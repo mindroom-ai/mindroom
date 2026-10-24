@@ -272,7 +272,7 @@ def _usage_from_run_metadata(run_metadata: dict[str, Any]) -> _UsageInfo:
 def _usage_from_team_output(record: TeamRunRecord) -> _UsageInfo:
     """Sum usage over the runs of a team turn, normalizing each run for its own provider."""
     total = _UsageInfo()
-    for run, metrics in team_usage_runs(record, record.ended_member_runs):
+    for run, metrics in team_usage_runs(record):
         usage = _usage_info(
             input_tokens=metrics.tokens.input_tokens,
             output_tokens=metrics.tokens.output_tokens,

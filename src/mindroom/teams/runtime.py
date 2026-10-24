@@ -188,22 +188,23 @@ def team_paused_content(record: TeamRunRecord) -> str:
     return "Team run paused. The following require input:\n" + "\n".join(parts) if parts else ""
 
 
-def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
+def team_usage_runs(record: TeamRunRecord) -> list[tuple[AnyRunRecord, RunMetrics]]:
     """Return the runs whose own metrics make up the turn's usage, with those metrics: the leader's, then each member's.
 
-    The team record's own metrics cover only the leader's requests; each member's usage is on its record, so
-    nothing is counted twice. A run that reported no usage is left out.
+    The team record's own metrics cover only the leader's requests; each member run that ended
+    (``ended_member_runs``) carries its usage on its record, so nothing is counted twice. A run that reported no
+    usage is left out.
     """
-    return [(run, run.metrics) for run in (record, *members) if run.metrics is not None]
+    return [(run, run.metrics) for run in (record, *record.ended_member_runs) if run.metrics is not None]
 
 
-def team_usage(record: TeamRunRecord, members: Sequence[RunRecord]) -> RunMetrics | None:
+def team_usage(record: TeamRunRecord) -> RunMetrics | None:
     """Return the turn's usage, the sum over ``team_usage_runs``, within the leader's duration.
 
     Members run inside the leader's window, so summing durations would double-count wall clock; token and cost sums
     are disjoint.
     """
-    metrics = [run_metrics for _, run_metrics in team_usage_runs(record, members)]
+    metrics = [run_metrics for _, run_metrics in team_usage_runs(record)]
     if not metrics:
         return None
     total = sum(metrics[1:], metrics[0])

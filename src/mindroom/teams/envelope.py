@@ -761,7 +761,6 @@ class _TeamTurn:
             blocking_team_pause(
                 paused,
                 record,
-                record.ended_member_runs,
                 config_names=attempt.members.requested_agent_names,
                 display_names=attempt.members.display_names,
                 show_tool_calls=attempt.presentation.show_tool_calls,

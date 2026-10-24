@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import ResolvedReplayPlan
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
-    from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
@@ -327,7 +327,6 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
 def blocking_team_pause(
     paused: PausedAttempt,
     record: TeamRunRecord,
-    members: Sequence[RunRecord],
     *,
     config_names: Sequence[str],
     display_names: Sequence[str],
@@ -336,14 +335,15 @@ def blocking_team_pause(
     """Render a blocking team pause from its runs' records into the document the resume continues.
 
     Each run's text fills its slot first, paused notices included: the leader's is the consensus, and each
-    member run that ended adds its own to its member's slot. Every run's tool calls follow in their slots, still
-    pending where the pause waits on them; a member's own delegation card waits on that member's call.
+    member run that ended (``ended_member_runs``) adds its own to its member's slot. Every run's tool calls follow
+    in their slots, still pending where the pause waits on them; a member's own delegation card waits on that
+    member's call.
     """
     presentation = TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
     waiting = {_waiting_slot(presentation, requirement) for requirement in paused.requirements}
     presentation.append_consensus(finished_run_text(record))
     calls = [("team", tool) for tool in record.tools or ()]
-    for member in members:
+    for member in record.ended_member_runs:
         member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
         presentation.append_member(member_id, finished_run_text(member))
         calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
