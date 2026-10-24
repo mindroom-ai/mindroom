@@ -51,8 +51,6 @@ class ToolCompleted:
 class RequestCompleted:
     """One provider request finished with the usage it reported."""
 
-    model_id: str
-    provider: str
     usage: MessageMetrics
 
 

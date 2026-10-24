@@ -211,7 +211,7 @@ async def run_model_loop(
         assert turn is not None
         message = turn.message
         _accept_turn(message, state, progress, metrics, identity)
-        yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
+        yield RequestCompleted(message.metrics)
         if not message.tool_calls:
             break
         async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn):

@@ -96,7 +96,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     assert events[0] == ReasoningDelta("hmm")
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
     assert events[-2:] == [
-        RequestCompleted(model_id="scripted-model", provider="Synthetic", usage=usage(12, 3, time_to_first_token=0.25)),
+        RequestCompleted(usage(12, 3, time_to_first_token=0.25)),
         LoopEnded(paused=False),
     ]
     assert record.content == "Hello, Alice."
@@ -739,7 +739,7 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
 
     events, record = await _run(spec(model), messages)
 
-    assert events[-2] == RequestCompleted(model_id="m", provider="OpenAI Chat", usage=usage(1, 1))
+    assert events[-2] == RequestCompleted(usage(1, 1))
     assert record.metrics is not None
     assert record.metrics.details == {
         "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI Chat")],

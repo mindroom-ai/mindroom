@@ -479,7 +479,7 @@ def test_run_events_are_frozen_values() -> None:
         ReasoningDelta("why"),
         ToolStarted(tool.call),
         ToolCompleted(tool.call),
-        RequestCompleted(model_id="m", provider="P", usage=MessageMetrics(tokens=TokenCounts(output_tokens=1))),
+        RequestCompleted(MessageMetrics(tokens=TokenCounts(output_tokens=1))),
         RunFinished(record),
     ]
 
