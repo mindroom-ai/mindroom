@@ -224,6 +224,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
                 user_id=_identity().requester_id,
                 call_id="parent-delegate-call",
             ),
+            middleware=(),
         )
 
     assert not outcome.is_error

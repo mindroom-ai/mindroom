@@ -156,7 +156,12 @@ def test_an_agent_without_skills_has_no_prompt_block(tmp_path: Path) -> None:
 async def _call(function: ToolFunction, arguments: dict[str, object]) -> tuple[bool, dict[str, Any]]:
     parsed = parse_tool_arguments(json.dumps(arguments), function)
     assert not isinstance(parsed, ToolArgumentError)
-    outcome = await execute_tool_call(function, parsed, ToolCallContext(run_id="run-1", session_id="session-1"))
+    outcome = await execute_tool_call(
+        function,
+        parsed,
+        ToolCallContext(run_id="run-1", session_id="session-1"),
+        middleware=(),
+    )
     return outcome.is_error, json.loads(outcome.content) if not outcome.is_error else {"text": outcome.content}
 
 

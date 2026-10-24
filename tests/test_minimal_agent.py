@@ -339,10 +339,16 @@ async def test_the_bash_facade_hands_its_own_provider_call_to_the_owner() -> Non
         bash,
         {"command": "true", "timeout": 5},
         ToolCallContext(run_id="run", session_id="session", call_id="outer"),
+        middleware=(),
     )
     assert outcome.content == "canonical owner"
     assert seen == [(ToolKey("shell", "run_shell_command"), {"args": "true", "tail": 100, "timeout": 5}, "outer")]
-    refused = await execute_tool_call(bash, {"command": "true"}, ToolCallContext(run_id="run", session_id="session"))
+    refused = await execute_tool_call(
+        bash,
+        {"command": "true"},
+        ToolCallContext(run_id="run", session_id="session"),
+        middleware=(),
+    )
     assert refused.is_error
     assert "response owner" in refused.content
 

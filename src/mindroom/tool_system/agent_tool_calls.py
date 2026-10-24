@@ -108,8 +108,8 @@ class PreparedAgentToolCatalog:
     run: RunContext
     runtime_context: ToolRuntimeContext
     store: ConversationStore | None
-    middleware: Sequence[ToolMiddleware] = ()
-    max_tool_calls_per_turn: int | None = None
+    middleware: Sequence[ToolMiddleware]
+    max_tool_calls_per_turn: int | None
     record: RunRecord | None = None
     _bindings: dict[ToolKey, PreparedAgentToolBinding] = field(default_factory=dict, init=False)
     _deferred: dict[str, DeferredAgentToolkit] = field(default_factory=dict, init=False)

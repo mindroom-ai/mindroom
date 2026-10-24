@@ -109,6 +109,8 @@ def test_a_catalog_cannot_be_built_for_a_run_without_a_session(tmp_path: Path) -
             run=RunContext(run_id="run", session_id="session", user_id="@alice:test"),
             runtime_context=_runtime(tmp_path),
             store=None,
+            middleware=(),
+            max_tool_calls_per_turn=None,
         )
 
 

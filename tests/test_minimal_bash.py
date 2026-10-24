@@ -52,7 +52,7 @@ async def test_facade_passes_effective_canonical_binding(
 
     [bash] = minimal_bash_toolkit(execute=execute).functions
     assert bash.name == "bash"
-    outcome = await execute_tool_call(bash, kwargs, _provider_call("real-provider-call"))
+    outcome = await execute_tool_call(bash, kwargs, _provider_call("real-provider-call"), middleware=())
     assert outcome.content == "canonical-result"
     assert seen[0][0].key.toolkit == "shell"
     assert seen[0][0].function.name == name
@@ -64,7 +64,7 @@ async def test_facade_closed_without_owner_and_filtered_source(tmp_path: Path) -
     """Neither shell authorization nor an operation owner is invented by presentation."""
     catalog = await _catalog(tmp_path, [])
     [closed] = minimal_bash_toolkit().functions
-    outcome = await execute_tool_call(closed, {"command": "echo no"}, _provider_call("provider"))
+    outcome = await execute_tool_call(closed, {"command": "echo no"}, _provider_call("provider"), middleware=())
     assert outcome.is_error
     assert "owner" in outcome.content
 
@@ -73,7 +73,7 @@ async def test_facade_closed_without_owner_and_filtered_source(tmp_path: Path) -
         pytest.fail("disabled source reached worker")
 
     [bash] = minimal_bash_toolkit(execute=execute).functions
-    outcome = await execute_tool_call(bash, {"command": "echo no"}, _provider_call("provider"))
+    outcome = await execute_tool_call(bash, {"command": "echo no"}, _provider_call("provider"), middleware=())
     assert outcome.is_error
     assert outcome.content == "No toolkit 'shell'"
 
@@ -108,9 +108,9 @@ async def test_bash_reads_its_exact_provider_call_without_exposing_it_in_the_sch
     [bash] = minimal_bash_toolkit(execute=execute).functions
     assert set(bash.parameters["properties"]) == {"command", "timeout", "tail"}
     assert bash.injected_params == frozenset()
-    outcome = await execute_tool_call(bash, {"command": "echo hi"}, _provider_call("actual-provider-id"))
+    outcome = await execute_tool_call(bash, {"command": "echo hi"}, _provider_call("actual-provider-id"), middleware=())
     assert outcome.content == "executed"
     assert calls[0][2] == "actual-provider-id"
-    refused = await execute_tool_call(bash, {"command": "echo hi"}, _provider_call(None))
+    refused = await execute_tool_call(bash, {"command": "echo hi"}, _provider_call(None), middleware=())
     assert refused.is_error
     assert len(calls) == 1

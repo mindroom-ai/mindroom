@@ -210,8 +210,8 @@ async def test_list_todos_reads_a_string_flag_as_the_boolean_it_names(tmp_path: 
         tool.update_todo(todo_id=_read_todos(config)["items"][0]["id"], status="done")
         # Parsing a model's arguments already reads a top-level "false" as False; arguments that skip parsing, as a
         # resumed call's do, reach the entrypoint as sent, so only the coercion turns this one into a boolean.
-        hidden = await execute_tool_call(list_todos, {"show_all": "false"}, call)
-        shown = await execute_tool_call(list_todos, {"show_all": "true"}, call)
+        hidden = await execute_tool_call(list_todos, {"show_all": "false"}, call, middleware=())
+        shown = await execute_tool_call(list_todos, {"show_all": "true"}, call, middleware=())
 
     assert "Done/Cancelled" not in hidden.content
     assert "Done/Cancelled" in shown.content

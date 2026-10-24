@@ -808,6 +808,8 @@ async def _checkpointed_batch(
         ),
         runtime_context=runtime,
         store=store,
+        middleware=(),
+        max_tool_calls_per_turn=None,
     )
     checkpoint = BatchCheckpoint(catalog)
     batch = [("call_completed", "completed sibling"), ("old-bash", "never replay outer")]

@@ -245,7 +245,7 @@ async def run_tool_call(
     arguments: Mapping[str, Any] | None,
     context: ToolCallContext,
     *,
-    middleware: Sequence[ToolMiddleware] = (),
+    middleware: Sequence[ToolMiddleware],
 ) -> object:
     """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it returned.
 
@@ -268,7 +268,7 @@ async def execute_tool_call(
     arguments: Mapping[str, Any] | None,
     context: ToolCallContext,
     *,
-    middleware: Sequence[ToolMiddleware] = (),
+    middleware: Sequence[ToolMiddleware],
 ) -> ToolOutcome:
     """Run one tool call as ``run_tool_call`` does and return what the model should read.
 
