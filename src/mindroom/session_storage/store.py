@@ -582,12 +582,17 @@ async def write_with_session_state[Result](
     return await run_session_storage_operation(lambda: store, lambda opened: write(opened, state))
 
 
-def _decoded_mapping(raw_value: object) -> dict[str, Any] | None:
-    """Return a stored JSON object column, or None when it is empty or unreadable, so one odd row never fails a load."""
+def _decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return a stored JSON object column, ``null`` for SQL or JSON null, or None when unreadable or not an object.
+
+    An odd row therefore never fails a load.
+    """
     try:
         value = decode_session_json(raw_value)
     except (TypeError, ValueError):
         return None
+    if value is None:
+        return null
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
 
@@ -773,7 +778,7 @@ def _record_run_usage(
         f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
         (session_id,),
     ).fetchone()
-    session_data = _rewritable_session_data(raw_session_data)
+    session_data = _decoded_mapping(raw_session_data, null={})
     if session_data is not None:
         stored_totals = session_data.get("session_metrics")
         totals = SessionMetrics.from_dict(stored_totals) if isinstance(stored_totals, dict) else SessionMetrics()
@@ -787,17 +792,6 @@ def _record_run_usage(
         f"UPDATE {sessions} SET session_data = COALESCE(?, session_data), updated_at = ? WHERE session_id = ?",  # noqa: S608
         (None if session_data is None else json.dumps(session_data), int(time()), session_id),
     )
-
-
-def _rewritable_session_data(raw_value: object) -> dict[str, Any] | None:
-    """Return a row's ``session_data`` object, empty for SQL or JSON null, or None when unreadable or not an object."""
-    try:
-        value = decode_session_json(raw_value)
-    except (TypeError, ValueError):
-        return None
-    if value is None:
-        return {}
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
 
 def _counted_usage(snapshot: Mapping[str, object]) -> RunMetrics:
