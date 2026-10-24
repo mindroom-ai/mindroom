@@ -25,7 +25,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.teams.members import BuiltTeam
-from mindroom.teams.runtime import continue_team, run_team
+from mindroom.teams.runtime import TeamDecisions, continue_team, run_team
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
@@ -259,9 +259,7 @@ def resume_team(
         team,
         paused,
         messages,
-        approved=approved,
-        denied=denied,
-        external_results=external_results,
+        decisions=TeamDecisions(approved, denied, external_results),
         ctx=ctx,
         hooks=NO_HOOKS,
         persist=persist,

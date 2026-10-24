@@ -111,9 +111,7 @@ def continue_team(
     paused: TeamRunRecord,
     messages: list[Message],
     *,
-    approved: Mapping[TeamCallKey, ApprovedCall],
-    denied: Mapping[TeamCallKey, str | None],
-    external_results: Mapping[TeamCallKey, str],
+    decisions: TeamDecisions,
     ctx: RunContext,
     hooks: LoopHooks,
     persist: Persist[AnyRunRecord],
@@ -122,9 +120,8 @@ def continue_team(
     """Resume a paused team run: its paused members with the decisions on their calls, then the leader.
 
     ``messages`` is the leader's resume request, built from ``paused`` as ``build_resume_request`` builds it.
-    Decisions are keyed by ``TeamCallKey``: the member whose run waits for the call, None for the leader's own
-    calls. Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision
-    must name a waiting call, else ``ValueError`` here before anything runs.
+    Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision must
+    name a waiting call, else ``ValueError`` here before anything runs.
     A member that completes hands the leader its text in the member-results message, which replaces every
     delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
     requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
@@ -139,7 +136,6 @@ def continue_team(
     record.content = None
     leader_requirements = [r for r in record.requirements or () if r.member_agent_id is None]
     record.requirements = leader_requirements
-    decisions = _TeamDecisions(approved, denied, external_results)
     plans = _plan_member_resumes(spec, paused, decisions)
     leader = decisions.take(None, {r.tool_execution.tool_call_id for r in leader_requirements})
     decided = decide_requirements(
@@ -228,13 +224,16 @@ class _Decided:
 
 
 @dataclass(slots=True)
-class _TeamDecisions:
-    """The resume's decisions by ``TeamCallKey``, handed out run by run so a stray decision is caught."""
+class TeamDecisions:
+    """One resume's decisions by ``TeamCallKey``, handed out run by run so a stray decision is caught.
+
+    ``continue_team`` records the calls it takes, so an instance serves one resume.
+    """
 
     approved: Mapping[TeamCallKey, ApprovedCall]
     denied: Mapping[TeamCallKey, str | None]
     external_results: Mapping[TeamCallKey, str]
-    consumed: set[TeamCallKey] = field(default_factory=set)
+    consumed: set[TeamCallKey] = field(default_factory=set, init=False)
 
     def take(self, member_id: str | None, call_ids: set[str | None]) -> _Decided:
         """Return the decisions on ``member_id``'s calls among ``call_ids`` (None names the leader's own)."""
@@ -262,7 +261,7 @@ class _MemberResume:
     plan: ResumePlan
 
 
-def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: _TeamDecisions) -> list[_MemberResume]:
+def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamDecisions) -> list[_MemberResume]:
     """Plan one resume per paused member run, checking every member's decisions before any member runs.
 
     The paused member runs are the ones the team run's requirements name.
@@ -504,6 +503,7 @@ __all__ = [
     "Emit",
     "MemberEvent",
     "TeamCallKey",
+    "TeamDecisions",
     "TeamRunEvent",
     "continue_team",
     "leader_tool_specs",

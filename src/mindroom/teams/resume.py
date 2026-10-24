@@ -48,7 +48,7 @@ from mindroom.teams.presentation import (
     format_team_header,
     publish_team_presentation,
 )
-from mindroom.teams.runtime import MemberEvent, continue_team
+from mindroom.teams.runtime import MemberEvent, TeamDecisions, continue_team
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -109,21 +109,12 @@ def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunR
     return persisted
 
 
-@dataclass(frozen=True)
-class _RoutedDecisions:
-    """The resume's decisions routed to the calls the paused team waits for, by ``TeamCallKey``."""
-
-    approved: dict[TeamCallKey, ApprovedCall]
-    denied: dict[TeamCallKey, str | None]
-    external_results: dict[TeamCallKey, str]
-
-
 def _route_decisions(
     persisted: TeamRunRecord,
     decisions: ResumeDecisions,
     *,
     toolkit_owners: Mapping[tuple[str, str], str],
-) -> _RoutedDecisions:
+) -> TeamDecisions:
     """Route each decision to the waiting member or leader call it names, checking an approved call's toolkit owner.
 
     An approved call is matched by the member the approval was shown for, and must still come from the toolkit the
@@ -158,7 +149,7 @@ def _route_decisions(
             raise RuntimeError(msg)
         require_original_toolkit(toolkit_owners, call)
         approved[(requirement.member_agent_id, call.tool_call_id)] = call
-    return _RoutedDecisions(
+    return TeamDecisions(
         approved=approved,
         denied={key_of(call_id): note for call_id, note in decisions.denied.items()},
         external_results=dict(decisions.external_results),
@@ -205,9 +196,7 @@ class TeamResume:
             self.built.spec,
             paused,
             build_resume_request(paused=paused.messages, summary=summary, history=history),
-            approved=routed.approved,
-            denied=routed.denied,
-            external_results=routed.external_results,
+            decisions=routed,
             ctx=RunContext(
                 run_id=paused.run_id,
                 session_id=session.session_id,
