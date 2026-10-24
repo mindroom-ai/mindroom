@@ -38,7 +38,7 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -847,7 +847,7 @@ async def test_the_driver_rewrites_the_parent_without_touching_its_recorded_usag
         status=RunStatus.paused,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2)),
     )
-    store.save_run(session, deepcopy(recorded), record_usage=True)
+    await persist_to(store, session)(recorded)
 
     rewritten = replace(recorded, metrics=RunMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=20)))
     await execution.persist_delegation_state(store, session, rewritten, DelegationState())
