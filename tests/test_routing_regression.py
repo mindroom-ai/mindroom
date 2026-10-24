@@ -1810,7 +1810,7 @@ class TestRoutingRegression:
             "news": news_bot,
         }
         mock_orchestrator.current_config = mock_config
-        mock_orchestrator.config = mock_config  # This is what teams.py uses
+        mock_orchestrator.config = mock_config  # Team formation reads the live config from here
         mock_orchestrator.runtime_paths = runtime_paths_for(mock_config)
 
         # Set the orchestrator on both bots

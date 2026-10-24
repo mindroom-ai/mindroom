@@ -2331,6 +2331,11 @@ class TestAgentBot(AgentBotTestBase):
         assert mock_generate_team_response.await_count == 1
         assert mock_generate_team_response.await_args.kwargs["team_mode"] == "coordinate"
         assert mock_generate_team_response.await_args.kwargs["team_agents"] == action.form_team.eligible_members
+        # Enrichment hooks see each member's configured agent name, not its Matrix username.
+        [team_request] = team_requests
+        assert team_request.payload_preparation is not None
+        assert team_request.payload_preparation.target_member_names == (bot.agent_name,)
+        assert bot.matrix_id.username != bot.agent_name
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_configured_team_skips_ai_team_mode(

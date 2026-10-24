@@ -18,8 +18,10 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     ROUTER_AGENT_NAME,
 )
+from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.session_context import create_scope_session_storage
@@ -71,6 +73,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.delivery_gateway import StreamingDeliveryRequest
     from mindroom.session_storage.store import ConversationStore
 
 TEAM_SESSION_ID = "!test:localhost:$thread-root"
@@ -1034,6 +1037,8 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
     [persisted_run] = _persisted_runs(store)
+    # The interrupted run belongs to the team whose history scope stored it.
+    assert persisted_run.team_id == "ultimate"
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
@@ -1772,6 +1777,99 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
 
     assert sequence == ["started:team:team_general:team_general"]
     assert len(_persisted_runs(store)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True], ids=["blocking", "streaming"])
+async def test_generate_team_response_helper_links_its_reply_event_to_the_reported_team_run(
+    tmp_path: Path,
+    streaming: bool,
+) -> None:
+    """A team reply links its Matrix event onto the team run its attempt reported, in the team's session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    store = _team_store(config, runtime_paths)
+
+    def run_team_attempt(kwargs: dict[str, object]) -> None:
+        cast("Callable[[str], None]", kwargs["run_id_callback"])("team-run")
+        seed_session(
+            store,
+            _team_session(
+                runs=[
+                    TeamRunRecord(
+                        run_id="team-run",
+                        team_id="ultimate",
+                        session_id=TEAM_SESSION_ID,
+                        status=RunStatus.completed,
+                        content="Team hello",
+                    ),
+                ],
+            ),
+        )
+        cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        run_team_attempt(kwargs)
+        return "Team hello"
+
+    def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+        async def stream() -> AsyncIterator[str]:
+            run_team_attempt(kwargs)
+            yield "Team hello"
+
+        return stream()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=streaming)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch("mindroom.response_runner.team_response_stream", new=fake_team_response_stream),
+        patch(
+            "mindroom.response_lifecycle.apply_post_response_effects",
+            new=AsyncMock(return_value=None),
+        ) as mock_post_response_effects,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=store,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery(request: StreamingDeliveryRequest) -> StreamTransportOutcome:
+            async for _chunk in request.response_stream:
+                pass
+            return _stream_outcome("$team-final", "Team hello")
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+        # The runner's state writer is a test double; its linkage writes through the real writer.
+        coordinator.deps.state_writer.apersist_response_event_id_in_session_run = AsyncMock(
+            side_effect=ConversationStateWriter(
+                ConversationStateWriterDeps(
+                    runtime=SimpleNamespace(config=config),
+                    logger=MagicMock(),
+                    runtime_paths=runtime_paths,
+                    agent_name="ultimate",
+                ),
+            ).apersist_response_event_id_in_session_run,
+        )
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert mock_post_response_effects.await_args is not None
+    _final_delivery, outcome, post_response_deps = mock_post_response_effects.await_args.args
+    assert outcome.response_run_id == "team-run"
+    assert post_response_deps.persist_response_event_id is not None
+    await post_response_deps.persist_response_event_id(outcome.response_run_id, "$reply")
+    assert [run.metadata for run in _persisted_runs(store)] == [{MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$reply"}]
 
 
 @pytest.mark.asyncio

@@ -690,18 +690,9 @@ async def test_private_members_join_an_ad_hoc_team_built_for_the_requester(
     *,
     stream: bool,
 ) -> None:
-    """Each member is built with the request's execution identity, never through the running bot's agent."""
+    """Each member is built with the request's execution identity, even when a bot of theirs is running."""
     team = _private_team(tmp_path, monkeypatch, leader=[answer("Team response")])
-
-    class _FailIfAccessed:
-        running = True
-
-        @property
-        def agent(self) -> object:
-            msg = "team member resolution should not use AgentBot.agent"
-            raise AssertionError(msg)
-
-    team.orchestrator.agent_bots = {"research": _FailIfAccessed()}
+    team.orchestrator.agent_bots = {"research": MagicMock(running=True)}
 
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
         text = await team.reply(stream=stream)

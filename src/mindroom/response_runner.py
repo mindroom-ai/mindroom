@@ -186,6 +186,7 @@ from .response_lifecycle import (
     ResponseLifecycleCoordinator,
     ResponseLifecycleDeps,
     ResponseLifecycleReservation,
+    SessionStartedWatch,
 )
 
 
@@ -3640,6 +3641,30 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
 
+    async def _setup_session_watch(
+        self,
+        lifecycle: ResponseLifecycle,
+        *,
+        request: ResponseRequest,
+        tool_dispatch: ToolDispatchContext,
+        session_id: str,
+        scope: HistoryScope,
+        resolved_target: MessageTarget,
+    ) -> SessionStartedWatch:
+        """Pre-compute session:started eligibility for a response whose session lives in one history scope."""
+        return await lifecycle.setup_session_watch(
+            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
+            session_id=session_id,
+            scope=scope,
+            room_id=request.room_id,
+            thread_id=resolved_target.resolved_thread_id,
+            create_storage=partial(
+                self.deps.state_writer.create_storage,
+                tool_dispatch.execution_identity,
+                scope=scope,
+            ),
+        )
+
     def _build_persist_response_event_id_effect(
         self,
         *,
@@ -3651,9 +3676,9 @@ class ResponseRunner:
 
         async def persist_response_event_id(run_id: str, response_event_id: str) -> None:
             await self.deps.state_writer.apersist_response_event_id_in_session_run(
-                create_storage=partial(self.deps.state_writer.create_storage, execution_identity, scope=scope),
+                execution_identity=execution_identity,
+                scope=scope,
                 session_id=session_id,
-                session_type=scope.kind,
                 run_id=run_id,
                 response_event_id=response_event_id,
             )
@@ -4670,14 +4695,13 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
         )
-        session_started_watch = await lifecycle.setup_session_watch(
-            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
+        session_started_watch = await self._setup_session_watch(
+            lifecycle,
+            request=request,
+            tool_dispatch=tool_dispatch,
             session_id=session_id,
-            session_type=session_scope.kind,
             scope=session_scope,
-            room_id=request.room_id,
-            thread_id=resolved_target.resolved_thread_id,
-            create_storage=partial(self.deps.state_writer.create_storage, execution_identity, scope=session_scope),
+            resolved_target=resolved_target,
         )
         orchestrator = self.deps.runtime.orchestrator
         if orchestrator is None:
@@ -4780,9 +4804,6 @@ class ResponseRunner:
                 request=delivery_request,
             )
 
-            def _note_visible_response_event_id(response_event_id: str) -> None:
-                team_turn_recorder.set_response_event_id(response_event_id)
-
             if use_streaming and (_existing_event_id(delivery_request) is None or _shows_placeholder(delivery_request)):
                 async with _response_typing_indicator(
                     self._client(),
@@ -4845,7 +4866,7 @@ class ResponseRunner:
                                 ),
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
-                                visible_event_id_callback=_note_visible_response_event_id,
+                                visible_event_id_callback=team_turn_recorder.set_response_event_id,
                                 visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(
                                     delivery_target,
                                 ),
@@ -5392,18 +5413,13 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_started_watch = await lifecycle.setup_session_watch(
-            tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
+        session_started_watch = await self._setup_session_watch(
+            lifecycle,
+            request=request,
+            tool_dispatch=runtime.tool_dispatch,
             session_id=runtime.session_id,
-            session_type=session_scope.kind,
             scope=session_scope,
-            room_id=request.room_id,
-            thread_id=runtime.resolved_target.resolved_thread_id,
-            create_storage=partial(
-                self.deps.state_writer.create_storage,
-                runtime.tool_dispatch.execution_identity,
-                scope=session_scope,
-            ),
+            resolved_target=runtime.resolved_target,
         )
         # The caller's list survives raising exit paths (cancellation, stream
         # re-raises), unlike the returned outcome.
@@ -5529,18 +5545,13 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_started_watch = await lifecycle.setup_session_watch(
-            tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
+        session_started_watch = await self._setup_session_watch(
+            lifecycle,
+            request=request,
+            tool_dispatch=runtime.tool_dispatch,
             session_id=runtime.session_id,
-            session_type=session_scope.kind,
             scope=session_scope,
-            room_id=request.room_id,
-            thread_id=runtime.resolved_target.resolved_thread_id,
-            create_storage=partial(
-                self.deps.state_writer.create_storage,
-                runtime.tool_dispatch.execution_identity,
-                scope=session_scope,
-            ),
+            resolved_target=runtime.resolved_target,
         )
         # The streaming path keeps these caller-owned (unlike the non-streaming
         # path's returned _NonStreamingGeneration): the metadata dict must stay
