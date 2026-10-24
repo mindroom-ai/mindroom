@@ -117,7 +117,7 @@ class ScriptedAgents:
     """One scripted model per agent, handed to ``create_agent`` for the agent its execution identity names.
 
     ``by_session`` serves a model by the identity's session first, for an agent that delegates to itself.
-    ``team`` is the leader of every team reply; ``built_models`` names the model each agent build asked for.
+    ``team`` leads every configured team's reply; ``built_models`` names the model each agent build asked for.
     """
 
     models: Mapping[str, ModelProvider]
