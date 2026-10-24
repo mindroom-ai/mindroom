@@ -410,7 +410,7 @@ Matrix sync callback
 | `agent_loop/build.py` | `AgentBuild`, what `create_agent` produces for the loop, and `prompt_for_turn`, its system message with one turn's context appended |
 | `agent_loop/prompt.py` | `PromptSpec` and `render_system_message`: an agent's system message from its prompt inputs, in the layout Agno 3.0.9 sent |
 | `agent_loop/structured.py` | The JSON prompt a JSON-mode route needs for an output schema, and lenient parsing of answers into the schema |
-| `agent_loop/helper.py` | `complete_once`: one tool-less helper request, optionally read into a schema, with the run record its usage is saved from; `complete_prompt` renders the helper's system message for it |
+| `agent_loop/helper.py` | `complete_prompt`: one tool-less helper request under its rendered system message, optionally read into a schema, with the run record its usage is saved from |
 | `agent_loop/output_limit.py` | `output_limit_policy`: answers the tool calls of a response the output limit cut off instead of running them, and fails the run on the third cut-off response |
 | `tools/agno_compat_*.py`, `custom_tools/agno_compat_*.py`, and `oauth/agno_compat_google_auth.py` | Repairs of Agno toolkits and of Google auth's toolkit binding; see `docs/architecture/agno-compatibility.md` for the boundary inventory and upstream tracking |
 | `constants.py` | Shared constants, paths, and environment variable defaults |

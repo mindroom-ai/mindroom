@@ -42,19 +42,29 @@ class HelperResult[T: BaseModel]:
     record: RunRecord
 
 
-async def complete_once[T: BaseModel](
+async def complete_prompt[T: BaseModel](
     provider: ModelProvider,
-    messages: Sequence[Message],
+    prompt: str,
     *,
+    role: str | None = None,
+    instructions: Sequence[str] = (),
     schema: type[T] | None = None,
     overrides: RequestOverrides | None = None,
     run_id: str | None = None,
 ) -> HelperResult[T]:
-    """Send ``messages`` as one request and return the answer with a completed run record.
+    """Send ``prompt`` under a system message rendered from ``role`` and ``instructions`` as one request.
 
-    ``schema`` asks for structured output; the system message must already end with its
-    ``structured.output_format_prompt``.
+    Returns the answer with a completed run record. ``schema`` asks for structured output the way ``provider``
+    supports it, so JSON-mode routes also get the JSON prompt at the end of the system message.
     """
+    system = render_system_message(
+        PromptSpec(
+            role=role,
+            instructions=tuple(instructions),
+            output_format_prompt=output_format_prompt(provider.capabilities, schema),
+        ),
+    )
+    messages = [system, Message(role="user", content=prompt)]
     started = perf_counter()
     turn = await complete(
         provider,
@@ -84,35 +94,4 @@ async def complete_once[T: BaseModel](
     return HelperResult(content=text if parsed is None else parsed, record=record)
 
 
-async def complete_prompt[T: BaseModel](
-    provider: ModelProvider,
-    prompt: str,
-    *,
-    role: str | None = None,
-    instructions: Sequence[str] = (),
-    schema: type[T] | None = None,
-    overrides: RequestOverrides | None = None,
-    run_id: str | None = None,
-) -> HelperResult[T]:
-    """Send ``prompt`` under a system message rendered from ``role`` and ``instructions``, as one helper request.
-
-    ``schema`` asks for structured output the way ``provider`` supports it, so JSON-mode routes also get the JSON
-    prompt at the end of the system message.
-    """
-    system = render_system_message(
-        PromptSpec(
-            role=role,
-            instructions=tuple(instructions),
-            output_format_prompt=output_format_prompt(provider.capabilities, schema),
-        ),
-    )
-    return await complete_once(
-        provider,
-        [system, Message(role="user", content=prompt)],
-        schema=schema,
-        overrides=overrides,
-        run_id=run_id,
-    )
-
-
-__all__ = ["HelperResult", "complete_once", "complete_prompt"]
+__all__ = ["HelperResult", "complete_prompt"]

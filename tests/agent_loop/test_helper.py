@@ -9,7 +9,7 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from mindroom.agent_loop.helper import complete_once, complete_prompt
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_loop.prompt import PromptSpec, render_system_message
 from mindroom.agent_loop.structured import output_format_prompt
 from mindroom.llm.errors import ProviderUnavailable
@@ -65,10 +65,6 @@ class _Verdict(BaseModel):
     confidence: int | None = None
 
 
-def _messages(spec: PromptSpec, prompt: str) -> list[Message]:
-    return [render_system_message(spec), Message(role="user", content=prompt)]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("structured_output", "json_prompt"),
@@ -122,16 +118,20 @@ async def test_a_prompt_without_a_schema_returns_text_with_the_callers_overrides
 async def test_a_text_answer_returns_its_text_and_a_completed_record() -> None:
     """Without a schema the answer is the text, and the record carries the request's messages, model, and usage."""
     provider = _RecordingProvider(answer="The user prefers aisle seats.")
-    messages = _messages(PromptSpec(role="Extract durable memories."), "Conversation excerpt: ...")
 
-    result = await complete_once(provider, messages, run_id="flush-1")
+    result = await complete_prompt(
+        provider,
+        "Conversation excerpt: ...",
+        role="Extract durable memories.",
+        run_id="flush-1",
+    )
 
     assert result.content == "The user prefers aisle seats."
     record = result.record
     assert (record.run_id, record.status, record.content) == ("flush-1", RunStatus.completed, result.content)
     assert (record.model, record.model_provider) == ("claude-sonnet-5-5", "Anthropic")
     assert [message.role for message in record.messages] == ["system", "user", "assistant"]
-    assert record.messages[:2] == messages
+    assert record.messages[:2] == list(provider.requests[0].messages)
     assert record.metrics is not None
     usage = record.metrics.to_dict()
     assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (12, 5, 17)
@@ -145,17 +145,14 @@ async def test_a_text_answer_returns_its_text_and_a_completed_record() -> None:
 async def test_a_structured_answer_is_read_into_the_schema(structured_output: str) -> None:
     """The request asks for the schema the provider's way, and the answer comes back as the model."""
     capabilities = Capabilities(structured_output=structured_output)
-    prompt = output_format_prompt(capabilities, _Verdict)
     provider = _RecordingProvider(answer='```json\n{"answer": "yes"}\n```', capabilities=capabilities)
-    spec = PromptSpec(role="Decide.", output_format_prompt=prompt)
 
-    result = await complete_once(provider, _messages(spec, "Is it raining?"), schema=_Verdict)
+    result = await complete_prompt(provider, "Is it raining?", role="Decide.", schema=_Verdict)
 
     assert result.content == _Verdict(answer="yes")
     assert result.record.content == '```json\n{"answer": "yes"}\n```'
     [request] = provider.requests
     assert request.output_schema is _Verdict
-    assert (prompt is not None) == (structured_output == "json_mode")
 
 
 @pytest.mark.asyncio
@@ -164,11 +161,7 @@ async def test_an_unreadable_structured_answer_stays_text() -> None:
     provider = _RecordingProvider(answer="I cannot decide.")
 
     with capture_logs() as logs:
-        result = await complete_once(
-            provider,
-            _messages(PromptSpec(role="Decide."), "?"),
-            schema=_Verdict,
-        )
+        result = await complete_prompt(provider, "?", role="Decide.", schema=_Verdict)
 
     assert result.content == "I cannot decide."
     assert result.record.content == "I cannot decide."
@@ -181,7 +174,7 @@ async def test_a_request_carries_the_callers_overrides_and_no_tools() -> None:
     provider = _RecordingProvider(answer="ok")
     overrides = RequestOverrides(temperature=0.2, caller_retries=True)
 
-    await complete_once(provider, _messages(PromptSpec(role="Summarize."), "Thread: ..."), overrides=overrides)
+    await complete_prompt(provider, "Thread: ...", role="Summarize.", overrides=overrides)
 
     [request] = provider.requests
     assert (request.overrides, request.tools, request.tool_choice, request.output_schema) == (
@@ -198,4 +191,4 @@ async def test_a_stream_that_never_finishes_its_turn_raises() -> None:
     provider = _RecordingProvider(answer="partial", finish=False)
 
     with pytest.raises(ProviderUnavailable, match="without completing the turn"):
-        await complete_once(provider, _messages(PromptSpec(role="Summarize."), "Thread: ..."))
+        await complete_prompt(provider, "Thread: ...", role="Summarize.")
