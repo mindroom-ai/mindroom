@@ -132,7 +132,7 @@ def _estimate_messages_tokens(
     # ceiling with one, so one history gets two estimates. Use one rounding rule. Operators would see compaction and
     # replay trimming trigger a few tokens earlier or later.
     canonical_tokens = (
-        _estimate_history_messages_tokens(canonical_messages)
+        sum(_estimated_message_chars(message) for message in canonical_messages) // 4
         if native_route is None
         else sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_messages)
     )
@@ -177,11 +177,6 @@ def estimate_summary_tokens(session: ConversationSession) -> int:
     if summary is None:
         return 0
     return estimate_text_tokens(str(compaction_summary_message(summary, run_local=False).content))
-
-
-def _estimate_history_messages_tokens(messages: list[Message]) -> int:
-    """Estimate the token count of materialized history messages."""
-    return sum(_estimated_message_chars(message) for message in messages) // 4
 
 
 def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> list[AnyRunRecord]:

@@ -8,9 +8,9 @@ from datetime import UTC, datetime
 
 from mindroom.history.prompt_tokens import _StaticTokenEstimator, build_static_token_estimator
 from mindroom.history.replay import (
-    _estimate_history_messages_tokens,
     compaction_summary_message,
     estimate_prompt_visible_history_tokens,
+    estimate_request_messages_tokens,
     estimate_summary_tokens,
 )
 from mindroom.history.types import (
@@ -225,7 +225,7 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
-    assert estimated_tokens == _estimate_history_messages_tokens(expected_messages)
+    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, replay_model=None)
 
 
 def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_removes_all_runs() -> None:
