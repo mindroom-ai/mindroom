@@ -46,8 +46,6 @@ KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_KNOWLEDGE_REFRESH_SUBPROCES
 # Generous enough for a cold full index of a large corpus, short enough that a
 # wedged child cannot outlive the day.
 DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS = 3600.0
-# The roles of the prompt messages MindRoom writes: history never replays them, and only a paused run stores them.
-PROMPT_MESSAGE_ROLES = frozenset({"system", "developer"})
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]

@@ -6,8 +6,8 @@ import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from mindroom.constants import PROMPT_MESSAGE_ROLES
 from mindroom.history.legacy_compaction_state import migrate_to_summary_rows
+from mindroom.llm.messages import PROMPT_MESSAGE_ROLES
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames

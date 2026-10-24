@@ -960,8 +960,8 @@ depends_on = ["mindroom.logging_config", "mindroom.tool_system.agno_toolkits"]
 [[modules]]
 path = "mindroom.session_storage.agent_storage"
 depends_on = [
-    "mindroom.constants",
     "mindroom.history.legacy_compaction_state",
+    "mindroom.llm",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.runtime_resolution",
     "mindroom.session_storage.preflight",

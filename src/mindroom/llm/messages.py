@@ -42,6 +42,8 @@ AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # (``usage/storage.py``, ``memory/_mem0_usage.py``). It also tells a run's own model messages from the replies its
 # input carries (``is_own_model_message``).
 MODEL_PROVENANCE_KEY = "mindroom_model"
+# The roles of the prompt messages MindRoom writes: history never replays them, and only a paused run stores them.
+PROMPT_MESSAGE_ROLES = frozenset({"system", "developer"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +236,7 @@ def split_thinking(content: str) -> tuple[str | None, str]:
 __all__ = [
     "AGGREGATE_USAGE_KEY",
     "MODEL_PROVENANCE_KEY",
+    "PROMPT_MESSAGE_ROLES",
     "Message",
     "ModelProvenance",
     "is_own_model_message",

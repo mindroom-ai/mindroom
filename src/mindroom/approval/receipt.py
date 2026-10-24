@@ -10,7 +10,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.event_journal import ApprovalCall
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import PROMPT_MESSAGE_ROLES, Message
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -95,7 +95,7 @@ def messages_with_approval_receipt(
             (
                 index
                 for index, message in enumerate(outbound)
-                if message.role in {"system", "developer"} and isinstance(message.content, str)
+                if message.role in PROMPT_MESSAGE_ROLES and isinstance(message.content, str)
             ),
             None,
         )
