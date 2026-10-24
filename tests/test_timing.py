@@ -402,7 +402,7 @@ def test_build_agent_model_provider_preserves_prompt_assembly_subspan() -> None:
     labels = _timing_probe_labels(
         module_name="mindroom.agents",
         call_expression='target_module._build_agent_model_provider(object(), object(), "agent-model", None)',
-        patch_target="mindroom.agents.build_model_provider",
+        patch_target="mindroom.providers.registry.build_model_provider",
     )
     assert labels == ["system_prompt_assembly.agent_create.model_instance"]
 
@@ -412,7 +412,7 @@ def test_load_compaction_model_preserves_history_prepare_subspan() -> None:
     labels = _timing_probe_labels(
         module_name="mindroom.history.compaction",
         call_expression='target_module._load_compaction_model(object(), object(), "compaction-model")',
-        patch_target="mindroom.history.compaction.build_model_provider",
+        patch_target="mindroom.providers.registry.build_model_provider",
     )
     assert labels == ["system_prompt_assembly.history_prepare.compaction_model_init"]
 

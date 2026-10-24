@@ -33,11 +33,10 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
-from tests.conftest import seed_session
+from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import compact_runs
 from tests.identity_helpers import persist_entity_accounts
-from tests.scripted_agent_helpers import install_agent_model
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 
 if TYPE_CHECKING:
@@ -131,7 +130,7 @@ async def _persona_request(
 ) -> ModelRequest:
     """Run one reply of the helper agent presenting ``persona`` and return the request the model received."""
     model = ScriptedModel([answer("Done.")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
     with tool_runtime_context(runtime):
         await ai_response(
             replace(_turn_context(), persona=persona),

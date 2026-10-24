@@ -14,7 +14,6 @@ from google.oauth2.credentials import Credentials
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.judgment import llm as judgment_llm
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.execution import SHARED_CAPACITY
 from mindroom.judgment.llm import judge_with_llm
@@ -23,7 +22,7 @@ from mindroom.judgment.typesafe import _PINNED_MODEL, SYSTEM_ONE
 from mindroom.llm.errors import ProviderError
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.tool_policy import provider_tools_disabled
-from tests.conftest import test_runtime_paths
+from tests.conftest import install_model_providers, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.gemini_helpers import gemini_decision_response
 
@@ -38,7 +37,7 @@ if TYPE_CHECKING:
 def _judge(monkeypatch: pytest.MonkeyPatch, *turn: ScriptStep) -> ScriptedModel:
     """Serve the judgment model from one scripted turn and return it, so tests read the request it received."""
     judge = ScriptedModel([list(turn)])
-    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
+    install_model_providers(monkeypatch, {"cheap": judge})
     return judge
 
 
@@ -370,7 +369,7 @@ async def test_abandoned_model_load_retains_capacity(
         finally:
             loop.call_soon_threadsafe(finished.set)
 
-    monkeypatch.setattr(judgment_llm, "build_model_provider", load)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load)
     monkeypatch.setattr(SHARED_CAPACITY, "_max_concurrent", 1)
     settings = LLMJudgmentConfig(provider="llm", model="cheap", timeout_seconds=0.1 if not cancel else 5)
     task = asyncio.create_task(
@@ -402,7 +401,7 @@ async def test_abandoned_model_load_retains_capacity(
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
+    install_model_providers(monkeypatch, {"cheap": judge})
     async with asyncio.timeout(2):
         while True:
             recovered = await judge_with_llm(

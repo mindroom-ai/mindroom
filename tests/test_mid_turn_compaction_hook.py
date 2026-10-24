@@ -18,6 +18,7 @@ from mindroom.providers.openai.responses_wire import ResponsesWire, responses_re
 from mindroom.providers.openai.settings import ResponsesSettings
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.agent_loop.helpers import collect, context, spec, toolkit
+from tests.conftest import install_model_providers
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import _make_config
@@ -226,7 +227,7 @@ async def test_a_responses_route_sizes_each_request_as_its_replay_sends_it(
     """
     config, runtime_paths = _small_window_config(tmp_path)
     summarizer = summary_model("SUMMARY")
-    monkeypatch.setattr("mindroom.history.compaction.build_model_provider", lambda *_args: summarizer)
+    install_model_providers(monkeypatch, {"summary": summarizer})
     scripted = ScriptedModel([calls(tool_call("spaced", "call_1")), answer("done")])
 
     def scripted_stage(_inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:

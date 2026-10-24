@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -284,7 +283,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
         _config: Config,
         _paths: RuntimePaths,
         model_name: str,
-        execution_identity: ToolExecutionIdentity | None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> ModelProvider:
         assert execution_identity is not None
         if execution_identity.session_id == identity.session_id:
@@ -295,7 +294,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
             raise RuntimeError(msg)
         return model
 
-    monkeypatch.setattr(agents, "_build_agent_model_provider", build)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", build)
     options = {"config": config, "runtime_paths": paths, "identity": identity}
     reply = await respond("leader", "Delegate", **options, run_id="parent-run")
     paused = stored_run("leader", "parent-run", **options)

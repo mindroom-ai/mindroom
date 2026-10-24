@@ -16,7 +16,6 @@ import pytest
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel, ValidationError
 
-from mindroom import thread_summary
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -30,6 +29,7 @@ from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAG
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
+from mindroom.providers import registry as provider_registry
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
@@ -2477,7 +2477,7 @@ class TestGenerateSummary:
         rp = _mock_runtime_paths()
 
         with _summarizer(_ThreadSummary(summary="🧵 Room-specific summary model")) as model:
-            build = cast("MagicMock", thread_summary.build_model_provider)
+            build = cast("MagicMock", provider_registry.build_model_provider)
             result = await _generate_summary(_make_thread_history(3), config, rp, model_name="qwen")
 
         assert result == "🧵 Room-specific summary model"
@@ -2698,7 +2698,7 @@ def _summary_answer(content: BaseModel | str) -> str:
 def _summarizer(content: BaseModel | str) -> Iterator[ScriptedModel]:
     """Serve the summary model from one answer with ``content``, on a route with native structured output."""
     model = ScriptedModel([answer(_summary_answer(content))], capabilities=Capabilities(structured_output="native"))
-    with patch("mindroom.thread_summary.build_model_provider", return_value=model):
+    with patch("mindroom.providers.registry.build_model_provider", return_value=model):
         yield model
 
 

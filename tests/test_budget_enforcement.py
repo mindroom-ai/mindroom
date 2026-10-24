@@ -36,7 +36,12 @@ from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.budget_helpers import budget_monitor_with_spend
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    install_model_providers,
+    patch_response_runner_module,
+    unwrap_extracted_collaborator,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -99,7 +104,10 @@ async def test_scheduled_model_is_budgeted_too(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_completed_response_asks_budgets_to_count_the_new_spend(tmp_path: Path) -> None:
+async def test_completed_response_asks_budgets_to_count_the_new_spend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
@@ -108,9 +116,10 @@ async def test_completed_response_asks_budgets_to_count_the_new_spend(tmp_path: 
     coordinator.deps.runtime.orchestrator = orchestrator
     model = ScriptedModel([answer("Done.")])
 
-    with (
-        patch("mindroom.agents._build_agent_model_provider", return_value=model),
-        patch_response_runner_module(typing_indicator=_noop_typing, should_use_streaming=AsyncMock(return_value=False)),
+    install_model_providers(monkeypatch, {"default": model})
+    with patch_response_runner_module(
+        typing_indicator=_noop_typing,
+        should_use_streaming=AsyncMock(return_value=False),
     ):
         await coordinator.generate_response(_plain_request(_target()))
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)

@@ -16,7 +16,7 @@ from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.matrix.state import MatrixState
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 from tests.access_schema_support import membership_config
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
@@ -86,7 +86,10 @@ async def test_topic_generation_rechecks_remote_state_before_writing(
 
 
 @pytest.mark.asyncio
-async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) -> None:  # noqa: ANN001
+async def test_generate_room_topic_includes_team_only_room_entities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Team-configured rooms should describe the team in the topic prompt."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -106,8 +109,8 @@ async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) ->
     )
     model = ScriptedModel([answer("Ops topic")])
 
-    with patch("mindroom.topic_generator.build_model_provider", return_value=model):
-        topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
+    install_model_providers(monkeypatch, {"default": model})
+    topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
 
     assert topic == "Ops topic"
     [request] = model.requests
@@ -117,7 +120,7 @@ async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_a_failed_model_run_never_becomes_the_topic(tmp_path: Path) -> None:
+async def test_a_failed_model_run_never_becomes_the_topic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A provider failure, such as a bad API key, raises instead of answering, so the room gets no topic."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -129,12 +132,15 @@ async def test_a_failed_model_run_never_becomes_the_topic(tmp_path: Path) -> Non
         message = "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}"
         raise ProviderError(message, provider="Synthetic")
 
-    with patch("mindroom.topic_generator.build_model_provider", return_value=ScriptedModel([[Await(fail)]])):
-        assert await generate_room_topic_ai("lobby", "Lobby", config, runtime_paths_for(config)) is None
+    install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(fail)]])})
+    assert await generate_room_topic_ai("lobby", "Lobby", config, runtime_paths_for(config)) is None
 
 
 @pytest.mark.asyncio
-async def test_generate_room_topic_resolves_configured_entities_for_persisted_room_key(tmp_path) -> None:  # noqa: ANN001
+async def test_generate_room_topic_resolves_configured_entities_for_persisted_room_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Persisted room IDs should not hide room-key configured entities from topic prompts."""
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState()
@@ -157,8 +163,8 @@ async def test_generate_room_topic_resolves_configured_entities_for_persisted_ro
     )
     model = ScriptedModel([answer("Ops topic")])
 
-    with patch("mindroom.topic_generator.build_model_provider", return_value=model):
-        topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
+    install_model_providers(monkeypatch, {"default": model})
+    topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
 
     assert topic == "Ops topic"
     [request] = model.requests

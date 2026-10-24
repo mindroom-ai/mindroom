@@ -38,7 +38,7 @@ from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_BASE_URL_DEFAULT
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -678,7 +678,7 @@ async def _process_transcription(
             transcription=transcription,
         )
 
-        provider = build_model_provider(config, runtime_paths, config.voice.intelligence.model)
+        provider = provider_registry.build_model_provider(config, runtime_paths, config.voice.intelligence.model)
 
         # The transcription is already usable, so a slow or hung normalizer model fails open to it instead of
         # blocking voice readiness (and the ingress lane serialized behind it).

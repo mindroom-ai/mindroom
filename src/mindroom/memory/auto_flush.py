@@ -34,7 +34,7 @@ from mindroom.logging_config import get_logger
 from mindroom.memory._prompting import redact_memory_text
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.memory.legacy_auto_flush import remove_legacy_flush_queue
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -310,7 +310,7 @@ async def _extract_memory_summary(
     model_name = extractor.model or config.resolve_entity(agent_name).model_name
     invocation_id = uuid4().hex
     response = await complete_prompt(
-        build_model_provider(config, runtime_paths, model_name),
+        provider_registry.build_model_provider(config, runtime_paths, model_name),
         prompt,
         role="Extract durable memory statements for long-term memory storage.",
         run_id=invocation_id,

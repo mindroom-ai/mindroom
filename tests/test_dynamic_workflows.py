@@ -67,11 +67,11 @@ def _room_agent_model(monkeypatch: pytest.MonkeyPatch, *turns: list[ScriptStep])
     model = ScriptedModel(list(turns))
     loaded: list[str] = []
 
-    def load(_config: Config, _runtime_paths: object, model_name: str, _identity: object) -> ScriptedModel:
+    def load(_config: Config, _runtime_paths: object, model_name: str, **_kwargs: object) -> ScriptedModel:
         loaded.append(model_name)
         return model
 
-    monkeypatch.setattr(agents, "_build_agent_model_provider", load)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load)
     return model, loaded
 
 

@@ -16,7 +16,6 @@ import pytest
 from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
-from mindroom import agents
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent
 from mindroom.approval.inbound import parse_approval_response_event
@@ -66,7 +65,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import install_model_providers, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
@@ -2029,7 +2028,7 @@ def configured_slack_pair(configured_slack: list[dict[str, object]]) -> Iterator
 
 def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: str = _AGENT) -> AgentBuild:
     """Build the configured agent as a turn does, on a model that is never called."""
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     return create_agent(agent_name, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
 
 
@@ -2064,7 +2063,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
     config.defaults.tools = []
     if offered is not None:
         config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
 
     build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
 

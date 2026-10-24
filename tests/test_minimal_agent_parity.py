@@ -53,6 +53,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, get_tool_execution_identity
 from tests.access_schema_support import with_responder_access
+from tests.conftest import install_model_providers
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
@@ -808,7 +809,7 @@ async def test_model_switch_timing_actual_minimal_requests(response_harness, mon
         name: _NamedModel(steps=steps, requests=requests, log=log, identity=replace(SYNTHETIC, id=model_id))
         for name, model_id in (("default", "test-model"), ("other", "other-model"))
     }
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
+    install_model_providers(monkeypatch, models)
     steps.extend([_bash_call("thread_model", "switch_thread_model", {"model_name": "other", "when": when}), "done"])
     await h.respond([])
     assert log == ["test-model", "other-model" if when == "after-toolcall" else "test-model"]

@@ -173,6 +173,7 @@ from tests.approval_continuation_helpers import (
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    install_model_providers,
     make_matrix_client_mock,
     make_visible_message,
     message_origin,
@@ -191,7 +192,6 @@ from tests.response_runner_helpers import (
     _plain_request,
     _target,
 )
-from tests.scripted_agent_helpers import install_agent_model
 from tests.test_agent_tool_calls import _catalog
 from tests.test_response_attempt import _Span
 from tests.test_response_turn import (
@@ -8655,7 +8655,7 @@ async def _respond_with_skill_learning(
     reviews = _RecordedSkillReviews(fail=fail)
     coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
     model = ScriptedModel([answer("The scripted answer to the request.")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
     with patch_response_runner_module(
         typing_indicator=_noop_typing,
         should_use_streaming=AsyncMock(return_value=streaming),
@@ -8776,7 +8776,7 @@ async def test_a_finished_response_tells_automations_its_source_events(
     automations = _RecordedAutomations()
     coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
     model = ScriptedModel([answer("The scripted answer to the request.")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
     request = _plain_request(_target())
     with patch_response_runner_module(
         typing_indicator=_noop_typing,

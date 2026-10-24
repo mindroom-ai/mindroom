@@ -118,11 +118,11 @@ class _Workflow:
         self.model = _ChildModel(turns if turns is not None else [answer(f"Answer {i}.") for i in range(4)])
         self.models_loaded: list[str] = []
 
-        def load_model(*args: object) -> _ChildModel:
+        def load_model(*args: object, **_kwargs: object) -> _ChildModel:
             self.models_loaded.append(str(args[2]))
             return self.model
 
-        monkeypatch.setattr("mindroom.agents._build_agent_model_provider", load_model)
+        monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load_model)
         self.tools = DynamicWorkflowTools()
 
     def context(self) -> AbstractContextManager[object]:
@@ -474,11 +474,11 @@ async def test_later_step_fails_when_its_named_function_becomes_gated(
     live = [auto]
     record = workflow.model
 
-    def load_model(*_args: object) -> _ChildModel:
+    def load_model(*_args: object, **_kwargs: object) -> _ChildModel:
         live[0] = gated
         return record
 
-    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", load_model)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load_model)
     context = _delegate_runtime_context(auto, workflow.paths, execution_identity=_identity())
     monkeypatch.setattr(
         workflow,

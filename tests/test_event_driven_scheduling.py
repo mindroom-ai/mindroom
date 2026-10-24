@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -12,6 +11,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from tests.conftest import install_model_providers
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
@@ -60,10 +60,9 @@ def mock_config(runtime_paths: RuntimePaths) -> Config:
 class TestEventDrivenScheduling:
     """Test event-driven scheduling conversions."""
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_email_urgent_event(
         self,
-        mock_build: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
@@ -77,7 +76,8 @@ class TestEventDrivenScheduling:
             description="Monitor for urgent emails and alert",
         )
 
-        mock_build.return_value = model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -98,10 +98,9 @@ class TestEventDrivenScheduling:
         assert "if" in call_args.lower()
         assert "polling" in call_args.lower()
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_bitcoin_price_event(
         self,
-        mock_build: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
@@ -114,7 +113,10 @@ class TestEventDrivenScheduling:
             description="Monitor Bitcoin price threshold",
         )
 
-        mock_build.return_value = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(
+            monkeypatch,
+            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
+        )
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -128,10 +130,9 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_server_monitoring_event(
         self,
-        mock_build: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
@@ -144,7 +145,10 @@ class TestEventDrivenScheduling:
             description="Monitor CPU and auto-scale",
         )
 
-        mock_build.return_value = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(
+            monkeypatch,
+            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
+        )
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -158,10 +162,9 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_build_failure_event(
         self,
-        mock_build: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
@@ -174,7 +177,10 @@ class TestEventDrivenScheduling:
             description="Monitor builds and create failure tickets",
         )
 
-        mock_build.return_value = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(
+            monkeypatch,
+            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
+        )
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -188,10 +194,9 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_reddit_mention_event(
         self,
-        mock_build: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
@@ -204,7 +209,10 @@ class TestEventDrivenScheduling:
             description="Monitor Reddit mentions and analyze",
         )
 
-        mock_build.return_value = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(
+            monkeypatch,
+            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
+        )
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -218,10 +226,9 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_boss_email_immediate_event(
         self,
-        mock_build: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
@@ -234,7 +241,10 @@ class TestEventDrivenScheduling:
             description="Monitor for boss emails",
         )
 
-        mock_build.return_value = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(
+            monkeypatch,
+            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
+        )
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -248,10 +258,9 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_prompt_includes_event_examples(
         self,
-        mock_build: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
@@ -264,7 +273,8 @@ class TestEventDrivenScheduling:
             description="Test",
         )
 
-        mock_build.return_value = model = ScriptedModel([answer(simple_workflow.model_dump_json(exclude_unset=True))])
+        model = ScriptedModel([answer(simple_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         await _parse_workflow_schedule(

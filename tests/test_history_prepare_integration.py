@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom import agents
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import prepare_run_tools
@@ -45,7 +44,6 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     _completed_run,
@@ -59,7 +57,6 @@ from tests.identity_helpers import persist_entity_accounts
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 
@@ -76,7 +73,7 @@ class _Provider:
         _config: Config,
         _runtime_paths: object,
         model_name: str,
-        _execution_identity: ToolExecutionIdentity | None,
+        **_kwargs: object,
     ) -> ModelProvider:
         self.model_names.append(model_name)
         return self.model
@@ -85,7 +82,7 @@ class _Provider:
 @pytest.fixture
 def provider(monkeypatch: pytest.MonkeyPatch) -> _Provider:
     built = _Provider()
-    monkeypatch.setattr(agents, "_build_agent_model_provider", built.build)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", built.build)
     return built
 
 
@@ -720,10 +717,8 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
         session,
         lambda metadata: _with_scope_state(metadata, _SCOPE, HistoryScopeState(force_compact_before_next_run=True)),
     )
-    with (
-        patch("mindroom.history.compaction.build_model_provider", return_value=summary_model()),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")),
-    ):
+    # The compaction model builds as the agent's provider; its summary is the patched one.
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
         compacted_turn = await system_prompt_of_turn("Third prompt")
     assert "Fact two." in compacted_turn
     assert any("merged summary" in str(message.content) for message in provider.model.requests[-1].messages)

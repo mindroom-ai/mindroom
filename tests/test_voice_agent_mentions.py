@@ -48,7 +48,7 @@ def _persist_voice_accounts(config: Config, *, usernames: dict[str, str] | None 
 def _normalizer(normalized: str) -> Iterator[ScriptedModel]:
     """Serve the voice normalizer from a model that answers with ``normalized``."""
     model = ScriptedModel([answer(normalized)])
-    with patch("mindroom.voice.handler.build_model_provider", return_value=model):
+    with patch("mindroom.providers.registry.build_model_provider", return_value=model):
         yield model
 
 

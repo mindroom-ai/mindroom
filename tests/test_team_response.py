@@ -50,7 +50,7 @@ from mindroom.teams.members import (
 from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import make_visible_message, seed_session
+from tests.conftest import install_model_providers, make_visible_message, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.history_helpers import _completed_team_run, _team_session
 from tests.providers.anthropic_family_support import (
@@ -70,7 +70,6 @@ from tests.team_turn_helpers import (
     authored_team_config,
     build_team_turn,
     delegate,
-    install_team_models,
     registered_probe,
 )
 
@@ -277,7 +276,7 @@ async def test_a_leader_on_a_claude_route_answers_with_its_reply_on_either_path(
     blocks = [{"type": "text", "text": "Leader synthesis"}]
     team = _team(tmp_path, monkeypatch)
     leader = route_provider("anthropic", tmp_path / "claude", Wire(sse_reply(blocks) if stream else json_reply(blocks)))
-    install_team_models(monkeypatch, {**team.models, "default": leader})
+    install_model_providers(monkeypatch, {**team.models, "default": leader})
 
     with isolated_provider_environment():
         text = await team.reply(stream=stream)

@@ -46,6 +46,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from tests.conftest import install_model_providers
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     ScriptedProvider,
@@ -677,7 +678,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         "default": ScriptedProvider(steps=[[("bash", {"command": "discover"})]]),
         "other": ScriptedProvider(),
     }
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
+    install_model_providers(monkeypatch, models)
     install_scripted_shell(monkeypatch, run_shell_command)
     ctx = replace(_turn_context(), agent_mode="minimal", run_id=None)
     identity = build_execution_identity_from_runtime_context(runtime)

@@ -18,7 +18,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
@@ -167,7 +167,7 @@ async def _select_team_mode(
 
     try:
         result = await complete_prompt(
-            build_model_provider(config, runtime_paths, "default"),
+            provider_registry.build_model_provider(config, runtime_paths, "default"),
             prompt,
             role="Determine team mode",
             schema=_TeamModeDecision,

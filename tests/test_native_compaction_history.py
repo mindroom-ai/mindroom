@@ -31,7 +31,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import seed_session
+from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _completed_run,
@@ -308,10 +308,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         defaults_compaction=CompactionConfig(enabled=auto_compact, reserve_tokens=1000, replay_window_tokens=6000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=30000)},
     )
-    monkeypatch.setattr(
-        "mindroom.history.compaction.build_model_provider",
-        lambda *_args: summary_model(model_id="summary"),
-    )
+    install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
         AsyncMock(return_value="Keep the recent instruction"),

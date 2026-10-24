@@ -107,6 +107,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    install_model_providers,
     install_runtime_journal_support,
     message_origin,
     patch_response_runner_module,
@@ -120,7 +121,6 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import reply_span, response_span
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.scripted_agent_helpers import install_agent_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
@@ -3336,7 +3336,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 {
                     "decline_reaction": reaction,
                     "judgment": (
-                        {"provider": "typesafe"} if backend == "typesafe" else {"provider": "llm", "model": "default"}
+                        {"provider": "typesafe"} if backend == "typesafe" else {"provider": "llm", "model": "judge"}
                     )
                     if backend != "model"
                     else None,
@@ -3355,6 +3355,8 @@ class TestAdaptiveResponse(AgentBotTestBase):
         """Build the agent's bot for an online requester, with unique event IDs from its mocked homeserver."""
         config = AgentBotTestBase._config_for_storage(tmp_path)
         config.memory.backend = "none"
+        # The llm judgment backend decides on its own model.
+        config.models["judge"] = config.models["default"]
         # Keep background summaries out of foreground participation call counts.
         config.defaults.thread_summary_first_threshold = 100
         paths = replace(runtime_paths_for(config), process_env=process_env or {})
@@ -3423,7 +3425,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
             turns.append(answer_turn)
         expected_model_requests = len(turns)
         model = ScriptedModel(turns)
-        install_agent_model(monkeypatch, model)
+        install_model_providers(monkeypatch, {"default": model})
         typesafe_calls: list[bytes] = []
         judge = ScriptedModel(
             [
@@ -3448,7 +3450,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
 
             monkeypatch.setattr(JudgmentClient, "_post", post)
         elif backend == "llm":
-            monkeypatch.setattr("mindroom.judgment.llm.build_model_provider", lambda *_: judge)
+            install_model_providers(monkeypatch, {"judge": judge})
         monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
         no_reply_callbacks: list[str] = []
 
@@ -3535,7 +3537,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         turns = [answer(json.dumps({"action": action, "reason": "Conversation context."}))]
         if action == "respond":
             turns.append(answer("Useful answer"))
-        install_agent_model(monkeypatch, ScriptedModel(turns))
+        install_model_providers(monkeypatch, {"default": ScriptedModel(turns)})
         thread_summary = AsyncMock()
         monkeypatch.setattr("mindroom.post_response_effects.maybe_generate_thread_summary", thread_summary)
         memory_queued: list[str] = []

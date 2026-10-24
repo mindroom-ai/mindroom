@@ -1,4 +1,4 @@
-"""Drive agent replies with the scripted provider: install it, register a probe toolkit, and stop a turn mid-stream."""
+"""Drive agent replies with the scripted provider: read their runs and text, register a probe toolkit, and stop a turn."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, ClassVar
 
 from agno.tools import Toolkit
 
-from mindroom import agents
 from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.events import TextDelta
@@ -22,19 +21,11 @@ from tests.fakes.scripted_model import Await
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    import pytest
-
     from mindroom.ai import AIStreamChunk
     from mindroom.cancellation import TaskCancelSource
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
-
-
-def install_agent_model(monkeypatch: pytest.MonkeyPatch, model: ModelProvider) -> None:
-    """Answer every agent request of the test with ``model``, whichever configured model the agent resolves."""
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
 
 
 def stored_runs(
@@ -209,7 +200,6 @@ def stop_turn(cancel_source: TaskCancelSource | None = None) -> Await:
 __all__ = [
     "PROBE_TOOL",
     "ProbeTools",
-    "install_agent_model",
     "raising",
     "registered_probe_tools",
     "registered_toolkit",

@@ -63,6 +63,7 @@ from tests.authorization_helpers import (
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
+    install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -1719,7 +1720,10 @@ async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_err
 
 
 @pytest.mark.asyncio
-async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hooks(tmp_path: Path) -> None:
+async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """AgentBot-built tool runtime context should deliver custom events and live request session IDs."""
     tool_name = "tool_hooks_runtime_event_tool"
     custom_event_name = "demo:tool_runtime_event"
@@ -1772,36 +1776,36 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         bot.hook_registry = HookRegistry.from_plugins(plugins)
         bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
 
-        with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
-            target = MessageTarget.resolve(
-                room_id="!room:localhost",
-                thread_id="$thread",
-                reply_to_event_id=None,
-            )
-            tool_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
-            assert tool_context is not None
-            assert tool_context.hook_registry.has_hooks(custom_event_name)
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        target = MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        )
+        tool_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
+        assert tool_context is not None
+        assert tool_context.hook_registry.has_hooks(custom_event_name)
 
-            execution_identity = bot._tool_runtime_support.build_execution_identity(
-                target=target,
-                user_id="@user:localhost",
-            )
-            build = create_agent(
-                "code",
-                config,
-                runtime_paths_for(config),
-                execution_identity=execution_identity,
-                hook_registry=bot.hook_registry,
-            )
-            echo = prepare_run_tools(build.spec).functions["echo"]
+        execution_identity = bot._tool_runtime_support.build_execution_identity(
+            target=target,
+            user_id="@user:localhost",
+        )
+        build = create_agent(
+            "code",
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+            hook_registry=bot.hook_registry,
+        )
+        echo = prepare_run_tools(build.spec).functions["echo"]
 
-            with tool_runtime_context(tool_context), tool_execution_identity(execution_identity):
-                result = await execute_tool_call(
-                    echo,
-                    {"text": "hi"},
-                    ToolCallContext(run_id="run-1", session_id=target.session_id or "", call_id="call-1"),
-                    middleware=agent_tool_middleware(build),
-                )
+        with tool_runtime_context(tool_context), tool_execution_identity(execution_identity):
+            result = await execute_tool_call(
+                echo,
+                {"text": "hi"},
+                ToolCallContext(run_id="run-1", session_id=target.session_id or "", call_id="call-1"),
+                middleware=agent_tool_middleware(build),
+            )
 
         assert not result.is_error, result.content
         assert result.content == "HI"
@@ -1991,7 +1995,10 @@ async def test_tool_hook_contexts_track_registry_lifecycle(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(tmp_path: Path) -> None:
+async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The build's tool middleware runs the plugin hooks around every call and provides fallback hook context."""
     tool_name = "tool_hooks_test_tool"
     after_seen: list[tuple[Config | None, object | None, str, bool]] = []
@@ -2019,14 +2026,14 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(tmp_path:
         config = _config(tmp_path, tools=[tool_name])
         plugin_state_root = runtime_paths_for(config).storage_root / "plugins" / "tool-policy"
 
-        with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
-            build = create_agent(
-                "code",
-                config,
-                runtime_paths_for(config),
-                execution_identity=None,
-                hook_registry=registry,
-            )
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        build = create_agent(
+            "code",
+            config,
+            runtime_paths_for(config),
+            execution_identity=None,
+            hook_registry=registry,
+        )
 
         echo = prepare_run_tools(build.spec).functions["echo"]
         outcome = await execute_tool_call(

@@ -57,7 +57,7 @@ from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import project_usage, quote_identifier
-from tests.conftest import seed_session
+from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     TEST_AGENT_SCOPE,
@@ -109,7 +109,7 @@ class _CancelOnSuccess(RecordingCompactionLifecycle):
 def summary_calls(monkeypatch: pytest.MonkeyPatch) -> SummaryCalls:
     calls = SummaryCalls()
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", calls)
-    monkeypatch.setattr("mindroom.history.compaction.build_model_provider", lambda *_args: summary_model())
+    install_model_providers(monkeypatch, {"summary": summary_model()})
     return calls
 
 
@@ -700,10 +700,7 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
     stream: bool,
 ) -> None:
     # A Claude summarizer sizes its input by bytes, more conservatively than request estimates.
-    monkeypatch.setattr(
-        "mindroom.history.compaction.build_model_provider",
-        lambda *_args: summary_model(model_id="claude-haiku-5-5", claude=True),
-    )
+    install_model_providers(monkeypatch, {"summary": summary_model(model_id="claude-haiku-5-5", claude=True)})
     config, paths = _config(tmp_path, context_window=20_000, summary_context_window=8_000)
     model = ToolLoopModel(tool_rounds=25)
     facts = iter(range(100))

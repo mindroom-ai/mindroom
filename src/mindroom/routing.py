@@ -14,7 +14,7 @@ from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.routing_judgment import ResponderSelection, judge_responder
 from mindroom.tool_system.events import body_without_tool_markers
 
@@ -79,7 +79,7 @@ async def suggest_responder(
             runtime_paths=runtime_paths,
         ).model_name
 
-        provider = build_model_provider(config, runtime_paths, router_model_name)
+        provider = provider_registry.build_model_provider(config, runtime_paths, router_model_name)
         logger.info("using_router_model", model_name=router_model_name, model_id=provider.identity.id)
 
         result = await complete_prompt(

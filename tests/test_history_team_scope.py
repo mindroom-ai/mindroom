@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom import agents, execution_preparation
+from mindroom import execution_preparation
 from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -37,7 +37,7 @@ from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, make_turn_context
+from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import _runtime_paths
 
@@ -77,11 +77,7 @@ def _build_pair(
     leader: ScriptedModel | None = None,
 ) -> BuiltTeam:
     """Build the alpha+zeta team on scripted providers, as a reply builds it; ``leader`` scripts the leader's turns."""
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr(
-        "mindroom.teams.members.build_model_provider",
-        lambda *_args, **_kwargs: leader or ScriptedModel([]),
-    )
+    install_model_providers(monkeypatch, {"default": leader or ScriptedModel([])})
     members = materialize_exact_team_members(
         ["zeta", "alpha"],
         config=config,

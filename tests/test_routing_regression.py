@@ -50,6 +50,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
+    install_model_providers,
     install_runtime_journal_support,
     make_matrix_client_mock,
     make_pending_event,
@@ -1749,12 +1750,10 @@ class TestRoutingRegression:
     @pytest.mark.asyncio
     @patch("mindroom.teams.members.resolve_agent_knowledge_access")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.teams.formation.build_model_provider")
     @patch("mindroom.config.main.load_config")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_from_yaml: MagicMock,
-        mock_build_model_provider: MagicMock,
         mock_ai_response: AsyncMock,
         mock_resolve_agent_knowledge_access: MagicMock,
         mock_research_agent: AgentMatrixUser,
@@ -1779,6 +1778,8 @@ class TestRoutingRegression:
             ),
             tmp_path,
         )
+        # Keep background summaries off the team's scripted model.
+        mock_config.defaults.thread_summary_first_threshold = 100
         mock_from_yaml.return_value = mock_config
 
         # Get the actual domain from config
@@ -1788,14 +1789,13 @@ class TestRoutingRegression:
         mock_research_agent.user_id = f"@mindroom_research:{domain}"
         mock_news_agent.user_id = f"@mindroom_news:{domain}"
 
-        # The team mode choice goes through the owned provider layer.
-        team_mode_model = ScriptedModel([answer(json.dumps({"mode": "collaborate", "reasoning": "Both weigh in"}))])
-        mock_build_model_provider.return_value = team_mode_model
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
-        # The members build on scripted providers that are never asked; the team's leader answers on its own.
-        team_leader = ScriptedModel([answer("Team response")])
-        monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_a, **_k: ScriptedModel([]))
-        monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_a, **_k: team_leader)
+        # Every model builds as one scripted model: it chooses the team mode, then answers as the team's leader on
+        # its own; the members are never asked.
+        team_model = ScriptedModel(
+            [answer(json.dumps({"mode": "collaborate", "reasoning": "Both weigh in"})), answer("Team response")],
+        )
+        install_model_providers(monkeypatch, {"default": team_model})
 
         test_room_id = "!research:localhost"
 
@@ -1861,8 +1861,8 @@ class TestRoutingRegression:
         # The other agent (research) does not respond individually
         assert research_bot.client.room_send.call_count == 0  # No individual response
         assert news_bot.client.room_send.call_count == 2  # Team response (thinking + final)
-        assert len(team_leader.requests) == 1  # Team formed once
-        assert len(team_mode_model.requests) == 1  # The team mode was chosen once
+        # The team mode was chosen once, then the team formed once.
+        assert [request.output_schema is not None for request in team_model.requests] == [True, False]
 
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")

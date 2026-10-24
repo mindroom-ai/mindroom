@@ -24,7 +24,7 @@ from mindroom.embeddings.errors import EmbedderRequestError, embedder_batch_card
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.knowledge_graph.store import UnusableExtractionError, run_on_loop
 from mindroom.knowledge_graph.usage import current_usage_target
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.session_storage.agent_storage import create_session_storage
 
 if TYPE_CHECKING:
@@ -93,7 +93,12 @@ class MindRoomLLMClient(LLMClient):
             raise ValueError(msg)
         target = current_usage_target()
         identity = target.execution_identity if target is not None else None
-        provider = build_model_provider(config, self._runtime_paths, model_name, execution_identity=identity)
+        provider = provider_registry.build_model_provider(
+            config,
+            self._runtime_paths,
+            model_name,
+            execution_identity=identity,
+        )
         system = "\n\n".join(message.content for message in messages if message.role == "system")
         invocation_id = uuid4().hex
         response = await complete_prompt(

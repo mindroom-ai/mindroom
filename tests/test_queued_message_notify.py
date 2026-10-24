@@ -57,7 +57,6 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt
-from mindroom.judgment import llm as judgment_llm
 from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.runs import AnyRunRecord, RunRecord, TeamRunRecord
 from mindroom.llm.runs import RunStatus as OwnedRunStatus
@@ -94,6 +93,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_model_providers,
     install_runtime_journal_support,
     make_conversation_reader_mock,
     make_matrix_client_mock,
@@ -3800,7 +3800,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
         else None
     )
     judge = ScriptedModel([answer('{"decision": false}')])
-    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
+    install_model_providers(monkeypatch, {"default": judge})
     envelope = _envelope(target=MessageTarget.resolve("!room:localhost", "$thread", "$event"))
     prompt = "Question: Install the dependency?\nSelected option: yes (install)" if selection else "hello"
     if selection:

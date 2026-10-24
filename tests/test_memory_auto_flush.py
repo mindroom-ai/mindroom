@@ -32,7 +32,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from mindroom.usage.storage import quote_identifier
-from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session
+from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
@@ -1067,7 +1067,7 @@ async def test_extraction_runs_on_the_extractor_model_when_one_is_set(
         requested.append(model_name)
         return ScriptedModel([answer("NO_REPLY")])
 
-    monkeypatch.setattr(auto_flush, "build_model_provider", model_provider)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", model_provider)
 
     await auto_flush._extract_memory_summary(
         config=config,
@@ -1095,7 +1095,7 @@ async def test_a_failed_extraction_run_is_a_failure_not_a_memory(
         message = "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}"
         raise ProviderError(message, provider="Synthetic")
 
-    monkeypatch.setattr(auto_flush, "build_model_provider", lambda *_args: ScriptedModel([[Await(fail)]]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(fail)]])})
     with pytest.raises(ProviderError, match=r"^Error code: 401"):
         await auto_flush._extract_memory_summary(
             config=config,

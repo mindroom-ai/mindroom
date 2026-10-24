@@ -27,11 +27,10 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom import agents
 from mindroom.config.models import ModelConfig
 from mindroom.event_journal import DeliveryStage
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import install_model_providers, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.response_runner_helpers import _bot, _plain_request, _target
 
@@ -341,7 +340,7 @@ def _watch(bot: AgentBot, monkeypatch: pytest.MonkeyPatch, turns: list[list[Scri
     outbox = _WatchedOutbox(inner=gateway.deps.outbox, timeline=timeline)
     object.__setattr__(gateway, "deps", replace(gateway.deps, outbox=outbox))
     model = _AttemptingModel(turns, timeline=timeline)
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
 
     homeserver = _Homeserver()
     bot.client.room_send = AsyncMock(side_effect=homeserver.room_send)

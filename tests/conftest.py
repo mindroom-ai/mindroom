@@ -143,6 +143,7 @@ from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
+from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
@@ -2875,6 +2876,27 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
     bot._delivery_gateway.edit_text = AsyncMock(side_effect=_edit_text)
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+
+def install_model_providers(monkeypatch: pytest.MonkeyPatch, providers: Mapping[str, "ModelProvider"]) -> None:
+    """Build each configured model ``providers`` names as its provider there; every other model builds as before.
+
+    ``providers`` is read at every build, so a test may replace a provider between two turns.
+    """
+    earlier = provider_registry.build_model_provider
+
+    def build(
+        config: Config,
+        paths: RuntimePaths,
+        model_name: str = "default",
+        *,
+        execution_identity: "ToolExecutionIdentity | None" = None,
+    ) -> "ModelProvider":
+        if model_name in providers:
+            return providers[model_name]
+        return earlier(config, paths, model_name, execution_identity=execution_identity)
+
+    monkeypatch.setattr(provider_registry, "build_model_provider", build)
 
 
 @pytest.fixture

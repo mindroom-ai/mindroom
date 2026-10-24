@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import agents
 from mindroom.agents import team_background_jobs
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -42,7 +41,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     tool_execution_identity,
 )
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.history_helpers import _runtime_paths as history_runtime_paths
@@ -452,8 +451,7 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
         session_id="session-1",
         transport_agent_name="pair",
     )
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     context = replace(
         _delegate_runtime_context(config, runtime_paths, execution_identity=identity),
         agent_name="pair",
@@ -542,7 +540,7 @@ async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs
         session_id="session-1",
         transport_agent_name="alpha",
     )
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     context = replace(
         _delegate_runtime_context(config, runtime_paths, execution_identity=identity),
         agent_name="zeta",

@@ -23,7 +23,7 @@ from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.voice import handler as voice_handler
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import isolated_membership_index
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_actual_entity_accounts
 
@@ -698,11 +698,11 @@ class TestVoiceHandler:
             request_started.set()
             await asyncio.Event().wait()
 
-        with patch("mindroom.voice.handler.build_model_provider", return_value=ScriptedModel([[Await(hang)]])):
-            result = await asyncio.wait_for(
-                _process_transcription("turn on the lights", config),
-                timeout=2.0,
-            )
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(hang)]])})
+        result = await asyncio.wait_for(
+            _process_transcription("turn on the lights", config),
+            timeout=2.0,
+        )
 
         assert request_started.is_set()
         assert result == "turn on the lights"
@@ -738,7 +738,7 @@ class TestVoiceHandler:
 
         model = ScriptedModel([answer("") if failure_stage == "empty" else [Await(fail)]])
         with patch(
-            "mindroom.voice.handler.build_model_provider",
+            "mindroom.providers.registry.build_model_provider",
             side_effect=RuntimeError("cleanup model unavailable") if failure_stage == "model" else None,
             return_value=model,
         ):
@@ -752,17 +752,15 @@ class TestVoiceHandler:
         assert result == expected
 
     @pytest.mark.asyncio
-    async def test_cleanup_cancellation_propagates(self) -> None:
+    async def test_cleanup_cancellation_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Cancellation remains control flow instead of becoming a transcript fallback."""
         config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
 
         async def cancel() -> None:
             raise asyncio.CancelledError
 
-        with (
-            patch("mindroom.voice.handler.build_model_provider", return_value=ScriptedModel([[Await(cancel)]])),
-            pytest.raises(asyncio.CancelledError),
-        ):
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(cancel)]])})
+        with pytest.raises(asyncio.CancelledError):
             await _process_transcription("recognized speech", config)
 
     @pytest.mark.asyncio

@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom import agents
 from mindroom.bot import AgentBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -63,7 +62,7 @@ from tests.bot_helpers import (
     _handled_response_event_id,
     _stream_outcome,
 )
-from tests.conftest import seed_session
+from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel
 from tests.identity_helpers import fixture_entity_matrix_id
 
@@ -1492,8 +1491,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
 
     # The leader is stopped while its first request streams; the member never runs.
     leader = ScriptedModel([[Await(stopped)]])
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: leader)
+    install_model_providers(monkeypatch, {"default": leader})
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])

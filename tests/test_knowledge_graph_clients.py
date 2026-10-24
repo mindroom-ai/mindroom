@@ -22,6 +22,8 @@ from mindroom.knowledge_graph.clients import MindRoomEmbedder, MindRoomLLMClient
 from mindroom.knowledge_graph.store import UnusableExtractionError
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
 from mindroom.llm.errors import ProviderError
+from mindroom.providers import registry as provider_registry
+from tests.conftest import install_model_providers
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
@@ -65,7 +67,7 @@ async def test_llm_client_returns_structured_output_and_records_usage(tmp_path: 
     ]
 
     with (
-        patch.object(clients, "build_model_provider", return_value=model) as build,
+        patch.object(provider_registry, "build_model_provider", return_value=model) as build,
         patch.object(clients, "record_helper_usage", record),
         usage_target(UsageTarget(agent_name="mind", session_id="!room:x:$thread", execution_identity=None)),
     ):
@@ -82,17 +84,15 @@ async def test_llm_client_returns_structured_output_and_records_usage(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_llm_client_without_usage_target_records_nothing(tmp_path: Path) -> None:
+async def test_llm_client_without_usage_target_records_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A call outside ingestion, such as a search, has no conversation to charge."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     model = _json_model(json.dumps({"names": []}))
     record = AsyncMock()
 
-    with (
-        patch.object(clients, "build_model_provider", return_value=model),
-        patch.object(clients, "record_helper_usage", record),
-    ):
+    install_model_providers(monkeypatch, {"luna": model})
+    with patch.object(clients, "record_helper_usage", record):
         await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
             [GraphitiMessage(role="user", content="x")],
             _Entities,
@@ -107,15 +107,13 @@ async def _reject_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_client_reports_the_providers_error(tmp_path: Path) -> None:
+async def test_llm_client_reports_the_providers_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A rejected request surfaces the provider's reason, which ingestion shows in health."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
-    with (
-        patch.object(clients, "build_model_provider", return_value=ScriptedModel([[Await(_reject_key)]])),
-        pytest.raises(ProviderError, match="invalid api key"),
-    ):
+    install_model_providers(monkeypatch, {"luna": ScriptedModel([[Await(_reject_key)]])})
+    with pytest.raises(ProviderError, match="invalid api key"):
         await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
             [GraphitiMessage(role="user", content="x")],
             _Entities,
@@ -124,15 +122,17 @@ async def test_llm_client_reports_the_providers_error(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer_text", ["[1, 2]", "null", json.dumps({"other": 1})])
-async def test_llm_client_rejects_output_of_the_wrong_shape(tmp_path: Path, answer_text: str) -> None:
+async def test_llm_client_rejects_output_of_the_wrong_shape(
+    tmp_path: Path,
+    answer_text: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Output that is not the requested object counts as unusable, so ingestion can drop it after a few tries."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
-    with (
-        patch.object(clients, "build_model_provider", return_value=_json_model(answer_text)),
-        pytest.raises(ValueError, match="knowledge graph extraction"),
-    ):
+    install_model_providers(monkeypatch, {"luna": _json_model(answer_text)})
+    with pytest.raises(ValueError, match="knowledge graph extraction"):
         await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
             [GraphitiMessage(role="user", content="x")],
             _Entities,
@@ -140,7 +140,7 @@ async def test_llm_client_rejects_output_of_the_wrong_shape(tmp_path: Path, answ
 
 
 @pytest.mark.asyncio
-async def test_extraction_runs_on_the_runtime_loop(tmp_path: Path) -> None:
+async def test_extraction_runs_on_the_runtime_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Graphiti calls from its own loop, but the model runs on the runtime loop that owns the providers' HTTP clients."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
@@ -159,10 +159,8 @@ async def test_extraction_runs_on_the_runtime_loop(tmp_path: Path) -> None:
         with usage_target(target):
             return await client._generate_response([GraphitiMessage(role="user", content="x")], _Entities)
 
-    with (
-        patch.object(clients, "build_model_provider", return_value=model),
-        patch.object(clients, "record_helper_usage", record),
-    ):
+    install_model_providers(monkeypatch, {"luna": model})
+    with patch.object(clients, "record_helper_usage", record):
         result = await asyncio.to_thread(asyncio.run, from_graph_loop())
 
     assert result == {"names": ["Alice"]}
@@ -171,17 +169,15 @@ async def test_extraction_runs_on_the_runtime_loop(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unusable_extraction_crosses_back_to_the_caller(tmp_path: Path) -> None:
+async def test_unusable_extraction_crosses_back_to_the_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Output the model got wrong reaches Graphiti's loop as the error ingestion counts toward dropping the episode."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     client = MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())
     call = client._generate_response([GraphitiMessage(role="user", content="x")], _Entities)
 
-    with (
-        patch.object(clients, "build_model_provider", return_value=_json_model("no")),
-        pytest.raises(UnusableExtractionError),
-    ):
+    install_model_providers(monkeypatch, {"luna": _json_model("no")})
+    with pytest.raises(UnusableExtractionError):
         await asyncio.to_thread(asyncio.run, call)
 
 

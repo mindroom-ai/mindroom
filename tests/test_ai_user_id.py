@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai, ai_run_metadata
+from mindroom import ai, ai_run_metadata
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
     _compose_current_turn_prompt,
@@ -112,6 +112,7 @@ from tests.bot_helpers import (
     _stream_outcome,
 )
 from tests.conftest import (
+    install_model_providers,
     make_turn_context,
     make_visible_message,
     seed_session,
@@ -121,7 +122,6 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.scripted_agent_helpers import (
     PROBE_TOOL,
     ProbeTools,
-    install_agent_model,
     raising,
     registered_probe_tools,
     stop_turn,
@@ -178,18 +178,18 @@ def _scripted_like(
 def _install(monkeypatch: pytest.MonkeyPatch, *turns: Sequence[ScriptStep]) -> ScriptedModel:
     """Answer every agent request with one scripted provider playing ``turns`` in order."""
     model = ScriptedModel([list(turn) for turn in turns])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
     return model
 
 
 def _install_by_name(monkeypatch: pytest.MonkeyPatch, models: dict[str, ModelProvider], built: list[str]) -> None:
     """Build each agent's provider by its configured model name and record the names built."""
 
-    def build(_config: Config, _paths: RuntimePaths, model_name: str, _identity: object) -> ModelProvider:
+    def build(_config: Config, _paths: RuntimePaths, model_name: str, **_kwargs: object) -> ModelProvider:
         built.append(model_name)
         return models[model_name]
 
-    monkeypatch.setattr(agents, "_build_agent_model_provider", build)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", build)
 
 
 def _switch(call_id: str, model_name: str, when: str) -> list[ScriptStep]:
@@ -1554,9 +1554,9 @@ class TestUserIdPassthrough:
         config, runtime_paths = _bound(tmp_path)
         refused = Message(role="assistant", content="", metrics=usage(5, 0))
         model = ScriptedModel([[UsageReported(usage(5, 0)), TurnCompleted(message=refused, stop_reason="refusal")]])
-        install_agent_model(
+        install_model_providers(
             monkeypatch,
-            wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=None),
+            {"default": wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=None)},
         )
         document_file = File(filepath=str(tmp_path / "report.pdf"), filename="report.pdf", mime_type="application/pdf")
 
@@ -1585,19 +1585,21 @@ class TestUserIdPassthrough:
         config, runtime_paths = _bound(tmp_path)
         debug = DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path))
         model = ScriptedModel([answer("Deferred stream")])
-        install_agent_model(
+        install_model_providers(
             monkeypatch,
-            wrap_provider(
-                model,
-                idle_timeout_seconds=None,
-                media_fallback_prompt="",
-                request_log=RequestLog(
-                    model_name="default",
-                    configured_provider="openai",
-                    debug=debug,
-                    storage_root=tmp_path / "unused",
+            {
+                "default": wrap_provider(
+                    model,
+                    idle_timeout_seconds=None,
+                    media_fallback_prompt="",
+                    request_log=RequestLog(
+                        model_name="default",
+                        configured_provider="openai",
+                        debug=debug,
+                        storage_root=tmp_path / "unused",
+                    ),
                 ),
-            ),
+            },
         )
 
         chunks = [
@@ -1873,7 +1875,10 @@ class TestUserIdPassthrough:
             ),
         )
         metrics = usage(800, 120, cache_read_tokens=640, cache_write_tokens=32, reasoning_tokens=24)
-        install_agent_model(monkeypatch, _scripted_like(config, runtime_paths, [answer("Response", metrics)]))
+        install_model_providers(
+            monkeypatch,
+            {"default": _scripted_like(config, runtime_paths, [answer("Response", metrics)])},
+        )
         run_metadata: dict[str, Any] = {}
 
         await _respond(
@@ -1953,7 +1958,10 @@ class TestUserIdPassthrough:
             ),
         )
         metrics = usage(3000, 120, cache_read_tokens=20_000, cache_write_tokens=500)
-        install_agent_model(monkeypatch, _scripted_like(config, runtime_paths, [answer("Response", metrics)]))
+        install_model_providers(
+            monkeypatch,
+            {"default": _scripted_like(config, runtime_paths, [answer("Response", metrics)])},
+        )
         run_metadata: dict[str, Any] = {}
 
         await _respond(
@@ -2334,7 +2342,7 @@ class TestUserIdPassthrough:
             ),
         )
         model = _scripted_like(config, runtime_paths, [answer("ok", usage(12, 3, time_to_first_token=0.12))])
-        install_agent_model(monkeypatch, model)
+        install_model_providers(monkeypatch, {"default": model})
         run_metadata: dict[str, Any] = {}
 
         async for _chunk in stream_agent_response(
@@ -2375,16 +2383,18 @@ class TestUserIdPassthrough:
         )
         first = usage(700, 50, cache_read_tokens=512, reasoning_tokens=40)
         latest = usage(120, 20, cache_read_tokens=64, reasoning_tokens=8)
-        install_agent_model(
+        install_model_providers(
             monkeypatch,
-            _scripted_like(
-                config,
-                runtime_paths,
-                [
-                    calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
-                    answer("step two", latest),
-                ],
-            ),
+            {
+                "default": _scripted_like(
+                    config,
+                    runtime_paths,
+                    [
+                        calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
+                        answer("step two", latest),
+                    ],
+                ),
+            },
         )
         run_metadata: dict[str, Any] = {}
 
@@ -2428,16 +2438,18 @@ class TestUserIdPassthrough:
         )
         first = usage(700, 50, cache_read_tokens=512, cache_write_tokens=32)
         latest = usage(120, 20)
-        install_agent_model(
+        install_model_providers(
             monkeypatch,
-            _scripted_like(
-                config,
-                runtime_paths,
-                [
-                    calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
-                    answer("step two", latest),
-                ],
-            ),
+            {
+                "default": _scripted_like(
+                    config,
+                    runtime_paths,
+                    [
+                        calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
+                        answer("step two", latest),
+                    ],
+                ),
+            },
         )
         run_metadata: dict[str, Any] = {}
 
@@ -2500,7 +2512,7 @@ class TestUserIdPassthrough:
                 answer("step two", latest),
             ],
         )
-        install_agent_model(monkeypatch, model)
+        install_model_providers(monkeypatch, {"default": model})
         run_metadata: dict[str, Any] = {}
 
         async for _chunk in stream_agent_response(

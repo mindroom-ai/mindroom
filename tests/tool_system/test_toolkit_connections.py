@@ -35,6 +35,7 @@ from mindroom.tool_system.toolkit_connections import register_mcp_functions, run
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
+    install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
     make_turn_context,
@@ -43,7 +44,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.identity_helpers import persist_entity_accounts
-from tests.scripted_agent_helpers import install_agent_model, raising, registered_toolkit, streamed_text
+from tests.scripted_agent_helpers import raising, registered_toolkit, streamed_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -179,7 +180,7 @@ def _agent(
     )
     config.memory.backend = "none"
     model = ScriptedModel([list(turn) for turn in turns])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
     return config, model
 
 

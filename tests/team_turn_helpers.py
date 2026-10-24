@@ -1,11 +1,11 @@
-"""Team turns on scripted providers: the team runtime seam and the drivers the team suites share.
+"""Team turns on scripted providers: the drivers the team suites share.
 
-``install_team_models`` is the team runtime seam. Every provider the production builders build, the members' and the
-leader's, is the ``ScriptedModel`` of its configured model name, so a turn runs the real member builds,
-``build_team_spec``, ``run_team``, the presentation, and the conversation store. ``TeamTurn`` holds one team's config,
-its scripted models, its tool runtime, and its orchestrator, and drives ``team_response``, ``team_response_stream``, and
-``continue_paused_team_run`` as the response runner calls them. ``squad_turn`` builds the ``squad`` team of a writer
-and a checker that the team runtime, compaction, and history suites share; ``ProbeToolkit`` is its members' tool.
+``build_team_turn`` installs a ``ScriptedModel`` for each configured model name, so the members and the leader build
+scripted providers and a turn runs the real member builds, ``build_team_spec``, ``run_team``, the presentation, and the
+conversation store. ``TeamTurn`` holds one team's config, its scripted models, its tool runtime, and its orchestrator,
+and drives ``team_response``, ``team_response_stream``, and ``continue_paused_team_run`` as the response runner calls
+them. ``squad_turn`` builds the ``squad`` team of a writer and a checker that the team runtime, compaction, and history
+suites share; ``ProbeToolkit`` is its members' tool.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from agno.tools import Toolkit
 
-from mindroom import agents
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
@@ -42,6 +41,7 @@ from tests.ai_user_id_helpers import team_orchestrator
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
+    install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
     make_turn_context,
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     import pytest
 
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
@@ -128,18 +127,6 @@ def registered_probe() -> Iterator[type[ProbeToolkit]]:
     ProbeToolkit.waiting = asyncio.Event()
     with registered_toolkit(PROBE_TOOL, ProbeToolkit):
         yield ProbeToolkit
-
-
-def install_team_models(monkeypatch: pytest.MonkeyPatch, models: Mapping[str, ModelProvider]) -> None:
-    """Install the team runtime seam: each member's and the leader's provider is the one ``models`` maps its model to.
-
-    ``models`` is read at every build, so a test may replace a model between a pause and its resume.
-    """
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
-    monkeypatch.setattr(
-        "mindroom.teams.members.build_model_provider",
-        lambda _config, _paths, name, **_kwargs: models[name],
-    )
 
 
 def authored_team_config(
@@ -347,7 +334,7 @@ def build_team_turn(
     scripts: Mapping[str, Sequence[Sequence[ScriptStep]]] | None = None,
     mode: TeamMode = TeamMode.COORDINATE,
 ) -> TeamTurn:
-    """Build one team of ``members`` over ``authored``, every configured model scripted by ``scripts`` or left empty.
+    """Build one team of ``members`` over ``authored``, each non-compaction model scripted by ``scripts`` or empty.
 
     ``team_name`` names the configured team the turn runs as, or None for an ad hoc team of ``members``; every agent
     of the config runs, and the requester may address every responder in the room.
@@ -355,8 +342,14 @@ def build_team_turn(
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     with_current_room_member_access(config)
-    models = {name: ScriptedModel([list(turn) for turn in (scripts or {}).get(name, ())]) for name in config.models}
-    install_team_models(monkeypatch, models)
+    compaction = config.defaults.compaction
+    compaction_model = compaction.model if compaction is not None else None
+    models = {
+        name: ScriptedModel([list(turn) for turn in (scripts or {}).get(name, ())])
+        for name in config.models
+        if name != compaction_model
+    }
+    install_model_providers(monkeypatch, models)
     runtime = make_test_tool_runtime_context(
         agent_name=team_name or members[0],
         target=MessageTarget(
@@ -476,7 +469,6 @@ __all__ = [
     "authored_team_config",
     "build_team_turn",
     "delegate",
-    "install_team_models",
     "member_approval",
     "registered_probe",
     "rendered",

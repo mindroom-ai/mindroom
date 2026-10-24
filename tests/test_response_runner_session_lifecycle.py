@@ -72,18 +72,13 @@ from tests.bot_helpers import (
     _stream_outcome,
 )
 from tests.conftest import (
+    install_model_providers,
     message_origin,
     request_envelope,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import response_span
-from tests.scripted_agent_helpers import (
-    PROBE_TOOL,
-    install_agent_model,
-    raising,
-    registered_probe_tools,
-    stored_runs,
-)
+from tests.scripted_agent_helpers import PROBE_TOOL, raising, registered_probe_tools, stored_runs
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -869,14 +864,20 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     storage = _history_store(tmp_path)
     config.agents["general"].tools = [PROBE_TOOL]
-    install_agent_model(
+    install_model_providers(
         monkeypatch,
-        ScriptedModel(
-            [
-                calls(tool_call("run_shell_command", "call-1", cmd="pwd"), content="Partial answer"),
-                [raising(ProviderError("Error code: 500 - provider exploded", provider="Synthetic", status_code=500))],
-            ],
-        ),
+        {
+            "default": ScriptedModel(
+                [
+                    calls(tool_call("run_shell_command", "call-1", cmd="pwd"), content="Partial answer"),
+                    [
+                        raising(
+                            ProviderError("Error code: 500 - provider exploded", provider="Synthetic", status_code=500),
+                        ),
+                    ],
+                ],
+            ),
+        },
     )
 
     with registered_probe_tools():
@@ -1506,9 +1507,9 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
     config.agents["general"].show_tool_calls = True
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     history_storage = _history_store(tmp_path)
-    install_agent_model(
+    install_model_providers(
         monkeypatch,
-        ScriptedModel([calls(tool_call("run_shell_command", "call-1", cmd="pwd")), answer("Half done")]),
+        {"default": ScriptedModel([calls(tool_call("run_shell_command", "call-1", cmd="pwd")), answer("Half done")])},
     )
 
     with (
@@ -1936,7 +1937,7 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
     config.memory.backend = "none"
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     model = ScriptedModel([answer("Hello")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
 
     with patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)):
         coordinator = _build_response_runner(

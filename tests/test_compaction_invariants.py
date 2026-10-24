@@ -63,7 +63,7 @@ from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session
+from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model, summary_turn
 from tests.history_helpers import (
     FakeModel,
@@ -324,7 +324,10 @@ def test_scope_state_writes_keep_other_scopes_verbatim() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) -> None:
+async def test_chunk_progress_survives_interruption_and_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An interrupted multi-chunk compaction keeps its partial summary and never re-compacts."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -396,15 +399,10 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
         restart_inputs.append(summary_input)
         return "summary chunk 2"
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(side_effect=restart_summary),
-        ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=restart_summary),
     ):
         await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -1548,7 +1546,10 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
 
 
 @pytest.mark.asyncio
-async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_fact_loss(tmp_path: Path) -> None:
+async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_fact_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A degenerate plan is unavailable and cannot repeatedly select a compaction rewrite."""
     summary_input_budget = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     config, runtime_paths = _make_config(
@@ -1605,15 +1606,10 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     assert read_scope_state(persisted, _SCOPE) == HistoryScopeState()
 
     runtime_generate_summary = AsyncMock()
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=runtime_generate_summary,
-        ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=runtime_generate_summary,
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -1639,7 +1635,10 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
 
 
 @pytest.mark.asyncio
-async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppression(tmp_path: Path) -> None:
+async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Retry exhaustion after a smaller timeout request leaves no durable policy state."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -1656,15 +1655,10 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
         attempts.append(summary_input)
         raise TimeoutError
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(side_effect=time_out_summary),
-        ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=time_out_summary),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",

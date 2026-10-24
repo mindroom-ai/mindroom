@@ -44,8 +44,8 @@ from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, Comp
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_summary, replay_basis
+from mindroom.providers import registry as provider_registry
 from mindroom.providers.names import provider_route
-from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import runs_without
 from mindroom.timing import timed
@@ -111,7 +111,7 @@ class Summarizer:
 @timed("system_prompt_assembly.history_prepare.compaction_model_init")
 def _load_compaction_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
     """Build the compaction model's provider with dedicated history-preparation timing."""
-    return build_model_provider(config, runtime_paths, model_name)
+    return provider_registry.build_model_provider(config, runtime_paths, model_name)
 
 
 def _compaction_fallback_is_distinct(

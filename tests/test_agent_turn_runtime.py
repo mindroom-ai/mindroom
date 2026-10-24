@@ -78,6 +78,7 @@ from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_model_providers,
     install_runtime_journal_support,
     make_conversation_reader_mock,
     make_matrix_client_mock,
@@ -210,7 +211,7 @@ def _reply(
     if approval_rules:
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     model = ScriptedModel([list(turn) for turn in turns], capabilities=capabilities or Capabilities())
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
     if plugins:
         monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: list(plugins))
     runtime = make_test_tool_runtime_context(
@@ -1086,7 +1087,7 @@ async def test_a_reply_posts_its_mid_turn_compaction_notices_and_seeds_no_earlie
         context_window=4000,
     )
     summarizer = summary_model("SUMMARY")
-    monkeypatch.setattr("mindroom.history.compaction.build_model_provider", lambda *_args: summarizer)
+    install_model_providers(monkeypatch, {"summary": summarizer})
     lifecycle = RecordingCompactionLifecycle()
     seeded = {COMPACTED_REQUESTS_METADATA_KEY: [{"input_tokens": 10}], "room_topic": "kept"}
 

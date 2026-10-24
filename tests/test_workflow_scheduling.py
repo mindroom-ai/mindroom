@@ -38,6 +38,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
+    install_model_providers,
     make_conversation_reader_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -276,20 +277,24 @@ class TestScheduledWorkflow:
 class TestParseWorkflowSchedule:
     """Test parse_workflow_schedule function."""
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_research_email_workflow(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """Test parsing research + email workflow."""
-        mock_build.return_value = _parser_model(
-            ScheduledWorkflow(
-                schedule_type="cron",
-                cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
-                message="@research @email_assistant Please research the latest AI news and email me a summary",
-                description="Weekly AI news research and email",
-            ),
+        install_model_providers(
+            monkeypatch,
+            {
+                "default": _parser_model(
+                    ScheduledWorkflow(
+                        schedule_type="cron",
+                        cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
+                        message="@research @email_assistant Please research the latest AI news and email me a summary",
+                        description="Weekly AI news research and email",
+                    ),
+                ),
+            },
         )
 
         # Parse the request
@@ -306,20 +311,24 @@ class TestParseWorkflowSchedule:
         assert "@research" in result.message
         assert "@email_assistant" in result.message
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_simple_reminder(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """Test parsing simple reminder without agents."""
-        mock_build.return_value = _parser_model(
-            ScheduledWorkflow(
-                schedule_type="once",
-                execute_at=datetime.now(UTC) + timedelta(minutes=5),
-                message="Check the deployment status",
-                description="Deployment check reminder",
-            ),
+        install_model_providers(
+            monkeypatch,
+            {
+                "default": _parser_model(
+                    ScheduledWorkflow(
+                        schedule_type="once",
+                        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+                        message="Check the deployment status",
+                        description="Deployment check reminder",
+                    ),
+                ),
+            },
         )
 
         result = await _parse_workflow_schedule(
@@ -333,16 +342,20 @@ class TestParseWorkflowSchedule:
         assert result.schedule_type == "once"
         assert result.message == "Check the deployment status"
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
-    async def test_parse_daily_task(self, mock_build: Mock, mock_config: MagicMock) -> None:
+    async def test_parse_daily_task(self, monkeypatch: pytest.MonkeyPatch, mock_config: MagicMock) -> None:
         """Test parsing daily recurring task."""
-        mock_build.return_value = _parser_model(
-            ScheduledWorkflow(
-                schedule_type="cron",
-                cron_schedule=CronSchedule(minute="0", hour="9"),
-                message="@finance Please provide a market analysis for today",
-                description="Daily market analysis",
-            ),
+        install_model_providers(
+            monkeypatch,
+            {
+                "default": _parser_model(
+                    ScheduledWorkflow(
+                        schedule_type="cron",
+                        cron_schedule=CronSchedule(minute="0", hour="9"),
+                        message="@finance Please provide a market analysis for today",
+                        description="Daily market analysis",
+                    ),
+                ),
+            },
         )
 
         result = await _parse_workflow_schedule(
@@ -357,15 +370,14 @@ class TestParseWorkflowSchedule:
         assert result.cron_schedule.to_cron_string() == "0 9 * * *"
         assert "@finance" in result.message
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_prompt_interprets_times_in_user_timezone(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """The parse prompt must carry the user's timezone and local wall-clock time."""
         mock_config.timezone = "America/Los_Angeles"
-        mock_build.return_value = model = _parser_model(
+        model = _parser_model(
             ScheduledWorkflow(
                 schedule_type="once",
                 execute_at=datetime(2026, 7, 4, 6, 45, tzinfo=UTC),
@@ -373,6 +385,7 @@ class TestParseWorkflowSchedule:
                 description="Reminder",
             ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         await _parse_workflow_schedule(
             "Remind me today at 11:45 PM",
@@ -387,14 +400,13 @@ class TestParseWorkflowSchedule:
         assert "(America/Los_Angeles): 2026-07-03T09:00:00-07:00" in prompt
         assert "Interpret times in the request as America/Los_Angeles wall-clock times" in prompt
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_prompt_includes_history_limit_instructions(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """The parse prompt must teach the model when to set the per-schedule history limit."""
-        mock_build.return_value = model = _parser_model(
+        model = _parser_model(
             ScheduledWorkflow(
                 schedule_type="cron",
                 cron_schedule=CronSchedule(minute="*/25"),
@@ -403,6 +415,7 @@ class TestParseWorkflowSchedule:
                 history_limit=0,
             ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "every 25 minutes poll the queue with no history",
@@ -420,19 +433,23 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, ScheduledWorkflow)
         assert result.history_limit == 0
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_once_without_execute_at_returns_parse_error(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """A one-time parse without execute_at must fail instead of silently defaulting."""
-        mock_build.return_value = _parser_model(
-            ScheduledWorkflow(
-                schedule_type="once",
-                message="Check deployment",
-                description="Deployment check",
-            ),
+        install_model_providers(
+            monkeypatch,
+            {
+                "default": _parser_model(
+                    ScheduledWorkflow(
+                        schedule_type="once",
+                        message="Check deployment",
+                        description="Deployment check",
+                    ),
+                ),
+            },
         )
 
         result = await _parse_workflow_schedule(
@@ -445,19 +462,23 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, _WorkflowParseError)
         assert "when to run" in result.error
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_cron_without_schedule_returns_parse_error(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """A recurring parse without cron_schedule must fail instead of silently defaulting."""
-        mock_build.return_value = _parser_model(
-            ScheduledWorkflow(
-                schedule_type="cron",
-                message="Market analysis",
-                description="Daily market analysis",
-            ),
+        install_model_providers(
+            monkeypatch,
+            {
+                "default": _parser_model(
+                    ScheduledWorkflow(
+                        schedule_type="cron",
+                        message="Market analysis",
+                        description="Daily market analysis",
+                    ),
+                ),
+            },
         )
 
         result = await _parse_workflow_schedule(
@@ -470,14 +491,13 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, _WorkflowParseError)
         assert "recurring schedule" in result.error
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_error_handling(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """Test error handling in parse_workflow_schedule."""
-        mock_build.return_value = ScriptedModel([[Await(_fail_parse)]])
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(_fail_parse)]])})
 
         result = await _parse_workflow_schedule(
             "Schedule something",
@@ -490,14 +510,13 @@ class TestParseWorkflowSchedule:
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_refusal_reports_declined_request_without_rephrase_hint(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """A parser model refusal must say the parser declined instead of asking for a more specific request."""
-        mock_build.return_value = ScriptedModel([[Await(_refuse_parse)]])
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(_refuse_parse)]])})
 
         result = await _parse_workflow_schedule(
             "Every day at 9am, summarize the news",
@@ -510,7 +529,7 @@ class TestParseWorkflowSchedule:
             error=f"The schedule parser model declined this request ({MODEL_SAFEGUARD_REFUSAL_MESSAGE}).",
         )
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
+    @patch("mindroom.providers.registry.build_model_provider")
     async def test_parse_empty_available_responders_returns_parse_error(
         self,
         mock_build: Mock,
@@ -528,14 +547,13 @@ class TestParseWorkflowSchedule:
         assert result.error == "No agents or teams available for scheduling."
         mock_build.assert_not_called()
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_formats_available_agents_without_double_at(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """Available-agent prompt rendering should never produce @@ mentions."""
-        mock_build.return_value = model = _parser_model(
+        model = _parser_model(
             ScheduledWorkflow(
                 schedule_type="once",
                 execute_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -543,6 +561,7 @@ class TestParseWorkflowSchedule:
                 description="Reminder",
             ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         await _parse_workflow_schedule(
             "remind me later",
@@ -561,21 +580,25 @@ class TestParseWorkflowSchedule:
         assert "Available agents and teams: @general, @research, @ops, @finance, @analyst" in prompt
         assert "@@" not in prompt
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_conditional_schedule_accepts_numeric_cron(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
         """Conditional schedules should accept numeric five-field crons because they recur."""
-        mock_build.return_value = _parser_model(
-            ScheduledWorkflow(
-                schedule_type="cron",
-                is_conditional=True,
-                cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
-                message="@general Check for messages containing urgent. If found, notify the team.",
-                description="Monitor urgent mentions",
-            ),
+        install_model_providers(
+            monkeypatch,
+            {
+                "default": _parser_model(
+                    ScheduledWorkflow(
+                        schedule_type="cron",
+                        is_conditional=True,
+                        cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
+                        message="@general Check for messages containing urgent. If found, notify the team.",
+                        description="Monitor urgent mentions",
+                    ),
+                ),
+            },
         )
 
         result = await _parse_workflow_schedule(
@@ -1030,17 +1053,16 @@ class TestIntegrationWithScheduling:
             assert "recurring task" in message
             assert "0 9 * * *" in message
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_edit_reparse_preserves_message_and_can_clear_history_limit(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An edit can clear a limit while preserving the original scheduled message."""
         original_message = "tool-audit schedule test — safe to ignore"
         client = AsyncMock()
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
-        mock_build.return_value = model = _parser_model(
+        model = _parser_model(
             ScheduledWorkflow(
                 schedule_type="once",
                 execute_at=datetime.now(UTC) + timedelta(hours=6),
@@ -1048,6 +1070,7 @@ class TestIntegrationWithScheduling:
                 description="Post a test reminder in the current thread.",
             ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         config = _runtime_bound_config(
             Config(
@@ -1136,17 +1159,16 @@ class TestIntegrationWithScheduling:
         assert stored_workflow.message == original_message
         assert stored_workflow.history_limit is None
 
-    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_edit_reparse_preserves_existing_history_limit_when_request_omits_context(
         self,
-        mock_build: Mock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A timing-only edit carries an existing history limit forward."""
         original_message = "tool-audit schedule test - safe to ignore"
         client = AsyncMock()
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
-        mock_build.return_value = model = _parser_model(
+        model = _parser_model(
             ScheduledWorkflow(
                 schedule_type="once",
                 execute_at=datetime.now(UTC) + timedelta(hours=6),
@@ -1155,6 +1177,7 @@ class TestIntegrationWithScheduling:
                 history_limit=5,
             ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         config = _runtime_bound_config(
             Config(

@@ -15,7 +15,6 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.hooks.enrichment import render_transient_context
-from mindroom.judgment import llm as judgment_llm
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.media import Image
@@ -24,7 +23,7 @@ from mindroom.participation import ParticipationGate
 from mindroom.participation_hook import participation_hook
 from mindroom.participation_judgment import create_participation_decider
 from tests.agent_loop.helpers import collect, context, spec
-from tests.conftest import test_runtime_paths
+from tests.conftest import install_model_providers, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 
 if TYPE_CHECKING:
@@ -308,7 +307,7 @@ async def test_dedicated_llm_uses_same_gate_without_calling_reply_model_for_deci
         selected.append(model_name)
         return judge
 
-    monkeypatch.setattr(judgment_llm, "build_model_provider", load)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load)
     reply = ScriptedModel([answer("Useful answer")])
     gate = _gate(tmp_path, backend="llm", key="")
     messages = [Message(role="system", content="Private system prompt"), Message(role="user", content="Any ideas?")]
@@ -344,7 +343,7 @@ async def test_dedicated_llm_abstention_uses_existing_fallback(
 ) -> None:
     """Both explicit abstention and judge failures preserve the existing fallback policy."""
     judge = ScriptedModel([turn])
-    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
+    install_model_providers(monkeypatch, {"cheap": judge})
     reply = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
     gate = _gate(tmp_path, backend="llm")
 
@@ -363,7 +362,7 @@ async def test_dedicated_llm_cancellation_does_not_start_fallback(
 ) -> None:
     """Cancellation has the same unsettled outcome for either backend."""
     judge = ScriptedModel([[Await(_cancel_judge)]])
-    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
+    install_model_providers(monkeypatch, {"cheap": judge})
     reply = ScriptedModel([answer("Must not run")])
     gate = _gate(tmp_path, backend="llm")
     with pytest.raises(asyncio.CancelledError):

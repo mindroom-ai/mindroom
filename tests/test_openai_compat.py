@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.conftest import seed_session
+from tests.conftest import install_model_providers, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -431,7 +431,11 @@ def _offered_function_names(build: AgentBuild) -> set[str]:
     return {function.name for toolkit in build.spec.toolkits for function in toolkit.functions}
 
 
-def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config, tmp_path: Path) -> None:
+def test_openai_compatible_agent_hides_approval_gated_tools(
+    test_config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """OpenAI-compatible agent construction should hide tools that require approval."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     config = Config.validate_with_runtime(
@@ -455,21 +459,21 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         session_id="openai-session",
     )
 
-    with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
-        build = create_agent(
-            "code",
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            include_openai_compat_guidance=True,
-        )
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    build = create_agent(
+        "code",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        include_openai_compat_guidance=True,
+    )
 
     exposed_tool_names = _offered_function_names(build)
     assert "run_shell_command" not in exposed_tool_names
     assert "read_file" in exposed_tool_names
 
 
-def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -> None:
+def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenAI-compatible agent construction should hide Matrix-context-bound todo tools."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     config = Config(
@@ -496,14 +500,14 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
         session_id="openai-session",
     )
 
-    with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
-        build = create_agent(
-            "code",
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            include_openai_compat_guidance=True,
-        )
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    build = create_agent(
+        "code",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        include_openai_compat_guidance=True,
+    )
 
     exposed_tool_names = _offered_function_names(build)
     assert "todo" not in {toolkit.name for toolkit in build.spec.toolkits}
@@ -520,7 +524,10 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
     )
 
 
-def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_path: Path) -> None:
+def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """OpenAI-compatible tool search should neither offer nor find context-bound todo."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     config = Config(
@@ -550,14 +557,14 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_pa
         session_id="openai-session",
     )
 
-    with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
-        build = create_agent(
-            "code",
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            include_openai_compat_guidance=True,
-        )
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    build = create_agent(
+        "code",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        include_openai_compat_guidance=True,
+    )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
     assert "todo" not in toolkits
@@ -568,7 +575,11 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_pa
     assert build.request_template.deferred_tools.names == frozenset({"sleep"})
 
 
-def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
+def test_openai_compatible_agent_hides_script_gated_tools(
+    test_config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Script-based approval rules should also hide matching /v1 tools."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     approval_script = tmp_path / "approval_scripts" / "shell_review.py"
@@ -598,14 +609,14 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         session_id="openai-session",
     )
 
-    with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
-        build = create_agent(
-            "code",
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            include_openai_compat_guidance=True,
-        )
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    build = create_agent(
+        "code",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        include_openai_compat_guidance=True,
+    )
 
     exposed_tool_names = _offered_function_names(build)
     assert "run_shell_command" not in exposed_tool_names
@@ -1234,7 +1245,11 @@ class TestChatCompletions:
         assert len(observed_session_ids) == 1
         assert observed_session_ids[0] is not None
 
-    def test_agent_completion_does_not_require_persisted_matrix_accounts(self, tmp_path: Path) -> None:
+    def test_agent_completion_does_not_require_persisted_matrix_accounts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """OpenAI-compatible agent completions should not prepare or require Matrix accounts."""
         config = Config(
             agents={
@@ -1256,9 +1271,9 @@ class TestChatCompletions:
         app.include_router(openai_compat.router)
         initialize_api_app(app, runtime_paths)
 
+        install_model_providers(monkeypatch, {"default": ScriptedModel([answer("Agent reply")])})
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
-            patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([answer("Agent reply")])),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
             TestClient(app, base_url="http://localhost") as client,
         ):
@@ -4000,10 +4015,14 @@ class TestTeamCompletion:
         assert response.status_code == 500
         assert response.json()["error"]["message"] == "Team execution failed"
 
-    def test_team_member_materialization_failure_returns_generic_500(self, team_app_client: TestClient) -> None:
+    def test_team_member_materialization_failure_returns_generic_500(
+        self,
+        team_app_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Configured team build failures should not expose internal exception details."""
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
         with (
-            patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
             patch(
                 "mindroom.teams.members.resolve_agent_knowledge_access",
                 return_value=_KnowledgeResolution(knowledge=None),
@@ -4563,7 +4582,12 @@ class TestTeamCompletion:
         ("mode", "expected"),
         [("collaborate", TeamMode.COLLABORATE), ("coordinate", TeamMode.COORDINATE)],
     )
-    def test_build_team_takes_the_configured_mode_and_id(self, mode: str, expected: TeamMode) -> None:
+    def test_build_team_takes_the_configured_mode_and_id(
+        self,
+        mode: str,
+        expected: TeamMode,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """A configured team is built in its configured mode under its configured name."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
@@ -4587,19 +4611,17 @@ class TestTeamCompletion:
             execution_identity=None,
             team_name="coord_team",
         )
-        with (
-            patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
-            patch("mindroom.teams.members.build_model_provider", return_value=ScriptedModel([])),
-        ):
-            assert scope_context is not None
-            members, built, built_mode = openai_compat._build_team(
-                "coord_team",
-                config,
-                runtime_paths,
-                execution_identity=None,
-                scope_context=scope_context,
-                models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
-            )
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        assert scope_context is not None
+        members, built, built_mode = openai_compat._build_team(
+            "coord_team",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            scope_context=scope_context,
+            models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+        )
 
         assert built_mode is expected
         assert (built.spec.id, built.spec.mode) == ("coord_team", expected)
@@ -4610,6 +4632,7 @@ class TestTeamCompletion:
         self,
         team_config: Config,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """OpenAI-compatible team construction should not require Matrix account preparation."""
         runtime_paths = resolve_runtime_paths(
@@ -4635,19 +4658,17 @@ class TestTeamCompletion:
             execution_identity=execution_identity,
             team_name="super_team",
         )
-        with (
-            patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
-            patch("mindroom.teams.members.build_model_provider", return_value=ScriptedModel([])),
-        ):
-            assert scope_context is not None
-            members, _built, mode = openai_compat._build_team(
-                "super_team",
-                team_config,
-                runtime_paths,
-                execution_identity=execution_identity,
-                scope_context=scope_context,
-                models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
-            )
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        assert scope_context is not None
+        members, _built, mode = openai_compat._build_team(
+            "super_team",
+            team_config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            scope_context=scope_context,
+            models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
+        )
 
         assert mode is TeamMode.COORDINATE
         assert [build.spec.id for build in members.builds] == ["general", "code"]
