@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import AsyncExitStack
-from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
@@ -35,6 +34,7 @@ from mindroom.delegation.lifecycle import (
     observe_child_event,
     prepare_child_turn,
     reserve_child_turn,
+    running_child_id,
     settle_child_response,
     start_child_turn,
 )
@@ -157,9 +157,6 @@ def _untagged(_requirement: RunRequirement, event: ToolStarted | ToolCompleted) 
     return event
 
 
-_RUNNING_CHILD_ID: ContextVar[str | None] = ContextVar("running_delegated_child", default=None)
-
-
 @dataclass(frozen=True)
 class _ChildOutcome:
     """Retained outcome and executable ownership observed by its actual envelope."""
@@ -267,27 +264,23 @@ async def _run_child(
 ) -> _ChildOutcome:
     """Reserve the child and run it in its execution scope; the caller holds its liveness through settlement."""
     await reserve_child_turn(child, owner=caller_identity, runtime_paths=runtime_paths)
-    token = _RUNNING_CHILD_ID.set(child.delegation_id)
-    try:
-        async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
-            response = await run_with_tool_execution_identity(
-                child_execution_identity(child),
-                operation=lambda: _execute_child(
-                    child,
-                    run_child=run_child,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    refresh_scheduler=refresh_scheduler,
-                    decisions=decisions,
-                    denial_reasons=denial_reasons,
-                    approval_calls=approval_calls,
-                    fresh=fresh,
-                ),
-            )
-            observation.keep_outcome(response.response)
-            return response
-    finally:
-        _RUNNING_CHILD_ID.reset(token)
+    async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
+        response = await run_with_tool_execution_identity(
+            child_execution_identity(child),
+            operation=lambda: _execute_child(
+                child,
+                run_child=run_child,
+                config=config,
+                runtime_paths=runtime_paths,
+                refresh_scheduler=refresh_scheduler,
+                decisions=decisions,
+                denial_reasons=denial_reasons,
+                approval_calls=approval_calls,
+                fresh=fresh,
+            ),
+        )
+        observation.keep_outcome(response.response)
+        return response
 
 
 async def _execute_child(
@@ -1236,7 +1229,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     await start_child_turn(
                         child,
                         parent_run_id=response.run_id,
-                        parent_delegation_id=_RUNNING_CHILD_ID.get(),
+                        parent_delegation_id=running_child_id(),
                         config=config,
                         runtime_paths=runtime_paths,
                         caller_execution_identity=caller_identity,

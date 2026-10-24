@@ -76,6 +76,12 @@ class _ChildRunObservation:
 _CHILD_RUN: ContextVar[_ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
 
 
+def running_child_id() -> str | None:
+    """Return the delegation id of the child turn running in this context, or None outside one."""
+    observation = _CHILD_RUN.get()
+    return None if observation is None else observation.child.delegation_id
+
+
 def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, str, _DelegationGrant], ...]:
     """Return the exact active native ancestry for a retained leaf execution owner, with each edge's grant."""
     observation = _CHILD_RUN.get()
