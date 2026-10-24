@@ -61,7 +61,6 @@ from mindroom.providers.anthropic.native_compaction import (
     native_compaction_supported,
     native_replay_messages_for_route,
     record_native_checkpoint_on,
-    request_uses_native_checkpoint,
     uses_compaction_edit,
 )
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
@@ -401,7 +400,7 @@ class ClaudeProvider:
         settings, overrides = self.settings, request.overrides
         replay = request.native_compaction
         route = replay.route if replay is not None else None
-        projected = native_replay_messages_for_route(
+        projected, replays_checkpoint = native_replay_messages_for_route(
             request.messages,
             route=route,
             manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
@@ -438,7 +437,7 @@ class ClaudeProvider:
             kwargs=body,
             # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
-            checkpoint_prefix=request_uses_native_checkpoint(projected, route),
+            checkpoint_prefix=replays_checkpoint,
         )
 
     def _client(self, *, caller_retries: bool) -> _AsyncClaudeClient:

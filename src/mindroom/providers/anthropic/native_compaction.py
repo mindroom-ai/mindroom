@@ -108,26 +108,23 @@ def _is_unsigned_thinking(block: dict[str, Any]) -> bool:
     return block.get("type") == "thinking" and not block.get("signature")
 
 
-def request_uses_native_checkpoint(messages: Sequence[Message], route: str | None) -> bool:
-    """Return whether the projected request replays a stored checkpoint of this route."""
-    return route is not None and any(checkpoint_items(message, route) for message in messages)
-
-
 def native_replay_messages_for_route(
     messages: Sequence[Message],
     *,
     route: str | None,
     manual_thinking: bool,
-) -> list[Message]:
+) -> tuple[list[Message], bool]:
     """Project the conversation for one request: the latest checkpoint plus its tail, with replayable thinking.
 
-    Thinking after a removed checkpoint is signed against a different prefix, so its whole later chain is
-    dropped on routes that do not replay that checkpoint; a response produced after fallback starts a new
-    valid chain. Legacy manual thinking requires unchanged thinking inside a tool turn and predates prefix
-    binding, so it keeps every block. Unsigned thinking never replays. The input messages are not mutated.
+    Also returns whether the projection replays a stored checkpoint of ``route``. Thinking after a removed
+    checkpoint is signed against a different prefix, so its whole later chain is dropped on routes that do not
+    replay that checkpoint; a response produced after fallback starts a new valid chain. Legacy manual thinking
+    requires unchanged thinking inside a tool turn and predates prefix binding, so it keeps every block.
+    Unsigned thinking never replays. The input messages are not mutated.
     """
     prepared = native_replay_messages(messages, route)
-    thinking_route = route if request_uses_native_checkpoint(prepared, route) else None
+    replays_checkpoint = route is not None and any(checkpoint_items(message, route) for message in prepared)
+    thinking_route = route if replays_checkpoint else None
     result: list[Message] = []
     stale_thinking = False
     for message in prepared:
@@ -167,7 +164,7 @@ def native_replay_messages_for_route(
             )
         else:
             result.append(replace(message, provider_data=next_data))
-    return result
+    return result, replays_checkpoint
 
 
 def record_native_checkpoint_on(
@@ -198,6 +195,5 @@ __all__ = [
     "native_compaction_supported",
     "native_replay_messages_for_route",
     "record_native_checkpoint_on",
-    "request_uses_native_checkpoint",
     "uses_compaction_edit",
 ]

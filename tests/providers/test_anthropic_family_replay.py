@@ -654,7 +654,7 @@ async def test_an_empty_summary_keeps_the_canonical_history(tmp_path: Path, cont
     replay = provider.native_compaction_settings(threshold=60000, history_generation="", allow_authored=False)
     assert replay is not None
 
-    projected = native_replay_messages_for_route(
+    projected, _ = native_replay_messages_for_route(
         [_user("Original facts."), reply],
         route=replay.route,
         manual_thinking=False,
@@ -1053,7 +1053,7 @@ async def test_thinking_overrides_align_the_replay_with_the_effective_mode(
     )
     reply = await _recorded_reply(provider, wire, [_CHECKPOINT, redacted, _TEXT])
 
-    projected = native_replay_messages_for_route(
+    projected, _ = native_replay_messages_for_route(
         [_user("Original facts."), reply, _user("Continue.")],
         route=None,
         manual_thinking=(provider.settings.effective_thinking() or {}).get("type") == "enabled",
