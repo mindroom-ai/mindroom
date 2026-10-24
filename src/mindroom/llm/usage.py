@@ -116,16 +116,16 @@ class _Counts:
         return cls(**_known_counts(cls, data))
 
 
-def _add_counts(target: _Counts, source: _Counts, *, sign: int = 1) -> None:
-    """Add the token counters and any cost of ``source``, times ``sign``, into ``target`` in place."""
-    target.tokens = target.tokens + source.tokens if sign > 0 else target.tokens - source.tokens
+def _add_counts(target: _Counts, source: _Counts) -> None:
+    """Add the token counters and any cost of ``source`` into ``target`` in place."""
+    target.tokens = target.tokens + source.tokens
     if source.cost is not None:
-        target.cost = (target.cost or 0) + sign * source.cost
+        target.cost = (target.cost or 0) + source.cost
 
 
 def _sum_optional(left: float | None, right: float | None) -> float | None:
-    # TODO(simplify): costs sum three ways: ``__add__`` by this rule, ``_add_counts`` with a 0.0 total read as unset,
-    # and ``_signed_model`` by sign, so sums differ in int or float type and a zero's sign. Sum every cost one way.
+    # TODO(simplify): costs sum two ways: ``__add__`` by this rule and ``_add_counts`` with a 0.0 total read as unset,
+    # so sums differ in int or float type and a zero's sign. Sum every cost one way.
     # Stored data would notice only in those edge cases.
     if left is None:
         return right
@@ -285,26 +285,23 @@ class RunMetrics(_Counts):
 
 @dataclass(slots=True, kw_only=True)
 class SessionMetrics(_Counts):
-    """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row."""
+    """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row.
+
+    ``count_run`` adds a run's token counters, in total and per model, which is the usage the session's ledger records;
+    a cost or additional metrics that stored totals already hold are kept as they are.
+    """
 
     details: dict[str, list[ModelMetrics]] | None = None
     additional_metrics: dict[str, Any] | None = None
 
     def count_run(self, metrics: RunMetrics, *, replacing: RunMetrics | None = None) -> None:
-        """Add one run's usage, first taking back ``replacing``, what an earlier save of the same run added."""
+        """Add one run's token counters, first taking back ``replacing``, what an earlier save of the same run added."""
         if replacing is not None:
             self._accumulate(replacing, sign=-1)
         self._accumulate(metrics, sign=1)
 
     def _accumulate(self, metrics: RunMetrics, *, sign: int) -> None:
-        # TODO(simplify): the session ledger passes token counters only, so the cost, additional_metrics, and
-        # provider_metrics handling here and in ``_signed_model`` serves only tests/llm/test_codecs.py's full-metrics
-        # cases. Count tokens only; only those tests and their goldens would notice.
-        _add_counts(self, metrics, sign=sign)
-        if metrics.additional_metrics is not None:
-            if self.additional_metrics is None:
-                self.additional_metrics = {}
-            _merge_numeric(self.additional_metrics, _scaled(metrics.additional_metrics, sign))
+        self.tokens = self.tokens + metrics.tokens if sign > 0 else self.tokens - metrics.tokens
         for model_type, entries in (metrics.details or {}).items():
             if self.details is None:
                 self.details = {}
@@ -332,12 +329,11 @@ class SessionMetrics(_Counts):
 
 
 def _signed_model(entry: ModelMetrics, sign: int) -> ModelMetrics:
+    """Return the token counters of a model entry, negated when ``sign`` is negative, under its provider and id."""
     return ModelMetrics(
         tokens=entry.tokens if sign > 0 else TokenCounts() - entry.tokens,
-        cost=None if entry.cost is None else sign * entry.cost,
         id=entry.id,
         provider=entry.provider,
-        provider_metrics=None if entry.provider_metrics is None else _scaled(entry.provider_metrics, sign),
     )
 
 
@@ -349,14 +345,6 @@ def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
             return
     # The copy drops an empty ``provider_metrics``.
     totals.append(ModelMetrics.from_dict(entry.to_dict()))
-
-
-def _scaled(values: Mapping[str, Any], sign: int) -> dict[str, Any]:
-    """Return ``values`` with numbers multiplied by ``sign``; other values are kept as they are."""
-    return {
-        key: sign * value if isinstance(value, (int, float)) and not isinstance(value, bool) else value
-        for key, value in values.items()
-    }
 
 
 @dataclass(slots=True, kw_only=True)
