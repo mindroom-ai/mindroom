@@ -142,7 +142,7 @@ async def observe_child_event(event: RunEvent) -> None:
     run_id = binding.child.run_id
     if isinstance(event, RunFinished):
         assert isinstance(event.record, RunRecord)
-        await _append_response_events(binding.owner, handle, event.record, run_id=run_id)
+        await _append_response_events(binding.owner, handle, event.record)
     elif isinstance(event, ToolStarted):
         await _append_tool_call(binding.owner, handle, event.call, run_id=run_id, event_index=index)
     else:
@@ -159,13 +159,11 @@ async def record_child_response(
     denial_reasons: Mapping[str, str | None] | None = None,
 ) -> dict[str, object] | None:
     """Record one snapshot of the child's run, which its lifecycle owner checked, and return its usage."""
-    run_id = child.run_id
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
     usage, pending_approval = await _append_response_events(
         owner,
         handle,
         response,
-        run_id=run_id,
         decisions=decisions,
         denial_reasons=denial_reasons,
     )
@@ -175,7 +173,7 @@ async def record_child_response(
             handle,
             DelegationEvent(
                 kind="status",
-                event_id=f"run:{run_id}:paused:{len(response.tools or ())}",
+                event_id=f"run:{response.run_id}:paused:{len(response.tools or ())}",
                 status="paused",
                 data={"status": "paused"},
             ),
@@ -188,11 +186,11 @@ async def _append_response_events(
     handle: DelegationRecordHandle,
     response: RunRecord,
     *,
-    run_id: str,
     decisions: Mapping[str, bool] | None = None,
     denial_reasons: Mapping[str, str | None] | None = None,
 ) -> tuple[dict[str, object] | None, bool]:
     """Persist one attempt snapshot without deciding whether the envelope is terminal."""
+    run_id = response.run_id
     for tool_call_id, approved in (decisions or {}).items():
         await owner.append_event(
             handle,

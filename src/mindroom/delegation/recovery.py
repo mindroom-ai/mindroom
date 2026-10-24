@@ -12,11 +12,9 @@ from mindroom.delegation.lifecycle import child_execution_identity, finish_child
 from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
 from mindroom.delegation.state import DELEGATION_STATE_KEY, TERMINAL_CHILD_STATUSES, DelegationChild, DelegationState
 from mindroom.delegation.storage import delegation_storage_config
-from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.storage import new_scope_session
+from mindroom.history.session_context import load_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
@@ -25,6 +23,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -51,6 +50,20 @@ async def resolve_subagent(
     return child
 
 
+def _load_child_context(child: DelegationChild, config: Config, paths: RuntimePaths) -> ScopeSessionContext:
+    """Load the child's agent-scope session from its frozen storage; ``config`` already carries the child's bindings."""
+    context = load_scope_session(
+        scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
+        session_id=child.session_id,
+        runtime_paths=paths,
+        config=config,
+        execution_identity=child_execution_identity(child),
+    )
+    # A named scope and session always load a context.
+    assert context is not None
+    return context
+
+
 async def read_child_run(
     child: DelegationChild,
     config: Config,
@@ -60,13 +73,7 @@ async def read_child_run(
     config = delegation_storage_config(config, child.storage_bindings)
 
     def read() -> RunRecord | None:
-        storage = create_session_storage(
-            child.child_agent_name,
-            config,
-            paths,
-            execution_identity=child_execution_identity(child),
-        )
-        session = storage.load_session(child.session_id, "agent")
+        session = _load_child_context(child, config, paths).session
         # Each turn owns its exact run even after later follow-ups reuse the session.
         runs = reversed(session.runs) if session is not None else ()
         response = next((run for run in runs if run.run_id == child.run_id), None)
@@ -152,19 +159,9 @@ async def interrupt_child(
             tool.external_execution_required = False
 
         def persist() -> None:
-            storage = create_session_storage(
-                child.child_agent_name,
-                config,
-                runtime_paths,
-                execution_identity=child_execution_identity(child),
-            )
-            session = storage.load_session(child.session_id, "agent") or new_scope_session(
-                session_id=child.session_id,
-                scope_id=child.child_agent_name,
-                is_team=False,
-            )
+            context = _load_child_context(child, config, runtime_paths)
             # The run exists; this rewrites its row without touching the usage ledger.
-            storage.save_runs(session, [response])
+            context.storage.save_runs(context.stored_or_first_session(), [response])
 
         await asyncio.to_thread(persist)
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
@@ -224,22 +221,18 @@ async def cancel_approval_delegations(
         scope = HistoryScope(kind="agent", scope_id=continuation.entity_name)
     if scope.kind == "agent" and continuation.entity_name not in config.agents:
         return
-    storage = await asyncio.to_thread(
-        create_scope_session_storage,
+    context = await asyncio.to_thread(
+        load_scope_session,
         scope=scope,
-        config=config,
+        session_id=continuation.session_id,
         runtime_paths=runtime_paths,
+        config=config,
         execution_identity=identity,
     )
-    response = await asyncio.to_thread(storage.get_run, continuation.run_id)
+    # A named scope and session always load a context.
+    assert context is not None
+    response = await asyncio.to_thread(context.storage.get_run, continuation.run_id)
     if response is not None and bool((response.metadata or {}).get(DELEGATION_STATE_KEY)):
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        session = await asyncio.to_thread(storage.load_session, continuation.session_id, scope.kind)
-        if session is None:
-            session = new_scope_session(
-                session_id=continuation.session_id,
-                scope_id=scope.scope_id,
-                is_team=scope.kind == "team",
-            )
         # The run exists; this rewrites its row without touching the usage ledger.
-        await asyncio.to_thread(storage.save_runs, session, [response])
+        await asyncio.to_thread(context.storage.save_runs, context.stored_or_first_session(), [response])

@@ -170,7 +170,7 @@ def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None
         Message(role="tool", content="tool result"),
     ]
 
-    projected = messages_with_approval_receipt(messages, "trusted approval receipt")
+    projected = messages_with_approval_receipt(messages, "trusted approval receipt", after_response_id=False)
 
     assert [(message.role, message.content) for message in projected] == [
         ("system", "base rules\n\ntrusted approval receipt"),
@@ -185,7 +185,11 @@ def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None
 
 def test_a_request_without_a_prompt_message_gets_the_receipt_as_its_own_system_message() -> None:
     """A run with no system message still delivers the receipt, first, without storing it."""
-    projected = messages_with_approval_receipt([Message(role="user", content="Do the task")], "Approved.")
+    projected = messages_with_approval_receipt(
+        [Message(role="user", content="Do the task")],
+        "Approved.",
+        after_response_id=False,
+    )
 
     assert [(message.role, message.content) for message in projected] == [
         ("system", "Approved."),

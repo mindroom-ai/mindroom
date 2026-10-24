@@ -4805,6 +4805,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         projected = messages_with_approval_receipt(
             [LoopMessage(role="system", content="base rules"), LoopMessage(role="tool", content="published")],
             receipt.receipt_text,
+            after_response_id=False,
         )
         model_messages.extend((message.role, message.content) for message in projected)
         return CompletedApprovalRun(response_text="done", metadata_content={})
