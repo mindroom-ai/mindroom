@@ -82,12 +82,12 @@ _BREAKPOINT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-|$)")
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ChatRoute:
-    """The fixed facts of one Chat Completions route."""
+    """The fixed facts of one Chat Completions route; the ``openai`` route's endpoint also serves Responses."""
 
     provider: str
     provider_name: str
+    api_key_env: str | None
     base_url: str | None = None
-    api_key_env: str | None = None
     dialect: ChatDialect = "openai"
     accepted: frozenset[str] = CHAT_FIELDS
     structured_output: Literal["native", "json_schema", "json_mode"] = "native"
@@ -126,11 +126,17 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         accepted=CHAT_FIELDS | {"use_thinking"},
         structured_output="json_mode",
     ),
-    "zai": _ChatRoute(provider="ZAI", provider_name="ZAI", base_url=ZAI_BASE_URL_DEFAULT),
-    "llama_cpp": _ChatRoute(provider="LlamaCpp", provider_name="LlamaCpp", base_url="http://127.0.0.1:8080/v1"),
+    "zai": _ChatRoute(provider="ZAI", provider_name="ZAI", api_key_env=None, base_url=ZAI_BASE_URL_DEFAULT),
+    "llama_cpp": _ChatRoute(
+        provider="LlamaCpp",
+        provider_name="LlamaCpp",
+        api_key_env=None,
+        base_url="http://127.0.0.1:8080/v1",
+    ),
     "kimi": _ChatRoute(
         provider="Kimi",
         provider_name="Kimi Chat",
+        api_key_env=None,
         base_url=KIMI_BASE_URL,
         accepted=CHAT_FIELDS | {"kimi_home", "prompt_cache_key"},
     ),
@@ -268,10 +274,7 @@ def _route_base_url(
     base_url: str | None,
     runtime: ProviderRuntime,
 ) -> str:
-    """Return a route's endpoint: the config's, else its endpoint variable's, else its default.
-
-    Responses on the ``openai`` route reads the endpoint the ``openai`` Chat route does.
-    """
+    """Return a route's endpoint: the config's, else its endpoint variable's, else its default."""
     route = _CHAT_ROUTES[route_key]
     configured = _authored_base_url(client_params, base_url) or (
         runtime.runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
@@ -489,6 +492,9 @@ def _build_responses(
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
+        # TODO(simplify): a store-false route, Codex's default, sends no previous_response_id yet claims to continue
+        # stored responses, so its receipt becomes a system message after the last response instead of joining the
+        # prompt. Derive this from `store is not False`. Models on store-false routes would see the receipt move.
         continues_stored_responses=True,
         provider_default_sampling=_provider_default_sampling(model_id),
         streams_only=route_key == "codex",
