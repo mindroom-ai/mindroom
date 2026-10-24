@@ -672,27 +672,6 @@ def _agent_tool_output_file_policy(
     )
 
 
-def _wrap_direct_agent_toolkit_for_output_files(
-    toolkit: Toolkit,
-    *,
-    tool_name: str,
-    tool_config_overrides: dict[str, object] | None,
-    agent_runtime: ResolvedAgentRuntime,
-    runtime_paths: constants.RuntimePaths,
-    tool_output_auto_save_threshold_bytes: int,
-) -> Toolkit:
-    """Apply the central output-file wrapper to MindRoom-owned direct toolkits."""
-    policy = _agent_tool_output_file_policy(
-        agent_runtime,
-        runtime_paths,
-        tool_output_auto_save_threshold_bytes,
-    )
-    return bind_toolkit_construction(
-        wrap_toolkit_for_output_files(toolkit, policy),
-        ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
-    )
-
-
 @timed("system_prompt_assembly.agent_create.model_instance")
 def _build_agent_model_provider(
     config: Config,
@@ -748,15 +727,18 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     storage_path = runtime_paths.storage_root
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_storage_path = shared_storage_root(storage_path)
-    # Every MindRoom-owned direct toolkit gets the same output-file wrapping and construction identity.
-    wrap_direct = partial(
-        _wrap_direct_agent_toolkit_for_output_files,
-        tool_name=tool_name,
-        tool_config_overrides=tool_config_overrides,
-        agent_runtime=agent_runtime,
-        runtime_paths=runtime_paths,
-        tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
-    )
+
+    def constructed(toolkit: Toolkit) -> Toolkit:
+        return bind_toolkit_construction(
+            toolkit,
+            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
+        )
+
+    def wrap_direct(toolkit: Toolkit) -> Toolkit:
+        # Every MindRoom-owned direct toolkit gets the same output-file wrapping and construction identity.
+        threshold = config.defaults.tool_output_auto_save_threshold_bytes
+        policy = _agent_tool_output_file_policy(agent_runtime, runtime_paths, threshold)
+        return constructed(wrap_toolkit_for_output_files(toolkit, policy))
 
     if tool_name == "memory":
         if config.resolve_entity(agent_name).memory_backend == "none":
@@ -828,7 +810,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
 
         # It keeps its own output handling, but background tool jobs still need its construction identity.
-        return bind_toolkit_construction(
+        return constructed(
             SkillManageTools(
                 agent_name,
                 config,
@@ -839,7 +821,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                     workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
                 ),
             ),
-            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
         )
 
     if tool_name == "compact_context":
@@ -874,10 +855,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         if deferred_toolkits is None:
             return None
         # Search results must reach the model inline, so they skip output-file redirection.
-        return bind_toolkit_construction(
-            DynamicToolsToolkit(deferred_toolkits=deferred_toolkits),
-            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
-        )
+        return constructed(DynamicToolsToolkit(deferred_toolkits=deferred_toolkits))
 
     worker_scope = agent_runtime.execution.execution_scope
     return get_tool_by_name(
@@ -1271,26 +1249,7 @@ def _render_agent_identity_context(
     )
 
 
-@timed("system_prompt_assembly.agent_create.skills_load")
-def _load_agent_skills(
-    agent_name: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    *,
-    workspace_root: Path | None = None,
-    output_file_policy: ToolOutputFilePolicy | None = None,
-    only: tuple[str, ...] | None = None,
-    refused: list[RefusedWorkspaceSkill] | None = None,
-) -> SkillsToolkit | None:
-    return build_skills_toolkit(
-        agent_name,
-        config,
-        runtime_paths,
-        workspace_root=workspace_root,
-        output_file_policy=output_file_policy,
-        only=only,
-        refused=refused,
-    )
+_load_agent_skills = timed("system_prompt_assembly.agent_create.skills_load")(build_skills_toolkit)
 
 
 def _generated_function_visible(
@@ -1864,7 +1823,7 @@ def _deferred_entries_as_offered(entries: Sequence[_ToolkitEntry]) -> tuple[_Too
 
     A deferred function that a same-named function of an earlier toolkit shadows is never offered, so tool search,
     the request's deferred names, and the run leave it out, and the earlier function keeps its name. A shadowed
-    eager function stays, and each run drops it and warns, as Agno's run did; a deferred toolkit's instructions
+    eager function stays, and each run drops it and warns, kept as main behaves; a deferred toolkit's instructions
     travel with the search results, so leaving functions out of it changes no prompt.
     """
     offered = _offered_entries(entries)
