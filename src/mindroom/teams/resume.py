@@ -42,11 +42,11 @@ from mindroom.teams.members import (
     team_label,
 )
 from mindroom.teams.presentation import (
+    NO_TEAM_RESPONSE,
     TeamStreamPresentation,
     finished_run_text,
     format_team_header,
     publish_team_presentation,
-    team_response_text,
 )
 from mindroom.teams.runtime import MemberEvent, continue_team
 from mindroom.teams.storage import (
@@ -525,9 +525,10 @@ async def continue_paused_team_run(
                         if attempt.apply(event):
                             await publish_team_presentation(progress, presentation)
             continued = attempt.records.terminal(entity_name)
-            # Each resumed run's slot shows what the run hands over and its events did not show, as Agno's resume added
-            # their content: a paused notice, or a failed member run's reason. A run without content adds nothing,
-            # where Agno's resume repeated its messages' text from before the pause.
+            # Each resumed run's slot shows what the run hands over beyond what it carried over from the pause and its
+            # events did not show, as Agno's resume added their content: a paused notice, or a failed member run's
+            # reason. A run that adds nothing new shows nothing, where Agno's resume repeated the text it wrote before
+            # the pause, or a paused notice that no longer held.
             for run in (continued, *continued.ended_member_runs):
                 attempt.show_unshown_handover(run)
             paused = paused_attempt_from_response(
@@ -542,9 +543,11 @@ async def continue_paused_team_run(
                 raise RuntimeError(str(continued.handover_content or "Team continuation did not complete"))
             if tool_trace_collector is not None and show_tool_calls:
                 tool_trace_collector.extend(presentation.tool_trace)
-            # A resume whose document stays empty, every run's text blank, renders its finished runs, as Agno's did.
+            # A resume whose document stays empty, every run's text blank, shows the leader's own text, as Agno's did, or
+            # the no-reply note. The document already holds what each run handed over beyond what it carried over, so
+            # rendering the member runs again could add only what they carried over.
             response_text = presentation.render_body() or (
-                format_team_header(members.display_names) + team_response_text(continued)
+                format_team_header(members.display_names) + (finished_run_text(continued) or NO_TEAM_RESPONSE)
             )
             return CompletedApprovalRun(
                 response_text=response_text,

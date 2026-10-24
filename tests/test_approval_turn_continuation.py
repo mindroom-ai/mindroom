@@ -709,6 +709,86 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("before", "saved", "reply"),
+    [
+        pytest.param("Adding first.", None, "Adding first.", id="wrote-before-the-pause"),
+        pytest.param(None, None, "I have tools to execute, but I need confirmation.", id="paused-without-text"),
+        pytest.param(None, "", "Tool approval continuation completed", id="pause-showed-nothing"),
+    ],
+)
+async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before: str | None,
+    saved: str | None,
+    reply: str,
+) -> None:
+    """A run that answers its approved call without text adds nothing to the reply it continues.
+
+    Its run still holds what it carried over from the pause: the text it wrote before it, or the paused notice, which
+    the blocking pause's saved reply already shows. A saved reply that showed nothing, as a streamed pause without
+    text leaves it, ends with the completion note instead of the paused notice, which no longer holds once the call
+    ran.
+    """
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    identity = _identity("silent-session")
+    model = _CheckedModel([calls(tool_call("add", "approved", a=2, b=3), content=before), answer("")])
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    continuation = approval_continuation(
+        approval_id="approval-silent",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
+        request_body="Add them.",
+        show_tool_calls=False,
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+
+    result = await execution.continue_run(
+        continuation,
+        paused_answer=PausedAnswer(text=paused.response_text if saved is None else saved, tool_trace=paused.tool_trace),
+        execution_identity=identity,
+        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        decisions={"approved": True},
+        denial_reasons={"approved": None},
+        tool_trace_collector=[],
+        typing_log_context={},
+        progress=None,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text == reply
+
+
+@pytest.mark.asyncio
 async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

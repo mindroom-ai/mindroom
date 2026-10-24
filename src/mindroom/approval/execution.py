@@ -131,12 +131,13 @@ async def _collect_agent_continuation(
     parent_call_ids = {tool.tool_call_id for tool in response.tools or ()}
     current_tools = [tool for tool in current_tools if tool.tool_call_id in parent_call_ids]
     _reconcile_agent_tools(presentation, response)
-    # A run that completed without streaming its text hands the text over for the lifecycle to append.
+    # A run that completed without streaming its text hands the text over for the lifecycle to append, apart from
+    # what it carried over from the pause, which the reply it continues already accounts for.
     hands_over_text = response.status is RunStatus.completed and not saw_content_delta
     return _CollectedAgentContinuation(
         response=response,
         tool_executions=tuple(current_tools),
-        terminal_content=str(response.content or "") if hands_over_text else "",
+        terminal_content=str(response.new_handover_content or "") if hands_over_text else "",
         has_visible_content=saw_content_delta,
     )
 
@@ -254,7 +255,7 @@ async def _continue_persisted_agent(
         raise RuntimeError(str(response.content or "Approval continuation did not complete"))
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
-        or (str(response.content or "Tool approval continuation completed") if not presentation.final_text() else ""),
+        or ("" if presentation.final_text() else "Tool approval continuation completed"),
         replayable_text=presentation.final_text(),
         has_visible_content=collected.has_visible_content,
         session_id=response.session_id or continuation.session_id,

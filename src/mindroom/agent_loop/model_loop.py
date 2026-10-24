@@ -256,9 +256,10 @@ def _accept_turn(
 ) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
-    The provider stamped the message with the model that answered it. A request that answers with tool calls and no
-    text leaves the content as it was, as Agno's loop did, so a resumed run keeps its paused text until the model
-    says something new.
+    The provider stamped the message with the model that answered it. A request that answers without content, as the
+    adapters report a streamed turn without text, leaves the content as it was, as Agno's loop did, so a resumed run
+    keeps its paused text until the model says something new. Empty content, which a reply that does not stream can
+    carry, is blank text, as Agno's non-streaming loop recorded it; its member results tell blank text from none.
     """
     state.messages.append(message)
     _count_request(metrics, message.metrics, identity)

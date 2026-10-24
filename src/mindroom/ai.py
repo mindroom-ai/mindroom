@@ -750,11 +750,8 @@ def _begin_attempt(
         )
     else:
         scope_context = run.scope_context = run.scope_context.with_session()
-        storage = _AttemptStorage(
-            store=scope_context.storage,
-            session=scope_context.stored_or_first_session(),
-            scope=scope_context.scope,
-        )
+        assert scope_context.session is not None
+        storage = _AttemptStorage(store=scope_context.storage, session=scope_context.session, scope=scope_context.scope)
     attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
