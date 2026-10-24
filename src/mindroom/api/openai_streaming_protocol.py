@@ -124,6 +124,9 @@ def error_response(
 # ---------------------------------------------------------------------------
 
 
+# TODO(simplify): a failed run is recognized by sniffing its reply text, so a real reply that starts with an error
+# emoji or "Error code:" reads as a failure. Have ai_response and the stream report failure as a typed outcome.
+# API clients would notice.
 def is_error_response(text: str) -> bool:
     """Detect error strings returned by ai_response() / stream_agent_response().
 
