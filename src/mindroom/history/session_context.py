@@ -74,7 +74,10 @@ class BoundTeamScopeContext:
 
 
 def resolve_bound_history_owner(member_names: Sequence[str]) -> str | None:
-    """Return the member whose configured storage settings own one bound team run: the first by name."""
+    """Return the member that labels one bound team run's history preparation: the first by name."""
+    # TODO(simplify): A team run resolves an owner, its first member by name, that team stores ignore and that only
+    # labels the run's history-preparation logs. Resolve the team's HistoryScope alone and log the scope. Operators
+    # reading those logs would notice.
     return min((name for name in member_names if name), default=None)
 
 

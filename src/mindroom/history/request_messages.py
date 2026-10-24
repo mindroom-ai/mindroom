@@ -1,9 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Assemble model requests from a scope's stored runs, its compaction summary, and the current turn.
 
-Selection follows what Agno's ``get_messages`` and ``filter_tool_calls`` returned for MindRoom's replay limits, except
-that a legacy tool message holding several results counts against the tool-call limit once per result, and the
-placement and media rules are the ones MindRoom applied on top of Agno's message builders.
+The replay limits select what main selected (kept as main behaves), except that a legacy tool message holding several
+results counts against the tool-call limit once per result.
 """
 
 from __future__ import annotations
