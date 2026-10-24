@@ -220,6 +220,9 @@ class ResumeRunner:
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
         if decisions.approved or decisions.denied:
             add_approval_receipt_reader(paused.run_id)
+        # TODO(simplify): this resume, like a saved team approval's TeamResume, names no model, so its tools see the
+        # tool context's, none for an approval saved without one, while the run uses its agent's. Pass model_name.
+        # Tools that follow the reply's model, such as claude_agent, would notice.
         events = resume_from_session(
             build.spec,
             paused,
