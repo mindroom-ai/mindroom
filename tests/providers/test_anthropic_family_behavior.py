@@ -766,11 +766,15 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         sse_reply([{"type": "text", "text": "Next."}]),
     )
     provider = route_provider("anthropic", tmp_path, wire)
-    replay = provider.native_compaction_settings(threshold=60000, history_generation="gen-1")
+    replay = provider.native_compaction_settings(threshold=60000, history_generation="gen-1", allow_authored=False)
     assert replay is not None
     assert replay.threshold == 60000
-    assert provider.native_compaction_settings(threshold=1000) is None, "Claude needs at least 50,000 input tokens"
-    assert provider.native_compaction_settings(threshold=60000, history_generation="gen-2") != replay
+    assert provider.native_compaction_settings(threshold=1000, history_generation="", allow_authored=False) is None, (
+        "Claude needs at least 50,000 input tokens"
+    )
+    assert (
+        provider.native_compaction_settings(threshold=60000, history_generation="gen-2", allow_authored=False) != replay
+    )
 
     first = await claude_turn(
         provider,
@@ -824,8 +828,8 @@ async def test_authored_compaction_edits_keep_their_policy_and_cannot_pause(tmp_
     wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": authored})
     assert provider.capabilities.native_compaction is False
-    assert provider.native_compaction_settings(threshold=60000) is None
-    replay = provider.native_compaction_settings(threshold=60000, allow_authored=True)
+    assert provider.native_compaction_settings(threshold=60000, history_generation="", allow_authored=False) is None
+    replay = provider.native_compaction_settings(threshold=60000, history_generation="", allow_authored=True)
     assert replay is not None
     assert replay.threshold is None
     await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
@@ -848,8 +852,8 @@ def test_bedrock_replays_no_native_checkpoints_even_with_an_authored_compaction_
         extra_kwargs={"context_management": authored},
     )
     assert provider.capabilities.native_compaction is False
-    assert provider.native_compaction_settings(threshold=60000, allow_authored=True) is None
-    assert provider.native_compaction_settings(threshold=None, allow_authored=True) is None
+    assert provider.native_compaction_settings(threshold=60000, history_generation="", allow_authored=True) is None
+    assert provider.native_compaction_settings(threshold=None, history_generation="", allow_authored=True) is None
 
 
 @pytest.mark.asyncio

@@ -220,8 +220,8 @@ class ClaudeProvider:
         self,
         *,
         threshold: int | None,
-        history_generation: str = "",
-        allow_authored: bool = False,
+        history_generation: str,
+        allow_authored: bool,
     ) -> NativeCompactionReplay | None:
         """Return the replay settings of a request that wants compaction at ``threshold`` input tokens.
 
