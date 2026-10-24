@@ -1,11 +1,15 @@
 """Tests for the pytest guard that refuses network dials."""
 
 import asyncio
+import json
+import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import google.auth
+import google.auth.compute_engine._metadata
 import google.auth.exceptions
 import httpcore
 import httpx
@@ -114,7 +118,26 @@ def test_every_patched_http_client_backend_is_refused(request: pytest.FixtureReq
     del dials[start:]
 
 
-def test_google_default_credentials_are_not_this_machines() -> None:
-    """A Google client built without credentials finds none, instead of the developer's gcloud login."""
+def test_google_default_credentials_are_not_this_machines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Google client built without credentials finds none, even where a gcloud login and a key file exist."""
+    login = {"type": "authorized_user", "client_id": "test", "client_secret": "test", "refresh_token": "test"}
+    gcloud = tmp_path / "gcloud"
+    gcloud.mkdir()
+    (gcloud / "application_default_credentials.json").write_text(json.dumps(login), encoding="utf-8")
+    key_file = tmp_path / "key.json"
+    key_file.write_text(json.dumps(login), encoding="utf-8")
+    monkeypatch.setenv("CLOUDSDK_CONFIG", str(gcloud))
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key_file))
+    assert google.auth.default()[0] is not None
+
+    def refuse_metadata_server(*_args: object, **_kwargs: object) -> bool:
+        msg = "the GCE metadata server was asked"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(google.auth.compute_engine._metadata, "ping", refuse_metadata_server)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    conftest.hide_developer_google_credentials(os.environ, str(empty))
+
     with pytest.raises(google.auth.exceptions.DefaultCredentialsError):
         google.auth.default()

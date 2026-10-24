@@ -938,9 +938,14 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
     config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
-    os.environ["CLOUDSDK_CONFIG"] = gcloud_config
-    os.environ["NO_GCE_CHECK"] = "true"
-    os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    hide_developer_google_credentials(os.environ, gcloud_config)
+
+
+def hide_developer_google_credentials(environ: MutableMapping[str, str], gcloud_config: str) -> None:
+    """Point google-auth at an empty gcloud config, skip the GCE metadata server, and drop a named key file."""
+    environ["CLOUDSDK_CONFIG"] = gcloud_config
+    environ["NO_GCE_CHECK"] = "true"
+    environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
 
 
 def pytest_configure_node(node: "WorkerController") -> None:
