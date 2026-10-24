@@ -224,8 +224,6 @@ if TYPE_CHECKING:
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import SessionKind
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
@@ -2606,11 +2604,8 @@ class ResponseRunner:
             history_scope = self.deps.state_writer.history_scope()
         return self._build_persist_response_event_id_effect(
             session_id=continuation.session_id,
-            session_type=history_scope.kind,
-            create_storage=lambda: self.deps.state_writer.create_storage(
-                execution_identity,
-                scope=history_scope,
-            ),
+            scope=history_scope,
+            execution_identity=execution_identity,
         )
 
     async def _continue_entity_call(
@@ -3657,16 +3652,16 @@ class ResponseRunner:
         self,
         *,
         session_id: str,
-        session_type: SessionKind,
-        create_storage: Callable[[], ConversationStore],
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
     ) -> Callable[[str, str], Awaitable[None]]:
         """Build the response-event persistence callback for one session-backed response."""
 
         async def persist_response_event_id(run_id: str, response_event_id: str) -> None:
             await self.deps.state_writer.apersist_response_event_id_in_session_run(
-                create_storage=create_storage,
+                create_storage=partial(self.deps.state_writer.create_storage, execution_identity, scope=scope),
                 session_id=session_id,
-                session_type=session_type,
+                session_type=scope.kind,
                 run_id=run_id,
                 response_event_id=response_event_id,
             )
@@ -4688,19 +4683,14 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
         )
-        session_type = session_scope.kind
-
-        def team_storage_factory() -> ConversationStore:
-            return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
-
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             session_id=session_id,
-            session_type=session_type,
+            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=resolved_target.resolved_thread_id,
-            create_storage=team_storage_factory,
+            create_storage=partial(self.deps.state_writer.create_storage, execution_identity, scope=session_scope),
         )
         orchestrator = self.deps.runtime.orchestrator
         if orchestrator is None:
@@ -4777,8 +4767,8 @@ class ResponseRunner:
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
-            session_type=session_type,
-            create_storage=team_storage_factory,
+            scope=session_scope,
+            execution_identity=execution_identity,
         )
         # A configured team keeps the conversations it answers in its members' shared memory.
         queue_memory_persistence = (
@@ -5425,7 +5415,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _process_and_respond(  # noqa: C901, PLR0912, PLR0915
+    async def _process_and_respond(  # noqa: C901, PLR0912
         self,
         request: ResponseRequest,
         *,
@@ -5449,19 +5439,18 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = session_scope.kind
-
-        def history_storage_factory() -> ConversationStore:
-            return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
-
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
-            session_type=session_type,
+            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
-            create_storage=history_storage_factory,
+            create_storage=partial(
+                self.deps.state_writer.create_storage,
+                runtime.tool_dispatch.execution_identity,
+                scope=session_scope,
+            ),
         )
         # The caller's list survives raising exit paths (cancellation, stream
         # re-raises), unlike the returned outcome.
@@ -5587,19 +5576,18 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = session_scope.kind
-
-        def history_storage_factory() -> ConversationStore:
-            return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
-
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
-            session_type=session_type,
+            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
-            create_storage=history_storage_factory,
+            create_storage=partial(
+                self.deps.state_writer.create_storage,
+                runtime.tool_dispatch.execution_identity,
+                scope=session_scope,
+            ),
         )
         # The streaming path keeps these caller-owned (unlike the non-streaming
         # path's returned _NonStreamingGeneration): the metadata dict must stay
@@ -5999,8 +5987,8 @@ class ResponseRunner:
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
-            session_type=history_scope.kind,
-            create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
+            scope=history_scope,
+            execution_identity=execution_identity,
         )
 
         async def generate(_message_id: str | None) -> None:
