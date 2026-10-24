@@ -933,6 +933,29 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     assert _notices(team, "prior-response") == [("run-earlier", "persisted", QUEUED_MESSAGE_NOTICE_TEXT)]
 
 
+def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every agent build renders a role, so a build without one is a broken invariant, not a member with no role."""
+    team = _team(tmp_path, monkeypatch)
+    members = materialize_team_members(list(team.member_names), team.orchestrator, team.identity)
+    [build] = members.builds
+    roleless = replace(members, builds=[replace(build, prompt=replace(build.prompt, role=None))])
+
+    with pytest.raises(ValueError, match="Team member 'general' has no role for the leader's roster"):
+        build_team_spec(
+            members=roleless,
+            mode=team.mode,
+            config=team.config,
+            runtime_paths=team.runtime_paths,
+            scope_context=None,
+            execution_identity=team.identity,
+            model_name="default",
+            configured_team_name=None,
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_a_notice_delivered_before_the_team_run_failed_is_not_left_live(

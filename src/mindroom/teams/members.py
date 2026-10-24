@@ -338,9 +338,13 @@ def _team_member(
     def new_hooks() -> LoopHooks:
         return agent_loop_hooks(as_member, turn, queued_notices=False)
 
+    # An agent build always renders its role; only a helper's prompt may go without one.
+    if build.prompt.role is None:
+        msg = f"Team member {build.spec.id!r} has no role for the leader's roster"
+        raise ValueError(msg)
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
-        role=build.prompt.role or "",
+        role=build.prompt.role,
         new_hooks=new_hooks,
         request_template=build.request_template,
     )
