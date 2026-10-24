@@ -3,34 +3,48 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.provider import ReasoningDelta
+from mindroom.llm.provider import ReasoningDelta, TextDelta
 
 if TYPE_CHECKING:
-    from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
 
 
 @dataclass(frozen=True, slots=True)
-class ContentDelta:
-    """A piece of the reply text."""
+class ReportedCall:
+    """One tool call as its tool event reports it, fixed when the event is made; a run's record keeps the call itself."""
 
-    text: str
+    tool_call_id: str | None
+    tool_name: str | None
+    tool_args: dict[str, Any] | None = None
+    result: str | None = None
+    is_error: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallOrigin:
+    """Where a hidden CLI call ran: the Bash call that ran it and its toolkit. Only the reply's tool trace keeps it."""
+
+    parent_bash_call_id: str | None
+    toolkit_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class ToolStarted:
-    """A tool call was admitted; paused calls are announced too."""
+    """A tool call was admitted; paused calls are announced too. ``origin`` is set for a hidden CLI call."""
 
-    tool: ToolExecution
+    call: ReportedCall
+    origin: ToolCallOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ToolCompleted:
-    """A tool call finished."""
+    """A tool call finished. ``origin`` is set for a hidden CLI call."""
 
-    tool: ToolExecution
+    call: ReportedCall
+    origin: ToolCallOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,14 +63,16 @@ class RunFinished:
     record: AnyRunRecord
 
 
-type RunEvent = ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | RunFinished
+type RunEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | RunFinished
 
 __all__ = [
-    "ContentDelta",
     "ReasoningDelta",
+    "ReportedCall",
     "RequestCompleted",
     "RunEvent",
     "RunFinished",
+    "TextDelta",
+    "ToolCallOrigin",
     "ToolCompleted",
     "ToolStarted",
 ]

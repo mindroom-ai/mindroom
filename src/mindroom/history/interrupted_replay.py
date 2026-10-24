@@ -59,14 +59,6 @@ def is_interrupted_replay_run(run: AnyRunRecord) -> bool:
     return (run.metadata or {}).get(_INTERRUPTED_REPLAY_STATE_KEY) == _INTERRUPTED_REPLAY_STATE
 
 
-def tool_execution_call_id(tool: ToolExecution | None) -> str | None:
-    """Return one normalized tool-call identifier when the provider supplies it."""
-    if tool is None or not isinstance(tool.tool_call_id, str):
-        return None
-    call_id = tool.tool_call_id.strip()
-    return call_id or None
-
-
 def split_interrupted_tool_trace(
     tools: Sequence[ToolExecution] | None,
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
@@ -77,14 +69,10 @@ def split_interrupted_tool_trace(
     completed: list[ToolTraceEntry] = []
     interrupted: list[ToolTraceEntry] = []
     for tool in tools or ():
-        if tool.result is None and tool.tool_call_error is None:
-            _, trace_entry = format_tool_started_event(tool)
-            traces = interrupted
+        if tool.result is None and tool.is_error is None:
+            interrupted.append(format_tool_started_event(tool.call)[1])
         else:
-            _, trace_entry = format_tool_completed_event(tool)
-            traces = completed
-        if trace_entry is not None:
-            traces.append(trace_entry)
+            completed.append(format_tool_completed_event(tool.call)[1])
     return completed, interrupted
 
 

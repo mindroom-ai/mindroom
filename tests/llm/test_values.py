@@ -16,7 +16,14 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import (
+    ReasoningDelta,
+    ReportedCall,
+    RequestCompleted,
+    RunFinished,
+    ToolCompleted,
+    ToolStarted,
+)
 from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -386,16 +393,16 @@ def test_run_events_are_frozen_values() -> None:
     tool = ToolExecution(tool_call_id="c", tool_name="t", tool_args={})
     record = RunRecord(run_id="r", agent_id="a", status=RunStatus.completed)
     events = [
-        ContentDelta("hi"),
+        TextDelta("hi"),
         ReasoningDelta("why"),
-        ToolStarted(tool),
-        ToolCompleted(tool),
+        ToolStarted(tool.call),
+        ToolCompleted(tool.call),
         RequestCompleted(model_id="m", provider="P", usage=MessageMetrics(output_tokens=1)),
         RunFinished(record),
     ]
 
     assert [type(event).__name__ for event in events] == [
-        "ContentDelta",
+        "TextDelta",
         "ReasoningDelta",
         "ToolStarted",
         "ToolCompleted",
@@ -405,3 +412,15 @@ def test_run_events_are_frozen_values() -> None:
     assert events[5].record is record  # type: ignore[union-attr]
     with pytest.raises(FrozenInstanceError):
         events[0].text = "changed"  # type: ignore[misc]
+
+
+def test_a_tool_event_reports_the_call_as_it_was_when_the_event_was_made() -> None:
+    tool = ToolExecution(tool_call_id="c", tool_name="t", tool_args={"q": 1})
+    started = ToolStarted(tool.call)
+    tool.result = "done"
+    tool.is_error = False
+
+    assert started.call == ReportedCall("c", "t", {"q": 1})
+    assert ToolCompleted(tool.call).call == ReportedCall("c", "t", {"q": 1}, result="done", is_error=False)
+    with pytest.raises(FrozenInstanceError):
+        started.call.result = "changed"  # type: ignore[misc]

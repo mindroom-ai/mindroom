@@ -391,7 +391,7 @@ async def review_conversation(
             record=record,
             run=RunContext(run_id=invocation_id, session_id=session_id),
             hooks=_review_hooks(config, review, metrics),
-            tool_call_limit=_REVIEW_TOOL_CALL_LIMIT,
+            max_tool_calls_per_turn=_REVIEW_TOOL_CALL_LIMIT,
             request_template=review.settings,
         )
         async for _event in events:

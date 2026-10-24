@@ -317,7 +317,7 @@ async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
             response = await run()
 
         tool = response.tools[0]
-        assert tool.tool_call_error is (status == "failed")
+        assert tool.is_error is (status == "failed")
         assert tool.result == expected_result
         assert (await lookup(runtime, "ordinary", owner=owner, depth=0)).consumed
     finally:

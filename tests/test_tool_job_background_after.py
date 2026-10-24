@@ -80,7 +80,7 @@ async def test_application_background_after_collision_fails_before_execution(tmp
         [schema] = model.requests[0].tools
         assert schema.parameters["properties"]["background_after"]["type"] == "integer"
         [tool] = record.tools
-        assert tool.tool_call_error
+        assert tool.is_error
         assert "exclude_toolkits" in str(tool.result)
         assert invoked == []
         assert await runtime.list_jobs(owner=owner, depth=depth) == []
@@ -327,11 +327,11 @@ async def test_owned_nested_application_cannot_create_detached_job(
         assert "background_after" not in model.requests[0].tools[0].parameters["properties"]
         [tool] = record.tools
         if arguments.get("background_after") is None:
-            assert not tool.tool_call_error
+            assert not tool.is_error
             assert tool.result == "inline result"
             assert called == [True]
         else:
-            assert tool.tool_call_error
+            assert tool.is_error
             assert "outer job" in str(tool.result)
             assert called == []
         owner = build_execution_identity_from_runtime_context(context)
@@ -379,7 +379,7 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
         assert record.status is RunStatus.completed
         assert invoked == ["sibling", "corrected"]
         rejected = next(tool for tool in record.tools if tool.tool_call_id == "invalid")
-        assert rejected.tool_call_error
+        assert rejected.is_error
         assert "background_after" in str(rejected.result)
         assert rejected.tool_args == {"value": "must-not-run", "background_after": invalid_budget}
         assert any(
@@ -430,7 +430,7 @@ def _ordinary() -> str:
 
 def _stopping_tool() -> JobTool:
     tool = job_tool(_ordinary)
-    return replace(tool, function=replace(tool.function, stop_after_tool_call=True))
+    return replace(tool, function=replace(tool.function, stop_after_call=True))
 
 
 @pytest.mark.parametrize(
@@ -516,9 +516,9 @@ async def test_run_connected_toolkits_run_inline_without_wait_metadata(
                 record = await run_job_turn(actor, model)
         assert "background_after" not in model.requests[0].tools[0].parameters.get("properties", {})
         results = {tool.tool_call_id: tool for tool in record.tools}
-        assert not results["connected"].tool_call_error
+        assert not results["connected"].is_error
         assert results["connected"].result == "rows"
-        assert results["stale"].tool_call_error
+        assert results["stale"].is_error
         assert "background_after" in str(results["stale"].result)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:

@@ -130,7 +130,7 @@ def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
     return not (
         isinstance(toolkit, JobTools)
         or function.external_execution
-        or function.stop_after_tool_call
+        or function.stop_after_call
         or connects_per_run(toolkit)
     )
 
@@ -156,7 +156,7 @@ def wait_mode(tool: JobTool | None, *, depth: int) -> ToolWaitMode:
     ):
         return "native"
     # A call a CLI command makes returns to that command, whose own result is what the reply saves.
-    if job_owns_execution() or depth > 0 or tool.function.stop_after_tool_call or cli_dispatch_active():
+    if job_owns_execution() or depth > 0 or tool.function.stop_after_call or cli_dispatch_active():
         return "inline"
     return "managed"
 
@@ -288,7 +288,7 @@ def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int) -> float | N
             )
             raise ValueError(msg)
         background_after = read_background_after(call.arguments, owned_execution=job_owns_execution() or depth > 0)
-    if call.function.stop_after_tool_call and background_after is not None:
+    if call.function.stop_after_call and background_after is not None:
         msg = f"{BACKGROUND_AFTER} is not supported for tools that stop the current model step"
         raise ValueError(msg)
     return background_after

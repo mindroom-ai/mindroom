@@ -47,7 +47,7 @@ class ToolFunction:
     approval_type: str | None = None
     external_execution: bool | None = None
     external_execution_silent: bool | None = None
-    stop_after_tool_call: bool = False
+    stop_after_call: bool = False
     entrypoint: Callable[..., Any]
     injected_params: frozenset[str] = frozenset()
     entrypoint_processed: bool = False

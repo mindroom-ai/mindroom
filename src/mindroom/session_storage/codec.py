@@ -37,16 +37,13 @@ def run_type(run: AnyRunRecord) -> SessionKind:
 # Legacy format: Run rows whose `metadata` holds a `tools_schema` list of tool definitions, written with every run,
 # including member responses embedded in a paused team run.
 # Last legacy release: v2026.10.281; replacement: v2026.10.282 stopped storing tool schemas in run metadata.
-# Handling: Every decoded run row drops the key, recursively through member responses, so loaded and replayed runs
+# Handling: Every decoded run row drops the key, from its member responses too, so loaded and replayed runs
 # never hold the schemas and a rewritten row no longer stores them; rows written by current releases omit it.
 # Coverage: tests/session_storage/test_store.py::test_loaded_runs_drop_their_stored_tool_schemas.
 def _drop_tool_schemas(data: dict[str, Any]) -> None:
-    metadata = data.get("metadata")
-    if isinstance(metadata, dict):
-        metadata.pop("tools_schema", None)
-    for member in data.get("member_responses") or []:
-        if isinstance(member, dict):
-            _drop_tool_schemas(member)
+    for run in (data, *(data.get("member_responses") or ())):
+        if isinstance(run, dict) and isinstance(metadata := run.get("metadata"), dict):
+            metadata.pop("tools_schema", None)
 
 
 __all__ = [

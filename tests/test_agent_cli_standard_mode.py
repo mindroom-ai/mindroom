@@ -22,7 +22,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.llm.events import ContentDelta
+from mindroom.llm.events import TextDelta
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -86,7 +86,7 @@ async def _respond_streaming(runtime: ToolRuntimeContext) -> str:
                 supports_native_tool_approval=True,
             )
         ]
-    return "".join(chunk.text for chunk in chunks if isinstance(chunk, ContentDelta))
+    return "".join(chunk.text for chunk in chunks if isinstance(chunk, TextDelta))
 
 
 def _tool_outputs(provider: ScriptedProvider, request: int = 1) -> list[str]:

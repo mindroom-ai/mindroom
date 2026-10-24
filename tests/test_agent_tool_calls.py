@@ -74,7 +74,7 @@ async def _catalog(
     owners: Mapping[str, str] | None = None,
     include: Callable[[Any], bool] | None = None,
     middleware: Sequence[ToolMiddleware] = (),
-    tool_call_limit: int | None = None,
+    max_tool_calls_per_turn: int | None = None,
 ) -> agent_tool_calls.PreparedAgentToolCatalog:
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
@@ -82,7 +82,7 @@ async def _catalog(
         run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session=session),
         runtime_context=_runtime(tmp_path),
         middleware=middleware,
-        tool_call_limit=tool_call_limit,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
     )
     if owners is None:
         owners = {function.name: toolkit.name for toolkit in toolkits for function in toolkit.functions}
@@ -149,7 +149,7 @@ async def test_a_cli_call_inside_a_job_blocks_on_its_own_thread(tmp_path: Path, 
     try:
         with job_control_context(JobControl()) if in_job else nullcontext():
             events = await _events(catalog, "threads", "offloading")
-        assert events[-1].execution.result == "done"
+        assert events[-1].call.result == "done"
         [thread] = threads
         assert thread.startswith("mindroom-job-call" if in_job else "shared-pool")
     finally:
@@ -174,7 +174,7 @@ async def test_a_failed_offloaded_cli_call_ends_as_that_calls_failure(tmp_path: 
         with job_control_context(JobControl()) if in_job else nullcontext():
             events = await _events(catalog, "threads", "offloading")
         assert events[-1].kind == "failed"
-        assert "runner refused the call" in str(events[-1].execution.result)
+        assert "runner refused the call" in str(events[-1].call.result)
     finally:
         shared.shutdown(wait=False)
 
@@ -205,7 +205,7 @@ async def test_prepared_call_preserves_real_owner_context_and_middleware(tmp_pat
     )
     events = await _events(catalog, "inspect", "inspect_binding")
     assert [event.kind for event in events] == ["started", "completed"]
-    assert events[-1].execution.result == "bound"
+    assert events[-1].call.result == "bound"
     [(run_id, runtime, call)] = seen
     assert run_id == "run"
     assert runtime is catalog.runtime_context
@@ -262,12 +262,12 @@ async def test_sync_async_generators_media_and_generated_functions(tmp_path: Pat
     ]:
         events = await _events(catalog, "ordinary", name, args)
         assert events[-1].kind == "completed"
-        assert events[-1].execution.result == expected
+        assert events[-1].call.result == expected
     events = await _events(catalog, "ordinary", "media")
     assert [event.kind for event in events] == ["started", "media", "completed"]
     assert events[1].media.images[0].url == "https://example.org/image.png"
     events = await _events(catalog, "agent", "search_knowledge_base", {"query": "binding"})
-    assert events[-1].execution.result == "Knowledge about binding"
+    assert events[-1].call.result == "Knowledge about binding"
     assert catalog.run.session_state["streamed"] is True
 
 
@@ -280,7 +280,7 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
         seen.append(value)
         return value
 
-    catalog = await _catalog(tmp_path, [_function(action)], tool_call_limit=1)
+    catalog = await _catalog(tmp_path, [_function(action)], max_tool_calls_per_turn=1)
     events = await _events(catalog, "actions", "action", {"value": "wrong"})
     assert events[-1].kind == "failed"
     assert seen == []
@@ -299,7 +299,7 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
     catalog = await _catalog(tmp_path, [_function(action, stop_after_tool_call=True)])
     events = await _events(catalog, "actions", "action", {"value": 4})
     assert events[-1].kind == "continuation_required"
-    assert events[-1].execution.result == "4"
+    assert events[-1].call.result == "4"
 
 
 @pytest.mark.asyncio
@@ -317,8 +317,8 @@ async def test_catalog_keeps_qualified_names_and_rejects_collisions(tmp_path: Pa
         [_toolkit("one", action), _toolkit("two", action, other)],
         owners={"action": "one", "other": "two"},
     )
-    assert (await _events(catalog, "one", "action"))[-1].execution.result == "ok"
-    assert (await _events(catalog, "two", "other"))[-1].execution.result == "other"
+    assert (await _events(catalog, "one", "action"))[-1].call.result == "ok"
+    assert (await _events(catalog, "two", "other"))[-1].call.result == "other"
     with pytest.raises(UnknownToolError):
         await catalog.bind(ToolKey("two", "action"))
     with pytest.raises(ValueError, match="reserved"):
@@ -355,7 +355,7 @@ async def test_lazy_metadata_and_single_materialization(tmp_path: Path) -> None:
     assert first == second
     assert first.instructions == ("Actual lazy instructions",)
     assert builds == [catalog.runtime_context]
-    assert (await _events(catalog, "lazy", "action", {"value": 9}))[-1].execution.result == "9"
+    assert (await _events(catalog, "lazy", "action", {"value": 9}))[-1].call.result == "9"
 
 
 @pytest.mark.asyncio
@@ -386,7 +386,7 @@ async def test_toolkits_the_catalog_connects_stay_connected_until_it_closes(tmp_
     catalog = await _catalog(tmp_path, [database])
     await catalog.connect([database])
     catalog.add_deferred(agent_tool_calls.DeferredAgentToolkit("server", "An MCP server", materialize))
-    assert (await _events(catalog, "server", "lookup", {"term": "x"}))[-1].execution.result == "x"
+    assert (await _events(catalog, "server", "lookup", {"term": "x"}))[-1].call.result == "x"
     assert log == ["database connect", "server connect"]
 
     await catalog.close()
@@ -454,10 +454,10 @@ async def test_arguments_are_frozen_before_started_event(tmp_path: Path) -> None
     started = await anext(stream)
     assert started.kind == "started"
     arguments["value"] = 2
-    started.execution.tool_args["value"] = 3
+    started.call.tool_args["value"] = 3
     events = [event async for event in stream]
-    assert events[-1].execution.result == "1"
-    assert events[-1].execution.tool_args == {"value": 1}
+    assert events[-1].call.result == "1"
+    assert events[-1].call.tool_args == {"value": 1}
     assert seen == [1]
 
 
@@ -543,8 +543,8 @@ async def test_a_call_that_returns_a_stop_controls_only_its_own_invocation(tmp_p
     binding = await catalog.bind(ToolKey("control", "stop"))
     events = await _events(catalog, "control", "stop")
     assert events[-1].kind == "continuation_required"
-    assert events[-1].execution.result == "stopped"
-    assert binding.function.stop_after_tool_call is False
+    assert events[-1].call.result == "stopped"
+    assert binding.function.stop_after_call is False
 
 
 @pytest.mark.asyncio
@@ -559,7 +559,7 @@ async def test_generator_failure_is_terminal_and_does_not_leak_context(tmp_path:
     catalog = await _catalog(tmp_path, [_toolkit("stream", broken)])
     events = await _events(catalog, "stream", "broken")
     assert events[-1].kind == "failed"
-    assert events[-1].execution.tool_call_error
+    assert events[-1].call.is_error
     assert get_tool_runtime_context() is None
 
 
@@ -610,7 +610,7 @@ async def test_canonical_shell_releases_only_shell_leaf_and_retains_middleware(t
     async def leaf(arguments: dict[str, object]) -> str:
         assert arguments == {"args": "nested"}
         events = await _events(catalog, "state", "mutate")
-        assert events[-1].execution.result == "changed"
+        assert events[-1].call.result == "changed"
         return "shell done"
 
     events = [
@@ -622,7 +622,7 @@ async def test_canonical_shell_releases_only_shell_leaf_and_retains_middleware(t
             shell_leaf=leaf,
         )
     ]
-    assert events[-1].execution.result == "shell done"
+    assert events[-1].call.result == "shell done"
     assert seen == ["before", "mutate", "after"]
     assert catalog.run.session_state["changed"] is True
 
@@ -708,7 +708,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(
     ]
     assert seen == ([3] if approved else [])
     assert resumed[-1].kind == ("completed" if approved else "failed")
-    assert approved or resumed[-1].execution.result == denial
+    assert approved or resumed[-1].call.result == denial
     assert binding.function.requires_confirmation is True
     for changed in (4, 3.0):
         with pytest.raises(ValueError, match="exact"):

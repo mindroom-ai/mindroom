@@ -247,12 +247,12 @@ def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
         )
     ad_hoc = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
 
-    assert (configured.spec.id, configured.spec.tool_call_limit) == ("pair", 3)
+    assert (configured.spec.id, configured.spec.max_tool_calls_per_turn) == ("pair", 3)
     assert [(member.spec.id, member.spec.name) for member in configured.spec.members] == [
         ("zeta", "Zeta"),
         ("alpha", "Alpha"),
     ]
-    assert ad_hoc.spec.tool_call_limit == config.defaults.max_tool_calls_per_turn
+    assert ad_hoc.spec.max_tool_calls_per_turn == config.defaults.max_tool_calls_per_turn
 
 
 def _private_pair_config(tmp_path: Path) -> tuple[Config, object]:

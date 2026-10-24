@@ -631,7 +631,7 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     paused = raised.paused
     assert ProbeToolkit.calls == []
     [requirement] = paused.requirements
-    assert (requirement.member_agent_id, requirement.member_agent_name) == ("checker", "Checker")
+    assert (requirement.member_agent_id, requirement.member_display_name) == ("checker", "Checker")
     assert requirement.tool_execution.tool_call_id == "call-touch"
     assert paused.toolkit_owners[("checker", "touch")] == PROBE_TOOL
     assert ("writer", "touch") in paused.toolkit_owners
@@ -880,7 +880,7 @@ async def test_a_denied_member_call_never_runs_and_the_member_answers_the_denial
     assert team.models["checker-model"].requests[-1].messages[-1].content == "Declined by requester"
     _, [member] = team.stored_runs()
     assert member.tools is not None
-    assert (member.tools[0].confirmed, member.tools[0].tool_call_error) == (False, True)
+    assert (member.tools[0].confirmed, member.tools[0].is_error) == (False, True)
 
 
 async def _writer_unavailable() -> None:

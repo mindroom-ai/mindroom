@@ -74,7 +74,7 @@ def external(*tools: Callable[..., object], name: str = "delegate") -> AdaptedTo
 def spec(
     model: ScriptedModel,
     *toolkits: AdaptedToolkit,
-    tool_call_limit: int | None = None,
+    max_tool_calls_per_turn: int | None = None,
 ) -> AgentSpec:
     """Return a spec for the ``code`` agent with the usual system message."""
     return AgentSpec(
@@ -83,7 +83,7 @@ def spec(
         model=model,
         system_message=Message(role="system", content="You are Code."),
         toolkits=toolkits,
-        tool_call_limit=tool_call_limit,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
     )
 
 

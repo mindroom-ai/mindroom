@@ -116,14 +116,14 @@ def plan_tool_batch(
     messages: list[Message],
     *,
     calls_so_far: int,
-    tool_call_limit: int | None,
+    max_tool_calls_per_turn: int | None,
 ) -> ToolBatch:
     """Resolve an assistant message's tool calls, apply the limit, and classify the admitted ones.
 
     A call naming no offered function, or whose arguments cannot be decoded, is answered with an error tool message
     appended to ``messages`` right away and never counts toward the limit. Of the rest, each call past
-    ``tool_call_limit`` gets a limit-error result instead of running. An admitted call whose function requires
-    confirmation or external execution is planned paused, with the flags its stored execution carries.
+    ``max_tool_calls_per_turn`` gets a limit-error result instead of running. An admitted call whose function
+    requires confirmation or external execution is planned paused, with the flags its stored execution carries.
     """
     planned: list[PlannedCall] = []
     refused: list[Message] = []
@@ -140,9 +140,9 @@ def plan_tool_batch(
         if isinstance(arguments, ToolArgumentError):
             messages.append(Message(role="tool", tool_call_id=call_id, tool_name=name, content=arguments.error_text))
             continue
-        if tool_call_limit is not None:
+        if max_tool_calls_per_turn is not None:
             count += 1
-            if count > tool_call_limit:
+            if count > max_tool_calls_per_turn:
                 refused.append(
                     Message(
                         role="tool",
@@ -204,8 +204,8 @@ async def _timed(call: PlannedCall, run: RunContext, middleware: Sequence[ToolMi
 def _complete_call(call: PlannedCall, outcome: ToolOutcome, elapsed: float) -> Message:
     execution = call.execution
     execution.result = outcome.content
-    execution.tool_call_error = outcome.is_error
-    execution.stop_after_tool_call = outcome.stop_after_call
+    execution.is_error = outcome.is_error
+    execution.stop_after_call = outcome.stop_after_call
     ended = time.time()
     execution.metrics = ToolCallMetrics(start_time=ended - elapsed, end_time=ended, duration=elapsed)
     return tool_result_message(execution, media=None if outcome.is_error else outcome)
@@ -227,8 +227,8 @@ def tool_result_message(execution: ToolExecution, media: ToolValue | None = None
         tool_call_id=execution.tool_call_id,
         tool_name=execution.tool_name,
         tool_args=execution.tool_args,
-        tool_call_error=execution.tool_call_error,
-        stop_after_tool_call=execution.stop_after_tool_call,
+        tool_call_error=execution.is_error,
+        stop_after_tool_call=execution.stop_after_call,
         images=images,
         audio=audio,
         videos=videos,

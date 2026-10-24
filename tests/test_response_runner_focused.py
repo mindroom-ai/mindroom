@@ -460,7 +460,7 @@ def _ordered_pause(paused: PausedAttempt) -> PausedAttempt:
     body = ""
     trace: list[ToolTraceEntry] = []
     for index, tool in enumerate(paused.tools, start=1):
-        marker, entry = format_tool_started_event(tool, tool_index=index)
+        marker, entry = format_tool_started_event(tool.call, tool_index=index)
         assert entry is not None
         body += marker
         trace.append(entry)
@@ -3420,7 +3420,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = "member-a"
-    requirement.member_agent_name = "Member A"
+    requirement.member_display_name = "Member A"
     trace = ToolTraceEntry(
         type="tool_call_started",
         tool_name="inspect",
@@ -3480,7 +3480,7 @@ def test_pause_presentation_rejects_a_tool_in_the_wrong_member_scope() -> None:
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = "member-a"
-    requirement.member_agent_name = "Same"
+    requirement.member_display_name = "Same"
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-1",
@@ -8223,7 +8223,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     async def attempt(_run, _continuation):  # noqa: ANN001, ANN202
         attempts.append(True)
         if len(attempts) <= spent:
-            return CompletedAttempt(control_executions=(_model_switch_execution("next-turn"),))
+            return CompletedAttempt(control_calls=(_model_switch_execution("next-turn").call,))
         lifetime = current_cli_lifetime()
         assert lifetime is not None
         lifetime.grant_expires_at_ns = 1

@@ -182,7 +182,7 @@ async def test_a_tool_call_that_ends_the_reply_leaves_its_ended_jobs_for_the_nex
         await conversation.cancel(job_id)
         return "switched"
 
-    stopping = replace(adapt_function(Function.from_callable(switch_away)), stop_after_tool_call=True)
+    stopping = replace(adapt_function(Function.from_callable(switch_away)), stop_after_call=True)
     model = ScriptedModel([calls(tool_call("switch_away", "switch", job_id="job_a"))])
     try:
         await conversation.start("job_a")

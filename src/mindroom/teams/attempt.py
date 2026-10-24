@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.budgets.pricing import model_prices
-from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.teams.presentation import apply_team_event, format_team_response, render_team_member_slots
@@ -40,7 +40,7 @@ def team_tool_executions(record: TeamRunRecord) -> list[ToolExecution]:
     return [*(record.tools or ()), *(tool for member in record.ended_member_runs for tool in member.tools or ())]
 
 
-def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | dict[str, Any] | None:
+def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
     """Return what ``run`` hands over beyond its pause (``new_handover_content``) that its events have not shown.
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
@@ -76,12 +76,12 @@ class TeamReplyText:
     def apply(self, event: TeamRunEvent) -> None:
         """Fold one run event into the text: a member's or the leader's delta."""
         if isinstance(event, MemberEvent):
-            if isinstance(event.event, ContentDelta):
+            if isinstance(event.event, TextDelta):
                 member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
                 self.per_member[member_id] += event.event.text
                 if event.event.text:
                     self.streamed_member_runs.add(event.run_id)
-        elif isinstance(event, ContentDelta):
+        elif isinstance(event, TextDelta):
             self.consensus += event.text
 
     def canonical_text(self) -> str:
@@ -153,11 +153,11 @@ class TeamAttempt:
                 team_name=self.team_name,
                 tool_scope="member" if member is not None else "team",
                 agent_name=member.member_name if member is not None else None,
-                tool_name=inner.tool.tool_name,
-                tool_call_id=inner.tool.tool_call_id,
+                tool_name=inner.call.tool_name,
+                tool_call_id=inner.call.tool_call_id,
                 show_tool_calls=self.presentation.show_tool_calls,
             )
-        elif not isinstance(inner, ContentDelta):
+        elif not isinstance(inner, TextDelta):
             return False
         apply_team_event(self.presentation, event)
         return True
@@ -175,7 +175,7 @@ class TeamAttempt:
             self.presentation.append_consensus(handover, separate=True)
             reply.consensus = append_stream_text(reply.consensus, handover, separate=True)
         else:
-            member_id = self.presentation.resolve_member_id(run.agent_id, run.agent_name)
+            member_id = self.presentation.resolve_member_id(run.agent_id, run.agent_display_name)
             handover = _unshown_handover(run, streamed=run.run_id in reply.streamed_member_runs)
             self.presentation.append_member(member_id, handover, separate=True)
             reply.per_member[member_id] = append_stream_text(reply.per_member[member_id], handover, separate=True)

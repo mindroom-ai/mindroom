@@ -273,14 +273,14 @@ async def execute_tool_call(
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
-        return ToolOutcome(content=str(error), stop_after_call=function.stop_after_tool_call, is_error=True)
+        return ToolOutcome(content=str(error), stop_after_call=function.stop_after_call, is_error=True)
     return ToolOutcome(
         content=value.content,
         images=value.images,
         audios=value.audios,
         videos=value.videos,
         files=value.files,
-        stop_after_call=function.stop_after_tool_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
+        stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
     )
 
 

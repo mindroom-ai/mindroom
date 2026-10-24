@@ -2097,7 +2097,7 @@ def create_agent(
         model=provider,
         system_message=None,
         toolkits=toolkits if windowed_toolkits is None else windowed_toolkits,
-        tool_call_limit=entity_view.max_tool_calls_per_turn,
+        max_tool_calls_per_turn=entity_view.max_tool_calls_per_turn,
     )
     prepared = prepare_run_tools(spec)
     prompt = PromptSpec(

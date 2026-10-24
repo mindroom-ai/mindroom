@@ -8,15 +8,16 @@ decode without migration; keys the records do not model are ignored on read.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from time import time
 from typing import Any
 from uuid import uuid4
 
+from mindroom.llm.events import ReportedCall
 from mindroom.llm.messages import Message
-from mindroom.llm.usage import RunMetrics, ToolCallMetrics, known_fields
+from mindroom.llm.usage import RunMetrics, ToolCallMetrics
 from mindroom.redaction import redact_sensitive_text
 
 
@@ -45,18 +46,25 @@ class RunStatus(StrEnum):
     regenerated = "REGENERATED"
 
 
+# The stored keys of the tool-execution fields whose names differ from them.
+_STORED_TOOL_KEYS = {"is_error": "tool_call_error", "stop_after_call": "stop_after_tool_call"}
+
+
 @dataclass(kw_only=True)
 class ToolExecution:
     """One tool call the model requested, with its outcome or pause state."""
 
+    # TODO(simplify): The call's id and name are optional though every writer sets them, so readers guard both. Make
+    # them required, the legacy requirement reader supplying values. Stored data would notice: a tool execution read
+    # without an id, such as that reader's placeholder, writes an id back instead of null.
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
-    tool_call_error: bool | None = None
+    is_error: bool | None = None
     result: str | None = None
     metrics: ToolCallMetrics | None = None
     child_run_id: str | None = None
-    stop_after_tool_call: bool = False
+    stop_after_call: bool = False
     created_at: int = field(default_factory=_now)
     requires_confirmation: bool | None = None
     confirmed: bool | None = None
@@ -70,16 +78,22 @@ class ToolExecution:
         """Whether the run must wait before this call runs or resumes."""
         return bool(self.requires_confirmation or self.external_execution_required)
 
+    @property
+    def call(self) -> ReportedCall:
+        """The call as a tool event reports it now: id, name, arguments, and any result."""
+        return ReportedCall(self.tool_call_id, self.tool_name, self.tool_args, self.result, self.is_error)
+
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: every field, None included, kept as main writes it."""
+        """Return the stored dict: every field, None included, under its stored key, kept as main writes it."""
         values = asdict(self)
         values["metrics"] = self.metrics.to_dict() if self.metrics is not None else None
-        return values
+        return {_STORED_TOOL_KEYS.get(name, name): value for name, value in values.items()}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
         """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default."""
-        values = known_fields(cls, data)
+        names = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in fields(cls)}
+        values = {names[key]: value for key, value in data.items() if key in names}
         metrics = values.pop("metrics", None)
         return cls(**values, metrics=ToolCallMetrics.from_dict(metrics) if metrics else None)
 
@@ -103,7 +117,7 @@ class RunRequirement:
     confirmation_note: str | None = field(default=None, kw_only=True)
     external_execution_result: str | None = field(default=None, kw_only=True)
     member_agent_id: str | None = field(default=None, kw_only=True)
-    member_agent_name: str | None = field(default=None, kw_only=True)
+    member_display_name: str | None = field(default=None, kw_only=True)
     member_run_id: str | None = field(default=None, kw_only=True)
 
     @property
@@ -168,7 +182,7 @@ class RunRequirement:
             "confirmation_note": self.confirmation_note,
             "external_execution_result": self.external_execution_result,
             "member_agent_id": self.member_agent_id,
-            "member_agent_name": self.member_agent_name,
+            "member_agent_name": self.member_display_name,
             "member_run_id": self.member_run_id,
             "tool_execution": self.tool_execution.to_dict(),
         }
@@ -200,7 +214,7 @@ class RunRequirement:
             confirmation_note=data.get("confirmation_note"),
             external_execution_result=data.get("external_execution_result"),
             member_agent_id=data.get("member_agent_id"),
-            member_agent_name=data.get("member_agent_name"),
+            member_display_name=data.get("member_agent_name"),
             member_run_id=data.get("member_run_id"),
         )
         execution = requirement.tool_execution
@@ -231,7 +245,7 @@ class _RunRecordCommon:
     parent_run_id: str | None = None
     user_id: str | None = None
     status: RunStatus = RunStatus.running
-    content: str | dict[str, Any] | None = None
+    content: str | None = None
     model: str | None = None
     model_provider: str | None = None
     messages: list[Message] = field(default_factory=list)
@@ -247,10 +261,10 @@ class _RunRecordCommon:
     # or team member keeps its paused content until it writes text of its own, while a resumed team leader starts its
     # text afresh (``continue_team``) and this records what it had at the pause. It is never stored, so a loaded
     # record has none.
-    carried_content: str | dict[str, Any] | None = field(default=None, compare=False, repr=False)
+    carried_content: str | None = field(default=None, compare=False, repr=False)
 
     @property
-    def handover_content(self) -> str | dict[str, Any] | None:
+    def handover_content(self) -> str | None:
         """Return what the run shows whoever reads it after it ends: why it failed, else its content.
 
         The run that started it, a team's document of its members, and a delegation's settlement all read this. A
@@ -261,10 +275,10 @@ class _RunRecordCommon:
             return self.content
         if self.error is not None:
             return self.error
-        return redact_sensitive_text(self.content) if isinstance(self.content, str) else self.content
+        return None if self.content is None else redact_sensitive_text(self.content)
 
     @property
-    def new_handover_content(self) -> str | dict[str, Any] | None:
+    def new_handover_content(self) -> str | None:
         """Return what the run hands over (``handover_content``) beyond what it carried over from its pause.
 
         A reply that a resume continues already accounts for what each resumed run carried over: the text it wrote
@@ -348,12 +362,12 @@ class RunRecord(_RunRecordCommon):
     """A persisted agent run; a team member run carries the team run as ``parent_run_id``."""
 
     agent_id: str | None = None
-    agent_name: str | None = None
+    agent_display_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored ``run_data`` dict, keys in stored order."""
         return {
-            **self._scalars_dict({"agent_id": self.agent_id, "agent_name": self.agent_name}),
+            **self._scalars_dict({"agent_id": self.agent_id, "agent_name": self.agent_display_name}),
             "status": self.status.value,
             **self._metrics_dict(),
             **self._history_dict(),
@@ -364,7 +378,7 @@ class RunRecord(_RunRecordCommon):
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> RunRecord:
         """Rebuild from a stored ``run_data`` dict, ignoring keys this record does not model."""
-        return cls(agent_id=data.get("agent_id"), agent_name=data.get("agent_name"), **_common_from_dict(data))
+        return cls(agent_id=data.get("agent_id"), agent_display_name=data.get("agent_name"), **_common_from_dict(data))
 
 
 @dataclass(kw_only=True)
@@ -379,7 +393,7 @@ class TeamRunRecord(_RunRecordCommon):
 
     team_id: str | None = None
     team_name: str | None = None
-    member_responses: list[RunRecord | TeamRunRecord] = field(default_factory=list)
+    member_responses: list[RunRecord] = field(default_factory=list)
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -400,24 +414,12 @@ class TeamRunRecord(_RunRecordCommon):
         return cls(
             team_id=data.get("team_id"),
             team_name=data.get("team_name"),
-            member_responses=[run_record_from_dict(member) for member in data.get("member_responses") or []],
+            member_responses=[RunRecord.from_dict(member) for member in data.get("member_responses") or []],
             **_common_from_dict(data),
         )
 
 
 type AnyRunRecord = RunRecord | TeamRunRecord
-
-
-def run_record_from_dict(data: Mapping[str, Any]) -> AnyRunRecord:
-    """Rebuild whichever record a stored dict holds.
-
-    A ``team_id`` key marks a team run; everything else is an agent run, including the usage-only records
-    MindRoom writes without an ``agent_id``.
-    """
-    if "team_id" in data:
-        return TeamRunRecord.from_dict(data)
-    return RunRecord.from_dict(data)
-
 
 __all__ = [
     "AnyRunRecord",
@@ -427,5 +429,4 @@ __all__ = [
     "TeamRunRecord",
     "ToolExecution",
     "denial_note_for",
-    "run_record_from_dict",
 ]

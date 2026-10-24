@@ -32,7 +32,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -104,39 +104,38 @@ async def _collect_agent_continuation(
     """
     response: RunRecord | None = None
     saw_content_delta = False
-    current_tools: list[ToolExecution] = []
+    completed_ids: set[str | None] = set()
     await presentation.publish(progress)
     async with closing_async_stream(events):
         async for event in events:
             if isinstance(event, RunFinished):
                 assert isinstance(event.record, RunRecord)
                 response = event.record
-            elif isinstance(event, ContentDelta):
+            elif isinstance(event, TextDelta):
                 presentation.append_text(event.text)
                 saw_content_delta = saw_content_delta or bool(event.text)
                 await presentation.publish(progress)
             elif isinstance(event, ToolStarted):
-                presentation.start_tool(event.tool)
+                presentation.start_tool(event.call)
                 await presentation.publish(progress)
             elif isinstance(event, ToolCompleted):
-                presentation.complete_tool(event.tool)
-                current_tools.append(event.tool)
+                presentation.complete_tool(event.call)
+                completed_ids.add(event.call.tool_call_id)
                 await presentation.publish(progress)
     if response is None:
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
-    # Child approval results are also projected into the root presentation.
-    # Only calls owned by the parent run can continue its turn.
-    parent_call_ids = {tool.tool_call_id for tool in response.tools or ()}
-    current_tools = [tool for tool in current_tools if tool.tool_call_id in parent_call_ids]
+    # The run's own calls this continuation completed; child approval results are projected into the root
+    # presentation too, but only the parent run's calls can continue its turn.
+    completed = tuple(tool for tool in response.tools or () if tool.tool_call_id in completed_ids)
     _reconcile_agent_tools(presentation, response)
     # A run that completed without streaming its text hands the text over for the lifecycle to append, apart from
     # what it carried over from the pause, which the reply it continues already accounts for.
     hands_over_text = response.status is RunStatus.completed and not saw_content_delta
     return _CollectedAgentContinuation(
         response=response,
-        tool_executions=tuple(current_tools),
-        terminal_content=str(response.new_handover_content or "") if hands_over_text else "",
+        tool_executions=completed,
+        terminal_content=(response.new_handover_content or "") if hands_over_text else "",
         has_visible_content=saw_content_delta,
     )
 
@@ -151,7 +150,7 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
     )
     if paused is not None:
         for tool in paused.tools:
-            presentation.start_tool(tool)
+            presentation.start_tool(tool.call)
     completed_call_ids = {
         entry.tool_call_id for entry in presentation.tool_tracker.completed_tools if entry.tool_call_id is not None
     }
@@ -160,10 +159,10 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
     for tool in response.tools or ():
         # An agent's own calls name no member.
         if tool.is_paused and (None, tool.tool_call_id) not in answered:
-            presentation.start_tool(tool)
+            presentation.start_tool(tool.call)
         elif tool.tool_call_id is None or tool.tool_call_id not in completed_call_ids:
             # Repeated terminal completions must not match older public slots by name.
-            presentation.complete_tool(tool)
+            presentation.complete_tool(tool.call)
 
 
 async def _persisted_events(persisted: RunRecord) -> AsyncIterator[RunEvent]:
@@ -251,7 +250,7 @@ async def _continue_persisted_agent(
             runtime_model_name=continuation.runtime_model_name,
         )
     if response.status is not RunStatus.completed:
-        raise RuntimeError(str(response.content or "Approval continuation did not complete"))
+        raise RuntimeError(response.content or "Approval continuation did not complete")
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),

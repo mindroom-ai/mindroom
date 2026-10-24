@@ -70,7 +70,7 @@ def test_split_interrupted_tool_trace_treats_explicit_success_without_result_as_
                 tool_name="noop",
                 tool_args={"x": 1},
                 result=None,
-                tool_call_error=False,
+                is_error=False,
             ),
         ],
     )
@@ -87,7 +87,7 @@ def test_split_interrupted_tool_trace_keeps_missing_terminal_state_as_interrupte
                 tool_name="noop",
                 tool_args={"x": 1},
                 result=None,
-                tool_call_error=None,
+                is_error=None,
             ),
         ],
     )
@@ -104,7 +104,7 @@ def test_interrupted_replay_describes_terminal_tool_errors_without_implying_succ
                 tool_name="request",
                 tool_args={"url": "https://example.com"},
                 result="HTTP 500",
-                tool_call_error=True,
+                is_error=True,
             ),
         ],
     )

@@ -96,10 +96,7 @@ def _cli_callable(function: ToolFunction) -> bool:
     a job read through the CLI is never saved as the reply's own call, so it would be reported again.
     """
     return not (
-        approval_gated(function)
-        or is_job_function(function)
-        or function.external_execution
-        or function.stop_after_tool_call
+        approval_gated(function) or is_job_function(function) or function.external_execution or function.stop_after_call
     )
 
 
@@ -123,7 +120,7 @@ async def bind_standard_cli(
         runtime_context=runtime,
         store=store,
         middleware=agent_tool_middleware(build),
-        tool_call_limit=build.spec.tool_call_limit,
+        max_tool_calls_per_turn=build.spec.max_tool_calls_per_turn,
     )
     try:
         await catalog.prepare(build.spec.toolkits, build.tool_owners, include=_cli_callable)

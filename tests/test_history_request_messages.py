@@ -26,8 +26,9 @@ from mindroom.history.request_messages import (
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord, run_record_from_dict
+from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+from tests.llm.agno_dict_helpers import stored_run_record
 
 _PARITY = Path(__file__).parent / "fixtures" / "agno_parity"
 _LOADED_SESSIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
@@ -58,7 +59,7 @@ def _session(golden: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stored_runs(golden: dict[str, Any]) -> list[AnyRunRecord]:
-    return [run_record_from_dict(run) for run in _session(golden)["runs"] or []]
+    return [stored_run_record(run) for run in _session(golden)["runs"] or []]
 
 
 def _stored_scope(golden: dict[str, Any]) -> HistoryScope:
@@ -139,7 +140,7 @@ def test_scoped_selection_matches_agno_get_messages(session_key: str, selection_
         if "team_id" in params
         else HistoryScope(kind="agent", scope_id=params["agent_id"])
     )
-    runs = [run_record_from_dict(run) for run in _LOADED_SESSIONS[store][session_id]["runs"] or []]
+    runs = [stored_run_record(run) for run in _LOADED_SESSIONS[store][session_id]["runs"] or []]
 
     history = scope_history_messages(
         runs,

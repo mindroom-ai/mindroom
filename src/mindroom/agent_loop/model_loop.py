@@ -22,7 +22,7 @@ from mindroom.agent_loop.tools import (
     tool_result_message,
 )
 from mindroom.llm.errors import incomplete_stream_error
-from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
+from mindroom.llm.events import RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
@@ -137,7 +137,7 @@ class LoopEnded:
     paused: bool
 
 
-type LoopEvent = ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | LoopEnded
+type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | LoopEnded
 
 
 @dataclass
@@ -159,7 +159,7 @@ async def run_model_loop(
     record: AnyRunRecord,
     run: RunContext,
     hooks: LoopHooks = NO_HOOKS,
-    tool_call_limit: int | None = None,
+    max_tool_calls_per_turn: int | None = None,
     request_template: ModelRequest = EMPTY_REQUEST,
     resumed: Sequence[RunRequirement] | None = None,
 ) -> AsyncIterator[LoopEvent]:
@@ -187,7 +187,7 @@ async def run_model_loop(
         loop_start_ids=frozenset(message.id for message in messages),
         request_template=request_template,
     )
-    max_requests = None if tool_call_limit is None else tool_call_limit + _EXTRA_MODEL_REQUESTS
+    max_requests = None if max_tool_calls_per_turn is None else max_tool_calls_per_turn + _EXTRA_MODEL_REQUESTS
     progress = _Progress()
     if resumed is not None:
         async for event in _answer_resumed(resumed, state, progress, hooks):
@@ -214,7 +214,7 @@ async def run_model_loop(
         yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
         if not message.tool_calls:
             break
-        async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, tool_call_limit):
+        async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn):
             yield event
     if hooks.on_loop_end is not None and progress.last_request is not None:
         hooks.on_loop_end(state, progress.last_request)
@@ -278,7 +278,7 @@ async def _run_tool_batch(
     state: LoopState,
     progress: _Progress,
     hooks: LoopHooks,
-    tool_call_limit: int | None,
+    max_tool_calls_per_turn: int | None,
 ) -> AsyncIterator[ToolStarted | ToolCompleted]:
     """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them."""
     assert message.tool_calls
@@ -293,17 +293,17 @@ async def _run_tool_batch(
         state.offered.functions,
         state.messages,
         calls_so_far=progress.calls_so_far,
-        tool_call_limit=tool_call_limit,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
     )
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
         await hooks.before_dispatch(state, batch.planned)
     for call in batch.planned:
-        yield ToolStarted(call.execution)
+        yield ToolStarted(call.execution.call)
     executed = await dispatch_tool_calls(batch.planned, run=state.run, middleware=hooks.tool_middleware)
     for call in batch.planned:
         if not call.execution.is_paused:
-            yield ToolCompleted(call.execution)
+            yield ToolCompleted(call.execution.call)
     results = [*batch.refused, *executed]
     progress.calls_so_far += len(results)
     progress.stopped = await _answer_batch(state.messages, results, hooks.after_tool_batch)
@@ -337,11 +337,11 @@ async def _answer_resumed(
                 arguments=execution.tool_args,
                 execution=execution,
             )
-            yield ToolStarted(execution)
+            yield ToolStarted(execution.call)
             results.extend(await dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware))
-            yield ToolCompleted(execution)
+            yield ToolCompleted(execution.call)
         elif requirement.confirmation is False:
-            execution.tool_call_error = True
+            execution.is_error = True
             execution.requires_confirmation = False
             results.append(_rejection_message(requirement))
         if requirement.external_execution_result is not None:
@@ -361,7 +361,7 @@ def _rejection_message(requirement: RunRequirement) -> Message:
         tool_name=execution.tool_name,
         tool_args=execution.tool_args,
         tool_call_error=True,
-        stop_after_tool_call=execution.stop_after_tool_call,
+        stop_after_tool_call=execution.stop_after_call,
     )
 
 
@@ -411,7 +411,7 @@ async def _stream_turn(
     request: ModelRequest,
     messages: list[Message],
     metrics: RunMetrics,
-) -> AsyncIterator[ContentDelta | ReasoningDelta | TurnCompleted]:
+) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
 
     When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the usage it
@@ -428,9 +428,7 @@ async def _stream_turn(
         stream = model.stream(request)
         async with closing_async_stream(stream):
             async for event in stream:
-                if isinstance(event, TextDelta):
-                    yield ContentDelta(event.text)
-                elif isinstance(event, ReasoningDelta):
+                if isinstance(event, TextDelta | ReasoningDelta):
                     yield event
                 elif isinstance(event, UsageReported):
                     reported.observe(event)

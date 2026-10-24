@@ -3219,8 +3219,8 @@ async def test_notice_follows_a_tool_batch_media_follow_up_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_response_finalization_collapses_nested_current_notice_state(tmp_path: Path) -> None:
-    """Outer finalization should leave one exact notice in the top-level completed run."""
+async def test_response_finalization_collapses_a_team_runs_current_notice_state(tmp_path: Path) -> None:
+    """Outer finalization should leave one exact notice in the top-level completed run; its members hold none."""
     store = _recording_store(tmp_path, "queued-notice-team")
 
     with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
@@ -3234,7 +3234,7 @@ async def test_response_finalization_collapses_nested_current_notice_state(tmp_p
                 team_id="queued-notice-team",
                 status=OwnedRunStatus.completed,
                 messages=deepcopy(messages),
-                member_responses=[_completed("member-run-1", messages, agent_id="member")],
+                member_responses=[_completed("member-run-1", [], agent_id="member")],
             ),
             kind="team",
         )

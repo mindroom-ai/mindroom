@@ -16,7 +16,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunStatus
@@ -139,13 +139,13 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
         "RequestCompleted",
         "ToolStarted",
         "ToolCompleted",
-        "ContentDelta",
+        "TextDelta",
         "RequestCompleted",
     ]
     assert all(event.run_id == member.run_id for event in events if isinstance(event, MemberEvent))
     completed = next(event for event in writer_events if isinstance(event, ToolCompleted))
-    assert completed.tool.tool_name == "add"
-    leader_tools = [event.tool.tool_name for event in events if isinstance(event, ToolStarted | ToolCompleted)]
+    assert completed.call.tool_name == "add"
+    leader_tools = [event.call.tool_name for event in events if isinstance(event, ToolStarted | ToolCompleted)]
     assert leader_tools == ["delegate_task_to_member", "delegate_task_to_member"]
     # The member's terminal record is stored before the leader's delegation completes, and the team ends last.
     assert stored_when_the_delegation_completed == [[("writer", "COMPLETED")]]
@@ -175,7 +175,7 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
     assert comparable(member.to_dict()) == comparable(checker_row)
     assert (member.status, member.content) == (RunStatus.error, "Checker overloaded")
     assert record.tools is not None
-    assert (record.tools[0].result, record.tools[0].tool_call_error) == ("Checker overloaded", False)
+    assert (record.tools[0].result, record.tools[0].is_error) == ("Checker overloaded", False)
     assert store.statuses == [("checker", "ERROR"), ("squad", "COMPLETED")]
     assert [(log["event"], log["member_id"]) for log in logs if log["event"] == "team_member_run_failed"] == [
         ("team_member_run_failed", "checker"),
@@ -220,7 +220,7 @@ async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
     [requirement] = record.requirements
     # The approval card keys the call by member id and call id, both as the member run recorded them.
     assert f"{requirement.member_agent_id}:{requirement.tool_execution.tool_call_id}" == "checker:call-checker-multiply"
-    assert (requirement.member_agent_name, requirement.member_run_id) == ("Checker", member.run_id)
+    assert (requirement.member_display_name, requirement.member_run_id) == ("Checker", member.run_id)
     assert len(leader.requests) == 1  # The leader is not asked again while the member waits.
     assert store.statuses == [("checker", "PAUSED"), ("squad", "PAUSED")]
     assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
@@ -261,7 +261,7 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
         member_id: "".join(
             event.event.text
             for event in events
-            if isinstance(event, MemberEvent) and event.member_id == member_id and isinstance(event.event, ContentDelta)
+            if isinstance(event, MemberEvent) and event.member_id == member_id and isinstance(event.event, TextDelta)
         )
         for member_id in ("writer", "checker")
     }

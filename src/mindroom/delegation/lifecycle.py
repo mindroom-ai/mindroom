@@ -24,7 +24,7 @@ from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
-from mindroom.llm.events import ContentDelta, RunFinished, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_progress, report_tool_progress
@@ -194,10 +194,10 @@ async def settle_child_response(
     content = response.handover_content
     if response.status == RunStatus.completed:
         child.status = "completed"
-        child.result = str(content or "Agent completed the task but returned no content.")
+        child.result = content or "Agent completed the task but returned no content."
     elif response.status == RunStatus.cancelled:
         child.status = "cancelled"
-        child.result = str(content or "Delegation cancelled.")
+        child.result = content or "Delegation cancelled."
     elif response.status in {RunStatus.error, RunStatus.regenerated}:
         child.status = "failed"
         child.result = str(content or response.status)
@@ -266,8 +266,8 @@ async def child_run_context(
             _CHILD_RUN.reset(token)
 
 
-def _report_child_activity(observation: _ChildRunObservation, event: ContentDelta | ToolStarted) -> None:
-    text = event.text if isinstance(event, ContentDelta) else f"\nCalling {event.tool.tool_name}\n"
+def _report_child_activity(observation: _ChildRunObservation, event: TextDelta | ToolStarted) -> None:
+    text = event.text if isinstance(event, TextDelta) else f"\nCalling {event.call.tool_name}\n"
     if text:
         observation.activity = cap_progress(observation.activity + text)
         report_tool_progress(observation.activity)
@@ -280,7 +280,7 @@ async def observe_child_event(event: RunEvent) -> None:
     terminal record names the run it ended.
     """
     observation = _CHILD_RUN.get()
-    if observation is not None and isinstance(event, (ContentDelta, ToolStarted)):
+    if observation is not None and isinstance(event, (TextDelta, ToolStarted)):
         _report_child_activity(observation, event)
     if isinstance(event, RunFinished) and isinstance(event.record, RunRecord):
         observe_child_record(event.record)

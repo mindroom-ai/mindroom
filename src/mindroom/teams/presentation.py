@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_loop.run import own_answers
 from mindroom.delegation.state import member_slot_id
-from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
@@ -33,7 +33,8 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.llm.runs import AnyRunRecord, TeamRunRecord, ToolExecution
+    from mindroom.llm.events import ReportedCall
+    from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
 
@@ -104,10 +105,7 @@ def finished_run_text(record: AnyRunRecord) -> str:
     A failed run shows why it failed, credentials redacted, and a run without content never shows an earlier reply
     of the thread that its input carried.
     """
-    content = record.handover_content
-    if content:
-        return str(content)
-    return "\n\n".join(own_answers(record))
+    return record.handover_content or "\n\n".join(own_answers(record))
 
 
 def format_team_response(record: TeamRunRecord) -> str:
@@ -123,11 +121,11 @@ def format_team_response(record: TeamRunRecord) -> str:
     # streamed reply shows one slot per member in configured order. Render both from the member slots in configured
     # order. Users, API clients, and replayed history would notice.
     contributions = [
-        _format_member_contribution(member.agent_name or "Team Member", text)
+        _format_member_contribution(member.agent_display_name or "Team Member", text)
         for member in record.ended_member_runs
         if (text := finished_run_text(member)).strip()
     ]
-    return "\n\n".join(_with_consensus(contributions, str(record.handover_content or "")))
+    return "\n\n".join(_with_consensus(contributions, record.handover_content or ""))
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
@@ -321,10 +319,10 @@ class TeamStreamPresentation:
             self.consensus = remap_visible_tool_marker_indices(self.consensus, index_map)
         self.tool_tracker.sync_visible_indices(self.tool_trace)
 
-    def start_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
+    def start_tool(self, scope_key: str, call: ReportedCall) -> None:
         """Record a tool start in its exact member or coordinator slot."""
         tool_index = len(self.tool_trace) + 1
-        marker, trace_entry = self.tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
+        marker, trace_entry = self.tool_tracker.start(call, scope_key=scope_key, tool_index=tool_index)
         if trace_entry is None:
             return
         trace_entry.scope_key = scope_key
@@ -335,13 +333,10 @@ class TeamStreamPresentation:
             self.separate_next_scopes.add(scope_key)
         self._align_tool_trace_with_document()
 
-    def complete_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
+    def complete_tool(self, scope_key: str, call: ReportedCall) -> None:
         """Complete only the pending slot identified by this tool event."""
-        completion = self.tool_tracker.complete(tool, scope_key=scope_key)
-        if completion is None:
-            return
-        tool_name, result, pending_tool, completed_trace = completion
-        if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
+        tool_name, result, pending_tool, completed_trace = self.tool_tracker.complete(call, scope_key=scope_key)
+        if pending_tool is None or pending_tool.visible_tool_index is None:
             return
         completed_trace.scope_key = scope_key
         if self.show_tool_calls:
@@ -354,13 +349,13 @@ class TeamStreamPresentation:
             self._set_slot_text(scope_key, updated_text)
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
-    def start_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
+    def start_member_tool(self, member_id: str, call: ReportedCall) -> None:
         """Record a tool start in the slot of ``member_id``, which ``resolve_member_id`` returned."""
-        self.start_tool(f"agent:{member_id}", tool)
+        self.start_tool(f"agent:{member_id}", call)
 
-    def complete_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
+    def complete_member_tool(self, member_id: str, call: ReportedCall) -> None:
         """Record a tool completion in the slot of ``member_id``, which ``resolve_member_id`` returned."""
-        self.complete_tool(f"agent:{member_id}", tool)
+        self.complete_tool(f"agent:{member_id}", call)
 
     def render_body(self) -> str:
         """Render the current structured document."""
@@ -379,18 +374,18 @@ def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) 
     if isinstance(event, MemberEvent):
         member_id = presentation.resolve_member_id(event.member_id, event.member_name)
         inner = event.event
-        if isinstance(inner, ContentDelta):
+        if isinstance(inner, TextDelta):
             presentation.append_member(member_id, inner.text)
         elif isinstance(inner, ToolStarted):
-            presentation.start_member_tool(member_id, inner.tool)
+            presentation.start_member_tool(member_id, inner.call)
         elif isinstance(inner, ToolCompleted):
-            presentation.complete_member_tool(member_id, inner.tool)
-    elif isinstance(event, ContentDelta):
+            presentation.complete_member_tool(member_id, inner.call)
+    elif isinstance(event, TextDelta):
         presentation.append_consensus(event.text)
     elif isinstance(event, ToolStarted):
-        presentation.start_tool("team", event.tool)
+        presentation.start_tool("team", event.call)
     elif isinstance(event, ToolCompleted):
-        presentation.complete_tool("team", event.tool)
+        presentation.complete_tool("team", event.call)
 
 
 async def publish_team_presentation(

@@ -19,7 +19,7 @@ from uuid import uuid4
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
@@ -244,7 +244,7 @@ def sse_chunk(
 
 def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: ToolStreamState) -> str:
     """Format one tool event as an inline tool block whose id the call's start and completion share."""
-    tool_call_id = str(event.tool.tool_call_id).strip()
+    tool_call_id = str(event.call.tool_call_id).strip()
     if not tool_call_id:
         msg = "Streaming tool events require a non-empty tool_call_id"
         raise ValueError(msg)
@@ -257,9 +257,7 @@ def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: Too
         tool_state.next_tool_id += 1
         if started:
             ids[tool_call_id] = tool_id
-    _, trace = format_tool_started_event(event.tool) if started else format_tool_completed_event(event.tool)
-    # A present tool always formats to a trace.
-    assert trace is not None
+    _, trace = format_tool_started_event(event.call) if started else format_tool_completed_event(event.call)
     message = f"{escape(trace.tool_name, quote=True)}({escape(trace.args_preview or '', quote=True)})"
     if not started:
         message += f"\n{escape(trace.result_preview or '', quote=True)}"
@@ -284,7 +282,7 @@ def finalize_pending_tools(tool_state: ToolStreamState) -> str | None:
 
 def extract_stream_text(event: AIStreamChunk, tool_state: ToolStreamState) -> str | None:
     """Return the wire text of one agent stream chunk: reply text, a plain string, or a tool block."""
-    if isinstance(event, ContentDelta):
+    if isinstance(event, TextDelta):
         return event.text
     if isinstance(event, str):
         return event

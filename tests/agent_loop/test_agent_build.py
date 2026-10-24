@@ -121,7 +121,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert build.spec.system_message is None
     assert [toolkit.name for toolkit in build.spec.toolkits] == ["calculator", "search_knowledge_base", "skills"]
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"search_knowledge_base"} | SKILL_FUNCTION_NAMES
-    assert build.spec.tool_call_limit == config.resolve_entity("assistant").max_tool_calls_per_turn
+    assert build.spec.max_tool_calls_per_turn == config.resolve_entity("assistant").max_tool_calls_per_turn
     assert build.tool_owners == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "assistant")
     assert f"### {workspace / 'SOUL.md'}\nYou are calm and precise." in build.prompt.role

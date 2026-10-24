@@ -6,7 +6,6 @@ import asyncio
 import inspect
 from contextlib import asynccontextmanager
 from contextvars import Context, copy_context
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
@@ -15,7 +14,7 @@ from uuid import uuid4
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
-from mindroom.agent_cli.events import emit_cli_run_event, emit_cli_tool_event, project_cli_execution
+from mindroom.agent_cli.events import emit_cli_run_event, emit_cli_tool_event
 from mindroom.agent_cli.json_io import canonical_json, read_json
 from mindroom.agent_cli.projection import project_cli_result, register_cli_media, schema_context_document
 from mindroom.agent_cli.protocol import (
@@ -37,7 +36,7 @@ from mindroom.agent_cli.session import (
 from mindroom.agent_cli.shell_contract import bound_agent_cli_shell_env
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
-from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_shell_call, execute_agent_tool_call
@@ -56,7 +55,8 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv
     from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.runs import RunRequirement, ToolExecution
+    from mindroom.llm.events import ReportedCall
+    from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import (
         PreparedAgentToolBinding,
         PreparedAgentToolCatalog,
@@ -189,7 +189,7 @@ class LiveTurnTools(TurnToolBridge):
         self._binding_retired = False
         # Retired attempt catalogs that open shell windows still call through, closed with this owner.
         self._retired_catalogs: list[PreparedAgentToolCatalog] = []
-        self.control_executions: list[ToolExecution] = []
+        self.control_calls: list[ReportedCall] = []
         self._close_task: asyncio.Task[None] | None = None
         self.close_for_shutdown = False
         self._response_task: asyncio.Task | None = None
@@ -290,7 +290,7 @@ class LiveTurnTools(TurnToolBridge):
                 "with its Bash command's MINDROOM_AGENT_CLI_WINDOW"
             )
             raise CliBashWindowRequiredError(msg)
-        if self.control_executions:
+        if self.control_calls:
             # The control fence rejects every window, including ones whose command still runs.
             msg = "Call cancelled before dispatch: continuation requires a rebuilt tool catalog"
             raise CliBashWindowRequiredError(msg)
@@ -406,7 +406,7 @@ class LiveTurnTools(TurnToolBridge):
         """Checkpoint exact provider history before any binding, hook or shell IO."""
         async with self._outer:
             self._check_live()
-            if self.control_executions:
+            if self.control_calls:
                 return _stopping("Bash cancelled before dispatch: continuation requires a rebuilt tool catalog.")
             if self._binding_retired or key.toolkit != "shell":
                 msg = "Bash binding is unavailable"
@@ -432,15 +432,15 @@ class LiveTurnTools(TurnToolBridge):
                 async for event in events:
                     if event.media is not None:
                         media_results.append(event.media)
-                    if event.execution is not None:
-                        terminal = event.execution
+                    if event.call is not None:
+                        terminal = event.call
             if terminal is None:
                 msg = "Canonical shell returned no terminal execution"
                 raise RuntimeError(msg)
             result_with_media = _with_media(str(terminal.result or ""), media_results)
             self.checkpoint.complete(call_id, result_with_media)
             # A control tool this command ran ends the run after its batch, so the next attempt runs with it.
-            return _stopping(result_with_media) if self.control_executions else result_with_media
+            return _stopping(result_with_media) if self.control_calls else result_with_media
 
     async def execute_shell(
         self,
@@ -561,9 +561,7 @@ class LiveTurnTools(TurnToolBridge):
             # Native iterator has closed; no catalog mutation lock spans human time.
             await self.checkpoint.persist_approval(parent)
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
-            presentation.start_tool(
-                project_cli_execution(waiting.tool_execution, parent=parent, toolkit_name=binding.key.toolkit),
-            )
+            presentation.start_tool(waiting.tool_execution.call, origin=ToolCallOrigin(parent, binding.key.toolkit))
             resolved = await handler(
                 PausedAttempt(
                     session_id=self.catalog.run.session_id,
@@ -608,7 +606,7 @@ class LiveTurnTools(TurnToolBridge):
 
         def on_child_event(event: object) -> None:
             if isinstance(event, ToolStarted | ToolCompleted):
-                child_call_id = str(event.tool.tool_call_id)
+                child_call_id = str(event.call.tool_call_id)
                 if child_call_id in child_toolkits:
                     emit_cli_run_event(event, parent=parent, toolkit_name=child_toolkits[child_call_id])
 
@@ -617,7 +615,7 @@ class LiveTurnTools(TurnToolBridge):
                 if not started:
                     started = True
                     tool = requirement.tool_execution
-                    yield AgentToolCallEvent("started", str(tool.tool_call_id), binding.key, execution=tool)
+                    yield AgentToolCallEvent("started", str(tool.tool_call_id), binding.key, call=tool.call)
                 result = await advance_cli_delegation(
                     binding,
                     requirement,
@@ -631,7 +629,7 @@ class LiveTurnTools(TurnToolBridge):
                     on_event=on_child_event,
                 )
             if not isinstance(result, PausedAttempt):
-                yield AgentToolCallEvent("completed", str(result.tool_call_id), binding.key, execution=result)
+                yield AgentToolCallEvent("completed", str(result.tool_call_id), binding.key, call=result.call)
                 return
             handler = self.catalog.runtime_context.cli_approval_handler
             if handler is None:
@@ -644,8 +642,8 @@ class LiveTurnTools(TurnToolBridge):
                     (result.approval_agent_name or self.catalog.runtime_context.agent_name, str(tool.tool_name)),
                 )
                 child_toolkits[str(tool.tool_call_id)] = child_toolkit
-                emit_cli_run_event(ToolStarted(tool), parent=parent, toolkit_name=child_toolkit)
-                presentation.start_tool(project_cli_execution(tool, parent=parent, toolkit_name=child_toolkit))
+                emit_cli_run_event(ToolStarted(tool.call), parent=parent, toolkit_name=child_toolkit)
+                presentation.start_tool(tool.call, origin=ToolCallOrigin(parent, child_toolkit))
             paused = replace(result, response_text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace))
             resolved = await handler(paused)
             approval_calls = approval_calls_for_cli_pause(paused, self.catalog.runtime_context.agent_name)
@@ -653,14 +651,14 @@ class LiveTurnTools(TurnToolBridge):
             denial_reasons = {str(item.tool_execution.tool_call_id): item.confirmation_note for item in resolved}
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
-        if event.kind == "continuation_required" and event.execution is not None:
+        if event.kind == "continuation_required" and event.call is not None:
             # Synchronous fencing happens while the executing call owns the catalog lock:
             # new calls are rejected, executing lifetimes drain, waiting calls fail at dispatch.
-            self.control_executions.append(deepcopy(event.execution))
+            self.control_calls.append(event.call)
 
     def _check_dispatch(self) -> None:
         self._check_live()
-        if self.control_executions:
+        if self.control_calls:
             msg = "Call cancelled before dispatch: continuation requires a rebuilt tool catalog"
             raise _StaleAttemptError(msg)
 
@@ -748,9 +746,9 @@ class LiveTurnTools(TurnToolBridge):
                         call.receipt = call.receipt.model_copy(update={"status": "running"})
                     if event.kind == "waiting":
                         call.receipt = call.receipt.model_copy(update={"status": "waiting"})
-                    if event.kind in {"completed", "failed", "continuation_required"} and event.execution is not None:
-                        status = "failed" if event.execution.tool_call_error else "completed"
-                        result = event.execution.result
+                    if event.kind in {"completed", "failed", "continuation_required"} and event.call is not None:
+                        status = "failed" if event.call.is_error else "completed"
+                        result = event.call.result
         except _StaleAttemptError as exc:
             status = "cancelled"
             result = str(exc)
@@ -816,7 +814,7 @@ class LiveTurnTools(TurnToolBridge):
         if context is not None:
             self._context = dict(context)
         self.checkpoint = BatchCheckpoint(catalog)
-        self.control_executions = []
+        self.control_calls = []
         self._binding_retired = False
 
     async def close(self) -> None:

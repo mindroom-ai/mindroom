@@ -127,9 +127,9 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
             denial_reasons=dict.fromkeys(decisions or {}),
         ):
             if isinstance(event, ToolStarted):
-                presentation.start_tool(event.tool)
+                presentation.start_tool(event.call)
             elif isinstance(event, ToolCompleted):
-                presentation.complete_tool(event.tool)
+                presentation.complete_tool(event.call)
             elif isinstance(event, RunFinished):
                 completed = event.record
 

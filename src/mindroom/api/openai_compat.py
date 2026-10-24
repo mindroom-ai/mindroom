@@ -64,7 +64,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePa
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
@@ -926,7 +926,7 @@ async def _stream_completion(
             while event is not None:
                 if isinstance(event, RunFinished):
                     content = event.record.content
-                    completed_body = str(content) if content is not None else completed_body
+                    completed_body = content if content is not None else completed_body
                 elif (failure_text := extract_agent_stream_failure(event)) is not None:
                     stream_failed = True
                     logger.warning(
@@ -938,7 +938,7 @@ async def _stream_completion(
                     yield sse_chunk(state, {"content": failure_text})
                     break
                 elif text := extract_stream_text(event, state.tool_state):
-                    if isinstance(event, ContentDelta | str):
+                    if isinstance(event, TextDelta | str):
                         saw_text_delta = True
                     yield sse_chunk(state, {"content": text})
                 event = await anext(stream, None)
@@ -1351,4 +1351,4 @@ def _team_stream_text(event: TeamRunEvent, tool_state: ToolStreamState) -> str |
     inner = event.event if isinstance(event, MemberEvent) else event
     if isinstance(inner, ToolStarted | ToolCompleted):
         return format_stream_tool_event(inner, tool_state)
-    return event.text if isinstance(event, ContentDelta) else None
+    return event.text if isinstance(event, TextDelta) else None

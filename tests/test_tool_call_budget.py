@@ -47,7 +47,7 @@ async def _run(
 ) -> tuple[ScriptedModel, list[Message], RunStatus]:
     model = ScriptedModel(turns)
     _, record = await collect(
-        run_agent(spec(model, toolkit(probe), tool_call_limit=_BUDGET), [], ctx=context(run_id=run_id)),
+        run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET), [], ctx=context(run_id=run_id)),
     )
     return model, record.messages, record.status
 
@@ -69,7 +69,9 @@ async def test_model_that_keeps_requesting_tools_ends_its_run(shape: str) -> Non
     model = ScriptedModel([_tool_turn(index, tool_name, arguments) for index in range(_CAP + 1)])
 
     with capture_logs() as logs:
-        _, record = await collect(run_agent(spec(model, toolkit(probe), tool_call_limit=_BUDGET), [], ctx=context()))
+        _, record = await collect(
+            run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET), [], ctx=context()),
+        )
 
     assert len(model.requests) == _CAP
     assert executed == (["probe"] * _BUDGET if shape == "known_tool" else [])
@@ -91,7 +93,9 @@ async def test_model_that_answers_after_the_first_refused_batch_keeps_its_closin
     model = ScriptedModel(turns)
 
     with capture_logs() as logs:
-        _, record = await collect(run_agent(spec(model, toolkit(probe), tool_call_limit=_BUDGET), [], ctx=context()))
+        _, record = await collect(
+            run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET), [], ctx=context()),
+        )
 
     assert len(model.requests) == _CAP
     assert executed == ["probe"] * _BUDGET
@@ -108,7 +112,9 @@ async def test_tool_calls_within_the_budget_are_untouched() -> None:
     model = ScriptedModel(turns)
 
     with capture_logs() as logs:
-        _, record = await collect(run_agent(spec(model, toolkit(probe), tool_call_limit=_BUDGET), [], ctx=context()))
+        _, record = await collect(
+            run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET), [], ctx=context()),
+        )
 
     assert len(model.requests) == _BUDGET + 1
     assert executed == ["probe"] * _BUDGET
@@ -121,7 +127,7 @@ async def test_each_run_starts_a_fresh_count() -> None:
     """A finished run leaves no count behind for the next run of the same agent."""
     turns = [_tool_turn(index, "probe", "{}") for index in range(2 * _CAP)]
     model = ScriptedModel(turns)
-    agent = spec(model, toolkit(probe), tool_call_limit=_BUDGET)
+    agent = spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET)
 
     with capture_logs() as logs:
         await collect(run_agent(agent, [], ctx=context(run_id="run-1")))

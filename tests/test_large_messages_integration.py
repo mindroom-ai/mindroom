@@ -674,8 +674,8 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
     tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
-        yield ToolStarted(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
-        yield ToolCompleted(tool=tool)
+        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+        yield ToolCompleted(call=tool.call)
 
     outcome = await send_streaming_response(
         client=client,
@@ -703,7 +703,7 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
-        yield ToolStarted(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
 
     outcome = await send_streaming_response(
         client=client,
@@ -734,9 +734,9 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
-        yield ToolStarted(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
         yield "hello world"
-        yield ToolCompleted(tool=tool)
+        yield ToolCompleted(call=tool.call)
 
     outcome = await send_streaming_response(
         client=client,
@@ -766,9 +766,9 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
     config = MockConfig()
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
-        yield ToolStarted(tool=ToolExecution(tool_name="first_tool", tool_args={}))
+        yield ToolStarted(call=ToolExecution(tool_name="first_tool", tool_args={}).call)
         await asyncio.sleep(0)
-        yield ToolStarted(tool=ToolExecution(tool_name="second_tool", tool_args={}))
+        yield ToolStarted(call=ToolExecution(tool_name="second_tool", tool_args={}).call)
         await asyncio.sleep(0)
         yield "Done"
 

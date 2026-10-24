@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from mindroom.llm.runs import RunRecord, TeamRunRecord
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from mindroom.llm.runs import AnyRunRecord
 
 # Keys Agno wrote that the owned ``ToolExecution`` does not model (Agno's user-input HITL variants).
 DROPPED_TOOL_EXECUTION_KEYS = frozenset(
@@ -51,3 +58,8 @@ def expected_requirement_dict(data: dict[str, Any]) -> dict[str, Any]:
     result = dict(data)
     result["tool_execution"] = without(result["tool_execution"], DROPPED_TOOL_EXECUTION_KEYS)
     return result
+
+
+def stored_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
+    """Decode a stored run dict as its row's ``run_type`` does: a ``team_id`` key marks a team run."""
+    return TeamRunRecord.from_dict(data) if "team_id" in data else RunRecord.from_dict(data)

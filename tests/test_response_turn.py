@@ -152,7 +152,7 @@ def _model_switch_execution(when: str) -> ToolExecution:
                 "when": when,
             },
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
 
@@ -280,7 +280,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     )
     requirement = RunRequirement(tool)
     requirement.member_agent_id = "member-id"
-    requirement.member_agent_name = "researcher"
+    requirement.member_display_name = "researcher"
     requirement.member_run_id = "member-run"
     response = TeamRunRecord(
         run_id="team-run",
@@ -300,7 +300,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused is not None
     assert paused.tools == (tool,)
     assert paused.requirements == (requirement,)
-    assert paused.requirements[0].member_agent_name == "researcher"
+    assert paused.requirements[0].member_display_name == "researcher"
 
 
 @pytest.mark.parametrize(
@@ -1188,7 +1188,7 @@ def test_blocking_after_toolcall_switch_selects_new_continuation_model(hidden: b
             return CompletedAttempt(
                 attempt_run_id="run-1",
                 tool_executions=() if hidden else (_model_switch_execution("after-toolcall"),),
-                control_executions=(_model_switch_execution("after-toolcall"),) if hidden else (),
+                control_calls=(_model_switch_execution("after-toolcall").call,) if hidden else (),
             )
         return CompletedAttempt(response_text="final", replayable_text="final", has_visible_content=True)
 
@@ -1221,7 +1221,7 @@ def test_blocking_next_turn_switch_keeps_current_model_for_continuation(hidden: 
                 attempt_run_id="run-1",
                 runtime_model_name="default",
                 tool_executions=() if hidden else (_model_switch_execution("next-turn"),),
-                control_executions=(_model_switch_execution("next-turn"),) if hidden else (),
+                control_calls=(_model_switch_execution("next-turn").call,) if hidden else (),
             )
         return CompletedAttempt(response_text="final", replayable_text="final", has_visible_content=True)
 
@@ -1757,7 +1757,7 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
                 CompletedAttempt(
                     attempt_run_id="run-1",
                     tool_executions=() if hidden else (_model_switch_execution("next-turn"),),
-                    control_executions=(_model_switch_execution("next-turn"),) if hidden else (),
+                    control_calls=(_model_switch_execution("next-turn").call,) if hidden else (),
                 ),
             )
             return

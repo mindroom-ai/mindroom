@@ -22,7 +22,7 @@ from mindroom.delegation.lifecycle import (
     prepare_child_turn,
 )
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.events import ContentDelta, RunFinished, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.redaction import redact_sensitive_text
@@ -323,9 +323,11 @@ async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: P
 
     async def talking_child(_ctx: object, **kwargs: object) -> str:
         cast("Callable[[str], None]", kwargs["run_id_callback"])("child-run")
-        await observe_child_event(ContentDelta("Reading "))
-        await observe_child_event(ContentDelta("the logs."))
-        await observe_child_event(ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={})))
+        await observe_child_event(TextDelta("Reading "))
+        await observe_child_event(TextDelta("the logs."))
+        await observe_child_event(
+            ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}).call),
+        )
         return "done"
 
     with (

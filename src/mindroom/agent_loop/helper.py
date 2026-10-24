@@ -76,7 +76,7 @@ async def complete_once[T: BaseModel](
     record = RunRecord(
         run_id=run_id or str(uuid4()),
         status=RunStatus.completed,
-        content=parsed.model_dump(mode="json", exclude_none=True) if parsed is not None else text or None,
+        content=text or None,
         model=identity.id,
         model_provider=identity.provider,
         messages=[*messages, turn.message],

@@ -157,7 +157,7 @@ def _resolve_live_function(
     # TODO(simplify): Scheduling refuses a tool that takes media although its live calls get none either. Drop the
     # media check. Models could schedule calls of those tools.
     takes_media = not function.injected_params.isdisjoint(MEDIA_INJECTED_PARAMS)
-    if function.external_execution or function.stop_after_tool_call or takes_media:
+    if function.external_execution or function.stop_after_call or takes_media:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
         toolkit_name=owner,

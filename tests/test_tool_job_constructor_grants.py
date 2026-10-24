@@ -97,7 +97,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
         try:
             record = await run_job_turn(actor, model, "Write the marker", session_id=owner.session_id or "session")
             [nested] = record.tools or []
-            return BackgroundOutcome("failed" if nested.tool_call_error else "completed", str(nested.result))
+            return BackgroundOutcome("failed" if nested.is_error else "completed", str(nested.result))
         finally:
             finished.set()
 

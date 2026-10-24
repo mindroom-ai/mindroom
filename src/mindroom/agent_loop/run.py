@@ -92,7 +92,7 @@ def run_agent(
         metrics=RunMetrics(),
         metadata=ctx.metadata,
         agent_id=spec.id,
-        agent_name=spec.name,
+        agent_display_name=spec.name,
     )
     messages = [*([] if spec.system_message is None else [spec.system_message]), *run_input]
     return drive_run(
@@ -338,7 +338,7 @@ async def drive_run[R: AnyRunRecord](
             record=record,
             run=ctx,
             hooks=hooks,
-            tool_call_limit=spec.tool_call_limit,
+            max_tool_calls_per_turn=spec.max_tool_calls_per_turn,
             request_template=template,
             resumed=resumed,
         )

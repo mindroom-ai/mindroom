@@ -25,7 +25,6 @@ from mindroom.llm.runs import (
     RunStatus,
     TeamRunRecord,
     ToolExecution,
-    run_record_from_dict,
 )
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, ToolCallMetrics
 from tests.llm.agno_dict_helpers import (
@@ -33,6 +32,7 @@ from tests.llm.agno_dict_helpers import (
     DROPPED_TOOL_EXECUTION_KEYS,
     expected_requirement_dict,
     expected_run_dict,
+    stored_run_record,
     without,
 )
 
@@ -410,18 +410,6 @@ def test_team_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
     assert TeamRunRecord(run_id="t", team_id="x", created_at=1).to_dict()["member_responses"] == []
 
 
-def test_run_record_from_dict_discriminates_on_team_id() -> None:
-    outer_dict = agno("team_run_with_nested_team")
-
-    record = run_record_from_dict(outer_dict)
-
-    assert isinstance(record, TeamRunRecord)
-    assert [type(member) for member in record.member_responses] == [RunRecord, TeamRunRecord]
-    assert isinstance(run_record_from_dict(agno("member_run")), RunRecord)
-    assert record.to_dict() == expected_run_dict(outer_dict)
-    assert isinstance(run_record_from_dict(agno("usage_only_run")), RunRecord)
-
-
 def test_run_status_values_and_names_match_agno() -> None:
     assert [[status.name, status.value] for status in RunStatus] == AGNO["run_statuses"]
     for status in RunStatus:
@@ -497,8 +485,8 @@ FIXTURE_RUNS = FIXTURES / "runs"
 
 # Fixture file -> (reader, expected dict for one stored case); every file under ``runs/`` has an entry.
 FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[str, Any]], dict[str, Any]]]] = {
-    "run_output": (run_record_from_dict, expected_run_dict),
-    "team_run_output": (run_record_from_dict, expected_run_dict),
+    "run_output": (stored_run_record, expected_run_dict),
+    "team_run_output": (stored_run_record, expected_run_dict),
     "message": (Message.from_dict, dict),
     "image": (Image.from_dict, dict),
     "audio": (Audio.from_dict, dict),

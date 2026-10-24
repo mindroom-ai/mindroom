@@ -147,7 +147,7 @@ async def interrupt_child(
         for tool in response.tools or ():
             if tool.is_paused:
                 tool.result = reason
-                tool.tool_call_error = True
+                tool.is_error = True
             tool.requires_confirmation = False
             tool.external_execution_required = False
 

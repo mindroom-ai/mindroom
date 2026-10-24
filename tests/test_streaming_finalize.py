@@ -27,7 +27,7 @@ from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal.models import DeliveryStage
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -733,10 +733,10 @@ async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_pa
     captured_edits: list[dict[str, Any]] = []
 
     async def tool_then_final_content() -> AsyncIterator[object]:
-        yield ContentDelta("Let me search...\n\n")
+        yield TextDelta("Let me search...\n\n")
         tool = ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="ok")
-        yield ToolStarted(tool=tool)
-        yield ToolCompleted(tool=tool)
+        yield ToolStarted(call=tool.call)
+        yield ToolCompleted(call=tool.call)
         yield RunFinished(RunRecord(run_id="run-final", content="Final answer"))
 
     async def record_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:

@@ -118,7 +118,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
 
     async def watched():
         async for event in stream_cli_events(source()):
-            if isinstance(event, ToolStarted) and event.tool.tool_name == "produce":
+            if isinstance(event, ToolStarted) and event.call.tool_name == "produce":
                 assert not finished
             yield event
 
@@ -140,7 +140,9 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
     assert "⏳" not in text
     assert trace[1].parent_bash_call_id == "outer"
     assert trace[1].toolkit_name == "media"
-    assert [tool.tool_name for tool in state.completed_tool_executions] == ["bash"]
+    # The run's own calls, which its completed attempt reports, are those of its record: the hidden call is not one.
+    assert state.terminal.record is not None
+    assert [tool.tool_name for tool in state.terminal.record.tools or ()] == ["bash"]
 
     stored = serialize_tool_trace(trace, include_internal=True)
     assert deserialize_tool_trace(stored)[1].parent_bash_call_id == "outer"

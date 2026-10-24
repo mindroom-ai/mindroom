@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.approval.execution import _collect_agent_continuation
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
@@ -33,7 +33,7 @@ def test_identify_approval_tools_keeps_team_member_owner(member_agent_id: str) -
     )
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = member_agent_id
-    requirement.member_agent_name = "Researcher"
+    requirement.member_display_name = "Researcher"
 
     identified = identify_approval_tools(
         PausedAttempt(
@@ -68,7 +68,7 @@ def member_pause() -> PausedAttempt:
     tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True)
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = "test_agent"
-    requirement.member_agent_name = "Test Agent"
+    requirement.member_display_name = "Test Agent"
     return PausedAttempt(
         session_id="session-1",
         run_id="run-1",
@@ -330,7 +330,7 @@ async def test_streamed_text_is_the_continuation_delta_and_the_record_adds_nothi
     presentation = CollectedStreamPresentation(show_tool_calls=True, response_text="Before approval. ")
 
     response = await _collect_agent_continuation(
-        _events(ContentDelta("After "), ContentDelta("approval."), _finished(content="After approval.")),
+        _events(TextDelta("After "), TextDelta("approval."), _finished(content="After approval.")),
         presentation,
         progress=None,
     )
@@ -359,7 +359,7 @@ async def test_agent_approval_completion_preserves_recovered_same_name_trace(com
         ],
     )
     tool = ToolExecution(tool_call_id="current-call", tool_name="inspect", result="current result")
-    events = [ToolCompleted(tool)] if completion_source == "stream" else []
+    events = [ToolCompleted(tool.call)] if completion_source == "stream" else []
     events.append(_finished(run_id="current-run", tools=[tool]))
 
     await _collect_agent_continuation(_events(*events), presentation, progress=None)
@@ -467,8 +467,8 @@ async def test_hidden_agent_continuation_separates_text_across_a_new_tool_bounda
 
     collected = await _collect_agent_continuation(
         _events(
-            ToolStarted(ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={})),
-            ToolCompleted(tool),
+            ToolStarted(ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={}).call),
+            ToolCompleted(tool.call),
             _finished(content="After tool.", tools=[tool]),
         ),
         presentation,

@@ -31,7 +31,7 @@ from mindroom.agent_loop.run import (
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.history.request_messages import build_resume_request
-from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RequestCompleted, RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
@@ -59,7 +59,7 @@ class MemberEvent:
     member_id: str
     member_name: str
     run_id: str
-    event: ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
+    event: TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
 
 
 type TeamRunEvent = RunEvent | MemberEvent
@@ -181,7 +181,7 @@ def team_paused_content(record: TeamRunRecord) -> str:
     The only externally executed calls are the silent delegation calls, so a pause on delegations alone has no text.
     """
     parts = [
-        f"- {r.member_agent_name or 'team'}: {r.tool_execution.tool_name or 'unknown'} requires confirmation"
+        f"- {r.member_display_name or 'team'}: {r.tool_execution.tool_name or 'unknown'} requires confirmation"
         for r in record.requirements or ()
         if r.needs_confirmation
     ]
@@ -264,7 +264,7 @@ def _plan_member_resumes(
 ) -> list[_MemberResume]:
     """Plan one resume per paused member run, checking every member's decisions before any member runs."""
     members = {member.spec.id: member for member in spec.members}
-    embedded = {member.run_id: member for member in paused.member_responses if isinstance(member, RunRecord)}
+    embedded = {member.run_id: member for member in paused.member_responses}
     by_run: dict[tuple[str, str], list[RunRequirement]] = {}
     for requirement in requirements:
         assert requirement.member_agent_id is not None
@@ -294,7 +294,7 @@ def _plan_member_resumes(
                 replace(
                     requirement,
                     member_agent_id=member.spec.id,
-                    member_agent_name=member.spec.name,
+                    member_display_name=member.spec.name,
                     member_run_id=run_id,
                 )
                 for requirement in member_record.requirements or ()
@@ -344,7 +344,7 @@ def _base_leader_spec(spec: TeamSpec) -> AgentSpec:
         model=spec.model,
         system_message=spec.system_message,
         toolkits=spec.toolkits,
-        tool_call_limit=spec.tool_call_limit,
+        max_tool_calls_per_turn=spec.max_tool_calls_per_turn,
     )
 
 

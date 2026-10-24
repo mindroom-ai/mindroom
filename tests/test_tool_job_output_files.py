@@ -125,7 +125,7 @@ async def test_job_retrieval_applies_workspace_output_policy(output_agent: _Outp
     arguments = {"mindroom_output_path": "results/job.txt"} if explicit else {}
     response = await case.call("job", action="wait", job_id=job_id, **arguments)
     assert response.tools
-    assert not response.tools[0].tool_call_error
+    assert not response.tools[0].is_error
     result = literal_eval(str(response.tools[0].result))
     receipt = result["mindroom_tool_output"]
     assert receipt["status"] == "saved_to_file"
@@ -147,7 +147,7 @@ async def test_job_output_path_is_validated_before_claiming_result(output_agent:
     job_id = await case.save_job()
     response = await case.call("job", action="wait", job_id=job_id, mindroom_output_path="../escape.txt")
     assert response.tools
-    assert not response.tools[0].tool_call_error
+    assert not response.tools[0].is_error
     assert literal_eval(str(response.tools[0].result))["mindroom_tool_output"]["status"] == "error"
     saved = await lookup(case.runtime, job_id, owner=case.owner, depth=0)
     assert not saved.consumed
@@ -179,7 +179,7 @@ async def test_native_delegation_job_wait_redirects_saved_result(output_agent: _
     response = await case.call("job", action="wait", job_id=job.job_id, **arguments)
     assert response.status is RunStatus.completed
     assert response.tools
-    assert not response.tools[0].tool_call_error
+    assert not response.tools[0].is_error
     receipt = literal_eval(str(response.tools[0].result))["mindroom_tool_output"]
     assert receipt["status"] == "saved_to_file"
     assert (case.workspace / receipt["path"]).read_bytes() == _LARGE_RESULT.encode()

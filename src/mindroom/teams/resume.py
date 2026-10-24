@@ -255,7 +255,7 @@ def _member_call_event(requirement: RunRequirement, event: ToolStarted | ToolCom
     """
     if requirement.member_agent_id is None or requirement.member_run_id is None:
         return event
-    member_name = requirement.member_agent_name or requirement.member_agent_id
+    member_name = requirement.member_display_name or requirement.member_agent_id
     return cast("RunEvent", MemberEvent(requirement.member_agent_id, member_name, requirement.member_run_id, event))
 
 
@@ -301,7 +301,7 @@ def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirem
     member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
     if member_id is None:
         return "team", call_id
-    return f"agent:{presentation.resolve_member_id(member_id, requirement.member_agent_name)}", call_id
+    return f"agent:{presentation.resolve_member_id(member_id, requirement.member_display_name)}", call_id
 
 
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
@@ -315,7 +315,7 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
         if member_delegation_card(requirement, member_names):
             continue
         scope, _ = _waiting_slot(presentation, requirement)
-        presentation.start_tool(scope, requirement.tool_execution)
+        presentation.start_tool(scope, requirement.tool_execution.call)
     return replace(
         paused,
         response_text=presentation.render_body(),
@@ -344,13 +344,13 @@ def blocking_team_pause(
     presentation.append_consensus(finished_run_text(record))
     calls = [("team", tool) for tool in record.tools or ()]
     for member in members:
-        member_id = presentation.resolve_member_id(member.agent_id, member.agent_name)
+        member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
         presentation.append_member(member_id, finished_run_text(member))
         calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
     for scope, tool in calls:
-        presentation.start_tool(scope, tool)
+        presentation.start_tool(scope, tool.call)
         if (scope, tool.tool_call_id) not in waiting:
-            presentation.complete_tool(scope, tool)
+            presentation.complete_tool(scope, tool.call)
     return continued_team_pause(presentation, paused)
 
 
@@ -538,7 +538,7 @@ async def continue_paused_team_run(
             if paused is not None:
                 return continued_team_pause(presentation, paused)
             if continued.status is not RunStatus.completed:
-                raise RuntimeError(str(continued.handover_content or "Team continuation did not complete"))
+                raise RuntimeError(continued.handover_content or "Team continuation did not complete")
             if tool_trace_collector is not None and show_tool_calls:
                 tool_trace_collector.extend(presentation.tool_trace)
             # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply

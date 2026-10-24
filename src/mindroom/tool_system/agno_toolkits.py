@@ -156,7 +156,7 @@ def adapt_function(function: Function) -> ToolFunction:
         approval_type=prepared.approval_type,
         external_execution=prepared.external_execution,
         external_execution_silent=prepared.external_execution_silent,
-        stop_after_tool_call=prepared.stop_after_tool_call,
+        stop_after_call=prepared.stop_after_tool_call,
         entrypoint=prepared.entrypoint,
         injected_params=injected_parameter_names(function.entrypoint),
         entrypoint_processed=not function.skip_entrypoint_processing,

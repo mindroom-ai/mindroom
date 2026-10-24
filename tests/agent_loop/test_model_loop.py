@@ -24,7 +24,7 @@ from mindroom.agent_loop.model_loop import (
 )
 from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
 from mindroom.llm.errors import ProviderError, RateLimited
-from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
@@ -74,7 +74,7 @@ async def _run(
             record=record,
             run=context(),
             hooks=hooks,
-            tool_call_limit=agent.tool_call_limit,
+            max_tool_calls_per_turn=agent.max_tool_calls_per_turn,
             **kwargs,
         )
     ]
@@ -95,7 +95,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     events, record = await _run(spec(model), messages)
 
     assert events[0] == ReasoningDelta("hmm")
-    assert "".join(event.text for event in events if isinstance(event, ContentDelta)) == "Hello, Alice."
+    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
     assert events[-2:] == [
         RequestCompleted(model_id="scripted-model", provider="Synthetic", usage=usage(12, 3, time_to_first_token=0.25)),
         LoopEnded(paused=False),
@@ -183,24 +183,26 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     events, record = await _run(spec(model, toolkit(add, echo)), messages)
 
     assert _names(events) == [
-        "ContentDelta",
+        "TextDelta",
         "RequestCompleted",
         "ToolStarted",
         "ToolStarted",
         "ToolCompleted",
         "ToolCompleted",
-        "ContentDelta",
-        "ContentDelta",
-        "ContentDelta",
+        "TextDelta",
+        "TextDelta",
+        "TextDelta",
         "RequestCompleted",
         "LoopEnded",
     ]
-    started = [event.tool for event in events if isinstance(event, ToolStarted)]
-    completed = [event.tool for event in events if isinstance(event, ToolCompleted)]
-    assert [tool.tool_call_id for tool in started] == ["c1", "c2"] == [tool.tool_call_id for tool in completed]
+    started = [event.call for event in events if isinstance(event, ToolStarted)]
+    completed = [event.call for event in events if isinstance(event, ToolCompleted)]
+    assert [call.tool_call_id for call in started] == ["c1", "c2"] == [call.tool_call_id for call in completed]
     assert record.tools is not None
-    assert [tool is entry for tool, entry in zip(started, record.tools, strict=True)]
-    assert [(tool.result, tool.tool_call_error) for tool in completed] == [('{"sum": 5}', False), ("yo", False)]
+    # A start reports the call before it ran; its completion reports the call as the run's record holds it.
+    assert started == [replace(entry.call, result=None, is_error=None) for entry in record.tools]
+    assert completed == [entry.call for entry in record.tools]
+    assert [(call.result, call.is_error) for call in completed] == [('{"sum": 5}', False), ("yo", False)]
     assert record.content == "Checking. 2 + 3 = 5."
     assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "assistant"]
     assert [m.tool_call_id for m in messages if m.role == "tool"] == ["c1", "c2"]
@@ -232,7 +234,7 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts(
     assert "validation error" in str(tool_messages[1].content)
     assert tool_messages[2].content == '{"sum": 7}'
     # Only resolved calls are announced; the unknown one was answered without running.
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c2", "c3"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c2", "c3"]
     assert record.tools is not None
     assert [tool.tool_call_id for tool in record.tools] == ["c2", "c3"]
     assert model.requests[1].messages[-3:] == tuple(tool_messages)
@@ -250,7 +252,7 @@ async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests()
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(add), tool_call_limit=1), messages)
+        events, record = await _run(spec(model, toolkit(add), max_tool_calls_per_turn=1), messages)
 
     limit_text = "Tool call limit reached. Tool call add not executed. Don't try to execute it again."
     tool_messages = [message for message in messages if message.role == "tool"]
@@ -262,7 +264,7 @@ async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests()
         ("c4", limit_text),
     ]
     # Refused calls are neither announced nor recorded as executions.
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1"]
     assert record.tools is not None
     assert len(record.tools) == 1
     assert len(model.requests) == 3
@@ -283,12 +285,12 @@ async def test_a_stop_after_tool_call_ends_the_loop_without_another_request() ->
     model = ScriptedModel([calls(tool_call("echo", "c1", text="switch"), metrics=usage(1, 1)), answer("never sent")])
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(echo, stop_after_tool_call=True)), messages)
+    events, record = await _run(spec(model, toolkit(echo, stop_after_call=True)), messages)
 
     assert len(model.requests) == 1
     assert events[-1] == LoopEnded(paused=False)
     assert record.tools is not None
-    assert record.tools[0].stop_after_tool_call is True
+    assert record.tools[0].stop_after_call is True
     assert messages[-1].role == "tool"
     assert messages[-1].stop_after_tool_call is True
 
@@ -308,7 +310,7 @@ async def test_a_batch_that_stops_the_run_skips_the_batch_hooks_as_agno_did() ->
     )
 
     await _run(
-        spec(model, toolkit(add), toolkit(echo, name="stopper", stop_after_tool_call=True)),
+        spec(model, toolkit(add), toolkit(echo, name="stopper", stop_after_call=True)),
         _prompt(),
         hooks=LoopHooks(after_tool_batch=(after_batch,)),
     )
@@ -356,13 +358,13 @@ async def test_a_confirmation_pause_announces_the_call_records_a_requirement_and
     events, record = await _run(spec(model, toolkit(echo), gated(add)), messages)
 
     assert events[-1] == LoopEnded(paused=True)
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2"]
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1"]
     assert len(model.requests) == 1
     assert record.tools is not None
     assert record.requirements is not None
     plain, paused = record.tools
-    assert (plain.result, plain.tool_call_error, plain.is_paused) == ("fine", False, False)
+    assert (plain.result, plain.is_error, plain.is_paused) == ("fine", False, False)
     assert paused.to_dict() == {
         **paused.to_dict(),
         "tool_call_id": "c2",
@@ -566,7 +568,7 @@ async def test_rewritten_tool_calls_are_what_runs_and_what_the_message_stores() 
     assert record.tools is not None
     assert (record.tools[0].tool_name, record.tools[0].result) == ("echo", "real")
     assert messages[2].tool_calls == [tool_call("echo", "c1", text="real")]
-    assert [event.tool.tool_name for event in events if isinstance(event, ToolStarted)] == ["echo"]
+    assert [event.call.tool_name for event in events if isinstance(event, ToolStarted)] == ["echo"]
 
 
 async def test_a_tool_exception_is_an_error_result_not_a_failed_loop() -> None:
@@ -577,7 +579,7 @@ async def test_a_tool_exception_is_an_error_result_not_a_failed_loop() -> None:
 
     assert events[-1] == LoopEnded(paused=False)
     assert record.tools is not None
-    assert (record.tools[0].result, record.tools[0].tool_call_error) == ("kaboom", True)
+    assert (record.tools[0].result, record.tools[0].is_error) == ("kaboom", True)
     assert (messages[3].content, messages[3].tool_call_error) == ("kaboom", True)
 
 

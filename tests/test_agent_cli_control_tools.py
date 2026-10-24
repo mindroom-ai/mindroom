@@ -19,7 +19,7 @@ from mindroom import agents
 from mindroom.agent_cli import cli_approval_recovery
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
-from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
+from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
@@ -32,6 +32,7 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.delegation.state import DelegationState
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.llm.events import ToolCallOrigin
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
@@ -86,10 +87,18 @@ def _flagged(name: str, *entrypoints: Callable[..., object], **flags: object) ->
     return AdaptedToolkit(name=name, functions=tuple(functions), instructions=None)
 
 
-async def _delegation_catalog(tmp_path, config, paths, toolkits, *, tool_call_limit=None, approval_handler=None):
+async def _delegation_catalog(
+    tmp_path,
+    config,
+    paths,
+    toolkits,
+    *,
+    max_tool_calls_per_turn=None,
+    approval_handler=None,
+):
     """Return a catalog whose turn may delegate: a stored session, the live parent run, and its requester context."""
     entity_ids(config, paths)
-    catalog = await _catalog(tmp_path, toolkits, tool_call_limit=tool_call_limit)
+    catalog = await _catalog(tmp_path, toolkits, max_tool_calls_per_turn=max_tool_calls_per_turn)
     runtime = _delegate_runtime_context(config, paths)
     runtime = replace(
         runtime,
@@ -164,7 +173,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         assert effects == ["outer-0"]
         # The control ends the run after its batch, so no further request is sent.
         assert record.content is None
-        assert [item.stop_after_tool_call for item in results] == [True, True]
+        assert [item.stop_after_call for item in results] == [True, True]
         first, second = [await owner.get_call(item["call_id"]) for item in receipts]
         assert first["status"] == ("failed" if raises else "completed")
         assert first["outcome"] == ("switch rejected" if raises else payload)
@@ -172,7 +181,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         assert "continuation" in second["outcome"].lower()
         assert second["parent_bash_call_id"] == "bash-0"
         decision = continuation_decision_from_tools(
-            owner.control_executions,
+            owner.control_calls,
             original_prompt="task",
             continuation_count=0,
         )
@@ -180,7 +189,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         assert decision.model_switch_name == (None if raises else "next")
     else:
         assert effects == ["outer-0", "outer-1"]
-        assert not owner.control_executions
+        assert not owner.control_calls
         assert record.content == "done"
     assert all(item.tool_name == "bash" for item in results)
     await owner.close()
@@ -235,7 +244,7 @@ async def test_hidden_delegation_uses_native_child_owner(
         config,
         paths,
         [_flagged("delegate", run_subagent, continue_subagent, external_execution=True)],
-        tool_call_limit=limit,
+        max_tool_calls_per_turn=limit,
     )
     children = []
 
@@ -502,10 +511,11 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
 
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
             presentation.start_tool(
-                project_cli_execution(requirement.tool_execution, parent="bash-parent", toolkit_name="delegate"),
+                requirement.tool_execution.call,
+                origin=ToolCallOrigin("bash-parent", "delegate"),
             )
             for tool in paused.tools:
-                presentation.start_tool(project_cli_execution(tool, parent="bash-parent", toolkit_name="report"))
+                presentation.start_tool(tool.call, origin=ToolCallOrigin("bash-parent", "report"))
             continuation = approval_continuation(
                 continuation_count=2,
                 run_id="run",
@@ -664,7 +674,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
         event
         async for event in execute_agent_tool_call(binding, "memory-write", {"content": "Canonical hidden memory"})
     ]
-    assert events[-1].execution.result == "Memorized: Canonical hidden memory"
+    assert events[-1].call.result == "Memorized: Canonical hidden memory"
     memories = await search_agent_memories("Canonical hidden", "helper", paths.storage_root, config, paths, limit=5)
     assert any(item["memory"] == "Canonical hidden memory" for item in memories.results)
     catalog.run.session_state["sentinel"] = "kept"
@@ -672,7 +682,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     compact_binding = await catalog.bind(ToolKey("compact_context", "compact_context"))
     events = [event async for event in execute_agent_tool_call(compact_binding, "compact", {})]
     assert events[-1].kind == "completed"
-    assert "before the next reply" in events[-1].execution.result
+    assert "before the next reply" in events[-1].call.result
     assert catalog.run.session_state is original
     assert catalog.run.session_state["sentinel"] == "kept"
     await catalog.close()
@@ -721,7 +731,7 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     catalog = await _catalog(tmp_path, [skills], owners={})
     binding = await catalog.bind(ToolKey("agent", "get_skill_instructions"))
     events = [event async for event in execute_agent_tool_call(binding, "skill-read", {"skill_name": "local-guide"})]
-    assert "Use the original session." in events[-1].execution.result
+    assert "Use the original session." in events[-1].call.result
     script = tmp_path / "server.py"
     script.write_text(
         'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n    return "echo:" + text\nserver.run()\n',
@@ -747,7 +757,7 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     binding = await catalog.bind(ToolKey("upstream", "echo_echo"))
     events = [event async for event in execute_agent_tool_call(binding, "mcp-call", {"text": "same-owner"})]
     assert events[-1].kind == "completed"
-    assert "echo:same-owner" in events[-1].execution.result
+    assert "echo:same-owner" in events[-1].call.result
     assert binding.catalog is catalog
     assert materialized == [True]
     await catalog.close()

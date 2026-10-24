@@ -95,7 +95,7 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
         functions,
         messages,
         calls_so_far=0,
-        tool_call_limit=1,
+        max_tool_calls_per_turn=1,
     )
 
     assert [(m.role, m.tool_call_id, m.tool_name) for m in messages] == [
@@ -119,7 +119,7 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
         functions,
         [],
         calls_so_far=1,
-        tool_call_limit=2,
+        max_tool_calls_per_turn=2,
     )
 
     assert [call.call_id for call in batch.planned] == ["c1"]
@@ -142,7 +142,13 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
 def test_empty_list_arguments_plan_as_no_arguments() -> None:
     functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(echo))).functions
 
-    batch = plan_tool_batch([raw_tool_call("echo", "c1", "[]")], functions, [], calls_so_far=0, tool_call_limit=None)
+    batch = plan_tool_batch(
+        [raw_tool_call("echo", "c1", "[]")],
+        functions,
+        [],
+        calls_so_far=0,
+        max_tool_calls_per_turn=None,
+    )
 
     assert batch.planned[0].arguments is None
     assert batch.planned[0].execution.tool_args is None
@@ -156,7 +162,7 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
         functions,
         [],
         calls_so_far=0,
-        tool_call_limit=None,
+        max_tool_calls_per_turn=None,
     )
 
     plain, confirmation, external_call = (call.execution for call in batch.planned)
@@ -202,7 +208,7 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
         functions,
         [],
         calls_so_far=0,
-        tool_call_limit=None,
+        max_tool_calls_per_turn=None,
     )
 
     results = await dispatch_tool_calls(batch.planned, run=context())
@@ -213,7 +219,7 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
     ]
     for call, result in zip(batch.planned, results, strict=True):
         execution = call.execution
-        assert (execution.result, execution.tool_call_error) == (result.content, False)
+        assert (execution.result, execution.is_error) == (result.content, False)
         assert execution.metrics is not None
         assert execution.metrics.duration is not None
         assert execution.metrics.duration > 0
@@ -250,7 +256,7 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
         functions,
         [],
         calls_so_far=0,
-        tool_call_limit=None,
+        max_tool_calls_per_turn=None,
     )
     dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context()))
     for _ in range(5):
@@ -269,7 +275,7 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
     finished: list[str] = []
 
     functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(_linger(release, finished)))).functions
-    batch = plan_tool_batch([tool_call("linger", "c1")], functions, [], calls_so_far=0, tool_call_limit=None)
+    batch = plan_tool_batch([tool_call("linger", "c1")], functions, [], calls_so_far=0, max_tool_calls_per_turn=None)
     dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context()))
     for _ in range(5):
         await asyncio.sleep(0)
@@ -292,7 +298,7 @@ async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results(
         functions,
         [],
         calls_so_far=0,
-        tool_call_limit=None,
+        max_tool_calls_per_turn=None,
     )
 
     results = await dispatch_tool_calls(batch.planned, run=context())
@@ -319,7 +325,7 @@ async def test_dispatch_skips_paused_calls_and_passes_the_call_id_through_middle
         functions,
         [],
         calls_so_far=0,
-        tool_call_limit=None,
+        max_tool_calls_per_turn=None,
     )
 
     results = await dispatch_tool_calls(batch.planned, run=context(), middleware=[middleware])
@@ -350,7 +356,7 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
         functions,
         [],
         calls_so_far=0,
-        tool_call_limit=None,
+        max_tool_calls_per_turn=None,
     )
     results = await dispatch_tool_calls(batch.planned, run=context())
     assert [len(m.images or ()) for m in results] == [1, 0, 1]

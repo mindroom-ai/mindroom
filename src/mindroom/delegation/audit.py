@@ -17,7 +17,7 @@ from mindroom.delegation.records import (
     DelegationRecordOwner,
 )
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
@@ -27,8 +27,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, DelegationTerminalStatus
-    from mindroom.llm.events import RunEvent
-    from mindroom.llm.runs import ToolExecution
+    from mindroom.llm.events import ReportedCall, RunEvent
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -123,11 +122,11 @@ async def observe_child_event(event: RunEvent) -> None:
     and a record of another run is not this child's.
     """
     binding = _CHILD_AUDIT.get()
-    if binding is None or not isinstance(event, ContentDelta | ToolStarted | ToolCompleted | RunFinished):
+    if binding is None or not isinstance(event, TextDelta | ToolStarted | ToolCompleted | RunFinished):
         return
     binding.observed += 1
     index = binding.observed
-    if isinstance(event, ContentDelta):
+    if isinstance(event, TextDelta):
         if event.text:
             binding.pending_content.append((index, event.text))
         return
@@ -145,9 +144,9 @@ async def observe_child_event(event: RunEvent) -> None:
         assert isinstance(event.record, RunRecord)
         await _append_response_events(binding.owner, handle, event.record, run_id=run_id)
     elif isinstance(event, ToolStarted):
-        await _append_tool_call(binding.owner, handle, event.tool, run_id=run_id, event_index=index)
+        await _append_tool_call(binding.owner, handle, event.call, run_id=run_id, event_index=index)
     else:
-        await _append_tool_result(binding.owner, handle, event.tool, run_id=run_id, event_index=index)
+        await _append_tool_result(binding.owner, handle, event.call, run_id=run_id, event_index=index)
 
 
 async def record_child_response(
@@ -211,16 +210,16 @@ async def _append_response_events(
 
     pending_approval = False
     for tool in response.tools or ():
-        await _append_tool_call(owner, handle, tool, run_id=run_id)
-        if tool.result is not None or tool.tool_call_error:
-            await _append_tool_result(owner, handle, tool, run_id=run_id)
+        await _append_tool_call(owner, handle, tool.call, run_id=run_id)
+        if tool.result is not None or tool.is_error:
+            await _append_tool_result(owner, handle, tool.call, run_id=run_id)
         if response.status == RunStatus.paused and tool.requires_confirmation:
             pending_approval = True
             await owner.append_event(
                 handle,
                 DelegationEvent(
                     kind="approval_requested",
-                    event_id=_tool_event_id(run_id, tool, "approval"),
+                    event_id=_tool_event_id(run_id, tool.tool_call_id, "approval"),
                     status="paused",
                     data={
                         "tool_call_id": tool.tool_call_id,
@@ -318,12 +317,12 @@ async def _open_record(
 
 def _tool_event_id(
     run_id: str,
-    tool: ToolExecution,
+    tool_call_id: str | None,
     phase: str,
     event_index: int | None = None,
 ) -> str | None:
-    if tool.tool_call_id:
-        return f"run:{run_id}:tool:{tool.tool_call_id}:{phase}"
+    if tool_call_id:
+        return f"run:{run_id}:tool:{tool_call_id}:{phase}"
     if event_index is not None:
         return f"{_stream_prefix(run_id)}{event_index}"
     return None
@@ -337,7 +336,7 @@ def _stream_prefix(run_id: str) -> str:
 async def _append_tool_call(
     owner: DelegationRecordOwner,
     handle: DelegationRecordHandle,
-    tool: ToolExecution,
+    call: ReportedCall,
     *,
     run_id: str,
     event_index: int | None = None,
@@ -346,11 +345,11 @@ async def _append_tool_call(
         handle,
         DelegationEvent(
             kind="tool_call",
-            event_id=_tool_event_id(run_id, tool, "call", event_index),
+            event_id=_tool_event_id(run_id, call.tool_call_id, "call", event_index),
             data={
-                "tool_call_id": tool.tool_call_id,
-                "tool_name": tool.tool_name,
-                "arguments": tool.tool_args or {},
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "arguments": call.tool_args or {},
             },
         ),
     )
@@ -359,7 +358,7 @@ async def _append_tool_call(
 async def _append_tool_result(
     owner: DelegationRecordOwner,
     handle: DelegationRecordHandle,
-    tool: ToolExecution,
+    call: ReportedCall,
     *,
     run_id: str,
     event_index: int | None = None,
@@ -368,12 +367,12 @@ async def _append_tool_result(
         handle,
         DelegationEvent(
             kind="tool_result",
-            event_id=_tool_event_id(run_id, tool, "result", event_index),
+            event_id=_tool_event_id(run_id, call.tool_call_id, "result", event_index),
             data={
-                "tool_call_id": tool.tool_call_id,
-                "tool_name": tool.tool_name,
-                "result": tool.result,
-                "tool_call_error": tool.tool_call_error,
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "result": call.result,
+                "tool_call_error": call.is_error,
             },
         ),
     )

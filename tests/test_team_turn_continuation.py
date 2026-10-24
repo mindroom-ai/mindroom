@@ -334,7 +334,10 @@ def test_releasing_a_spent_attempt_s_members_drops_its_partial_output(
     team = _team(tmp_path, monkeypatch)
     members = materialize_team_members(["general"], team.orchestrator, team.identity)
     presentation = TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False)
-    presentation.start_member_tool("general", ToolExecution(tool_call_id="call-1", tool_name="touch", tool_args={}))
+    presentation.start_member_tool(
+        "general",
+        ToolExecution(tool_call_id="call-1", tool_name="touch", tool_args={}).call,
+    )
     attempt = TeamAttempt(
         run_id="run-1",
         members=members,

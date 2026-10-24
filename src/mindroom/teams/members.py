@@ -449,7 +449,7 @@ def build_team_spec(
         model=model,
         system_message=system_message,
         toolkits=leader_toolkits,
-        tool_call_limit=team_view.max_tool_calls_per_turn,
+        max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
         members=team_members,
     )
     if jobs is None:

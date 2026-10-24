@@ -35,7 +35,7 @@ def split_combined_tool_results(run: AnyRunRecord) -> None:
     run.messages = _split(run.messages)
     if isinstance(run, TeamRunRecord):
         for member in run.member_responses:
-            split_combined_tool_results(member)
+            member.messages = _split(member.messages)
 
 
 def _split(messages: Sequence[Message]) -> list[Message]:

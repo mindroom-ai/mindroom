@@ -18,7 +18,7 @@ from mindroom.history.run_visibility import (
     queued_notice_marker,
 )
 from mindroom.llm.messages import PROMPT_MESSAGE_ROLES, Message
-from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -284,24 +284,11 @@ def queued_notice_on_resume_entry(notice_text: str) -> AfterToolBatchHook:
     return on_resume_entry
 
 
-def _strip_response_turn_notice_from_run(run: AnyRunRecord, *, response_turn_id: str) -> None:
-    """Remove one response's notice from a top-level or nested run."""
-    _strip_queued_notice_messages(run.messages, response_turn_id=response_turn_id)
-    if isinstance(run, TeamRunRecord):
-        for member_response in run.member_responses:
-            _strip_response_turn_notice_from_run(member_response, response_turn_id=response_turn_id)
-
-
 def _run_notice_messages(run: AnyRunRecord, *, response_turn_id: str | None) -> list[Message]:
-    """Return the notices of one response, or of any response when ``response_turn_id`` is None, in a run and its members."""
-    matches = _top_level_queued_notice_messages(run, response_turn_id=response_turn_id)
-    if isinstance(run, TeamRunRecord):
-        for member_response in run.member_responses:
-            matches.extend(_run_notice_messages(member_response, response_turn_id=response_turn_id))
-    return matches
+    """Return the notices of one response, or of any response when ``response_turn_id`` is None, in a run.
 
-
-def _top_level_queued_notice_messages(run: AnyRunRecord, *, response_turn_id: str | None) -> list[Message]:
+    Only a top-level run holds notices: team members run without them.
+    """
     return [
         message for message in run.messages if _is_queued_notice_message(message, response_turn_id=response_turn_id)
     ]
@@ -345,32 +332,16 @@ def _finalize_queued_notice_in_runs(
         (
             run
             for run in reversed(runs)
-            if is_model_history_visible_run(run)
-            and _top_level_queued_notice_messages(
-                run,
-                response_turn_id=response_turn_id,
-            )
+            if is_model_history_visible_run(run) and _run_notice_messages(run, response_turn_id=response_turn_id)
         ),
         None,
     )
-    all_matches = [
-        message
-        for run in runs
-        for message in _run_notice_messages(
-            run,
-            response_turn_id=response_turn_id,
-        )
-    ]
+    all_matches = [message for run in runs for message in _run_notice_messages(run, response_turn_id=response_turn_id)]
     if not all_matches and destination is None:
         return []
 
     destination_matches = (
-        _top_level_queued_notice_messages(
-            destination,
-            response_turn_id=response_turn_id,
-        )
-        if destination is not None
-        else []
+        _run_notice_messages(destination, response_turn_id=response_turn_id) if destination is not None else []
     )
     notice_text = _queued_notice_text_to_persist(
         destination_matches=destination_matches,
@@ -403,10 +374,7 @@ def _finalize_queued_notice_in_runs(
         if not _run_notice_messages(run, response_turn_id=response_turn_id):
             continue
         edited_run = deepcopy(run)
-        _strip_response_turn_notice_from_run(
-            edited_run,
-            response_turn_id=response_turn_id,
-        )
+        _strip_queued_notice_messages(edited_run.messages, response_turn_id=response_turn_id)
         edited[id(run)] = edited_run
 
     if destination is None or notice_text is None:
@@ -543,10 +511,7 @@ def _has_notice_marker_for_response(
     return any(
         queued_notice_marker(message) == marker
         for run in runs
-        for message in _run_notice_messages(
-            run,
-            response_turn_id=response_turn_id,
-        )
+        for message in _run_notice_messages(run, response_turn_id=response_turn_id)
     )
 
 
@@ -609,10 +574,7 @@ def is_empty_completed_run(record: AnyRunRecord) -> bool:
     """Return whether one run completed with no tool calls and no visible content."""
     if record.status is not RunStatus.completed or record.tools:
         return False
-    content = record.content
-    if content is None:
-        return True
-    return isinstance(content, str) and not content.strip()
+    return not (record.content or "").strip()
 
 
 def discard_empty_completed_run(

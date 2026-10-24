@@ -203,7 +203,7 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
         assert response.status is RunStatus.completed
         assert response.content == "corrected"
         rejected = next(tool for tool in response.tools or [] if tool.tool_call_id == "invalid")
-        assert rejected.tool_call_error
+        assert rejected.is_error
         assert "background_after" in str(rejected.result)
         assert rejected.tool_args == arguments
         assert any(
