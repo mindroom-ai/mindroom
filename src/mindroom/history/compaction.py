@@ -487,7 +487,7 @@ async def _rewrite_working_session_for_compaction(
                 storage,
                 persisted_session,
                 scope,
-                [run.run_id for run in remaining if run.run_id],
+                [run.run_id for run in remaining],
                 previous_summary=previous_summary,
             ),
         )
@@ -505,7 +505,7 @@ async def _rewrite_working_session_for_compaction(
             )
             break
         await before_persist(chunk.included_runs)
-        compacted_run_ids = tuple(run.run_id for run in chunk.included_runs if run.run_id)
+        compacted_run_ids = tuple(run.run_id for run in chunk.included_runs)
         appended = await run_session_storage_operation(
             lambda: storage,
             partial(
@@ -890,6 +890,9 @@ def _runs_with_stable_ids(
     session_id: str,
     scope: HistoryScope,
 ) -> list[AnyRunRecord]:
+    # TODO(simplify): every run a session holds has a generated run id, so only a test's in-memory run lacks one.
+    # Compact every visible run and drop this guard; nobody but
+    # test_compact_scope_history_ignores_runs_without_stable_ids would notice.
     stable_runs = [run for run in runs if run.run_id]
     if len(stable_runs) < len(runs):
         logger.warning(

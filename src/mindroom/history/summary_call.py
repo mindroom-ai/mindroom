@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.cancellation import request_task_cancel
@@ -184,36 +183,20 @@ def _consume_detached_compaction_request_result(response_task: asyncio.Task[Mode
         logger.warning("Detached compaction request raised after caller moved on", exc_info=True)
 
 
-def _warn_if_detached_compaction_request_still_running(
-    response_task: asyncio.Task[ModelTurn],
-    *,
-    reason: str,
-) -> None:
-    """Log when a detached provider request ignored cancellation past the grace window."""
-    if response_task.done():
-        return
-    logger.warning(
-        "Compaction request still running after cancellation grace period",
-        reason=reason,
-        timeout_seconds=_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS,
-    )
-
-
-def _detach_cancelled_compaction_request(
-    response_task: asyncio.Task[ModelTurn],
-    *,
-    reason: str,
-) -> None:
-    """Detach one cancelled provider request without blocking the caller or leaking cleanup tasks."""
+def _cancel_and_detach(response_task: asyncio.Task[ModelTurn], *, reason: str) -> None:
+    """Cancel one provider request without waiting for it, logging a late failure or a request that ignores the cancel."""
+    request_task_cancel(response_task)
     response_task.add_done_callback(_consume_detached_compaction_request_result)
-    asyncio.get_running_loop().call_later(
-        _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS,
-        partial(
-            _warn_if_detached_compaction_request_still_running,
-            response_task,
-            reason=reason,
-        ),
-    )
+
+    def warn_if_still_running() -> None:
+        if not response_task.done():
+            logger.warning(
+                "Compaction request still running after cancellation grace period",
+                reason=reason,
+                timeout_seconds=_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS,
+            )
+
+    asyncio.get_running_loop().call_later(_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS, warn_if_still_running)
 
 
 async def _request_summary(
@@ -261,25 +244,14 @@ async def generate_compaction_summary(
         name="compaction_summary_request",
     )
     try:
-        done, _pending = await asyncio.wait(
-            {provider_done},
-            timeout=timeout_seconds,
-        )
+        done, _pending = await asyncio.wait({provider_done}, timeout=timeout_seconds)
         if provider_done not in done:
-            request_task_cancel(response_task)
-            _detach_cancelled_compaction_request(
-                response_task,
-                reason="timeout",
-            )
+            _cancel_and_detach(response_task, reason="timeout")
             msg = f"compaction summary timed out after {timeout_seconds}s"
             raise _CompactionSummaryTimeoutError(msg)
         turn = await asyncio.shield(response_task)
     except asyncio.CancelledError:
-        request_task_cancel(response_task)
-        _detach_cancelled_compaction_request(
-            response_task,
-            reason="outer_cancellation",
-        )
+        _cancel_and_detach(response_task, reason="outer_cancellation")
         raise
 
     normalized_text = _normalize_compaction_summary_text(turn.content)

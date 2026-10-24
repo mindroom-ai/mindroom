@@ -44,6 +44,8 @@ _SUMMARY_METADATA_OMIT_KEYS = frozenset(
         MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
         COMPACTED_REQUESTS_METADATA_KEY,
         "model_params",
+        # TODO(simplify): run decoding drops ``tools_schema``, so only a test's in-memory run still holds it here.
+        # Drop the key; nobody but the tests/test_history_summary_call.py cases that set it would notice.
         "tools_schema",
     },
 )
@@ -190,17 +192,11 @@ def _serialize_run_excerpt(
     return "\n".join(lines)
 
 
-def _compaction_replay_messages(
-    run: AnyRunRecord,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    messages = [
-        deepcopy(message)
-        for message in replayable_messages([run], system_message_role=history_settings.system_message_role)
-    ]
+def _compaction_replay_messages(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[Message]:
+    """Return the run's messages a summary reads, not copied: the input renders no thinking, so only hooks strip it."""
+    messages = replayable_messages([run], system_message_role=history_settings.system_message_role)
     if history_settings.max_tool_calls_from_history is not None:
         messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
-    strip_stale_anthropic_replay_fields(messages)
     return messages
 
 
@@ -249,7 +245,9 @@ def messages_for_runs(
     """Copy and sanitize conversation messages for portable compaction hooks."""
     messages: list[Message] = []
     for run in runs:
-        messages.extend(_compaction_replay_messages(run, history_settings))
+        copies = [deepcopy(message) for message in _compaction_replay_messages(run, history_settings)]
+        strip_stale_anthropic_replay_fields(copies)
+        messages.extend(copies)
     strip_stale_anthropic_replay_fields(messages)
     return messages
 

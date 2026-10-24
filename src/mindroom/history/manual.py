@@ -11,14 +11,12 @@ from mindroom.history.storage import add_pending_force_compaction_scope, update_
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config, ResolvedRuntimeModel
-    from mindroom.config.models import CompactionConfig
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-_MANUAL_COMPACTION_SUCCESS_MESSAGE = "Compaction will run before the next reply in this conversation scope."
 logger = get_logger(__name__)
 
 
@@ -51,17 +49,19 @@ def request_compaction_before_next_reply(
         if scope_context is None:
             return "Error: Current agent has no history scope. Cannot compact context."
 
-        runtime_model, compaction_config = _resolve_active_compaction_settings(
-            scope=scope,
-            agent_name=agent_name,
-            config=config,
-            runtime_paths=runtime_paths,
+        entity_name: str | None = agent_name
+        if scope.kind != "agent":
+            # An ad-hoc team has no authored settings of its own.
+            entity_name = scope.scope_id if scope.scope_id in config.teams else None
+        runtime_model = config.resolve_runtime_model(
+            entity_name=entity_name,
             active_model_name=active_model_name,
             room_id=room_id,
+            runtime_paths=runtime_paths,
         )
         execution_plan = resolve_history_execution_plan(
             config=config,
-            compaction_config=compaction_config,
+            compaction_config=config.resolve_entity(entity_name).compaction_config,
             has_authored_compaction_config=True,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
@@ -88,27 +88,4 @@ def request_compaction_before_next_reply(
             agent=agent_name,
             scope=scope_context.scope.key,
         )
-        return _MANUAL_COMPACTION_SUCCESS_MESSAGE
-
-
-def _resolve_active_compaction_settings(
-    *,
-    scope: HistoryScope,
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    active_model_name: str | None,
-    room_id: str | None,
-) -> tuple[ResolvedRuntimeModel, CompactionConfig]:
-    """Resolve the active model and compaction config for the current scope."""
-    entity_name: str | None = agent_name
-    if scope.kind != "agent":
-        # An ad-hoc team has no authored settings of its own.
-        entity_name = scope.scope_id if scope.scope_id in config.teams else None
-    runtime_model = config.resolve_runtime_model(
-        entity_name=entity_name,
-        active_model_name=active_model_name,
-        room_id=room_id,
-        runtime_paths=runtime_paths,
-    )
-    return runtime_model, config.resolve_entity(entity_name).compaction_config
+        return "Compaction will run before the next reply in this conversation scope."

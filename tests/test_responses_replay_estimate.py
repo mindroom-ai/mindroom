@@ -552,8 +552,6 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
     )
 
     prepared = await prepare_scope_history(
-        agent_name="test_agent",
-        scope=_SCOPE,
         model=pipeline_provider(adapter),
         resolved_inputs=inputs,
         non_prompt_tokens=0,

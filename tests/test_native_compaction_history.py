@@ -132,8 +132,6 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
     resolved = _inputs(config)
 
     prepared = await prepare_scope_history(
-        agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
@@ -273,8 +271,6 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     text_compact = AsyncMock(side_effect=AssertionError("Canonical history must remain intact"))
     monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
     prepared = await prepare_scope_history(
-        agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
@@ -339,8 +335,6 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     prepared = await prepare_scope_history(
-        agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
@@ -425,8 +419,6 @@ async def test_native_activation_respects_history_policy(
     monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
 
     prepared = await prepare_scope_history(
-        agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
@@ -456,8 +448,6 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     prepared = await prepare_scope_history(
-        agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
@@ -549,8 +539,6 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     assert session is not None
     resolved = _inputs(config)
     prepared = await prepare_scope_history(
-        agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,

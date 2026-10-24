@@ -41,7 +41,7 @@ from mindroom.history.runtime import (
     resolve_agent_preparation_inputs,
 )
 from mindroom.history.storage import read_scope_seen_event_ids
-from mindroom.history.types import HistoryScope, ResolvedReplayPlan
+from mindroom.history.types import ResolvedReplayPlan
 from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
@@ -956,8 +956,6 @@ async def prepare_agent_execution_context(
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
         )
         return await prepare_scope_history(
-            agent_name=agent_name,
-            scope=scope_context.scope if scope_context is not None else HistoryScope(kind="agent", scope_id=agent_name),
             model=build.spec.model,
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=static_token_estimator.non_prompt_tokens(),

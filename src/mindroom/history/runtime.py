@@ -34,7 +34,6 @@ from mindroom.history.replay import (
     scope_visible_runs,
 )
 from mindroom.history.session_context import (
-    BoundTeamScopeContext,
     ScopeSessionContext,
     resolve_bound_history_owner,
     resolve_bound_team_scope_context,
@@ -174,8 +173,6 @@ def _native_history(
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_scope_history(
     *,
-    agent_name: str,
-    scope: HistoryScope | None,
     model: ModelProvider | None,
     resolved_inputs: HistoryPreparationInputs,
     non_prompt_tokens: int,
@@ -194,7 +191,7 @@ async def prepare_scope_history(
     replay_estimator = model.replay_estimator if model is not None else None
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
-            scope=scope,
+            scope=None,
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
@@ -229,15 +226,15 @@ async def prepare_scope_history(
         native_history = native_history.without_native_compaction()
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     native_route = native_history_route(native_history)
-    # Large provider projections spend seconds in tokenizers that release the GIL.
-    estimated_history_tokens = await asyncio.to_thread(
+    estimate_history_tokens = partial(
         estimate_prompt_visible_history_tokens,
         session=session,
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
-        native_route=native_route,
         replay_model=replay_estimator,
     )
+    # Large provider projections spend seconds in tokenizers that release the GIL.
+    estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
     # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
     reported_history_tokens = (
         _reported_history_tokens(
@@ -264,7 +261,7 @@ async def prepare_scope_history(
     )
     logger.info(
         "History preparation check",
-        agent=agent_name,
+        scope=scope_context.scope.key,
         auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.text_compaction_available,
         compaction_available=execution_plan.text_compaction_available,
         trigger_budget=execution_plan.replay_budget_tokens,
@@ -294,13 +291,7 @@ async def prepare_scope_history(
         if native_route is not None:
             assert native_history is not None
             native_history = native_history.without_native_compaction()
-            current_history_tokens = await asyncio.to_thread(
-                estimate_prompt_visible_history_tokens,
-                session=session,
-                scope=scope_context.scope,
-                history_settings=resolved_inputs.history_settings,
-                replay_model=replay_estimator,
-            )
+            current_history_tokens = await asyncio.to_thread(estimate_history_tokens)
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
         # Compaction skips history that already fits its budget, so a trigger-level pass targets the trigger.
@@ -337,7 +328,7 @@ async def prepare_scope_history(
         if outcome is not None:
             logger.info(
                 "Compaction completed",
-                agent=agent_name,
+                scope=scope_context.scope.key,
                 outcome_mode=outcome.mode,
                 before_tokens=outcome.before_tokens,
                 after_tokens=outcome.after_tokens,
@@ -715,24 +706,20 @@ def finalize_history_preparation(
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
         replays_persisted_history = False
     else:
-        current_history_tokens = estimate_prompt_visible_history_tokens(
+        estimate_history_tokens = partial(
+            estimate_prompt_visible_history_tokens,
             session=session,
             scope=scope,
             history_settings=history_settings,
-            native_route=native_history_route(native_history),
             replay_model=replay_estimator,
         )
+        current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
         if history_budget is not None and current_history_tokens > history_budget:
             # Never trim a native checkpoint by run/message count. Fall back to the
             # existing canonical guard if the final dynamic prompt exhausts its room.
             if native_history is not None:
                 native_history = native_history.without_native_compaction()
-            current_history_tokens = estimate_prompt_visible_history_tokens(
-                session=session,
-                scope=scope,
-                history_settings=history_settings,
-                replay_model=replay_estimator,
-            )
+            current_history_tokens = estimate_history_tokens()
         if history_budget is not None:
             replay_plan = plan_replay_that_fits(
                 session=session,
@@ -799,19 +786,13 @@ async def prepare_bound_scope_history(
     ``model`` is the leader's provider, whose native compaction the scope may use.
     """
     if scope_context is not None:
-        owner_agent_name = resolve_bound_history_owner(member_names)
-        bound_scope = (
-            BoundTeamScopeContext(owner_agent_name=owner_agent_name, scope=scope_context.scope)
-            if owner_agent_name is not None
-            else None
-        )
+        # A team without a named member has no history, whether or not its scope is open.
+        has_scope = resolve_bound_history_owner(member_names) is not None
     elif team_name is None and ad_hoc_team_has_private_member(member_names, config.agents):
-        bound_scope = None
+        has_scope = False
     else:
-        bound_scope = resolve_bound_team_scope_context(
-            member_names=member_names,
-            config=config,
-            team_name=team_name,
+        has_scope = (
+            resolve_bound_team_scope_context(member_names=member_names, config=config, team_name=team_name) is not None
         )
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
@@ -820,16 +801,9 @@ async def prepare_bound_scope_history(
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
-    if bound_scope is None:
-        return PreparedScopeHistory(
-            scope=None,
-            session=None,
-            resolved_inputs=resolved_inputs,
-        )
-
+    if not has_scope:
+        return PreparedScopeHistory(scope=None, session=None, resolved_inputs=resolved_inputs)
     return await prepare_scope_history(
-        agent_name=bound_scope.owner_agent_name,
-        scope=bound_scope.scope,
         model=model,
         resolved_inputs=resolved_inputs,
         runtime_paths=runtime_paths,

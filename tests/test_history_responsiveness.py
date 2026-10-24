@@ -79,8 +79,6 @@ async def test_history_sizing_allows_loop_progress(
 
     async def prepare() -> PreparedScopeHistory:
         return await prepare_scope_history(
-            agent_name="test_agent",
-            scope=scope,
             model=model,
             resolved_inputs=resolved,
             non_prompt_tokens=0,
@@ -258,8 +256,6 @@ async def test_forced_compaction_reuses_canonical_history_count(
     lifecycle = RecordingCompactionLifecycle()
     prepared = await prepare_scope_history(
         compaction_lifecycle=lifecycle,
-        agent_name="test_agent",
-        scope=scope,
         model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
@@ -391,8 +387,6 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
     seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     prepared = await prepare_scope_history(
-        agent_name="test_agent",
-        scope=scope,
         model=model,
         resolved_inputs=_agent_inputs(config),
         non_prompt_tokens=0,
@@ -530,8 +524,6 @@ async def test_cancelling_preparation_sizing_preserves_input(
 
     monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
     operation = prepare_scope_history(
-        agent_name="test_agent",
-        scope=scope,
         model=model,
         resolved_inputs=_agent_inputs(config),
         non_prompt_tokens=0,

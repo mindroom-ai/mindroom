@@ -881,8 +881,6 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     ):
         prepared = await prepare_scope_history(
             compaction_lifecycle=RecordingCompactionLifecycle(),
-            agent_name="test_agent",
-            scope=scope,
             model=None,
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
@@ -975,8 +973,6 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            agent_name="test_agent",
-            scope=scope,
             model=_native_model() if native_model else None,
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
@@ -1987,8 +1983,6 @@ async def _prepare_with_reported_usage(
     ):
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            agent_name="test_agent",
-            scope=scope,
             # The model that answered the stored runs, so its reported request sizes apply.
             model=ScriptedModel([], identity=ModelIdentity(id="fake-model", provider="fake", provider_name="fake")),
             resolved_inputs=resolved_inputs,
