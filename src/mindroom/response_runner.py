@@ -4742,8 +4742,6 @@ class ResponseRunner:
             return {**fallback, **team_run_metadata_content} or None
 
         async def persist_failed_team_turn() -> None:
-            if current_task_is_process_shutdown():
-                return
             await self._persist_failed_turn(
                 team_turn_recorder,
                 is_team=True,
