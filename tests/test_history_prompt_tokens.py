@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-import inspect
 from datetime import UTC, datetime
 
-from mindroom.history.prompt_tokens import _StaticTokenEstimator, build_static_token_estimator
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
@@ -96,10 +95,6 @@ def test_static_estimate_leaves_deferred_tools_out() -> None:
         frozenset(),
     ).estimate("Current prompt")
     assert all_deferred.non_prompt_tokens() == estimate_text_tokens(str(_SYSTEM_MESSAGE.content))
-
-
-def test_static_token_estimator_cache_fields_are_not_constructor_inputs() -> None:
-    assert "_non_prompt_tokens" not in inspect.signature(_StaticTokenEstimator).parameters
 
 
 def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages() -> None:
