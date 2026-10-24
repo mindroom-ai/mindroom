@@ -26,13 +26,13 @@ if TYPE_CHECKING:
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import NativeCompactionReplay
-    from mindroom.providers.anthropic.settings import ClaudeSettings
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings
 
 COMPACTION_BETA = "compact-2026-01-12"
 _COMPACTION_EDIT_TYPE = "compact_20260112"
 # Claude requires at least this many input tokens before it compacts.
 MIN_COMPACTION_THRESHOLD = 50_000
-_NATIVE_COMPACTION_PROVIDERS = frozenset({"Anthropic", "VertexAI"})
+_NATIVE_COMPACTION_ROUTES: frozenset[ClaudeRouteKind] = frozenset({"anthropic", "vertexai_claude"})
 _COMPACTION_INSTRUCTIONS = (
     "Summarize the conversation for continuation inside <summary></summary> tags. "
     "Preserve user requests, decisions, constraints, completed work, and next steps. "
@@ -45,12 +45,18 @@ def _compact_edits(context_management: Mapping[str, Any] | None) -> list[dict[st
     return [edit for edit in edits if isinstance(edit, dict) and edit.get("type") == _COMPACTION_EDIT_TYPE]
 
 
-def authored_native_compaction_supported(*, provider: str, settings: ClaudeSettings) -> bool:
+def authored_native_compaction_supported(*, route: ClaudeRouteKind, settings: ClaudeSettings) -> bool:
     """Return whether the model's own ``context_management`` carries a compaction edit MindRoom can replay."""
-    return provider in _NATIVE_COMPACTION_PROVIDERS and bool(_compact_edits(settings.effective_context_management()))
+    return route in _NATIVE_COMPACTION_ROUTES and bool(_compact_edits(settings.effective_context_management()))
 
 
-def native_compaction_supported(*, provider: str, model_id: str, settings: ClaudeSettings, endpoint: str) -> bool:
+def native_compaction_supported(
+    *,
+    route: ClaudeRouteKind,
+    model_id: str,
+    settings: ClaudeSettings,
+    endpoint: str,
+) -> bool:
     """Return whether MindRoom may add its own compaction trigger on this route.
 
     An authored ``context_management`` keeps its own policy, and the direct API supports it only on its
@@ -58,12 +64,12 @@ def native_compaction_supported(*, provider: str, model_id: str, settings: Claud
     """
     request_params = settings.request_params or {}
     return (
-        provider in _NATIVE_COMPACTION_PROVIDERS
+        route in _NATIVE_COMPACTION_ROUTES
         and model_id.startswith(CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
         and settings.context_management is None
         and "context_management" not in request_params
         and "context_management" not in (request_params.get("extra_body") or {})
-        and (provider == "VertexAI" or endpoint == ANTHROPIC_BASE_URL_DEFAULT)
+        and (route == "vertexai_claude" or endpoint == ANTHROPIC_BASE_URL_DEFAULT)
     )
 
 

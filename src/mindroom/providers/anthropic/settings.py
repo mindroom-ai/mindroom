@@ -1,7 +1,7 @@
-"""Authored settings of one Claude route, parsed from ``ModelConfig.extra_kwargs`` under Agno's field names.
+"""Authored settings of one Claude route, parsed from ``ModelConfig.extra_kwargs``.
 
-``extra_kwargs`` was documented as the fields of the Agno model class, so the accepted keys keep those
-names; a key the route does not accept fails at model construction with the accepted list.
+The accepted keys keep the names existing configs use; a key the route does not accept fails at model
+construction with the accepted list.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ type ClaudeRouteKind = Literal["anthropic", "vertexai_claude", "bedrock_claude"]
 # ``ANTHROPIC_BASE_URL``.
 ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {"vertexai_claude": "ANTHROPIC_VERTEX_BASE_URL"}
 
-# Agno's Claude default; a reply that reaches it is answered as cut off instead of run (the loop's policy).
+# Kept as main behaves; a reply that reaches this cap is answered as cut off instead of run (the loop's policy).
 _DEFAULT_MAX_TOKENS = 8192
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past ten minutes unless the
 # client has an explicit timeout; 3600 s is the SDK's own ceiling for non-streaming operations.
@@ -60,8 +60,8 @@ ACCEPTED_KEYS: dict[ClaudeRouteKind, frozenset[str]] = {
 class ClaudeSettings:
     """What one Claude model's config authored, with MindRoom's defaults where it authored nothing.
 
-    ``request_params`` are raw request overrides merged last, as Agno merged them, so a ``thinking`` or
-    ``context_management`` value there (or inside its ``extra_body``) wins over the top-level field.
+    ``request_params`` are raw request overrides merged last, so a ``thinking`` or ``context_management``
+    value there (or inside its ``extra_body``) wins over the top-level field.
     """
 
     max_tokens: int | None = _DEFAULT_MAX_TOKENS

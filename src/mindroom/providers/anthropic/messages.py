@@ -215,10 +215,7 @@ class ClaudeProvider:
         if threshold is not None and threshold < MIN_COMPACTION_THRESHOLD:
             threshold = None
         if threshold is None or not self.capabilities.native_compaction:
-            if not allow_authored or not authored_native_compaction_supported(
-                provider=self.identity.provider,
-                settings=self.settings,
-            ):
+            if not allow_authored or not authored_native_compaction_supported(route=self.route, settings=self.settings):
                 return None
             threshold = None
         route = native_compaction_route(
@@ -237,9 +234,7 @@ class ClaudeProvider:
         streaming and yields its usage and finished turn once the response arrives.
         """
         started = time.monotonic()
-        messages = await inline_url_media(request.messages, self.http_client)
-        if messages is not request.messages:
-            request = replace(request, messages=messages)
+        request = replace(request, messages=await inline_url_media(request.messages, self.http_client))
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
@@ -250,7 +245,7 @@ class ClaudeProvider:
                 )
                 # TODO(simplify): A non-streaming reply leaves time_to_first_token unset. Stamp it when the whole
                 # reply arrives, as the other adapters do. Stored run metrics and operators would notice (#3075).
-                usage, completed = self._finished_turn(response, request, prepared, started, None, streamed=False)
+                usage, completed = self._finished_turn(response, request, prepared, started, None)
                 yield usage
                 yield completed
                 return
@@ -267,7 +262,6 @@ class ClaudeProvider:
                             prepared,
                             started,
                             first_output_at,
-                            streamed=True,
                         )
                         yield usage
                         yield completed
@@ -288,14 +282,12 @@ class ClaudeProvider:
         prepared: _PreparedRequest,
         started: float,
         first_output_at: float | None,
-        *,
-        streamed: bool,
     ) -> tuple[UsageReported, TurnCompleted]:
         """Return the usage and completion of a finished response, its message stamped with provenance and timings."""
         message = assistant_message_from_response(
             response,
             record_context_management=self.settings.context_management is not None,
-            streamed=streamed,
+            streamed=request.stream,
         )
         stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
@@ -596,7 +588,7 @@ def _claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: Claude
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=native_tool_search_supported(route, model_id),
         native_compaction=native_compaction_supported(
-            provider=_PROVIDER_NAMES[route],
+            route=route,
             model_id=model_id,
             settings=settings,
             endpoint=native_compaction_endpoint(route, settings),
