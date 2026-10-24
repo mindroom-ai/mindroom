@@ -120,12 +120,10 @@ class _FallbackAwareJSONReader(JSONReader):
 
 
 class _InMemoryTextReader(TextReader):
-    """Read the malformed JSON text already retained by its parse error.
+    """Chunk the malformed JSON text already retained by its parse error, with the base's text chunking.
 
-    Only ``read`` is overridden, because indexing reads synchronously on a
-    worker thread. ``TextReader.async_read`` does not delegate to ``read``, so
-    anything switching to it must override it too or it will re-read the
-    source instead of serving the retained text.
+    Only ``read`` is overridden: indexing reads synchronously on a worker thread, and ``async_read`` would reread
+    the file instead of serving the retained text.
     """
 
     def __init__(self, source_text: str) -> None:
@@ -133,14 +131,7 @@ class _InMemoryTextReader(TextReader):
         self._source_text = source_text
 
     def read(self, file: Path | IO[Any], name: str | None = None) -> list[Document]:
-        document = Document(
-            name=name or str(file),
-            id=str(uuid.uuid4()),
-            content=self._source_text,
-        )
-        if not self.chunk:
-            return [document]
-        return self.chunk_document(document)
+        return self.chunk_document(Document(name=name or str(file), id=str(uuid.uuid4()), content=self._source_text))
 
 
 #: Files pulled into one prepare/embed/write batch. This bounds live asyncio
