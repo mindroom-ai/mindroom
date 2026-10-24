@@ -215,10 +215,7 @@ class ClaudeProvider:
         if threshold is not None and threshold < MIN_COMPACTION_THRESHOLD:
             threshold = None
         if threshold is None or not self.capabilities.native_compaction:
-            if not allow_authored or not authored_native_compaction_supported(
-                provider=self.identity.provider,
-                settings=self.settings,
-            ):
+            if not allow_authored or not authored_native_compaction_supported(route=self.route, settings=self.settings):
                 return None
             threshold = None
         route = native_compaction_route(
@@ -596,7 +593,7 @@ def _claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: Claude
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=native_tool_search_supported(route, model_id),
         native_compaction=native_compaction_supported(
-            provider=_PROVIDER_NAMES[route],
+            route=route,
             model_id=model_id,
             settings=settings,
             endpoint=native_compaction_endpoint(route, settings),
