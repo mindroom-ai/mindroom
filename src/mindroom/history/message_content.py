@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Audio, File, Image, Video
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 from mindroom.token_budget import stable_serialize
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message
 
 
@@ -18,7 +20,7 @@ _MAX_HISTORY_VIEWED_IMAGE_BYTES = 10 * 1024 * 1024
 HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS = 5_000
 
 
-def message_media_entries(message: Message) -> tuple[tuple[str, object | None], ...]:
+def message_media_entries(message: Message) -> tuple[tuple[str, Sequence[Image | Audio | Video | File] | None], ...]:
     """Return the message's media fields in stable order."""
     return (
         ("images", message.images),
@@ -28,13 +30,9 @@ def message_media_entries(message: Message) -> tuple[tuple[str, object | None], 
     )
 
 
-def media_payload_snapshot(media_value: object) -> object:
+def media_payload_snapshot(media: Sequence[Image | Audio | Video | File]) -> list[dict[str, Any]]:
     """Serialize media metadata without embedding the binary content."""
-    if isinstance(media_value, (Image, Audio, Video, File)):
-        return media_value.to_dict(include_content=False)
-    if isinstance(media_value, Sequence) and not isinstance(media_value, (str, bytes, bytearray)):
-        return [media_payload_snapshot(item) for item in media_value]
-    return media_value
+    return [item.to_dict(include_content=False) for item in media]
 
 
 def _retained_viewed_images(messages: Sequence[Message]) -> set[tuple[int, int]]:
