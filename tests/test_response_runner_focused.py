@@ -51,6 +51,7 @@ from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -93,9 +94,10 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message as LoopMessage
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -192,6 +194,7 @@ from tests.response_runner_helpers import (
     _plain_request,
     _target,
 )
+from tests.scripted_agent_helpers import stored_runs
 from tests.test_agent_tool_calls import _catalog
 from tests.test_response_attempt import _Span
 from tests.test_response_turn import (
@@ -8695,6 +8698,32 @@ async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_a_completed_response_links_its_reply_event_onto_its_stored_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """Both agent response drivers record the Matrix reply event on the run they stored in the agent's session."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer("The scripted answer to the request.")])})
+    target = _target()
+    with patch_response_runner_module(
+        typing_indicator=_noop_typing,
+        should_use_streaming=AsyncMock(return_value=streaming),
+    ):
+        await coordinator.generate_response(_plain_request(target))
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
+
+    [run] = stored_runs(coordinator.deps.runtime.config, coordinator.deps.runtime_paths, target.session_id)
+    assert run.metadata is not None
+    assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$response"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent", "a job follow-up"])
 async def test_turns_no_person_asked_for_never_count_toward_skill_review(
     tmp_path: Path,
@@ -8819,6 +8848,48 @@ def test_a_finished_approval_continuation_tells_automations_its_source_events(tm
     deps.notify_response_finished()
 
     assert automations.finished == [("$prompt",)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entity_kind", ["agent", "team"])
+async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_run_it_resumed(
+    tmp_path: Path,
+    entity_kind: Literal["agent", "team"],
+) -> None:
+    """A resumed reply records its Matrix event on the run it continued, in the agent or team session holding it."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$prompt",
+        resolved_thread_id="$prompt",
+        session_id="session-1",
+    )
+    is_team = entity_kind == "team"
+    scope = HistoryScope(kind=entity_kind, scope_id="crew" if is_team else "general")
+    continuation = approval_continuation(
+        entity_kind=entity_kind,
+        history_scope=scope,
+        execution_identity=serialize_tool_execution_identity(identity),
+    )
+    storage = coordinator.deps.state_writer.create_storage(identity, scope=scope)
+    session = new_scope_session(session_id="session-1", scope_id=scope.scope_id, is_team=is_team)
+    session.runs = [
+        TeamRunRecord(run_id="run-1", team_id="crew", session_id="session-1", status=RunStatus.completed)
+        if is_team
+        else RunRecord(run_id="run-1", agent_id="general", session_id="session-1", status=RunStatus.completed),
+    ]
+    seed_session(storage, session)
+
+    deps = coordinator._approval_post_response_deps(continuation)
+    assert deps.persist_response_event_id is not None
+    await deps.persist_response_event_id("run-1", "$reply")
+
+    stored = storage.load_session("session-1", entity_kind)
+    assert stored is not None
+    assert [run.metadata for run in stored.runs] == [{MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$reply"}]
 
 
 @pytest.mark.asyncio
