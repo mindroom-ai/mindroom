@@ -73,6 +73,8 @@ class ToolSpec:
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None = None
+    # TODO(simplify): the approval flags exist only so OpenAI-family wires send Agno's fields in each function
+    # definition. Stop sending them and drop them here. Models would notice: tool definitions change once. (#3075)
     requires_confirmation: bool | None = None
     external_execution: bool | None = None
     approval_type: str | None = None

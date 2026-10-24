@@ -16,7 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from mindroom.llm.messages import Message
-from mindroom.llm.usage import RunMetrics, ToolCallMetrics
+from mindroom.llm.usage import RunMetrics, ToolCallMetrics, known_fields
 from mindroom.redaction import redact_sensitive_text
 
 
@@ -79,26 +79,10 @@ class ToolExecution:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
-        """Rebuild from a stored dict, ignoring keys this type does not model."""
-        metrics = data.get("metrics")
-        created_at = {"created_at": data["created_at"]} if "created_at" in data else {}
-        return cls(
-            tool_call_id=data.get("tool_call_id"),
-            tool_name=data.get("tool_name"),
-            tool_args=data.get("tool_args"),
-            tool_call_error=data.get("tool_call_error"),
-            result=data.get("result"),
-            metrics=ToolCallMetrics.from_dict(metrics) if metrics else None,
-            child_run_id=data.get("child_run_id"),
-            stop_after_tool_call=data.get("stop_after_tool_call", False),
-            requires_confirmation=data.get("requires_confirmation"),
-            confirmed=data.get("confirmed"),
-            confirmation_note=data.get("confirmation_note"),
-            external_execution_required=data.get("external_execution_required"),
-            external_execution_silent=data.get("external_execution_silent"),
-            approval_type=data.get("approval_type"),
-            **created_at,
-        )
+        """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default."""
+        values = known_fields(cls, data)
+        metrics = values.pop("metrics", None)
+        return cls(**values, metrics=ToolCallMetrics.from_dict(metrics) if metrics else None)
 
 
 _DENIED_WITHOUT_REASON = "Not approved by requester"

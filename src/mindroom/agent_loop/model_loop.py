@@ -6,8 +6,7 @@ tool calls it requested, and appends their results; the loop ends when the model
 a tool stops it, when the run waits for a decision, when a pre-request hook ends it, or when the run's request cap
 is reached. A resume enters the loop with the paused batch's decided calls, which it answers as the rest of that
 batch before any request. A run waits for a decision when a call of its own paused, or when a tool left an
-unresolved requirement on the record, as a team leader's delegation does for a paused member. Every point MindRoom
-patched into Agno's loop is a ``LoopHooks`` field or a parameter here.
+unresolved requirement on the record, as a team leader's delegation does for a paused member.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import RunContext
     from mindroom.agent_loop.tools import PreparedTools, ToolBatch
     from mindroom.llm.provider import ModelIdentity, ModelProvider, StopReason, ToolSpec
-    from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics, RunMetrics
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import ToolFunction
@@ -210,7 +209,8 @@ async def run_model_loop(
                 else:
                     yield event
         assert turn is not None
-        message = _accept_turn(turn.message, state, progress, metrics, identity)
+        message = turn.message
+        _accept_turn(message, state, progress, metrics, identity)
         yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
         if not message.tool_calls:
             break
@@ -253,7 +253,7 @@ def _accept_turn(
     progress: _Progress,
     metrics: RunMetrics,
     identity: ModelIdentity,
-) -> Message:
+) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
     The provider stamped the message with the model that answered it. A request that answers with tool calls and no
@@ -266,7 +266,6 @@ def _accept_turn(
     if message.content is not None:
         progress.text_parts.append(message.get_content_string())
         state.record.content = "".join(progress.text_parts)
-    return message
 
 
 async def _run_tool_batch(
@@ -326,8 +325,18 @@ async def _answer_resumed(
         if requirement.confirmation is True:
             assert execution.tool_name is not None
             function = state.offered.functions[execution.tool_name]
-            async for event in _run_approved(function, execution, state.run, hooks, results):
-                yield event
+            assert execution.tool_call_id is not None
+            # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
+            execution.requires_confirmation = False
+            planned = PlannedCall(
+                call_id=execution.tool_call_id,
+                function=function,
+                arguments=execution.tool_args,
+                execution=execution,
+            )
+            yield ToolStarted(execution)
+            results.extend(await dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware))
+            yield ToolCompleted(execution)
         elif requirement.confirmation is False:
             execution.tool_call_error = True
             execution.requires_confirmation = False
@@ -351,27 +360,6 @@ def _rejection_message(requirement: RunRequirement) -> Message:
         tool_call_error=True,
         stop_after_tool_call=execution.stop_after_tool_call,
     )
-
-
-async def _run_approved(
-    function: ToolFunction,
-    execution: ToolExecution,
-    run: RunContext,
-    hooks: LoopHooks,
-    results: list[Message],
-) -> AsyncIterator[ToolStarted | ToolCompleted]:
-    assert execution.tool_call_id is not None
-    # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
-    execution.requires_confirmation = False
-    planned = PlannedCall(
-        call_id=execution.tool_call_id,
-        function=function,
-        arguments=execution.tool_args,
-        execution=execution,
-    )
-    yield ToolStarted(execution)
-    results.extend(await dispatch_tool_calls([planned], run=run, middleware=hooks.tool_middleware))
-    yield ToolCompleted(execution)
 
 
 def _waits_for_decision(record: AnyRunRecord) -> bool:

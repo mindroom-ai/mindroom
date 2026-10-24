@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -62,18 +62,29 @@ def _bytes_from(data: Mapping[str, Any]) -> bytes | None:
     return _decode_base64(content) if isinstance(content, str) else None
 
 
-def _finish(scalars: dict[str, Any], *, content: str | None, metadata: dict[str, Any] | None) -> dict[str, Any]:
-    if content is not None:
-        scalars["content"] = content
-    if metadata:
-        scalars["metadata"] = metadata
-    return {key: value for key, value in scalars.items() if value is not None}
-
-
 def _base64_or_none(content: bytes | None, *, include_content: bool) -> str | None:
     if include_content and content:
         return base64.b64encode(content).decode("utf-8")
     return None
+
+
+type _Media = Image | Audio | Video | File
+_LAST_KEYS = ("content", "metadata")
+
+
+def _stored_dict(media: _Media, *, content: str | None) -> dict[str, Any]:
+    """Return the stored dict: every field in declaration order but ``content`` and ``metadata``, which come last.
+
+    None values and an empty ``metadata`` are left out.
+    """
+    values = {item.name: getattr(media, item.name) for item in fields(media) if item.name not in _LAST_KEYS}
+    values.update(content=content, metadata=media.metadata or None)
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _stored_fields(cls: type[_Media], data: Mapping[str, Any]) -> dict[str, Any]:
+    """Read every field but ``id`` and ``content`` from a stored dict, None when absent; other keys are ignored."""
+    return {item.name: data.get(item.name) for item in fields(cls) if item.name not in {"id", "content"}}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -98,36 +109,12 @@ class Image:
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
         """Return the stored dict shape; ``content`` is base64 text and None values are dropped."""
-        scalars = {
-            "id": self.id,
-            "url": self.url,
-            "filepath": self.filepath,
-            "format": self.format,
-            "mime_type": self.mime_type,
-            "detail": self.detail,
-            "original_prompt": self.original_prompt,
-            "revised_prompt": self.revised_prompt,
-            "alt_text": self.alt_text,
-        }
-        content = _base64_or_none(self.content, include_content=include_content)
-        return _finish(scalars, content=content, metadata=self.metadata)
+        return _stored_dict(self, content=_base64_or_none(self.content, include_content=include_content))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Image:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(
-            id=_id_from(data),
-            url=data.get("url"),
-            filepath=data.get("filepath"),
-            content=_bytes_from(data),
-            format=data.get("format"),
-            mime_type=data.get("mime_type"),
-            detail=data.get("detail"),
-            original_prompt=data.get("original_prompt"),
-            revised_prompt=data.get("revised_prompt"),
-            alt_text=data.get("alt_text"),
-            metadata=data.get("metadata"),
-        )
+        return cls(id=_id_from(data), content=_bytes_from(data), **_stored_fields(cls, data))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -153,38 +140,12 @@ class Audio:
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
         """Return the stored dict shape; ``content`` is base64 text and None values are dropped."""
-        scalars = {
-            "id": self.id,
-            "url": self.url,
-            "filepath": self.filepath,
-            "format": self.format,
-            "mime_type": self.mime_type,
-            "duration": self.duration,
-            "sample_rate": self.sample_rate,
-            "channels": self.channels,
-            "transcript": self.transcript,
-            "expires_at": self.expires_at,
-        }
-        content = _base64_or_none(self.content, include_content=include_content)
-        return _finish(scalars, content=content, metadata=self.metadata)
+        return _stored_dict(self, content=_base64_or_none(self.content, include_content=include_content))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Audio:
-        """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(
-            id=_id_from(data),
-            url=data.get("url"),
-            filepath=data.get("filepath"),
-            content=_bytes_from(data),
-            format=data.get("format"),
-            mime_type=data.get("mime_type"),
-            duration=data.get("duration"),
-            sample_rate=data.get("sample_rate"),
-            channels=data.get("channels"),
-            transcript=data.get("transcript"),
-            expires_at=data.get("expires_at"),
-            metadata=data.get("metadata"),
-        )
+        """Rebuild from a stored dict, ignoring keys this type does not model; a missing rate or channel count is None."""
+        return cls(id=_id_from(data), content=_bytes_from(data), **_stored_fields(cls, data))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -212,42 +173,12 @@ class Video:
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
         """Return the stored dict shape; ``content`` is base64 text and None values are dropped."""
-        scalars = {
-            "id": self.id,
-            "url": self.url,
-            "filepath": self.filepath,
-            "format": self.format,
-            "mime_type": self.mime_type,
-            "duration": self.duration,
-            "width": self.width,
-            "height": self.height,
-            "fps": self.fps,
-            "eta": self.eta,
-            "original_prompt": self.original_prompt,
-            "revised_prompt": self.revised_prompt,
-        }
-        content = _base64_or_none(self.content, include_content=include_content)
-        return _finish(scalars, content=content, metadata=self.metadata)
+        return _stored_dict(self, content=_base64_or_none(self.content, include_content=include_content))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Video:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(
-            id=_id_from(data),
-            url=data.get("url"),
-            filepath=data.get("filepath"),
-            content=_bytes_from(data),
-            format=data.get("format"),
-            mime_type=data.get("mime_type"),
-            duration=data.get("duration"),
-            width=data.get("width"),
-            height=data.get("height"),
-            fps=data.get("fps"),
-            eta=data.get("eta"),
-            original_prompt=data.get("original_prompt"),
-            revised_prompt=data.get("revised_prompt"),
-            metadata=data.get("metadata"),
-        )
+        return cls(id=_id_from(data), content=_bytes_from(data), **_stored_fields(cls, data))
 
 
 def image_format(data: bytes) -> str | None:
@@ -327,41 +258,19 @@ class File:
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
         """Return the stored dict shape; ``text/*`` bytes that are UTF-8 become text, other bytes base64 text."""
-        scalars = {
-            "id": self.id,
-            "url": self.url,
-            "filepath": self.filepath,
-            "mime_type": self.mime_type,
-            "file_type": self.file_type,
-            "filename": self.filename,
-            "size": self.size,
-            "format": self.format,
-            "name": self.name,
-        }
-        content = self._encoded_content() if include_content else None
-        return _finish(scalars, content=content, metadata=self.metadata)
+        return _stored_dict(self, content=self._encoded_content() if include_content else None)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> File:
         """Rebuild from a stored dict; text content decodes by ``mime_type`` as Agno wrote it."""
-        mime_type = data.get("mime_type")
         raw = data.get("content")
         content: bytes | None = None
         if isinstance(raw, str):
-            content = raw.encode("utf-8") if _is_text(mime_type) else _decode_base64(raw)
-        return cls(
-            id=_id_from(data),
-            url=data.get("url"),
-            filepath=data.get("filepath"),
-            content=content,
-            mime_type=mime_type,
-            file_type=data.get("file_type"),
-            filename=data.get("filename"),
-            size=data.get("size"),
-            format=data.get("format"),
-            name=data.get("name"),
-            metadata=data.get("metadata"),
-        )
+            # TODO(simplify): ``text/*`` bytes that are not UTF-8 are written as base64 but read back as that base64 text.
+            # Write them so the reader can tell, such as always as base64, so they read back as their bytes.
+            # Users and stored data would notice: such an attachment after an approval resume. (#3075)
+            content = raw.encode("utf-8") if _is_text(data.get("mime_type")) else _decode_base64(raw)
+        return cls(id=_id_from(data), content=content, **_stored_fields(cls, data))
 
 
 __all__ = [
