@@ -169,7 +169,6 @@ def _loop_hooks(
     final request of run ``run_id``.
     """
     capabilities = model.capabilities
-    storage = turn.storage
     before_request: list[BeforeRequestHook] = []
     if job_definitions is not None:
         before_request.append(job_definitions_hook(job_definitions))
@@ -185,9 +184,7 @@ def _loop_hooks(
             model_name=turn.model_name,
             model=model,
             history_settings=history_settings,
-            store=storage.store if storage is not None else None,
-            session=storage.session if storage is not None else None,
-            scope=storage.scope if storage is not None else None,
+            storage=turn.storage,
             replay_plan=turn.replay_plan,
             deferred_tool_names=deferred_tools.names,
             prompt_id=turn.prompt_id,
