@@ -145,10 +145,14 @@ def test_paused_content_follows_agno_for_a_pending_confirmation() -> None:
     confirm = ToolExecution(requires_confirmation=True)
     silent = ToolExecution(external_execution_required=True, external_execution_silent=True)
 
-    assert paused_content([confirm]) == "I have tools to execute, but I need confirmation."
-    assert paused_content([silent]) == ""
-    assert paused_content([confirm, silent]) == "I have tools to execute, but I need confirmation."
-    assert paused_content([ToolExecution(requires_confirmation=True, confirmed=True)]) == ""
+    def paused(*tools: ToolExecution) -> RunRecord:
+        return RunRecord(run_id="r", status=RunStatus.paused, tools=list(tools))
+
+    assert paused_content(paused(confirm)) == "I have tools to execute, but I need confirmation."
+    assert paused_content(paused(silent)) == ""
+    assert paused_content(paused(confirm, silent)) == "I have tools to execute, but I need confirmation."
+    assert paused_content(paused(ToolExecution(requires_confirmation=True, confirmed=True))) == ""
+    assert paused_content(RunRecord(run_id="r", status=RunStatus.paused)) == ""
 
 
 @pytest.mark.asyncio

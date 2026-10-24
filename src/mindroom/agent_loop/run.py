@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
-    from mindroom.llm.runs import AnyRunRecord, RunRequirement, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.tool_system.tool_function import ToolkitClose
 
 logger = get_logger(__name__)
@@ -291,9 +291,14 @@ def decide_requirements(
     return [requirement for call_id, requirement in requirements.items() if call_id in waited_for]
 
 
-def _agent_paused_content(record: AnyRunRecord) -> str:
-    """Return the content of an agent run paused on its own tools (``paused_content``)."""
-    return paused_content(record.tools or ())
+def paused_content(record: AnyRunRecord) -> str:
+    """Return the content of an agent run paused without text of its own: a notice while a call waits for confirmation.
+
+    The only externally executed calls, delegations, pause silently and never wait for confirmation, so they add none.
+    """
+    if any(tool.requires_confirmation is True and not tool.confirmed for tool in record.tools or ()):
+        return "I have tools to execute, but I need confirmation."
+    return ""
 
 
 async def drive_run[R: AnyRunRecord](
@@ -307,7 +312,7 @@ async def drive_run[R: AnyRunRecord](
     template: ModelRequest,
     entry: Callable[[], Awaitable[None]] | None = None,
     resumed: Sequence[RunRequirement] | None = None,
-    pause_content: Callable[[R], str] = _agent_paused_content,
+    pause_content: Callable[[R], str] = paused_content,
 ) -> AsyncIterator[RunEvent]:
     """Run ``entry`` and then the loop over ``messages``, ending the record exactly once however the run ends.
 
@@ -426,16 +431,6 @@ def own_model_messages(record: AnyRunRecord) -> list[Message]:
 def own_answers(record: AnyRunRecord) -> list[str]:
     """Return the text of each of the run's own model messages (``own_model_messages``) that has any, oldest first."""
     return [message.get_content_string() for message in own_model_messages(record) if message.content]
-
-
-def paused_content(tools: Sequence[ToolExecution]) -> str:
-    """Return the content of a paused run that produced none of its own: a notice while a call waits for confirmation.
-
-    The only externally executed calls, delegations, pause silently and never wait for confirmation, so they add none.
-    """
-    if any(tool.requires_confirmation is True and not tool.confirmed for tool in tools):
-        return "I have tools to execute, but I need confirmation."
-    return ""
 
 
 __all__ = [
