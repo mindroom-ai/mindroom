@@ -452,7 +452,6 @@ def _stopping_tool() -> JobTool:
         ("ordinary", 1, False, "inline"),
         ("ordinary", 0, True, "inline"),
         ("stops_step", 0, False, "inline"),
-        ("framework", 0, False, "native"),
         ("job", 0, False, "native"),
         ("job", 1, True, "native"),
         ("run_connection", 0, False, "native"),
@@ -467,7 +466,10 @@ def test_wait_mode_classifies_every_call_from_current_policy(
     owned: bool,
     expected: str,
 ) -> None:
-    """One classifier decides definition projection and execution for each kind of function."""
+    """One classifier decides definition projection and execution for each kind of assembled function.
+
+    A function the framework generated is never classified; ``test_tool_job_sdk_functions.py`` covers it.
+    """
     paths = _runtime_paths(tmp_path)
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(exclude_toolkits=["shell"]),
@@ -477,7 +479,6 @@ def test_wait_mode_classifies_every_call_from_current_policy(
     tools = {
         "ordinary": lambda: job_tool(_ordinary),
         "stops_step": _stopping_tool,
-        "framework": lambda: None,
         "job": lambda: toolkit_job_tools(
             JobTools(paths, build_execution_identity_from_runtime_context(context)),
             authored_name="job",
@@ -488,7 +489,7 @@ def test_wait_mode_classifies_every_call_from_current_policy(
     }
     tool = tools[case]()
     with tool_runtime_context(context), job_control_context(JobControl()) if owned else nullcontext():
-        assert wait_mode(tool, depth=depth) == expected
+        assert wait_mode(tool, depth=depth, context=context) == expected
 
 
 def test_a_call_a_cli_command_makes_runs_inline(tmp_path: Path) -> None:
@@ -497,9 +498,9 @@ def test_a_call_a_cli_command_makes_runs_inline(tmp_path: Path) -> None:
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     tool = job_tool(_ordinary)
     with tool_runtime_context(context):
-        assert wait_mode(tool, depth=0) == "managed"
+        assert wait_mode(tool, depth=0, context=context) == "managed"
         with cli_dispatch_scope():
-            assert wait_mode(tool, depth=0) == "inline"
+            assert wait_mode(tool, depth=0, context=context) == "inline"
 
 
 @pytest.mark.asyncio

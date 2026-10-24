@@ -686,6 +686,7 @@ def view_file_from_worker(
             operation="view-file",
             failure="Sandbox file view failed.",
         )
+        # Deferred: Agno's tool layer, which both modules load, must stay out of the slim tool registry.
         from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
         from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
 

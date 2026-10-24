@@ -16,7 +16,7 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution import with_job_admission
-from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
+from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
@@ -40,6 +40,7 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -166,3 +167,61 @@ async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, s
     finally:
         await runtime.shutdown()
     assert ran == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("admitted", "expected"),
+    [(False, {"tool_name": "read"}), (True, {"query": "rewritten"})],
+    ids=["generated function", "admitted call"],
+)
+async def test_a_jobs_call_is_rechecked_with_the_arguments_its_own_grant_belongs_to(
+    tmp_path: Path,
+    admitted: bool,
+    expected: dict[str, object],
+) -> None:
+    """A generated function has no grant, so inside a job its recheck reads the enclosing call's arguments.
+
+    An admitted call binds its own grant, which its tool hooks recheck with the arguments they accepted.
+    """
+    rechecked: list[Mapping[str, object]] = []
+
+    def call_tool(tool_name: str) -> str:
+        return tool_name
+
+    def search(query: str) -> str:
+        return query
+
+    def authorize_execution(_owner: object, _tool: object, accepted: Mapping[str, object]) -> None:
+        rechecked.append(dict(accepted))
+
+    async def leaf(_arguments: dict[str, object]) -> str:
+        rechecked.clear()
+        # The tool hook rechecks with the arguments it accepted, here rewritten, before the tool body.
+        check_current_execution_authority(arguments={"query": "rewritten"})
+        return "found"
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path, authorize_execution=authorize_execution)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    run = ToolCallContext(run_id="job-run", session_id="session", call_id="inner-call")
+    enclosing = JobCall(tool=job_tool(call_tool), arguments={"tool_name": "read"}, context=run, team=False)
+    searching = job_tool(search)
+    (admit,) = with_job_admission(job_actor(*([searching] if admitted else [])), ())
+    try:
+        async with execution_resources():
+            with (
+                tool_runtime_context(context),
+                job_control_context(JobControl()),
+                authorized_tool_call(build_execution_identity_from_runtime_context(context), enclosing),
+            ):
+                result = await admit(
+                    ToolCall(function=searching.function, arguments={"query": "tea"}, context=run),
+                    leaf,
+                )
+    finally:
+        await runtime.shutdown()
+    assert result == "found"
+    assert rechecked == [expected]

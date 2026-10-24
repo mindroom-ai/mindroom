@@ -185,6 +185,8 @@ class _Cards:
     decision: asyncio.Future[BackgroundApprovalDecision]
     posted: asyncio.Event = field(default_factory=asyncio.Event)
     requested: list[tuple[str, str, dict[str, object]]] = field(default_factory=list)
+    # The authored toolkit each card names as its call's origin.
+    toolkits: list[str] = field(default_factory=list)
     # The entity and operation each card binds its timed approvals to.
     grants: list[tuple[str | None, ApprovalOperation | None]] = field(default_factory=list)
     settled: list[str] = field(default_factory=list)
@@ -202,6 +204,7 @@ class _Cards:
         **_kwargs: object,
     ) -> BackgroundApprovalDecision:
         self.requested.append((origin.run_id, tool_name, arguments))
+        self.toolkits.append(origin.toolkit_name)
         self.grants.append((entity_name, grant_operation))
         self.posted.set()
         return await asyncio.shield(self.decision)
@@ -253,7 +256,8 @@ class _GatedRun:
         """Run the leader's reply that makes the gated call, its function a generated one when ``generated``."""
         toolkit = _GatedTools(self.effects, self.gate)
         [function] = gated_functions(toolkit, self.config, approvals_as_jobs=True).values()
-        [tool] = toolkit_job_tools(toolkit, authored_name="reports").values()
+        # Authored under a name of its own, so a card names the authored toolkit, not the one built for it.
+        [tool] = toolkit_job_tools(toolkit, authored_name="report_writer").values()
         model = ScriptedModel([calls(tool_call("write_report", "write-1", title="q3", **budget)), answer("done")])
         if generated:
             return await run_job_turn(job_actor(), model, "Write", generated=(function,))
@@ -284,6 +288,7 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
                 # The card shows the exact arguments, and nothing ran before the decision.
                 [(_, tool_name, arguments)] = run.cards.requested
                 assert (tool_name, arguments, run.effects) == ("write_report", {"title": "q3"}, [])
+                assert run.cards.toolkits == ["report_writer"]
                 # Its timed approvals cover this conversation's operation, as a paused reply's card would.
                 assert run.cards.grants == [("leader", grant_operation(run.config, "write_report", {"title": "q3"}))]
                 run.decide(decision)

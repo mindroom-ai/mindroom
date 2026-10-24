@@ -42,9 +42,7 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_jobs.authorization import toolkit_authority
-from mindroom.tool_jobs.execution import JobActor, job_definitions_hook, with_job_admission
-from mindroom.tool_jobs.execution_authority import JobTool
+from mindroom.tool_jobs.execution import JobActor, assembled_job_tools, job_definitions_hook, with_job_admission
 from mindroom.tool_jobs.notices import job_notice_hook
 from mindroom.tool_jobs.runtime import (
     TERMINAL_STATUSES,
@@ -76,6 +74,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider
     from mindroom.participation import ParticipationGate
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_jobs.execution_authority import JobTool
     from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
@@ -277,11 +276,10 @@ def toolkit_job_tools(
     ``snapshot`` is the actor's execution scope and file access, as ``authority_snapshot`` freezes it; only such
     functions may become jobs.
     """
-    authority = toolkit_authority(snapshot or {}, toolkit)
-    return {
-        function.name: JobTool(function=function, toolkit_name=authored_name, toolkit=toolkit, authority=authority)
-        for function in adapt_toolkit(toolkit).functions
-    }
+    return assembled_job_tools(
+        ((authored_name, toolkit, function) for function in adapt_toolkit(toolkit).functions),
+        snapshot or {},
+    )
 
 
 def job_tool(
