@@ -56,7 +56,7 @@ logger = get_logger(__name__)
 
 # Hermes caps one review fork at 16 iterations and 75% of the review model's context window, at most 600k input
 # tokens across all of its requests, falling back to 120k when the window is unknown.
-_REVIEW_TOOL_CALL_LIMIT = 16
+_REVIEW_MAX_TOOL_CALLS = 16
 _INPUT_CONTEXT_FRACTION = 0.75
 _MAX_INPUT_TOKENS = 600_000
 _FALLBACK_INPUT_TOKENS = 120_000
@@ -391,7 +391,7 @@ async def review_conversation(
             record=record,
             run=RunContext(run_id=invocation_id, session_id=session_id),
             hooks=_review_hooks(config, review, metrics),
-            max_tool_calls_per_turn=_REVIEW_TOOL_CALL_LIMIT,
+            max_tool_calls_per_turn=_REVIEW_MAX_TOOL_CALLS,
             request_template=review.settings,
         )
         async for _event in events:

@@ -613,7 +613,6 @@ def test_format_tool_completed_event_formats_combined_block() -> None:
     tool = ToolExecution(tool_name="run_shell", tool_args={"cmd": "pwd"}, result="/app")
     text, trace = format_tool_completed_event(tool.call, tool_index=1)
     assert text == "\n\n🔧 `run_shell` [1]\n\n"
-    assert trace is not None
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "run_shell"
     assert trace.args_preview == "cmd=pwd"

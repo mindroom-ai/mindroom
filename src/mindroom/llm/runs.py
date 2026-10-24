@@ -92,11 +92,13 @@ class ToolExecution:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
         """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default."""
-        names = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in fields(cls)}
-        values = {names[key]: value for key, value in data.items() if key in names}
+        values = {_TOOL_FIELDS[key]: value for key, value in data.items() if key in _TOOL_FIELDS}
         metrics = values.pop("metrics", None)
         return cls(**values, metrics=ToolCallMetrics.from_dict(metrics) if metrics else None)
 
+
+# Each tool-execution field by its stored key.
+_TOOL_FIELDS = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in fields(ToolExecution)}
 
 _DENIED_WITHOUT_REASON = "Not approved by requester"
 

@@ -117,15 +117,14 @@ class StreamingToolTracker:
     def update_visible_trace_entry(
         self,
         tool_trace: list[ToolTraceEntry],
-        pending_tool: _PendingStreamingTool | None,
-        completed_trace: ToolTraceEntry | None,
+        pending_tool: _PendingStreamingTool,
+        completed_trace: ToolTraceEntry,
     ) -> bool:
         """Update the visible trace snapshot slot for a matched completion."""
-        if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
+        index = pending_tool.visible_tool_index
+        if index is None or not 0 < index <= len(tool_trace):
             return False
-        if not 0 < pending_tool.visible_tool_index <= len(tool_trace):
-            return False
-        existing_entry = tool_trace[pending_tool.visible_tool_index - 1]
+        existing_entry = tool_trace[index - 1]
         existing_entry.type = "tool_call_completed"
         existing_entry.result_preview = completed_trace.result_preview
         existing_entry.truncated = existing_entry.truncated or completed_trace.truncated

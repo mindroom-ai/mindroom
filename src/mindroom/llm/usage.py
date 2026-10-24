@@ -81,7 +81,7 @@ def _compact(values: Mapping[str, Any], *, keep_empty: bool = False) -> dict[str
     }
 
 
-def known_fields(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
+def _known_fields(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the entries of a stored dict that name a field of the dataclass ``cls``."""
     names = {item.name for item in fields(cls)}
     return {key: value for key, value in data.items() if key in names}
@@ -96,7 +96,7 @@ def _flattened(record: _Counts) -> dict[str, Any]:
 
 def _known_counts(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the entries of a stored usage dict that name a field of ``cls``, its counters read into ``tokens``."""
-    return {**known_fields(cls, data), "tokens": TokenCounts(**known_fields(TokenCounts, data))}
+    return {**_known_fields(cls, data), "tokens": TokenCounts(**_known_fields(TokenCounts, data))}
 
 
 @dataclass(slots=True, kw_only=True)
@@ -374,7 +374,7 @@ class ToolCallMetrics:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolCallMetrics:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**known_fields(cls, data))
+        return cls(**_known_fields(cls, data))
 
 
 __all__ = [
@@ -386,5 +386,4 @@ __all__ = [
     "TokenCounts",
     "ToolCallMetrics",
     "add_usage",
-    "known_fields",
 ]
