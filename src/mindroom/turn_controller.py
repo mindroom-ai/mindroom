@@ -2044,8 +2044,7 @@ class TurnController:
                 assert action.form_team.mode is not None
                 registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
                 target_member_names = tuple(
-                    registry.current_entity_name_for_user_id(member.full_id) or member.username
-                    for member in action.form_team.eligible_members
+                    registry.entity_name_or_username(member) for member in action.form_team.eligible_members
                 )
 
             context_ready_monotonic = time.monotonic()

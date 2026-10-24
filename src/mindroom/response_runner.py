@@ -4520,9 +4520,7 @@ class ResponseRunner:
             requester_user_id=retry_execution_identity.requester_id,
         )
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        agent_names = [
-            registry.current_entity_name_for_user_id(mid.full_id) or mid.username for mid in team_request.team_agents
-        ]
+        agent_names = [registry.entity_name_or_username(mid) for mid in team_request.team_agents]
         request = replace(request, participating_agent_names=tuple(agent_names))
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(

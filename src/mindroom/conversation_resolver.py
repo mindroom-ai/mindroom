@@ -286,10 +286,7 @@ class ConversationResolver:
     def _mentioned_agent_names(self, mentioned_agents: Sequence[MatrixID]) -> tuple[str, ...]:
         """Return canonical entity names for mentioned managed users."""
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        return tuple(
-            registry.current_entity_name_for_user_id(agent_id.full_id) or agent_id.username
-            for agent_id in mentioned_agents
-        )
+        return tuple(registry.entity_name_or_username(agent_id) for agent_id in mentioned_agents)
 
     def _envelope_ingress_metadata(  # noqa: C901
         self,

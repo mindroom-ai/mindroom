@@ -20,7 +20,7 @@ from mindroom.entity_resolution import (
     prepared_entity_names_by_user_id,
 )
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import managed_account_key
+from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -258,6 +258,9 @@ def test_entity_identity_registry_uses_only_persisted_current_ids(tmp_path: Path
     assert identity.current_ids["general"].full_id == "@mindroom_general_oldns:localhost"
     assert identity.current_entity_name_for_user_id("@mindroom_general_oldns:localhost") == "general"
     assert identity.current_entity_name_for_user_id("@mindroom_general:localhost") is None
+    # Team resolution names the router too, and an unmanaged member by its username.
+    assert identity.entity_name_or_username(MatrixID.parse("@mindroom_router_oldns:localhost")) == ROUTER_AGENT_NAME
+    assert identity.entity_name_or_username(MatrixID.parse("@mindroom_general:localhost")) == "mindroom_general"
 
 
 def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Path) -> None:

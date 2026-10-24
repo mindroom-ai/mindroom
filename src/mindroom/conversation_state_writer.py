@@ -60,10 +60,7 @@ class ConversationStateWriter:
         if self.deps.agent_name in config.teams:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         registry = entity_identity_registry(config, self.deps.runtime_paths)
-        member_names = [
-            registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
-            for matrix_id in team_agents
-        ]
+        member_names = [registry.entity_name_or_username(matrix_id) for matrix_id in team_agents]
         scope_id = (
             ad_hoc_team_scope_id(
                 member_names,
