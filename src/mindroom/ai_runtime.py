@@ -45,7 +45,6 @@ __all__ = [
     "queued_notice_on_resume_entry",
     "register_queued_notice_storage",
     "register_scope_notice_storage",
-    "run_attempt_with_model",
     "scrub_queued_notice_session_context",
     "stream_attempt_with_model",
 ]
@@ -71,21 +70,6 @@ class AttemptModelRuntime(Protocol):
         active_model_name: str,
     ) -> AsyncIterator[ChunkT]:
         """Bind one streaming attempt's model during stream pulls and close."""
-
-
-async def run_attempt_with_model[ResultT](
-    runtime: AttemptModelRuntime | None,
-    *,
-    active_model_name: str,
-    operation: Callable[[], Awaitable[ResultT]],
-) -> ResultT:
-    """Run an attempt through its optional model-aware runtime boundary."""
-    if runtime is None:
-        return await operation()
-    return await runtime.run_with_model(
-        active_model_name=active_model_name,
-        operation=operation,
-    )
 
 
 def stream_attempt_with_model[ChunkT](
@@ -518,9 +502,7 @@ async def finalize_queued_notice_response_turn_async(
     notice_context: _QueuedMessageNoticeContext,
 ) -> None:
     """Finalize one delivered notice at the user-visible response boundary."""
-    if not notice_context.notice_fired:
-        return
-    if not notice_context.storage_targets:
+    if not notice_context.notice_fired or not notice_context.storage_targets:
         return
     storage_task = asyncio.create_task(
         asyncio.to_thread(

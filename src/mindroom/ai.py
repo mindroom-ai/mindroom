@@ -1670,17 +1670,24 @@ async def ai_response(  # noqa: C901
         prepared_run = run_context.prepared_run
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
         holder.attempt = attempt
-        attempt_result = await ai_runtime.run_attempt_with_model(
-            attempt_model_runtime,
-            active_model_name=prepared_run.runtime_model_name,
-            operation=lambda: _run_non_streaming_agent_attempts(
+
+        def operation() -> Awaitable[_NonStreamingAttemptResult]:
+            return _run_non_streaming_agent_attempts(
                 run_context=run_context,
                 attempt=attempt,
                 storage=storage,
                 run_id_callback=run_id_callback,
                 scope_context=run.scope_context,
                 pipeline_timing=pipeline_timing,
-            ),
+            )
+
+        attempt_result = await (
+            operation()
+            if attempt_model_runtime is None
+            else attempt_model_runtime.run_with_model(
+                active_model_name=prepared_run.runtime_model_name,
+                operation=operation,
+            )
         )
         record = attempt_result.record
         if attempt_result.user_error is not None:
