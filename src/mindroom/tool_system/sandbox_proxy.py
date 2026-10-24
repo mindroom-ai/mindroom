@@ -15,7 +15,7 @@ import secrets
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import httpx
 
@@ -529,6 +529,44 @@ def _record_worker_failure(
         worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
 
 
+def _post_worker_file_request(
+    proxy_config: _SandboxProxyConfig,
+    runtime_paths: RuntimePaths,
+    payload: dict[str, object],
+    *,
+    worker_handle: WorkerHandle | None,
+    worker_manager: WorkerBackend,
+    proxy_path: str,
+    operation: Literal["save-attachment", "view-file"],
+    failure: str,
+) -> dict[str, object]:
+    """Post one attachment request and return the worker's successful response, recording a failed one against it."""
+    data = post_worker_proxy_json(
+        config=_worker_proxy_client_config(proxy_config, runtime_paths),
+        payload=payload,
+        worker_handle=worker_handle,
+        worker_manager=worker_manager,
+        proxy_path=proxy_path,
+        worker_operation=operation,
+        client_factory=httpx.Client,
+    )
+    if not isinstance(data, dict):
+        msg = f"Sandbox {operation} returned a non-object response."
+        _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
+        raise TypeError(msg)
+    response_data = {str(key): value for key, value in data.items()}
+    if response_data.get("ok") is not True:
+        error = str(response_data.get("error") or failure)
+        record_proxy_response_failure_for_worker(
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            error=error,
+            failure_kind=response_data.get("failure_kind"),
+        )
+        raise RuntimeError(error)
+    return response_data
+
+
 def save_attachment_to_worker(
     *,
     runtime_paths: RuntimePaths,
@@ -581,43 +619,28 @@ def save_attachment_to_worker(
             "config_snapshot": runner_config_snapshot(runtime_paths, manager_context.runtime_config),
         }
 
-        data = post_worker_proxy_json(
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
-            payload=request_payload,
+        response_data = _post_worker_file_request(
+            proxy_config,
+            runtime_paths,
+            request_payload,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
             proxy_path=SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
-            worker_operation="save-attachment",
-            client_factory=httpx.Client,
+            operation="save-attachment",
+            failure="Sandbox attachment save failed.",
         )
-
-        if not isinstance(data, dict):
-            msg = "Sandbox save-attachment returned a non-object response."
-            _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
-            raise TypeError(msg)
-        response_data = {str(key): value for key, value in data.items()}
-        if response_data.get("ok") is True:
-            receipt = _validate_attachment_save_receipt(
-                response_data,
-                requested_path=mindroom_output_path,
-                byte_count=byte_count,
-                sha256=attachment_fields["sha256"],
-            )
-            if isinstance(receipt, str):
-                _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=receipt)
-                raise RuntimeError(receipt)
-            if worker_handle is not None:
-                worker_manager.touch_worker(worker_handle.worker_key)
-            return receipt
-
-        error = response_data.get("error") or "Sandbox attachment save failed."
-        record_proxy_response_failure_for_worker(
-            worker_handle=worker_handle,
-            worker_manager=worker_manager,
-            error=str(error),
-            failure_kind=response_data.get("failure_kind"),
+        receipt = _validate_attachment_save_receipt(
+            response_data,
+            requested_path=mindroom_output_path,
+            byte_count=byte_count,
+            sha256=attachment_fields["sha256"],
         )
-        raise RuntimeError(str(error))
+        if isinstance(receipt, str):
+            _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=receipt)
+            raise RuntimeError(receipt)  # noqa: TRY004
+        if worker_handle is not None:
+            worker_manager.touch_worker(worker_handle.worker_key)
+        return receipt
 
 
 def view_file_from_worker(
@@ -662,9 +685,10 @@ def view_file_from_worker(
             with suppress(ValueError):
                 path = Path(path).relative_to(workspace_root).as_posix()
 
-        data = post_worker_proxy_json(
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
-            payload={
+        response_data = _post_worker_file_request(
+            proxy_config,
+            runtime_paths,
+            {
                 **worker_payload,
                 "path": path,
                 "config_snapshot": runner_config_snapshot(runtime_paths, manager_context.runtime_config),
@@ -672,39 +696,24 @@ def view_file_from_worker(
             worker_handle=worker_handle,
             worker_manager=worker_manager,
             proxy_path=SANDBOX_PROXY_VIEW_FILE_PATH,
-            worker_operation="view-file",
-            client_factory=httpx.Client,
+            operation="view-file",
+            failure="Sandbox file view failed.",
         )
-        if not isinstance(data, dict):
-            msg = "Sandbox view-file returned a non-object response."
+        from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
+        from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
+
+        try:
+            result = decode_media_result(response_data.get("result"))
+        except ValueError as exc:
+            _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=str(exc))
+            raise
+        if not isinstance(result, ToolResult):
+            msg = "Sandbox view-file returned a non-media result."
             _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
             raise TypeError(msg)
-        response_data = {str(key): value for key, value in data.items()}
-        if response_data.get("ok") is True:
-            from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
-            from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
-
-            try:
-                result = decode_media_result(response_data.get("result"))
-            except ValueError as exc:
-                _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=str(exc))
-                raise
-            if not isinstance(result, ToolResult):
-                msg = "Sandbox view-file returned a non-media result."
-                _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
-                raise TypeError(msg)
-            if worker_handle is not None:
-                worker_manager.touch_worker(worker_handle.worker_key)
-            return result
-
-        error = response_data.get("error") or "Sandbox file view failed."
-        record_proxy_response_failure_for_worker(
-            worker_handle=worker_handle,
-            worker_manager=worker_manager,
-            error=str(error),
-            failure_kind=response_data.get("failure_kind"),
-        )
-        raise RuntimeError(str(error))
+        if worker_handle is not None:
+            worker_manager.touch_worker(worker_handle.worker_key)
+        return result
 
 
 def _make_progress_sink(
