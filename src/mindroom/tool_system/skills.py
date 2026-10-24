@@ -63,7 +63,7 @@ _GET_SKILL_REFERENCE_DESCRIPTION = (
 _GET_SKILL_SCRIPT_DESCRIPTION = (
     "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
 )
-# Agno's skills prompt, with get_skill_script offered only for reading.
+# The fixed header of the skills section, kept as main renders it; get_skill_script only reads scripts.
 _PROMPT_HEADER = (
     "<skills_system>",
     "",
@@ -206,31 +206,15 @@ class SkillsToolkit(Toolkit):
         self._skills = dict(skills)
         # The workspace root of each skill that came from an agent workspace.
         self._workspace_roots = dict(workspace_roots)
-        self._output_file_policy = output_file_policy
-        for function in self._new_functions():
+        for entrypoint, description in (
+            (self.get_skill_instructions, _GET_SKILL_INSTRUCTIONS_DESCRIPTION),
+            (self.get_skill_reference, _GET_SKILL_REFERENCE_DESCRIPTION),
+            (self.get_skill_script, _GET_SKILL_SCRIPT_DESCRIPTION),
+        ):
+            function = Function(name=entrypoint.__name__, description=description, entrypoint=entrypoint)
+            if output_file_policy is not None:
+                function = wrap_function_for_output_files(function, output_file_policy)
             self.functions[function.name] = function
-
-    def _new_functions(self) -> list[Function]:
-        functions = [
-            Function(
-                name="get_skill_instructions",
-                description=_GET_SKILL_INSTRUCTIONS_DESCRIPTION,
-                entrypoint=self.get_skill_instructions,
-            ),
-            Function(
-                name="get_skill_reference",
-                description=_GET_SKILL_REFERENCE_DESCRIPTION,
-                entrypoint=self.get_skill_reference,
-            ),
-            Function(
-                name="get_skill_script",
-                description=_GET_SKILL_SCRIPT_DESCRIPTION,
-                entrypoint=self.get_skill_script,
-            ),
-        ]
-        if self._output_file_policy is None:
-            return functions
-        return [wrap_function_for_output_files(function, self._output_file_policy) for function in functions]
 
     @property
     def skills(self) -> tuple[Skill, ...]:
@@ -378,7 +362,7 @@ class SkillsToolkit(Toolkit):
 
 @dataclass(frozen=True, slots=True)
 class _SkillFileKind:
-    """One kind of file a skill lists, with the error texts and keys Agno's skill functions used."""
+    """One kind of file a skill lists, with the error texts and keys its skill function answers with."""
 
     dirname: str
     noun: str
@@ -414,7 +398,7 @@ def _unlisted_file_error(
 
 
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-# Configured skill roots read files by path, accepting exactly the paths Agno's skills loader accepted.
+# Configured skill roots read files by path; the paths they accept are kept as main behaves.
 _WINDOWS_RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)", re.IGNORECASE)
 _WINDOWS_PATH_PREFIX = re.compile(r"^([A-Za-z]:|\\\\)")
 
@@ -512,12 +496,8 @@ def build_skills_toolkit(
         ),
     )
 
-    loaders: list[_SkillsLoader]
-    if skill_roots is None:
-        loaders = [loader for loader in (configured_loader, workspace_loader) if loader is not None]
-    else:
-        loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
-
+    ordered = (configured_loader, workspace_loader) if skill_roots is None else (workspace_loader, configured_loader)
+    loaders = [loader for loader in ordered if loader is not None]
     skills, workspace_roots = _load_skills(loaders, None if only is None else frozenset(only))
     if refused is not None:
         refused.extend(workspace_loader.refused)
@@ -753,7 +733,7 @@ def _read_skill_frontmatter(skill_path: Path) -> dict[str, Any] | None:
     except Exception as exc:
         logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
         return None
-    # Only operator skill roots are listed here, and agents load them with Agno's plain YAML loader, so parse alike.
+    # Only operator skill roots are listed here, and agents load them with plain YAML, so parse alike.
     try:
         return _parse_skill_frontmatter(content, load_yaml=yaml_io.safe_load)[0]
     except SkillMarkdownError as exc:
@@ -811,7 +791,7 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
-# Operator skill roots load as Agno's LocalSkills(validate=False) loaded them, so their skills keep loading the same.
+# Operator skill roots load leniently, kept as main behaves.
 def _read_skill_root(root: Path) -> list[Skill]:
     """Read one skill folder, or every skill folder directly below ``root``, in directory order."""
     return [skill for folder in _skill_folders(root) if (skill := _read_skill_folder(folder)) is not None]

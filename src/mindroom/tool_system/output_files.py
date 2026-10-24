@@ -179,10 +179,7 @@ def _auto_save_success_receipt(
         output_format=output_format,
         overwritten=False,
     )
-    receipt["auto_saved"] = True
-    receipt["threshold_bytes"] = threshold_bytes
-    receipt["preview"] = preview
-    receipt["hint"] = _AUTO_SAVE_READ_HINT
+    receipt.update(auto_saved=True, threshold_bytes=threshold_bytes, preview=preview, hint=_AUTO_SAVE_READ_HINT)
     return {"mindroom_tool_output": receipt}
 
 

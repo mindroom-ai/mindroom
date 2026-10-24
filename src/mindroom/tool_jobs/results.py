@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
 
 _MEDIA = {kind.__name__: kind for kind in (Image, Audio, Video, File)}
-# The media of a tool value under the names its wire tag has kept since Agno's ToolResult.
+# The media of a tool value under the field names saved payloads use.
 _TOOL_VALUE_MEDIA = ("images", "audios", "videos", "files")
 _MAX_ENCODED_RESULT_BYTES = 64 * 1024 * 1024
 _SUMMARY_TRUNCATED_NOTICE = "[Truncated: only the start of this runtime message was saved.]"

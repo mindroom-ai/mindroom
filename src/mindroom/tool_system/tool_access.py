@@ -9,12 +9,9 @@ from jsonschema import Draft202012Validator
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from mindroom.tool_system.agno_toolkits import adapt_function
-
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.tool_function import ToolFunction
 
 
@@ -45,13 +42,6 @@ class ToolDescriptor:
     description: str
     input_schema: dict[str, object]
     instructions: tuple[str, ...]
-
-
-def function_definition(function: Function) -> dict[str, object]:
-    """Return the name, description, and input schema the model is shown for one Agno function."""
-    if function.entrypoint is None:
-        return {"name": function.name, "description": function.description or "", "parameters": function.parameters}
-    return tool_definition(adapt_function(function))
 
 
 def tool_definition(function: ToolFunction) -> dict[str, object]:
