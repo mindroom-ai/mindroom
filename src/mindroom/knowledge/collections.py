@@ -221,9 +221,14 @@ def delete_source_path_vectors(collection: KnowledgeCollection, relative_paths: 
         chroma_collection.delete(where={SOURCE_PATH_KEY: {"$in": batch}})
 
 
-def _source_content_hash(source_metadata: Mapping[str, Any], relative_path: str) -> str:
-    """Return the hash every row of one file version carries, from the file's identity and signature."""
-    return hashlib.sha256(":".join([json.dumps(source_metadata, sort_keys=True), relative_path]).encode()).hexdigest()
+def _source_content_hash(source_metadata: Mapping[str, Any]) -> str:
+    """Return the hash every row of one file version carries, from the file's identity and signature.
+
+    The input is the sorted metadata JSON, a colon, and the path, the order Agno's content hash used.
+    """
+    return hashlib.sha256(
+        ":".join([json.dumps(source_metadata, sort_keys=True), source_metadata[SOURCE_PATH_KEY]]).encode(),
+    ).hexdigest()
 
 
 def _row_metadata(
@@ -268,7 +273,7 @@ def write_source_rows(
         SOURCE_SIZE_KEY: size,
         SOURCE_DIGEST_KEY: digest,
     }
-    content_hash = _source_content_hash(source_metadata, relative_path)
+    content_hash = _source_content_hash(source_metadata)
     chroma_collection = collection.collection()
     chroma_collection.delete(where={SOURCE_PATH_KEY: relative_path})
     page_size = collection.client.get_max_batch_size()
