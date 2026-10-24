@@ -78,8 +78,8 @@ def known_fields(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _sum_optional(left: float | None, right: float | None) -> float | None:
-    # TODO(simplify): ``__add__`` sums costs by this rule and accumulation by ``_add_counts``, which treats a 0.0 total
-    # as unset, so the two differ in a sum's int or float type and a zero's sign. Sum every cost one way.
+    # TODO(simplify): costs sum three ways: ``__add__`` by this rule, ``_add_counts`` with a 0.0 total read as unset,
+    # and ``_signed_model`` by sign, so sums differ in int or float type and a zero's sign. Sum every cost one way.
     # Stored data would notice only in those edge cases.
     if left is None:
         return right
@@ -253,6 +253,9 @@ class SessionMetrics(_Counts):
         self._accumulate(metrics, sign=1)
 
     def _accumulate(self, metrics: RunMetrics, *, sign: int) -> None:
+        # TODO(simplify): the session ledger passes token counters only, so the cost, additional_metrics, and
+        # provider_metrics handling here and in ``_signed_model`` serves only tests/llm/test_codecs.py's full-metrics
+        # cases. Count tokens only; only those tests and their goldens would notice.
         _add_counts(self, metrics, sign=sign)
         if metrics.additional_metrics is not None:
             if self.additional_metrics is None:
