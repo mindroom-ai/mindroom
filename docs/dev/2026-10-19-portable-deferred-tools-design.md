@@ -49,7 +49,7 @@ Inference servers that constrain tool names to the declared list (vLLM and llama
 - Providers accept a `call_tool` call whose `arguments` is a nested JSON object; weaker models sometimes send it as a JSON string, which the rewrite accepts.
 - Deferred function arguments lose provider-side `strict` schema enforcement; Agno's existing argument parsing and validation return errors to the model so it can retry.
 - Discovered definitions live in the conversation, so after compaction summarizes them away the model searches again.
-- The rewrite binds to Agno internals with no public extension point, so each binding carries an `AGNO_COMPAT` record.
+- The rewrite bound to Agno internals with no public extension point, so each binding carried an `AGNO_COMPAT` record, until the agent loop's `rewrite_tool_calls` hook and the provider pipeline replaced the bindings and their markers when MindRoom [stopped running Agno's agent loop](2026-10-20-replace-agno-design.md).
 - Minimal mode keeps calling deferred toolkits through `mindroom-agent`, which never changed the provider tool list.
 
 ## Evidence

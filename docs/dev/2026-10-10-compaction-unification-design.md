@@ -42,7 +42,7 @@ Behavior on `main` when this design was written:
 ### A pre-request hook instead of Agno's CompressionManager
 
 - Mid-turn compaction runs from a hook around the model's per-request response processing, which Agno calls once per provider request with the loop's live messages, the formatted tools, and the run output.
-- Agno has no awaitable pre-request hook with mutable messages, and its `CompressionManager` is a partial extension point limited to tool results and tied to `compress_tool_results`, so the hook is an `AGNO_COMPAT` workaround on the seam the tool-call cap already used.
+- Agno has no awaitable pre-request hook with mutable messages, and its `CompressionManager` is a partial extension point limited to tool results and tied to `compress_tool_results`, so the hook was an `AGNO_COMPAT` workaround on the seam the tool-call cap already used, until the agent loop's `before_request` hooks replaced it and its marker when MindRoom [stopped running Agno's agent loop](2026-10-20-replace-agno-design.md).
 - The tool-call cap wraps outside the compaction hook, so it refuses a request before compaction spends a summary call.
 - The trigger is the limit the pre-reply trigger already applies, the replay window minus `reserve_tokens`.
   `reserve_tokens` stays the one headroom setting and must cover the model's maximum output, including any thinking budget, because no provider-neutral output setting exists.
