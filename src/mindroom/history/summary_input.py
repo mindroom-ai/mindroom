@@ -44,6 +44,8 @@ _SUMMARY_METADATA_OMIT_KEYS = frozenset(
         MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
         COMPACTED_REQUESTS_METADATA_KEY,
         "model_params",
+        # TODO(simplify): run decoding drops ``tools_schema``, so only a test's in-memory run still holds it here.
+        # Drop the key; nobody but the tests/test_history_summary_call.py cases that set it would notice.
         "tools_schema",
     },
 )
