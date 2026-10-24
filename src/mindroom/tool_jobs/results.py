@@ -119,7 +119,8 @@ def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch p
         return Path(data)
     if kind == "ToolResult":
         fields = _decode(data)
-        media = {name: tuple(fields.get(name) or ()) for name in _TOOL_VALUE_MEDIA}
+        # A legacy value saves null in place of an empty media list; see legacy_results.
+        media = {name: tuple(fields[name] or ()) for name in _TOOL_VALUE_MEDIA}
         return ToolValue(content=fields["content"], **media)
     if kind in _MEDIA:
         return _media(_MEDIA[kind], _decode(data))
