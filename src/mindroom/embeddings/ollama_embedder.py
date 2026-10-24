@@ -36,7 +36,7 @@ class OllamaEmbedder:
     """Embed one text per ``/api/embed`` request; Ollama models embed queries and documents alike."""
 
     model: str
-    host: str | None = None
+    host: str | None
     client: Client | None = field(default=None, repr=False)
     async_client: AsyncClient | None = field(default=None, repr=False)
 
