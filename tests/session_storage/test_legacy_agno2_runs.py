@@ -77,7 +77,7 @@ def test_blob_runs_become_rows_when_the_summary_rows_migrate(tmp_path: Path) -> 
     rows = stored_rows(db_file, _NAMES.runs, "session-1")
     assert [_comparable(row) for row in rows] == [_comparable(row) for row in expected]
     assert _blob(db_file) is None
-    session = ConversationStore(db_file, _NAMES).load_session("session-1", "agent")
+    session = ConversationStore(db_file).load_session("session-1", "agent")
     assert session is not None
     assert session.session_state == {}
     assert [(run.run_id, run.status.value) for run in session.runs] == [
@@ -128,7 +128,7 @@ def test_a_database_with_summary_rows_is_never_migrated_again(tmp_path: Path) ->
     """Once the conversation log has summary rows, a blob is no longer Agno 2 history and stays untouched."""
     db_file = create_agno_2_sessions_db(tmp_path / "code.db")
     migrate_to_summary_rows(db_file, _NAMES)
-    store = ConversationStore(db_file, _NAMES)
+    store = ConversationStore(db_file)
     session = ConversationSession(session_id="session-1", kind="agent", owner_id="code")
     store.save_run(session, RunRecord(run_id="run-4", agent_id="code", created_at=4))
     _set_blob(db_file, [_entry("late", 5)])

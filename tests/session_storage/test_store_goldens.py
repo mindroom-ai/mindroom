@@ -66,7 +66,7 @@ def _summary_dict(summary: ScopeSummary | None) -> dict[str, str] | None:
 
 
 def _load(store: GoldenStore, db_file: Path, session_id: str) -> ConversationSession:
-    session = ConversationStore(db_file, store.names).load_session(session_id, store.sessions[session_id])
+    session = ConversationStore(db_file).load_session(session_id, store.sessions[session_id])
     assert session is not None
     return session
 
@@ -202,7 +202,7 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
             "WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-    fresh = ConversationStore(tmp_path / "fresh.db", store.names)
+    fresh = ConversationStore(tmp_path / golden.name)
     # As the runtime builds the session of a conversation's first turn: it does not know the requester.
     session = ConversationSession(session_id=session_id, kind=kind, owner_id=owner, created_at=created_at)
 
@@ -246,7 +246,7 @@ def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
         golden_row[SESSION_COLUMNS.index(column)] for column in ("session_type", "agent_id", "team_id")
     )
     session = new_scope_session(session_id=session_id, scope_id=team_id or agent_id, is_team=kind == "team")
-    fresh = ConversationStore(tmp_path / "fresh.db", store.names)
+    fresh = ConversationStore(tmp_path / golden.name)
 
     for run in _replayed(rows):
         fresh.save_run(session, run)
@@ -321,6 +321,7 @@ def test_new_databases_get_the_layout_agno_created(tmp_path: Path) -> None:
     """A database the owned store creates has Agno 3's tables and indexes, and writing to Agno's adds none."""
     [store] = [store for store in golden_stores() if store.label == "agent_code"]
     golden = store.restore(tmp_path / "golden")
+    fresh = tmp_path / golden.name
     objects = _schema_objects(golden)
     session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
     tables = (
@@ -331,13 +332,10 @@ def test_new_databases_get_the_layout_agno_created(tmp_path: Path) -> None:
         store.names.usage,
     )
 
-    for db_file in (tmp_path / "fresh.db", golden):
-        ConversationStore(db_file, store.names).save_run(
-            session,
-            RunRecord(run_id="r1", agent_id="code"),
-        )
+    for db_file in (fresh, golden):
+        ConversationStore(db_file).save_run(session, RunRecord(run_id="r1", agent_id="code"))
 
-    assert _layout(tmp_path / "fresh.db", tables) == _layout(golden, tables)
+    assert _layout(fresh, tables) == _layout(golden, tables)
     assert _schema_objects(golden) == objects
     # Agno's own bookkeeping table is the one object the owned store does not create.
-    assert _schema_objects(tmp_path / "fresh.db") == [item for item in objects if "agno_schema_versions" not in item[1]]
+    assert _schema_objects(fresh) == [item for item in objects if "agno_schema_versions" not in item[1]]

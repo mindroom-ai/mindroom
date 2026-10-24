@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.session_storage.lanes import _lane, run_session_storage_operation
-from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.store import ConversationStore
 
 if TYPE_CHECKING:
@@ -21,7 +20,7 @@ _REQUEST = contextvars.ContextVar[str]("request", default="none")
 
 
 def _store(tmp_path: Path, name: str = "code") -> ConversationStore:
-    return ConversationStore(tmp_path / f"{name}.db", TableNames(name))
+    return ConversationStore(tmp_path / f"{name}.db")
 
 
 def _blocking(log: list[str], started: threading.Event, release: threading.Event) -> Callable[[ConversationStore], str]:

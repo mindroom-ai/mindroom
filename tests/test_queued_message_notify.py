@@ -446,7 +446,7 @@ class _RecordingStore(ConversationStore):
 
 def _recording_store(tmp_path: Path, name: str, *, held: threading.Event | None = None) -> _RecordingStore:
     store = create_state_storage(name, tmp_path)
-    return _RecordingStore(store.path, store.names, held=held)
+    return _RecordingStore(store.path, held=held)
 
 
 def _completed(run_id: str, messages: list[OwnedMessage], *, agent_id: str = "general") -> RunRecord:

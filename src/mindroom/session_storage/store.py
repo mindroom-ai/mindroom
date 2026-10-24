@@ -28,7 +28,7 @@ from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCo
 from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
-from mindroom.session_storage.schema import schema_sql, table_names
+from mindroom.session_storage.schema import TableNames, schema_sql, table_names
 from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
 from mindroom.usage.storage import project_usage, quote_identifier, usage_upsert_sql
 
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.schema import TableNames
     from mindroom.session_storage.types import Refusal, SaveOutcome, SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
@@ -105,7 +104,11 @@ class ConversationStore:
     """
 
     path: Path
-    names: TableNames
+
+    @property
+    def names(self) -> TableNames:
+        """The names of the database ``path`` holds."""
+        return TableNames.of_database(self.path)
 
     @contextmanager
     def transaction(self, *, write: bool) -> Iterator[sqlite3.Connection]:

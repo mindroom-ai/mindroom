@@ -18,7 +18,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
-from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.schema import table_names
 from mindroom.session_storage.store import (
     ConversationStore,
     migrate_database,
@@ -35,11 +35,9 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import SessionKind
 
-_NAMES = TableNames("code")
-
 
 def _store(tmp_path: Path) -> ConversationStore:
-    return ConversationStore(tmp_path / "code.db", _NAMES)
+    return ConversationStore(tmp_path / "code.db")
 
 
 @pytest.fixture

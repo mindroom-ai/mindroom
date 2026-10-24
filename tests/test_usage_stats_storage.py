@@ -17,7 +17,6 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
@@ -51,7 +50,7 @@ _SESSION_COLUMNS = """
 
 def _source(path: Path) -> UsageStorageSource:
     # Existing-history fixtures pass through the same one-time import as startup.
-    migrate_usage_database(path, TableNames.of_database(path))
+    migrate_usage_database(path)
     return UsageStorageSource(
         path=path,
         path_label=path.name,
