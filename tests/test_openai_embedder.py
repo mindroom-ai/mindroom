@@ -212,16 +212,21 @@ def test_file_reference_like_inputs_are_sent_as_literal_text() -> None:
     assert second_request.kwargs["input"] == ["ordinary text", f" {text}"]
 
 
-def test_texts_beyond_the_batch_size_go_in_further_requests() -> None:
-    """A long list is split into requests of at most ``batch_size`` texts, keeping input order."""
+def test_texts_beyond_one_request_go_in_further_requests() -> None:
+    """A long list is split into requests of at most 100 texts, keeping input order."""
+    texts = [f"text {index}" for index in range(201)]
     client = MagicMock()
-    client.embeddings.create.side_effect = [_success_response(count=2), _success_response(count=2), _success_response()]
-    embedder = OpenAIEmbedder(model="gemini-embedding-2", api_key=SECRET, client=client, batch_size=2)
+    client.embeddings.create.side_effect = [
+        _success_response(count=100),
+        _success_response(count=100),
+        _success_response(),
+    ]
+    embedder = OpenAIEmbedder(model="gemini-embedding-2", api_key=SECRET, client=client)
 
-    assert len(embedder.embed(["a", "b", "c", "d", "e"], purpose="document")) == 5
+    assert len(embedder.embed(texts, purpose="document")) == 201
 
     inputs = [call.kwargs["input"] for call in client.embeddings.create.call_args_list]
-    assert inputs == [["a", "b"], ["c", "d"], "e"]
+    assert inputs == [texts[:100], texts[100:200], texts[200]]
 
 
 @pytest.mark.asyncio

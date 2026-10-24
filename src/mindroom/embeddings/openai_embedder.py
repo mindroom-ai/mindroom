@@ -38,6 +38,10 @@ if TYPE_CHECKING:
     from mindroom.embeddings.base import EmbeddingPurpose
 
 
+#: The most texts one request carries; longer lists go in further requests.
+_MAX_TEXTS_PER_REQUEST = 100
+
+
 def _classified_request_error(exc: Exception, health_recorder: EmbedderHealthRecorder) -> EmbedderRequestError:
     """Record and return the classified failure for one provider exception."""
     detail = describe_embedder_error(exc)
@@ -75,7 +79,7 @@ class OpenAIEmbedder:
     """Embed through an OpenAI-compatible ``/embeddings`` endpoint without forcing OpenAI defaults onto other hosts.
 
     A request carrying one text sends it as a bare string, and one carrying several sends a list of at most
-    ``batch_size`` texts, exactly as the vectors in existing indexes were requested.
+    ``_MAX_TEXTS_PER_REQUEST`` texts, exactly as the vectors in existing indexes were requested.
     """
 
     model: str
@@ -88,7 +92,6 @@ class OpenAIEmbedder:
     #: SDK client limits; health probes shorten them so a stalled endpoint fails fast.
     timeout: float | None = None
     max_retries: int | None = None
-    batch_size: int = 100
     client: OpenAI | None = field(default=None, repr=False)
     async_client: AsyncOpenAI | None = field(default=None, repr=False)
     health_recorder: EmbedderHealthRecorder = field(default_factory=capture_embedder_health_recorder, repr=False)
@@ -140,8 +143,8 @@ class OpenAIEmbedder:
         return request
 
     def _batches(self, texts: Sequence[str]) -> Iterator[Sequence[str]]:
-        for start in range(0, len(texts), self.batch_size):
-            yield texts[start : start + self.batch_size]
+        for start in range(0, len(texts), _MAX_TEXTS_PER_REQUEST):
+            yield texts[start : start + _MAX_TEXTS_PER_REQUEST]
 
     def embed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
         """Return one vector per text; raise a classified error on failure."""
