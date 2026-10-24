@@ -7,6 +7,7 @@ attempt renders and records its reply from the records the run hands over, which
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
@@ -14,9 +15,9 @@ from mindroom.budgets.pricing import model_prices
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnPartialSnapshot
+from mindroom.run_storage import TerminalRecord
 from mindroom.teams.presentation import apply_team_event, format_team_response, render_team_member_slots
 from mindroom.teams.runtime import MemberEvent, team_usage
-from mindroom.teams.storage import TeamRunRecords
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import StructuredStreamChunk, append_stream_text
 
@@ -111,7 +112,7 @@ class TeamAttempt:
     prepared_history: PreparedHistoryState | None
     # The reply without tool markers: what a streamed turn records.
     reply: TeamReplyText = field(init=False)
-    records: TeamRunRecords = field(default_factory=TeamRunRecords)
+    records: TerminalRecord[TeamRunRecord] = field(default_factory=partial(TerminalRecord, TeamRunRecord))
 
     def __post_init__(self) -> None:
         """Start the reply's text from the presentation's member slots."""

@@ -24,6 +24,7 @@ from mindroom.llm.request_context import RequestAttribution
 from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.response_turn import stream_with_llm_request_log_context
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -205,9 +206,7 @@ class ResumeRunner:
                 config=self.config,
                 runtime_paths=self.runtime_paths,
                 model_name=self.model_name,
-                store=self.store,
-                session=self.session,
-                scope=self.scope,
+                storage=RunStorage(self.store, self.session, self.scope),
                 replay_plan=self._replay_plan,
                 prompt_id=None,
             ),

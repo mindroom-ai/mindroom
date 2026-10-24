@@ -65,12 +65,14 @@ from mindroom.history.session_context import ScopeSessionContext, load_bound_sco
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
+from mindroom.llm.runs import TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
 from mindroom.routing import suggest_responder
+from mindroom.run_storage import TerminalRecord
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
 from mindroom.teams.members import (
     BuiltTeam,
@@ -83,7 +85,6 @@ from mindroom.teams.members import (
 from mindroom.teams.presentation import format_team_response
 from mindroom.teams.runtime import MemberEvent, team_usage_runs
 from mindroom.teams.spec import TeamMode
-from mindroom.teams.storage import TeamRunRecords
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.runtime_context import DetachedRequesterContext, detached_requester_context
 from mindroom.tool_system.worker_routing import (
@@ -102,7 +103,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
-    from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.teams.envelope import PreparedTeamExecution
     from mindroom.teams.runtime import TeamRunEvent
@@ -1146,7 +1146,7 @@ async def _non_stream_team_completion(
     if isinstance(turn, JSONResponse):
         return turn
     built, prepared = turn
-    records = TeamRunRecords()
+    records = TerminalRecord(TeamRunRecord)
     try:
         with (
             bind_llm_request_log_context(

@@ -89,7 +89,13 @@ from mindroom.response_turn import (
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
-from mindroom.session_storage.store import persist_to
+from mindroom.run_storage import (
+    RunStorage,
+    TerminalRecord,
+    attempt_run_storage,
+    persist_into,
+    without_terminal_record,
+)
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -109,7 +115,6 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
-    from mindroom.agent_loop.run import Persist
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.ai_turn_state import AITurnState
     from mindroom.approval.resume import ResumeDecisions, ResumeEvents
@@ -132,8 +137,6 @@ if TYPE_CHECKING:
         StandaloneReplaySnapshot,
         TurnRunState,
     )
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -266,27 +269,6 @@ class _AgentAttempt:
         )
 
 
-@dataclass
-class _TerminalRecord:
-    """The terminal record a run handed to its persist callback, however the run ended."""
-
-    record: AnyRunRecord | None = None
-
-
-def _without_terminal_record(run_id: str) -> RuntimeError:
-    """Return the error for an agent run that finished without handing over the record it ended with."""
-    return RuntimeError(f"agent run {run_id!r} ended without its terminal record")
-
-
-@dataclass(frozen=True)
-class _AttemptStorage:
-    """Where one attempt's run is stored: the scope's store and the session whose state its tools share."""
-
-    store: ConversationStore | None
-    session: ConversationSession
-    scope: HistoryScope | None
-
-
 _render_system_enrichment_context = timed("system_prompt_assembly.system_enrichment_render")(
     render_system_enrichment_block,
 )
@@ -300,7 +282,7 @@ class _StreamingAttemptState:
     observed_tool_calls: int = 0
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
     latest_request_usage: MessageMetrics | None = None
-    terminal: _TerminalRecord = field(default_factory=_TerminalRecord)
+    terminal: TerminalRecord[RunRecord] = field(default_factory=partial(TerminalRecord, RunRecord))
     finished: bool = False
     first_token_logged: bool = False
     error: Exception | None = None
@@ -723,17 +705,17 @@ def _begin_attempt(
     media: MediaInputs,
     *,
     stream_state: _StreamingAttemptState | None = None,
-) -> tuple[_AttemptStorage, _AgentAttempt]:
+) -> tuple[RunStorage, _AgentAttempt]:
     """Record one prepared attempt on the turn's run state, and return where its run is stored and its request.
 
-    A scope without a stored session gets its first session, which stays on the turn's scope context, so a later
-    attempt of the same turn replays this one's run and an empty-run discard finds it, as a reload of the scope would.
+    A turn without a scope context stores its run in its build's store, in a session of its own outside any scope.
     """
     prepared_run = run_context.prepared_run
     run.unseen_event_ids = prepared_run.unseen_event_ids
     run.run_metadata = run_context.metadata
-    if run.scope_context is None:
-        storage = _AttemptStorage(
+    storage = attempt_run_storage(run)
+    if storage is None:
+        storage = RunStorage(
             store=prepared_run.build.store,
             session=new_scope_session(
                 session_id=run_context.session_id,
@@ -742,10 +724,6 @@ def _begin_attempt(
             ),
             scope=None,
         )
-    else:
-        scope_context = run.scope_context = run.scope_context.with_session()
-        assert scope_context.session is not None
-        storage = _AttemptStorage(store=scope_context.storage, session=scope_context.session, scope=scope_context.scope)
     attempt = run.attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
@@ -754,22 +732,10 @@ def _begin_attempt(
     return storage, attempt
 
 
-def _persist_into(terminal: _TerminalRecord, storage: _AttemptStorage) -> Persist[RunRecord]:
-    """Return the persist callback of one run: keep its terminal record and store it, which updates the loaded session."""
-    store_persist = persist_to(storage.store, storage.session) if storage.store is not None else None
-
-    async def persist(record: RunRecord) -> None:
-        terminal.record = record
-        if store_persist is not None:
-            await store_persist(record)
-
-    return persist
-
-
 def _agent_loop_hooks(
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
-    storage: _AttemptStorage,
+    storage: RunStorage,
 ) -> LoopHooks:
     """Return the hooks of one agent run: the turn's gate, lifecycle, recorder, and skill capture around the shared set.
 
@@ -784,9 +750,7 @@ def _agent_loop_hooks(
             config=run_context.config,
             runtime_paths=run_context.runtime_paths,
             model_name=prepared.runtime_model_name,
-            store=storage.store,
-            session=storage.session,
-            scope=storage.scope,
+            storage=storage,
             replay_plan=prepared.prepared_history.replay_plan,
             prompt_id=prepared.turn.prompt.id,
             lifecycle=run_context.compaction_lifecycle,
@@ -803,8 +767,8 @@ async def _start_agent_run(
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
     *,
-    storage: _AttemptStorage,
-    terminal: _TerminalRecord,
+    storage: RunStorage,
+    terminal: TerminalRecord[RunRecord],
     stream: bool,
 ) -> AsyncIterator[RunEvent]:
     """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
@@ -852,7 +816,7 @@ async def _start_agent_run(
         attempt.run_input,
         ctx=run,
         hooks=hooks,
-        persist=_persist_into(terminal, storage),
+        persist=persist_into(terminal, storage),
         request_template=replace(run_context.request_template, stream=stream),
     )
     driven = drive_delegation_stream(
@@ -890,8 +854,8 @@ async def _continue_turn_run(
     *,
     spec: AgentSpec,
     hooks: LoopHooks,
-    storage: _AttemptStorage,
-    terminal: _TerminalRecord,
+    storage: RunStorage,
+    terminal: TerminalRecord[RunRecord],
 ) -> RunRecord:
     """Continue this attempt's paused run with its delegations' results, as the spec and hooks it ran with.
 
@@ -911,7 +875,7 @@ async def _continue_turn_run(
         user_id=run_context.turn.requester_id,
         model_name=prepared.runtime_model_name,
         hooks=hooks,
-        persist=_persist_into(terminal, storage),
+        persist=persist_into(terminal, storage),
         request_template=run_context.request_template,
     )
     return await forward_resume(events, on_event, record_type=RunRecord)
@@ -922,8 +886,8 @@ async def _run_cached_agent_attempt(
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
     *,
-    storage: _AttemptStorage,
-    terminal: _TerminalRecord,
+    storage: RunStorage,
+    terminal: TerminalRecord[RunRecord],
     on_attempt_start: Callable[[str, str], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> AnyRunRecord:
@@ -933,27 +897,24 @@ async def _run_cached_agent_attempt(
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
     events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
-    record: AnyRunRecord | None = None
+    finished = TerminalRecord(RunRecord)
     async with closing_async_stream(events):
         async for event in events:
-            if isinstance(event, RunFinished):
-                record = event.record
-    if record is None:
-        raise _without_terminal_record(attempt.run_id)
-    return record
+            finished.collect(event)
+    return finished.terminal(attempt.run_id)
 
 
 async def _run_non_streaming_agent_attempts(
     *,
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
-    storage: _AttemptStorage,
+    storage: RunStorage,
     on_attempt_start: Callable[[str, str], None] | None,
     scope_context: ScopeSessionContext | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> _NonStreamingAttemptResult:
     """Run one non-streaming agent response attempt."""
-    terminal = _TerminalRecord()
+    terminal = TerminalRecord(RunRecord)
     try:
         with bind_llm_request_log_context(**_attempt_request_log_context(run_context)):
             record = await _run_cached_agent_attempt(
@@ -1667,7 +1628,7 @@ async def ai_response(  # noqa: C901
                 ),
             )
         if record is None:
-            raise _without_terminal_record(attempt.run_id)
+            raise without_terminal_record(RunRecord, attempt.run_id)
         if record.status is RunStatus.completed and (
             skipped := skip_unapproved_attempt(
                 ctx.participation,
@@ -1810,7 +1771,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
 
             if isinstance(event, RunFinished):
                 state.finished = True
-                state.terminal.record = event.record
+                state.terminal.keep(event.record)
                 if state_updated is not None:
                     state_updated()
                 if event.record.status is RunStatus.completed and event.record.content is not None:
@@ -1829,7 +1790,7 @@ async def _stream_agent_attempt_chunks(
     *,
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
-    storage: _AttemptStorage,
+    storage: RunStorage,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
     on_attempt_start: Callable[[str, str], None] | None,
@@ -2070,7 +2031,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 )
             return
         if record is None or not state.finished:
-            raise _without_terminal_record(attempt.run_id)
+            raise without_terminal_record(RunRecord, attempt.run_id)
 
         if skipped := skip_unapproved_attempt(
             ctx.participation,

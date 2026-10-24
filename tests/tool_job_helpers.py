@@ -38,6 +38,7 @@ from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.participation_hook import participation_hook
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
@@ -468,9 +469,11 @@ async def run_built_turn(
             config=config,
             runtime_paths=runtime_paths,
             model_name="default",
-            store=None,
-            session=ConversationSession(session_id=session_id, kind="agent", owner_id=name),
-            scope=None,
+            storage=RunStorage(
+                store=None,
+                session=ConversationSession(session_id=session_id, kind="agent", owner_id=name),
+                scope=None,
+            ),
             replay_plan=None,
             prompt_id=None,
         ),
@@ -752,9 +755,7 @@ class DelegatingLeader:
                 config=self.config,
                 runtime_paths=self.paths,
                 model_name="default",
-                store=self.store,
-                session=self.session,
-                scope=_LEADER_SCOPE,
+                storage=RunStorage(store=self.store, session=self.session, scope=_LEADER_SCOPE),
                 replay_plan=None,
                 prompt_id=None,
             ),
