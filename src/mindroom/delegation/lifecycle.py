@@ -186,7 +186,7 @@ async def settle_child_response(
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
     # TODO(simplify): A resumed child that wrote nothing hands over its carried pause notice ("I have tools to
-    # execute, but I need confirmation.") after its call ran, as main did. Hand over only what the resume added
+    # execute, but I need confirmation.") after its call ran. Hand over only what the resume added
     # (``new_handover_content``) or the completion note below. The delegating parent's model would notice.
     content = response.handover_content
     if response.status == RunStatus.completed:
