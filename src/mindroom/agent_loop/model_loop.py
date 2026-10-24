@@ -210,7 +210,7 @@ async def run_model_loop(
                     yield event
         assert turn is not None
         message = turn.message
-        _accept_turn(message, state, progress, metrics, identity)
+        _accept_turn(message, state, progress, identity)
         yield RequestCompleted(message.metrics)
         if not message.tool_calls:
             break
@@ -251,7 +251,6 @@ def _accept_turn(
     message: Message,
     state: LoopState,
     progress: _Progress,
-    metrics: RunMetrics,
     identity: ModelIdentity,
 ) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
@@ -261,6 +260,8 @@ def _accept_turn(
     until the model says something new. Empty content, which a reply that does not stream can carry, is blank text;
     its member results tell blank text from none.
     """
+    metrics = state.record.metrics
+    assert metrics is not None
     state.messages.append(message)
     _count_request(metrics, message.metrics, identity)
     state.request_index += 1
