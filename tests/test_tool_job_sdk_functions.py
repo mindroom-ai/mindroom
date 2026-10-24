@@ -206,7 +206,7 @@ async def test_a_jobs_call_is_rechecked_with_the_arguments_its_own_grant_belongs
     runtime = await tool_job_runtime(tmp_path, authorize_execution=authorize_execution)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    run = ToolCallContext(run_id="job-run", session_id="session", call_id="inner-call")
+    run = ToolCallContext(run_id="job-run", session_id="session", call_id="inner-call", user_id=None)
     enclosing = JobCall(tool=job_tool(call_tool), arguments={"tool_name": "read"}, context=run, team=False)
     searching = job_tool(search)
     (admit,) = with_job_admission(job_actor(*([searching] if admitted else [])), ())
