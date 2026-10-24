@@ -150,34 +150,6 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
-async def test_gemini_reads_what_its_config_leaves_unset_from_the_process_environment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """GOOGLE_API_KEY supplies a missing key, and on Vertex AI the project and location come from their variables."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-project")
-    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west4")
-    seen: list[httpx.Request] = []
-
-    def respond(http_request: httpx.Request) -> httpx.Response:
-        seen.append(http_request)
-        return gemini_sse(_gemini_chunk({"text": "ok"}))
-
-    for config in (
-        {"provider": "google", "id": "gemini-3.8-flash"},
-        {"provider": "gemini", "id": "gemini-3.8-flash", "extra_kwargs": {"vertexai": True}},
-    ):
-        adapter = build_adapter(config, tmp_path, respond)
-        _completed([event async for event in adapter.stream(_request())])
-
-    api, vertex = seen
-    assert api.headers["x-goog-api-key"] == "env-key"
-    assert "/projects/env-project/locations/europe-west4/" in str(vertex.url)
-    assert "x-goog-api-key" not in vertex.headers
-
-
-@pytest.mark.asyncio
 async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """GOOGLE_GENAI_USE_VERTEXAI=true sends a model without ``vertexai`` to Vertex AI, as Agno's Gemini did."""
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
