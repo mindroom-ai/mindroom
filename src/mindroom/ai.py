@@ -1152,7 +1152,6 @@ async def _prepare_agent_and_prompt(
     Returns the prepared run input plus history bookkeeping for one agent turn.
     """
     agent_name = ctx.entity_label
-    _assert_agent_target(agent_name, config)
 
     def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, AgentBuild]:
         """Resolve the runtime model and build the agent off the event loop (#1260).
