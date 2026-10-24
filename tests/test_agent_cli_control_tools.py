@@ -110,7 +110,7 @@ async def _delegation_catalog(
     catalog.runtime_context = runtime
     identity = build_execution_identity_from_runtime_context(runtime)
     store = create_session_storage("helper", config, paths, identity)
-    catalog.storage = replace(catalog.storage, store=store)
+    catalog.store = store
     store.ensure_session_row(catalog.session)
     catalog.record = RunRecord(
         run_id="run",
@@ -164,7 +164,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         tmp_path,
         [_toolkit("shell", run_shell_command), adapt_toolkit(Toolkit(name="control", tools=[switch, mutate]))],
     )
-    catalog.storage = replace(catalog.storage, store=create_state_storage("helper", tmp_path))
+    catalog.store = create_state_storage("helper", tmp_path)
     receipts = []
     owner = _owner(catalog)
     owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
@@ -285,8 +285,8 @@ async def test_hidden_delegation_uses_native_child_owner(
         assert catalog.record is not None
         state = DelegationState.from_metadata(catalog.record.metadata)
         assert state.children[0].run_id == child.run_id
-        assert catalog.storage.store is not None
-        saved = catalog.storage.store.get_run("run")
+        assert catalog.store is not None
+        saved = catalog.store.get_run("run")
         assert saved is not None
         assert saved.requirements is None
         followup_id = uuid4()
@@ -531,9 +531,9 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 calls=approval_calls,
                 cli_call=paused.cli_call,
             )
-            assert catalog.storage.store is not None
-            persisted = catalog.storage.store.get_run("run")
-            session = catalog.storage.store.load_session("session", "agent")
+            assert catalog.store is not None
+            persisted = catalog.store.get_run("run")
+            session = catalog.store.load_session("session", "agent")
             assert isinstance(persisted, RunRecord)
             assert session is not None
             build = agents.create_agent(
@@ -542,7 +542,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 paths,
                 identity,
                 agent_mode="minimal",
-                history_storage=catalog.storage.store,
+                history_storage=catalog.store,
                 supports_native_tool_approval=True,
             )
 
@@ -555,7 +555,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                     continuation,
                     CliApprovalCall.from_dict(continuation.cli_call),
                     persisted,
-                    RunStorage(catalog.storage.store, session, None),
+                    RunStorage(catalog.store, session, None),
                     paused_answer=PausedAnswer(
                         text=presentation.final_text(),
                         tool_trace=tuple(presentation.tool_trace),
@@ -642,8 +642,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
     assert catalog.record is not None
     state_metadata = catalog.record.metadata
     if mode in {"recover", "recover_again"}:
-        assert catalog.storage.store is not None
-        saved_run = catalog.storage.store.get_run("run")
+        assert catalog.store is not None
+        saved_run = catalog.store.get_run("run")
         assert saved_run is not None
         state_metadata = saved_run.metadata
     child = DelegationState.from_metadata(state_metadata).children[0]

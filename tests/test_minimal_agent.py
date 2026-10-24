@@ -711,7 +711,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         assert offered_tools(request) == ["bash"]
         assert "optional long role" not in str(request.messages)
         assert "actual current request" in str(request.messages)
-    store = owners[0].catalog.storage.store
+    store = owners[0].catalog.store
     assert store is not None
     saved = store.load_session(ctx.session_id, "agent")
     assert saved is not None
