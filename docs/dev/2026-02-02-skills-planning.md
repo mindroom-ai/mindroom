@@ -9,9 +9,9 @@ The goal was OpenClaw's model, so OpenClaw skills carry over: skills are instruc
 
 ## Decisions
 
-- Skill orchestration uses Agno's `Skills` prompt snippet and `get_skill_*` tools instead of a custom `<available_skills>` prompt block, so Agno's snippet is the single source of truth for the skills prompt.
+- Skill orchestration uses Agno's `Skills` prompt snippet and `get_skill_*` tools instead of a custom `<available_skills>` prompt block, so Agno's snippet is the single source of truth for the skills prompt (now MindRoom's copy of it in `tool_system/skills.py`, since MindRoom [replaced Agno's runtime](2026-10-20-replace-agno-design.md)).
   The skills section must stay compact to avoid prompt bloat.
-- OpenClaw writes `metadata` as a single-line JSON5 string in the `SKILL.md` frontmatter, so skills load through Agno with validation disabled (`LocalSkills(validate=False)`) and MindRoom normalizes the metadata to preserve it.
+- OpenClaw writes `metadata` as a single-line JSON5 string in the `SKILL.md` frontmatter, so skills load through Agno with validation disabled (`LocalSkills(validate=False)`; now the lenient loader in `tool_system/skills.py`) and MindRoom normalizes the metadata to preserve it.
 
 ## Assumptions
 

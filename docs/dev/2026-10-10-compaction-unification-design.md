@@ -33,7 +33,7 @@ Behavior on `main` when this design was written:
   A fast model that reads the prompt last can start the request over even when the summary records it finished: on a logged team-member request whose summary recorded all six file reads, gpt-6-luna restarted at the first file 12/12 with the summary before the prompt and 0/12 after it, and in a live run that member looped through about 30 folds until it was stopped.
   gpt-6.1-sol, gpt-6-astra, and gemini-3.8-flash answered in both orders, and with partial progress every model continued at the next file in both orders.
   Rewording the closing line without moving the summary restarted 12/12, and a firmer "do not call them again" line restarted 1/12 and would also discourage a repeat the user asks for in a later turn.
-- The summary is never stored as a message: it is marked as history, so Agno drops it when it stores a run, later turns cannot replay it twice, and an approval resume rebuilds it together with the history it re-fetches.
+- The summary is never stored as a message: it is marked as history, so Agno drops it when it stores a run (now the agent loop, in `agent_loop/run.py`), later turns cannot replay it twice, and an approval resume rebuilds it together with the history it re-fetches.
 - A replay plan that replays only the summary keeps history on with zero runs instead of turning history off, so the summary still replays.
   A scheduled task with `history_limit: 0` turns history off and therefore no longer sees the summary, matching "`0` for none" in the scheduling docs.
 - A run paused before this release stored a system message that embeds Agno's summary block, and resuming it inserts no summary message, because leaving the paused prefix unchanged keeps the paused tool call's signed reasoning valid (a `LEGACY_COMPAT` rule).
@@ -41,7 +41,7 @@ Behavior on `main` when this design was written:
 
 ### A pre-request hook instead of Agno's CompressionManager
 
-- Mid-turn compaction runs from a hook around the model's per-request response processing, which Agno calls once per provider request with the loop's live messages, the formatted tools, and the run output.
+- Mid-turn compaction runs from a hook around the model's per-request response processing, which Agno calls once per provider request with the loop's live messages, the formatted tools, and the run output (now `mid_turn_compaction_hook`, one of the `before_request` hooks `loop_hooks.py` composes).
 - Agno has no awaitable pre-request hook with mutable messages, and its `CompressionManager` is a partial extension point limited to tool results and tied to `compress_tool_results`, so the hook was an `AGNO_COMPAT` workaround on the seam the tool-call cap already used, until the agent loop's `before_request` hooks replaced it and its marker when MindRoom [stopped running Agno's agent loop](2026-10-20-replace-agno-design.md).
 - The tool-call cap wraps outside the compaction hook, so it refuses a request before compaction spends a summary call.
 - The trigger is the limit the pre-reply trigger already applies, the replay window minus `reserve_tokens`.
@@ -98,6 +98,6 @@ Behavior on `main` when this design was written:
 - With no assistant message left after a fold, OpenAI Responses cannot restore folded items through `previous_response_id`.
 - Fallback models do not get the mid-turn hook, because a fallback serves only after the primary fails.
 - Turning native replay off does not remove an authored `compact_20260112` policy from the request, as in the pre-reply fallback.
-- Synchronous Agno response loops are not covered, because MindRoom runs every agent and team asynchronously.
+- Synchronous Agno response loops are not covered, because MindRoom runs every agent and team asynchronously; the agent loop that replaced them has no synchronous form.
 - An approval resume of a scheduled task with `history_limit` rebuilds its agent with the configured history settings instead of the task's limit; this predates the design and is unchanged by it.
 - With the summary in every agent's history, `agent-context` is no longer any agent's route to it; whether minimal authored subagents keep the configured agent's `role`, `instructions`, and `agent-context` documents belongs to #2794, as do its prompt-builder and skills changes.

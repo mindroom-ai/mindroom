@@ -88,7 +88,7 @@ The server persists with an append-only file, so a kill loses at most a second o
 
 ### Graphiti's models come from MindRoom config
 
-Graphiti's `LLMClient` and `EmbedderClient` are thin adapters over MindRoom's own model and embedder construction (`get_model_instance` with a structured-output Agno run, and `create_configured_embedder` for `memory.embedder`), so every provider, credential rule, and base URL MindRoom supports works without a second mapping.
+Graphiti's `LLMClient` and `EmbedderClient` are thin adapters over MindRoom's own model and embedder construction (`get_model_instance` with a structured-output Agno run, now `build_model_provider` with a structured-output `complete_prompt` call, and `create_configured_embedder` for `memory.embedder`), so every provider, credential rule, and base URL MindRoom supports works without a second mapping.
 
 Rejected: mapping MindRoom providers onto Graphiti's own provider clients.
 It duplicates key precedence and base-URL rules per provider, covers fewer providers, and gives no usage accounting.
