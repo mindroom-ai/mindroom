@@ -8,6 +8,7 @@ import weakref
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import yaml
@@ -507,13 +508,38 @@ def _request_or_current_snapshot(request: Request) -> ApiSnapshot:
     return require_api_state(request.app).snapshot
 
 
-def _published_snapshot(snapshot: ApiSnapshot, *, increment_generation: bool = True, **changes: object) -> ApiSnapshot:
-    """Return ``snapshot`` with ``changes`` as one new publication, always with a fresh commit revision."""
+class _Keep(Enum):
+    """Default for a ``_published_snapshot`` field the caller leaves unchanged."""
+
+    FIELD = auto()
+
+
+def _published_snapshot(
+    snapshot: ApiSnapshot,
+    *,
+    increment_generation: bool = True,
+    runtime_paths: constants.RuntimePaths | _Keep = _Keep.FIELD,
+    config_data: dict[str, Any] | _Keep = _Keep.FIELD,
+    runtime_config: Config | None | _Keep = _Keep.FIELD,
+    config_load_result: ConfigLoadResult | None | _Keep = _Keep.FIELD,
+    source_fingerprint: str | None | _Keep = _Keep.FIELD,
+    source_files: frozenset[Path] | None | _Keep = _Keep.FIELD,
+    uses_includes: bool | None | _Keep = _Keep.FIELD,
+    auth_state: object = _Keep.FIELD,
+) -> ApiSnapshot:
+    """Return ``snapshot`` with the given fields as one new publication, always with a fresh commit revision."""
     return replace(
         snapshot,
         generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
         revision=snapshot.revision + 1,
-        **changes,
+        runtime_paths=snapshot.runtime_paths if runtime_paths is _Keep.FIELD else runtime_paths,
+        config_data=snapshot.config_data if config_data is _Keep.FIELD else config_data,
+        runtime_config=snapshot.runtime_config if runtime_config is _Keep.FIELD else runtime_config,
+        config_load_result=snapshot.config_load_result if config_load_result is _Keep.FIELD else config_load_result,
+        source_fingerprint=snapshot.source_fingerprint if source_fingerprint is _Keep.FIELD else source_fingerprint,
+        source_files=snapshot.source_files if source_files is _Keep.FIELD else source_files,
+        uses_includes=snapshot.uses_includes if uses_includes is _Keep.FIELD else uses_includes,
+        auth_state=snapshot.auth_state if auth_state is _Keep.FIELD else auth_state,
     )
 
 
