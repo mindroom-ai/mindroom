@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai
+from mindroom import agents, ai, ai_run_metadata
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
     _compose_current_turn_prompt,
@@ -285,6 +285,19 @@ def test_reply_usage_publishes_its_keys_in_order_with_fractions_as_decimal_strin
         ("uncached_input_tokens", 0),
     ]
     assert _ReplyUsage.of(RunMetrics(), uncached_input_tokens=5).to_wire() == {}
+
+
+def test_reply_usage_publishes_a_counter_its_order_omits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The published order only orders the counters, so a counter it does not name is still published after the rest."""
+    monkeypatch.setattr(
+        ai_run_metadata,
+        "_PUBLISHED_COUNTERS",
+        tuple(name for name in ai_run_metadata._PUBLISHED_COUNTERS if name != "input_tokens"),
+    )
+
+    payload = _ReplyUsage.of(RunMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2), cost=0.5)).to_wire()
+
+    assert list(payload.items()) == [("output_tokens", 2), ("input_tokens", 5), ("cost", "0.5")]
 
 
 def test_reply_usage_preserves_zero_usage_fields_from_metrics() -> None:

@@ -340,6 +340,24 @@ def test_token_counts_dict_lists_every_counter_in_report_order() -> None:
     assert set(TokenCounts().to_dict().values()) == {0}
 
 
+def test_token_counts_dict_puts_the_first_names_first_and_keeps_every_other_counter() -> None:
+    counts = TokenCounts(input_tokens=1, reasoning_tokens=6, audio_total_tokens=9)
+
+    assert list(counts.to_dict(first=("audio_total_tokens", "input_tokens")).items()) == [
+        ("audio_total_tokens", 9),
+        ("input_tokens", 1),
+        ("output_tokens", 0),
+        ("total_tokens", 0),
+        ("cache_read_tokens", 0),
+        ("cache_write_tokens", 0),
+        ("reasoning_tokens", 6),
+        ("audio_input_tokens", 0),
+        ("audio_output_tokens", 0),
+    ]
+    with pytest.raises(KeyError, match="retired_tokens"):
+        counts.to_dict(first=("input_tokens", "retired_tokens"))
+
+
 # --- provider --------------------------------------------------------------------------------------------------
 
 

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import PreparedHistoryState
 
 _AI_RUN_METADATA_VERSION = 1
-# The counters the ``usage`` object publishes, in its key order.
+# The ``usage`` object lists the counters first, in this order; a counter it omits follows them.
 _PUBLISHED_COUNTERS = (
     "input_tokens",
     "output_tokens",
@@ -56,9 +56,8 @@ class _ReplyUsage:
 
     def to_wire(self) -> dict[str, Any]:
         """Return the published object, empty when nothing was reported; the uncached input is published as given."""
-        counters = self.tokens.to_dict()
         values = {
-            **{name: counters[name] for name in _PUBLISHED_COUNTERS},
+            **self.tokens.to_dict(first=_PUBLISHED_COUNTERS),
             "cost": self.cost,
             "time_to_first_token": self.time_to_first_token,
             "duration": self.duration,

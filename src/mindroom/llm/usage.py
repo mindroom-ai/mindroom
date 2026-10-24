@@ -41,9 +41,10 @@ class TokenCounts:
             audio_total_tokens=self.audio_input_tokens + self.audio_output_tokens,
         )
 
-    def to_dict(self) -> dict[str, int]:
-        """Return every counter, zero included, in report order."""
-        return asdict(self)
+    def to_dict(self, *, first: tuple[str, ...] = ()) -> dict[str, int]:
+        """Return every counter, zero included: the ``first`` names in that order, then the rest in report order."""
+        counters = asdict(self)
+        return {**{name: counters.pop(name) for name in first}, **counters}
 
     def __add__(self, other: TokenCounts) -> TokenCounts:
         """Add the counters one by one."""
@@ -55,7 +56,7 @@ class TokenCounts:
 
 
 TOKEN_FIELDS = tuple(item.name for item in fields(TokenCounts))
-# Stored usage dicts list the counters first, in this order, as main stored them.
+# Stored usage dicts list the counters first, in this order, as main stored them; a counter it omits follows them.
 _STORED_COUNTER_ORDER = (
     "input_tokens",
     "output_tokens",
@@ -86,10 +87,11 @@ def known_fields(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if key in names}
 
 
-def _flattened(values: dict[str, Any]) -> dict[str, Any]:
-    """Return a usage record's ``asdict`` with its nested ``tokens`` spread out first, in stored order."""
-    tokens = values.pop("tokens")
-    return {**{name: tokens[name] for name in _STORED_COUNTER_ORDER}, **values}
+def _flattened(record: _Counts) -> dict[str, Any]:
+    """Return a usage record's fields with its ``tokens`` spread out first, in stored order."""
+    values = asdict(record)
+    del values["tokens"]
+    return {**record.tokens.to_dict(first=_STORED_COUNTER_ORDER), **values}
 
 
 def _known_counts(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
@@ -106,7 +108,7 @@ class _Counts:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape."""
-        return _compact(_flattened(asdict(self)))
+        return _compact(_flattened(self))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
@@ -197,7 +199,7 @@ def _details_to_dict(details: Mapping[str, list[ModelMetrics]]) -> dict[str, lis
     # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
     # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
     return {
-        model_type: [_compact(_flattened(asdict(entry)), keep_empty=True) for entry in entries]
+        model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
         for model_type, entries in details.items()
     }
 
@@ -244,7 +246,7 @@ class RunMetrics(_Counts):
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape."""
-        values = _flattened(asdict(self))
+        values = _flattened(self)
         if self.details is not None:
             values["details"] = _details_to_dict(self.details)
         return _compact(values)
@@ -312,7 +314,7 @@ class SessionMetrics(_Counts):
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape."""
-        values = _flattened(asdict(self))
+        values = _flattened(self)
         if self.details is not None:
             values["details"] = _details_to_dict(self.details)
         return _compact(values)

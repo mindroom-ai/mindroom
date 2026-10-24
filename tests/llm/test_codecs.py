@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.llm import usage as llm_usage
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import (
@@ -557,6 +558,23 @@ def test_stored_metrics_keep_agno_key_order_at_every_level(fixture: str) -> None
 
     for value in stored:
         assert json.dumps(_METRIC_CODECS[fixture](value).to_dict()) == json.dumps(value)
+
+
+def test_stored_metrics_keep_a_counter_the_stored_order_omits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stored order only orders the counters, so a counter it does not name is still stored after the rest."""
+    monkeypatch.setattr(
+        llm_usage,
+        "_STORED_COUNTER_ORDER",
+        tuple(name for name in llm_usage._STORED_COUNTER_ORDER if name != "input_tokens"),
+    )
+    run = RunMetrics()
+    run.add(MessageMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2)), model_id="m", provider="P")
+
+    stored = run.to_dict()
+
+    assert list(stored) == ["output_tokens", "input_tokens", "details"]
+    assert list(stored["details"]["model"][0]) == ["output_tokens", "input_tokens", "id", "provider"]
+    assert RunMetrics.from_dict(stored).to_dict() == stored
 
 
 # --- session totals --------------------------------------------------------------------------------------------
