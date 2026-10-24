@@ -125,31 +125,6 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
 type TeamStreamChunk = str | StructuredStreamChunk
 
 
-def _team_request_log_context(
-    ctx: ResponseTurnContext,
-    *,
-    team_name: str,
-    prompt: str,
-    run_input: Sequence[Message],
-    metadata: dict[str, object] | None,
-) -> dict[str, object]:
-    return build_llm_request_log_context(
-        RequestAttribution(
-            agent_id=team_name,
-            session_id=ctx.session_id or "",
-            room_id=ctx.room_id,
-            thread_id=ctx.thread_id,
-            reply_to_event_id=ctx.reply_to_event_id,
-            requester_id=ctx.requester_id,
-            correlation_id=ctx.correlation_id,
-        ),
-        prompt=prompt,
-        model_prompt=None,
-        full_prompt=render_prepared_team_messages_text(run_input),
-        metadata=metadata,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Preparing a turn
 # ---------------------------------------------------------------------------
@@ -226,6 +201,7 @@ async def prepare_materialized_team_execution(
         runtime_paths=runtime_paths,
         config=config,
         entity_name=configured_team_name,
+        history_settings=built.history_settings,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
         response_sender_id=response_sender_id,
@@ -281,13 +257,14 @@ async def prepare_materialized_team_execution(
 
 @dataclass(frozen=True)
 class _LeaderRun:
-    """How the leader of one prepared team turn runs: where it stores, its hooks, request settings, and model."""
+    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata."""
 
     spec: TeamSpec
     storage: RunStorage | None
     hooks: LoopHooks
     request_template: ModelRequest
     model_name: str
+    metadata: dict[str, Any] | None
 
     def start(
         self,
@@ -296,7 +273,6 @@ class _LeaderRun:
         run_id: str,
         session_id: str,
         user_id: str | None,
-        metadata: dict[str, Any] | None,
         records: TerminalRecord[TeamRunRecord] | None,
     ) -> AsyncIterator[TeamRunEvent]:
         """Start the run; its tools share the stored session's ``session_state``, which the store writes back."""
@@ -307,7 +283,7 @@ class _LeaderRun:
                 run_id=run_id,
                 session=self.storage.session if self.storage is not None else UnstoredSession(session_id),
                 user_id=user_id,
-                metadata=metadata,
+                metadata=self.metadata,
                 history_scope=self.storage.scope if self.storage is not None else None,
                 model_name=self.model_name,
             ),
@@ -350,6 +326,7 @@ def _leader_run(
         ),
         request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
         model_name=prepared.runtime_model_name,
+        metadata=prepared.run_metadata,
     )
 
 
@@ -386,7 +363,6 @@ def run_prepared_team(
         run_id=str(uuid4()),
         session_id=session_id,
         user_id=user_id,
-        metadata=prepared.run_metadata,
         records=None,
     )
 
@@ -473,6 +449,31 @@ class _TeamTurn:
         """The turn's session id; team turns always run with one."""
         assert self.ctx.session_id is not None
         return self.ctx.session_id
+
+    def request_log_context(
+        self,
+        *,
+        prompt: str,
+        run_input: Sequence[Message],
+        metadata: dict[str, object] | None,
+    ) -> dict[str, object]:
+        """Return the request-log context of one attempt's leader requests, which carry the team's name."""
+        ctx = self.ctx
+        return build_llm_request_log_context(
+            RequestAttribution(
+                agent_id=self.entity_name,
+                session_id=self.session_id,
+                room_id=ctx.room_id,
+                thread_id=ctx.thread_id,
+                reply_to_event_id=ctx.reply_to_event_id,
+                requester_id=ctx.requester_id,
+                correlation_id=ctx.correlation_id,
+            ),
+            prompt=prompt,
+            model_prompt=None,
+            full_prompt=render_prepared_team_messages_text(run_input),
+            metadata=metadata,
+        )
 
     async def members_for_attempt(self, continuation_state: TurnContinuationRunState) -> ResolvedExactTeamMembers:
         """Return the attempt's member set: the turn's members for its first attempt, rebuilt for every later one."""
@@ -584,12 +585,10 @@ class _TeamTurn:
         )
         if self.run_id_callback is not None:
             self.run_id_callback(attempt.run_id)
-        request_context = _team_request_log_context(
-            self.ctx,
-            team_name=self.entity_name,
+        request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
             run_input=run_input,
-            metadata=prepared.run_metadata,
+            metadata=leader.metadata,
         )
         with bind_llm_request_log_context(**request_context):
             if self.pipeline_timing is not None:
@@ -599,7 +598,6 @@ class _TeamTurn:
                 run_id=attempt.run_id,
                 session_id=self.session_id,
                 user_id=self.user_id,
-                metadata=prepared.run_metadata,
                 records=attempt.records,
             )
         if storage is not None:
@@ -651,7 +649,7 @@ class _TeamTurn:
             # The run stores its record before its events end, however they end, so a stop from here until the turn
             # settles records the run's records.
             self.sync_live_turn_recorder(run, attempt)
-        record = attempt.records.terminal(self.entity_name)
+        record = attempt.terminal_record()
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record, blocking=True)
         return await self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
@@ -680,7 +678,7 @@ class _TeamTurn:
             yield self.error_text(error)
             yield AttemptResolved(HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error)))
             return
-        record = attempt.records.terminal(self.entity_name)
+        record = attempt.terminal_record()
         # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
         shown_reasons = attempt.show_failure_reasons(record)
         if shown_reasons:

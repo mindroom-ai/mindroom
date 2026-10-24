@@ -75,6 +75,7 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
     inputs = resolve_entity_preparation_inputs(
         config=turn.config,
         entity_name=turn.agent_name,
+        history_settings=turn.config.resolve_entity(turn.agent_name).history_settings,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,

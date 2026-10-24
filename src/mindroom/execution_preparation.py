@@ -38,7 +38,7 @@ from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
-    resolve_agent_preparation_inputs,
+    resolve_entity_preparation_inputs,
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.history.session_context import ScopeSessionContext
-    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
+    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedHistorySettings
     from mindroom.llm.provider import ModelProvider, ToolSpec
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
@@ -884,10 +884,10 @@ async def prepare_agent_execution_context(
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
     ) -> PreparedScopeHistory:
-        resolved_inputs = resolve_agent_preparation_inputs(
-            agent_name=agent_name,
-            history_settings=build.history_settings,
+        resolved_inputs = resolve_entity_preparation_inputs(
             config=config,
+            entity_name=agent_name,
+            history_settings=build.history_settings,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
@@ -947,6 +947,7 @@ async def _prepare_bound_team_execution_context(
     runtime_paths: RuntimePaths,
     config: Config,
     team_name: str | None,
+    history_settings: ResolvedHistorySettings,
     active_model_name: str | None,
     active_context_window: int | None,
     response_sender_id: str | None = None,
@@ -962,12 +963,10 @@ async def _prepare_bound_team_execution_context(
     """Prepare one bound team scope for the current call.
 
     ``leader_system_message`` and ``leader_tools`` size the static part of every leader request; the delegation tool
-    the run adds is among them.
+    the run adds is among them. ``history_settings`` are the built team's, which the replay plan follows.
     """
     static_token_estimator = build_static_token_estimator(leader_system_message, leader_tools, frozenset())
-    team_compaction_config = config.resolve_entity(
-        team_name if team_name is not None and team_name in config.teams else None,
-    ).compaction_config
+    team_compaction_config = config.resolve_entity(team_name).compaction_config
 
     async def _prepare_team_scope_history(
         prepared_prompt: str,
@@ -979,6 +978,7 @@ async def _prepare_bound_team_execution_context(
             config=config,
             scope_context=scope_context,
             team_name=team_name,
+            history_settings=history_settings,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
@@ -1032,6 +1032,7 @@ async def prepare_bound_team_run_context(
     runtime_paths: RuntimePaths,
     config: Config,
     entity_name: str | None,
+    history_settings: ResolvedHistorySettings,
     active_model_name: str | None,
     active_context_window: int | None,
     response_sender_id: str | None = None,
@@ -1061,6 +1062,7 @@ async def prepare_bound_team_run_context(
         runtime_paths=runtime_paths,
         config=config,
         team_name=entity_name,
+        history_settings=history_settings,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
         response_sender_id=response_sender_id,
