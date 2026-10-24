@@ -8,7 +8,7 @@ This record explains why file memory is the primary backend and why auto-flush e
 - Preserve `mem0` as an alternative backend.
 - Avoid user-managed schedules for memory maintenance.
 - Keep cross-thread memory fresh for the same agent.
-- Read sessions through Agno session and storage APIs instead of raw SQL, to minimize low-level coupling to Agno (now the conversation store in `session_storage/`, since MindRoom [replaced Agno's runtime](2026-10-20-replace-agno-design.md)).
+- Read sessions through Agno session and storage APIs instead of raw SQL, to minimize low-level coupling to Agno (now the conversation store, since MindRoom [replaced Agno's runtime](2026-10-20-replace-agno-design.md)).
 
 ## Decisions
 
