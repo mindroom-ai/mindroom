@@ -78,6 +78,9 @@ def known_fields(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _sum_optional(left: float | None, right: float | None) -> float | None:
+    # TODO(simplify): ``__add__`` sums costs by this rule and accumulation by ``_add_counts``, which treats a 0.0 total
+    # as unset, so the two differ in a sum's int or float type and a zero's sign. Sum every cost one way.
+    # Stored data would notice only in those edge cases.
     if left is None:
         return right
     if right is None:
