@@ -81,7 +81,10 @@ _BREAKPOINT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-|$)")
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ChatRoute:
-    """The fixed facts of one Chat Completions route; the ``openai`` route's endpoint also serves Responses."""
+    """The fixed facts of one Chat Completions route.
+
+    The ``openai`` route's endpoint and key variable also serve Responses.
+    """
 
     provider: str
     provider_name: str
@@ -164,7 +167,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
 ENDPOINT_VARIABLES = {key: route.base_url_variable for key, route in _CHAT_ROUTES.items() if route.base_url_variable}
 # Every route this module builds, as ``provider_route`` names it.
 OPENAI_FAMILY_PROVIDERS = frozenset(_CHAT_ROUTES) | {"codex"}
-_ROUTE_KEY_VARIABLES = {"azure": PROVIDER_ENV_KEYS["azure"], "zai": PROVIDER_ENV_KEYS["zai"]}
+_ROUTE_KEY_VARIABLES = frozenset({"azure", "zai"})
 # Providers whose models authenticate without the shared key.
 _NO_SHARED_KEY = frozenset({"llama_cpp", "kimi"})
 
@@ -193,7 +196,7 @@ def _configured_key(route_key: str, model_config: ModelConfig, runtime: Provider
     # Azure and Z.ai keys may also come straight from their variables, including the ``_FILE`` forms.
     if shared or route_key not in _ROUTE_KEY_VARIABLES:
         return shared
-    return get_secret_from_env(_ROUTE_KEY_VARIABLES[route_key], runtime_paths=runtime.runtime_paths)
+    return get_secret_from_env(PROVIDER_ENV_KEYS[route_key], runtime_paths=runtime.runtime_paths)
 
 
 def _provider_default_sampling(model_id: str) -> bool:
@@ -296,7 +299,10 @@ def _keyed_client_factory(
     provider_name: str,
     runtime: ProviderRuntime,
 ) -> Callable[[], AsyncOpenAI]:
-    """Return the factory of a client keyed by ``api_key``, else by the route's key variable, else failing."""
+    """Return the factory of a client keyed by ``api_key``, else by the route's key variable, else failing.
+
+    A route with no key variable gets the ``not-provided`` placeholder key instead of failing.
+    """
     api_key_env = _CHAT_ROUTES[route_key].api_key_env
     process_env = runtime.runtime_paths.process_env
 
