@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import agents
-from mindroom.agent_cli.bash import MinimalBashTools
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState
@@ -23,7 +23,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelRequest
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer, calls, tool_call
 
@@ -126,7 +125,7 @@ async def capture_bash_batch(
     history: Sequence[Message] = (),
 ) -> None:
     """Hand the owner's checkpoint one provider batch of Bash calls, as the loop does before it runs any of them."""
-    bash = adapt_toolkit(MinimalBashTools()).functions[0]
+    bash = minimal_bash_toolkit().functions[0]
     assistant = Message(
         role="assistant",
         tool_calls=[
@@ -179,7 +178,7 @@ async def run_bash_batch(owner: LiveTurnTools, *commands: str) -> RunRecord:
         name=catalog.agent_name,
         model=model,
         system_message=None,
-        toolkits=(adapt_toolkit(MinimalBashTools(execute=owner.execute_bash)),),
+        toolkits=(minimal_bash_toolkit(execute=owner.execute_bash),),
     )
     record: RunRecord | None = None
     events = run_agent(

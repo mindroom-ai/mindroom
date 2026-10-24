@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_cli.bash import MinimalBashTools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from tests.test_agent_tool_calls import _catalog, _toolkit
 
@@ -51,7 +50,7 @@ async def test_facade_passes_effective_canonical_binding(
         seen.append((binding, canonical_arguments))
         return "canonical-result"
 
-    [bash] = adapt_toolkit(MinimalBashTools(execute=execute)).functions
+    [bash] = minimal_bash_toolkit(execute=execute).functions
     assert bash.name == "bash"
     outcome = await execute_tool_call(bash, kwargs, _provider_call("real-provider-call"))
     assert outcome.content == "canonical-result"
@@ -64,7 +63,7 @@ async def test_facade_passes_effective_canonical_binding(
 async def test_facade_closed_without_owner_and_filtered_source(tmp_path: Path) -> None:
     """Neither shell authorization nor an operation owner is invented by presentation."""
     catalog = await _catalog(tmp_path, [])
-    [closed] = adapt_toolkit(MinimalBashTools()).functions
+    [closed] = minimal_bash_toolkit().functions
     outcome = await execute_tool_call(closed, {"command": "echo no"}, _provider_call("provider"))
     assert outcome.is_error
     assert "owner" in outcome.content
@@ -73,7 +72,7 @@ async def test_facade_closed_without_owner_and_filtered_source(tmp_path: Path) -
         await catalog.bind(key)
         pytest.fail("disabled source reached worker")
 
-    [bash] = adapt_toolkit(MinimalBashTools(execute=execute)).functions
+    [bash] = minimal_bash_toolkit(execute=execute).functions
     outcome = await execute_tool_call(bash, {"command": "echo no"}, _provider_call("provider"))
     assert outcome.is_error
     assert outcome.content == "No toolkit 'shell'"
@@ -92,9 +91,9 @@ async def test_invalid_facade_shapes_fail_before_owner(kwargs: dict[str, Any]) -
     async def execute(*_args: object) -> None:
         pytest.fail("invalid operation reached owner")
 
-    facade = MinimalBashTools(execute=execute)
+    [facade] = minimal_bash_toolkit(execute=execute).functions
     with pytest.raises(ValueError, match=r"^Bash requires a command$"):
-        await facade.bash(**kwargs)
+        await facade.entrypoint(**kwargs)
 
 
 @pytest.mark.asyncio
@@ -106,7 +105,7 @@ async def test_bash_reads_its_exact_provider_call_without_exposing_it_in_the_sch
         calls.append((key, arguments, call_id))
         return "executed"
 
-    [bash] = adapt_toolkit(MinimalBashTools(execute=execute)).functions
+    [bash] = minimal_bash_toolkit(execute=execute).functions
     assert set(bash.parameters["properties"]) == {"command", "timeout", "tail"}
     assert bash.injected_params == frozenset()
     outcome = await execute_tool_call(bash, {"command": "echo hi"}, _provider_call("actual-provider-id"))

@@ -15,7 +15,7 @@ from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_cli import turn
-from mindroom.agent_cli.bash import MinimalBashTools
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json
 from mindroom.agent_cli.lifetime import response_cli_lifetime
@@ -98,7 +98,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         name="Helper",
         model=ScriptedModel([calls(tool_call("bash", "outer", command="generate")), answer("done")]),
         system_message=None,
-        toolkits=(adapt_toolkit(MinimalBashTools(execute=owner.execute_bash)),),
+        toolkits=(minimal_bash_toolkit(execute=owner.execute_bash),),
     )
     finished = False
 

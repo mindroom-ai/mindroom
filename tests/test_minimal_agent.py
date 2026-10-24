@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 
 from mindroom import agents, ai
-from mindroom.agent_cli.bash import MinimalBashTools
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.minimal_agent import (
@@ -42,7 +42,6 @@ from mindroom.memory.functions import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -333,7 +332,7 @@ async def test_the_bash_facade_hands_its_own_provider_call_to_the_owner() -> Non
         seen.append((key, arguments, call_id))
         return "canonical owner"
 
-    [bash] = adapt_toolkit(MinimalBashTools(execute=execute)).functions
+    [bash] = minimal_bash_toolkit(execute=execute).functions
     outcome = await execute_tool_call(
         bash,
         {"command": "true", "timeout": 5},

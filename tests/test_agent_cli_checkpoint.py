@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_cli.bash import MinimalBashTools
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
 from mindroom.agent_loop.tools import PlannedCall, PreparedTools
@@ -23,7 +23,6 @@ from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to, write_with_session_state
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolValue
 from tests.test_agent_tool_calls import _catalog
 
@@ -47,7 +46,7 @@ def _assistant(*call_ids: str, content: str | None = None) -> Message:
 
 async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: list[Message]) -> None:
     """Capture the batch the last assistant message requests, as the loop does before it runs any call."""
-    bash = adapt_toolkit(MinimalBashTools()).functions[0]
+    bash = minimal_bash_toolkit().functions[0]
     planned = [
         PlannedCall(
             call_id=call["id"],
