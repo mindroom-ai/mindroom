@@ -619,7 +619,7 @@ def _ensure_session_row(
             session.kind,
             session.owner_id,
             session_data,
-            # Agno's JSON column stored no metadata as the text ``null``, never as SQL NULL.
+            # No metadata is stored as the JSON text ``null``, never SQL NULL, kept as main behaves.
             json.dumps(session.metadata),
             session.created_at,
             session.created_at,
