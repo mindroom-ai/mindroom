@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from chromadb.api.models.Collection import Collection
     from chromadb.api.types import Metadata
 
+    from mindroom.knowledge.candidate_checkpoint import FileSignature
+
 logger = get_logger(__name__)
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
@@ -250,33 +252,37 @@ def write_source_rows(
     collection: KnowledgeCollection,
     *,
     relative_path: str,
-    source_metadata: Mapping[str, Any],
-    chunks: Sequence[KnowledgeChunk],
-    vectors: Sequence[Sequence[float]],
+    signature: FileSignature,
+    rows: Sequence[tuple[KnowledgeChunk, Sequence[float]]],
 ) -> None:
-    """Replace one source file's rows with its embedded chunks.
+    """Replace one source file's rows with its chunks, each paired with its vector.
 
-    The old rows are deleted only once every new vector exists, so a failed
-    embedding never empties a file. Rows are written in pages of Chroma's
-    largest batch, and row ids are fixed by the file version and the chunk's
-    position.
+    The caller embeds every chunk before it writes, so a failed embedding
+    never empties a file. Rows are written in pages of Chroma's largest
+    batch, and row ids are fixed by the file version and the chunk's position.
     """
-    if len(vectors) != len(chunks):
-        message = f"Expected {len(chunks)} vectors for {relative_path}, got {len(vectors)}"
-        raise ValueError(message)
+    mtime_ns, size, digest = signature
+    source_metadata = {
+        SOURCE_PATH_KEY: relative_path,
+        SOURCE_MTIME_NS_KEY: mtime_ns,
+        SOURCE_SIZE_KEY: size,
+        SOURCE_DIGEST_KEY: digest,
+    }
     content_hash = _source_content_hash(source_metadata, relative_path)
     chroma_collection = collection.collection()
     chroma_collection.delete(where={SOURCE_PATH_KEY: relative_path})
     page_size = collection.client.get_max_batch_size()
-    for start in range(0, len(chunks), page_size):
-        page = range(start, min(start + page_size, len(chunks)))
+    for start in range(0, len(rows), page_size):
+        page = rows[start : start + page_size]
         chroma_collection.upsert(
-            ids=[hashlib.md5(f"{content_hash}_{index}".encode()).hexdigest() for index in page],  # noqa: S324
-            embeddings=[list(vectors[index]) for index in page],
-            documents=[chunks[index].text.replace("\x00", "\ufffd") for index in page],
+            ids=[
+                hashlib.md5(f"{content_hash}_{index}".encode()).hexdigest()  # noqa: S324
+                for index in range(start, start + len(page))
+            ],
+            embeddings=[list(vector) for _, vector in page],
+            documents=[chunk.text.replace("\x00", "\ufffd") for chunk, _ in page],
             metadatas=[
-                _row_metadata(chunks[index], source_metadata=source_metadata, content_hash=content_hash)
-                for index in page
+                _row_metadata(chunk, source_metadata=source_metadata, content_hash=content_hash) for chunk, _ in page
             ],
         )
 

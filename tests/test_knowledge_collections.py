@@ -138,13 +138,20 @@ def test_superseded_cleanup_releases_owned_clients_and_preserves_reader(
     _assert_storage_released(space, expected)
 
 
-_SOURCE = {"source_path": "notes.md", "source_mtime_ns": 1, "source_size": 9, "source_digest": "digest"}
+_SIGNATURE = (1, 9, "digest")
 
 
-def _chunks(*texts: str) -> list[KnowledgeChunk]:
+def _rows(*texts_and_vectors: tuple[str, list[float]]) -> list[tuple[KnowledgeChunk, list[float]]]:
     return [
-        KnowledgeChunk(text=text, name="notes.md", metadata={"chunk": index, "chunk_size": len(text), "page": None})
-        for index, text in enumerate(texts, start=1)
+        (
+            KnowledgeChunk(
+                text=text,
+                name="notes.md",
+                metadata={"chunk": index, "chunk_size": len(text), "page": None},
+            ),
+            vector,
+        )
+        for index, (text, vector) in enumerate(texts_and_vectors, start=1)
     ]
 
 
@@ -156,23 +163,20 @@ def test_write_source_rows_replaces_one_files_rows(space: CollectionSpace) -> No
         write_source_rows(
             collection,
             relative_path="other.md",
-            source_metadata={**_SOURCE, "source_path": "other.md"},
-            chunks=_chunks("other"),
-            vectors=[[0.0, 1.0]],
+            signature=_SIGNATURE,
+            rows=_rows(("other", [0.0, 1.0])),
         )
         write_source_rows(
             collection,
             relative_path="notes.md",
-            source_metadata={**_SOURCE, "source_mtime_ns": 0, "source_digest": "old"},
-            chunks=_chunks("stale", "stale", "stale"),
-            vectors=[[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
+            signature=(0, 9, "old"),
+            rows=_rows(("stale", [1.0, 0.0]), ("stale", [1.0, 0.0]), ("stale", [1.0, 0.0])),
         )
         write_source_rows(
             collection,
             relative_path="notes.md",
-            source_metadata=_SOURCE,
-            chunks=_chunks("first", "null\x00byte"),
-            vectors=[[1.0, 0.0], [0.5, 0.5]],
+            signature=_SIGNATURE,
+            rows=_rows(("first", [1.0, 0.0]), ("null\x00byte", [0.5, 0.5])),
         )
 
         stored = collection.collection().get(where={"source_path": "notes.md"}, include=["documents", "metadatas"])
@@ -217,40 +221,12 @@ def test_write_source_rows_pages_by_the_stores_batch_limit(
         write_source_rows(
             collection,
             relative_path="notes.md",
-            source_metadata=_SOURCE,
-            chunks=_chunks("a", "b", "c", "d", "e"),
-            vectors=[[1.0, float(index)] for index in range(5)],
+            signature=_SIGNATURE,
+            rows=_rows(*((text, [1.0, float(index)]) for index, text in enumerate("abcde"))),
         )
 
         assert pages == [2, 2, 1]
         assert collection.collection().count() == 5
-    finally:
-        collection.close()
-
-
-def test_write_source_rows_keeps_old_rows_when_vectors_are_missing(space: CollectionSpace) -> None:
-    """A write without one vector per chunk fails before it deletes the file's existing rows."""
-    collection = open_collection(space, "rows")
-    try:
-        reset_collection(collection)
-        write_source_rows(
-            collection,
-            relative_path="notes.md",
-            source_metadata=_SOURCE,
-            chunks=_chunks("kept"),
-            vectors=[[1.0, 0.0]],
-        )
-
-        with pytest.raises(ValueError, match="Expected 2 vectors"):
-            write_source_rows(
-                collection,
-                relative_path="notes.md",
-                source_metadata=_SOURCE,
-                chunks=_chunks("one", "two"),
-                vectors=[[1.0, 0.0]],
-            )
-
-        assert collection.collection().get(include=["documents"])["documents"] == ["kept"]
     finally:
         collection.close()
 
@@ -266,9 +242,8 @@ def test_reset_collection_raises_when_the_old_collection_cannot_be_dropped(
         write_source_rows(
             collection,
             relative_path="notes.md",
-            source_metadata=_SOURCE,
-            chunks=_chunks("old"),
-            vectors=[[1.0, 0.0]],
+            signature=_SIGNATURE,
+            rows=_rows(("old", [1.0, 0.0])),
         )
 
         def fail_operation(self: Client, name: str, **kwargs: object) -> Never:  # noqa: ARG001

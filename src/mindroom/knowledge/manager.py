@@ -433,19 +433,12 @@ def _write_file_rows(
     """Embed the chunks one file's batch left unembedded, then replace the file's rows."""
     missing = [text for text in dict.fromkeys(chunk.text for chunk in prepared.chunks) if text not in batch_vectors]
     own_vectors = dict(zip(missing, embedder.embed_each(missing), strict=True))
-    mtime_ns, size, digest = prepared.signature
     write_source_rows(
         collection,
         relative_path=prepared.relative_path,
-        source_metadata={
-            SOURCE_PATH_KEY: prepared.relative_path,
-            SOURCE_MTIME_NS_KEY: mtime_ns,
-            SOURCE_SIZE_KEY: size,
-            SOURCE_DIGEST_KEY: digest,
-        },
-        chunks=prepared.chunks,
-        vectors=[
-            batch_vectors[chunk.text] if chunk.text in batch_vectors else own_vectors[chunk.text]
+        signature=prepared.signature,
+        rows=[
+            (chunk, batch_vectors[chunk.text] if chunk.text in batch_vectors else own_vectors[chunk.text])
             for chunk in prepared.chunks
         ],
     )
