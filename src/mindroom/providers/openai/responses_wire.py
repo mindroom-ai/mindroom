@@ -41,7 +41,7 @@ from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from openai.types.responses import Response, ResponseStreamEvent, ResponseUsage
+    from openai.types.responses import Response, ResponseFunctionToolCall, ResponseStreamEvent, ResponseUsage
 
     from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
@@ -417,6 +417,16 @@ def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[
         parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).extend(items)
 
 
+def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
+    """Return a function-call output item as the turn's tool call, with the ``call_`` id its result references."""
+    return {
+        "id": item.id,
+        "call_id": item.call_id or item.id,
+        "type": "function",
+        "function": {"name": item.name, "arguments": item.arguments},
+    }
+
+
 def _incomplete_reason(response: Response) -> str | None:
     return None if response.incomplete_details is None else response.incomplete_details.reason
 
@@ -516,13 +526,7 @@ class ResponsesStream:
             self._reasoning.append(current.delta)
             events.append(ReasoningDelta(current.delta))
         elif event.type == "response.output_item.added" and current.item.type == "function_call":
-            item = current.item
-            self._tool_use = {
-                "id": item.id,
-                "call_id": item.call_id or item.id,
-                "type": "function",
-                "function": {"name": item.name, "arguments": item.arguments},
-            }
+            self._tool_use = _function_call(current.item)
         elif event.type == "response.function_call_arguments.delta" and self._tool_use:
             self._tool_use["function"]["arguments"] += current.delta
         elif event.type == "response.output_item.done":
@@ -614,14 +618,7 @@ def parse_response(
         if output.type == "message":
             parts.content = response.output_text
         elif output.type == "function_call":
-            parts.tool_calls.append(
-                {
-                    "id": output.id,
-                    "call_id": output.call_id or output.id,
-                    "type": "function",
-                    "function": {"name": output.name, "arguments": output.arguments},
-                },
-            )
+            parts.tool_calls.append(_function_call(output))
     parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
     # TODO(simplify): Only a blocking response stores response_status and incomplete_reason in provider_data, and
     # nothing reads them. Store them on neither path. Stored data.
