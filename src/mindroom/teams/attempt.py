@@ -40,7 +40,7 @@ def team_tool_executions(record: TeamRunRecord) -> list[ToolExecution]:
     return [*(record.tools or ()), *(tool for member in record.ended_member_runs for tool in member.tools or ())]
 
 
-def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | dict[str, Any] | None:
+def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
     """Return what ``run`` hands over beyond its pause (``new_handover_content``) that its events have not shown.
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,

@@ -574,10 +574,7 @@ def is_empty_completed_run(record: AnyRunRecord) -> bool:
     """Return whether one run completed with no tool calls and no visible content."""
     if record.status is not RunStatus.completed or record.tools:
         return False
-    content = record.content
-    if content is None:
-        return True
-    return isinstance(content, str) and not content.strip()
+    return not (record.content or "").strip()
 
 
 def discard_empty_completed_run(

@@ -465,7 +465,7 @@ async def collect_streamed_response_content(
                     presentation.append_text(chunk.text)
                 elif isinstance(chunk, RunFinished):
                     if chunk.record.content is not None:
-                        presentation.canonical_final_body_candidate = str(chunk.record.content)
+                        presentation.canonical_final_body_candidate = chunk.record.content
                 elif isinstance(chunk, ToolStarted):
                     presentation.start_tool(chunk.tool)
                 elif isinstance(chunk, ToolCompleted):
@@ -503,7 +503,7 @@ def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool = T
 
     # Add main content if present
     if record.content:
-        response_parts.append(str(record.content))
+        response_parts.append(record.content)
 
     # Add formatted tool call sections when present (and enabled).
     if show_tool_calls and record.tools:
@@ -726,7 +726,7 @@ def _track_stream_tool_completed(
 
 
 def _stream_completed_without_visible_output(state: _StreamingAttemptState, record: AnyRunRecord) -> bool:
-    visible_text = state.full_response.strip() or (str(record.content) if record.content else "").strip()
+    visible_text = state.full_response.strip() or (record.content or "").strip()
     return not visible_text and state.observed_tool_calls == 0
 
 
@@ -2164,7 +2164,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
         completed_without_output = _stream_completed_without_visible_output(state, record)
         final_status = RunStatus.error if completed_without_output else RunStatus.completed
-        final_text = str(record.content) if record.content is not None else ""
+        final_text = record.content or ""
         yield AttemptResolved(
             CompletedAttempt(
                 status=final_status,

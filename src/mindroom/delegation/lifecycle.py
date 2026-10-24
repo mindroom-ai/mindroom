@@ -194,10 +194,10 @@ async def settle_child_response(
     content = response.handover_content
     if response.status == RunStatus.completed:
         child.status = "completed"
-        child.result = str(content or "Agent completed the task but returned no content.")
+        child.result = content or "Agent completed the task but returned no content."
     elif response.status == RunStatus.cancelled:
         child.status = "cancelled"
-        child.result = str(content or "Delegation cancelled.")
+        child.result = content or "Delegation cancelled."
     elif response.status in {RunStatus.error, RunStatus.regenerated}:
         child.status = "failed"
         child.result = str(content or response.status)

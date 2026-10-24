@@ -104,10 +104,7 @@ def finished_run_text(record: AnyRunRecord) -> str:
     A failed run shows why it failed, credentials redacted, and a run without content never shows an earlier reply
     of the thread that its input carried.
     """
-    content = record.handover_content
-    if content:
-        return str(content)
-    return "\n\n".join(own_answers(record))
+    return record.handover_content or "\n\n".join(own_answers(record))
 
 
 def format_team_response(record: TeamRunRecord) -> str:
@@ -127,7 +124,7 @@ def format_team_response(record: TeamRunRecord) -> str:
         for member in record.ended_member_runs
         if (text := finished_run_text(member)).strip()
     ]
-    return "\n\n".join(_with_consensus(contributions, str(record.handover_content or "")))
+    return "\n\n".join(_with_consensus(contributions, record.handover_content or ""))
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"

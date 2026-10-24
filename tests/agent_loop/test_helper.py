@@ -153,7 +153,7 @@ async def test_a_structured_answer_is_read_into_the_schema(structured_output: st
     result = await complete_once(provider, _messages(spec, "Is it raining?"), response_format=response_format)
 
     assert result.content == _Verdict(answer="yes")
-    assert result.record.content == {"answer": "yes"}
+    assert result.record.content == '```json\n{"answer": "yes"}\n```'
     [request] = provider.requests
     assert request.response_format == response_format.request_format
     assert (response_format.prompt is not None) == (structured_output == "json_mode")

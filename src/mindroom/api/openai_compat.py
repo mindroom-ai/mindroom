@@ -926,7 +926,7 @@ async def _stream_completion(
             while event is not None:
                 if isinstance(event, RunFinished):
                     content = event.record.content
-                    completed_body = str(content) if content is not None else completed_body
+                    completed_body = content if content is not None else completed_body
                 elif (failure_text := extract_agent_stream_failure(event)) is not None:
                     stream_failed = True
                     logger.warning(

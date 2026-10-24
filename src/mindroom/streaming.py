@@ -1744,7 +1744,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
         elif isinstance(chunk, RunFinished):
-            if isinstance(chunk.record.content, str):
+            if chunk.record.content is not None:
                 streaming.canonical_final_body_candidate = chunk.record.content
             continue
         elif isinstance(chunk, ToolStarted):

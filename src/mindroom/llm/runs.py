@@ -231,7 +231,7 @@ class _RunRecordCommon:
     parent_run_id: str | None = None
     user_id: str | None = None
     status: RunStatus = RunStatus.running
-    content: str | dict[str, Any] | None = None
+    content: str | None = None
     model: str | None = None
     model_provider: str | None = None
     messages: list[Message] = field(default_factory=list)
@@ -247,10 +247,10 @@ class _RunRecordCommon:
     # or team member keeps its paused content until it writes text of its own, while a resumed team leader starts its
     # text afresh (``continue_team``) and this records what it had at the pause. It is never stored, so a loaded
     # record has none.
-    carried_content: str | dict[str, Any] | None = field(default=None, compare=False, repr=False)
+    carried_content: str | None = field(default=None, compare=False, repr=False)
 
     @property
-    def handover_content(self) -> str | dict[str, Any] | None:
+    def handover_content(self) -> str | None:
         """Return what the run shows whoever reads it after it ends: why it failed, else its content.
 
         The run that started it, a team's document of its members, and a delegation's settlement all read this. A
@@ -261,10 +261,10 @@ class _RunRecordCommon:
             return self.content
         if self.error is not None:
             return self.error
-        return redact_sensitive_text(self.content) if isinstance(self.content, str) else self.content
+        return None if self.content is None else redact_sensitive_text(self.content)
 
     @property
-    def new_handover_content(self) -> str | dict[str, Any] | None:
+    def new_handover_content(self) -> str | None:
         """Return what the run hands over (``handover_content``) beyond what it carried over from its pause.
 
         A reply that a resume continues already accounts for what each resumed run carried over: the text it wrote

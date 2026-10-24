@@ -136,7 +136,7 @@ async def _collect_agent_continuation(
     return _CollectedAgentContinuation(
         response=response,
         tool_executions=tuple(current_tools),
-        terminal_content=str(response.new_handover_content or "") if hands_over_text else "",
+        terminal_content=(response.new_handover_content or "") if hands_over_text else "",
         has_visible_content=saw_content_delta,
     )
 
@@ -251,7 +251,7 @@ async def _continue_persisted_agent(
             runtime_model_name=continuation.runtime_model_name,
         )
     if response.status is not RunStatus.completed:
-        raise RuntimeError(str(response.content or "Approval continuation did not complete"))
+        raise RuntimeError(response.content or "Approval continuation did not complete")
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),

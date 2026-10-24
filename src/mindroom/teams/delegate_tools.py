@@ -10,7 +10,6 @@ which pauses the leader's loop after the batch.
 from __future__ import annotations
 
 import asyncio
-import json
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -104,10 +103,8 @@ def member_result_text(child: RunRecord, *, stream: bool) -> str:
 def _streamed_result(child: RunRecord) -> str:
     """Return the member's text, else its tool results, else the no-response notice."""
     content = child.handover_content
-    if isinstance(content, str) and content.strip():
+    if content is not None and content.strip():
         return content
-    if isinstance(content, dict):
-        return _json_text(content)
     if child.tools:
         return _tool_results(child)
     return NO_MEMBER_RESPONSE
@@ -116,15 +113,13 @@ def _streamed_result(child: RunRecord) -> str:
 def _blocking_result(child: RunRecord) -> str:
     """Return the blocking result: the no-response notice only for a run with neither content nor tools.
 
-    A run whose text is blank gives its tool results, which without tools leaves nothing; any other content, None
-    among it, is JSON.
+    A run whose text is blank gives its tool results, which without tools leaves nothing; a run with tools but no
+    content reads ``null``.
     """
     content = child.handover_content
-    if content is None and not child.tools:
-        return NO_MEMBER_RESPONSE
-    if isinstance(content, str):
-        return content if content.strip() else _tool_results(child)
-    return _json_text(content)
+    if content is None:
+        return "null" if child.tools else NO_MEMBER_RESPONSE
+    return content if content.strip() else _tool_results(child)
 
 
 def _tool_results(child: RunRecord) -> str:
@@ -162,13 +157,9 @@ def collaborate_result_text(
 def _labeled_result(child: RunRecord) -> str:
     """Return ``_blocking_result``, but blank text gives all tool results, empty ones too, else ``No Response``."""
     content = child.handover_content
-    if isinstance(content, str) and not content.strip():
+    if content is not None and not content.strip():
         return ",".join(tool.result or "" for tool in child.tools) if child.tools else "No Response"
     return _blocking_result(child)
-
-
-def _json_text(content: object) -> str:
-    return json.dumps(content, indent=2, ensure_ascii=False)
 
 
 def waited_on_member(tool: ToolExecution, member: TeamMember) -> bool:
