@@ -396,7 +396,7 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
     assert record.content == "The probe answered."
     assert [tool.tool_name for tool in record.tools or []] == ["touch"]
     assert record.metrics is not None
-    assert (record.metrics.input_tokens, record.metrics.output_tokens) == (20, 4)
+    assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (20, 4)
     assert reply.recorder.outcome == "completed"
     assert reply.recorder.assistant_text == "The probe answered."
     assert [tool.tool_name for tool in reply.recorder.completed_tools] == ["touch"]

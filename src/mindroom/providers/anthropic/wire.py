@@ -28,7 +28,7 @@ from anthropic.types.beta import (
 
 from mindroom.llm.media import canonical_mime_type, image_format
 from mindroom.llm.messages import Message
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.providers.claude_wire_blocks import as_dict
 from mindroom.providers.stored_tool_calls import call_arguments
@@ -505,7 +505,7 @@ def parse_claude_usage(usage: Usage | MessageDeltaUsage | BetaUsage) -> MessageM
     response bills every iteration; the counters sum them while ``provider_metrics.context_usage`` keeps the
     final iteration's active context, which history budgeting reads.
     """
-    metrics = MessageMetrics(
+    counts = TokenCounts(
         input_tokens=usage.input_tokens or 0,
         output_tokens=usage.output_tokens or 0,
         cache_read_tokens=usage.cache_read_input_tokens or 0,
@@ -517,26 +517,26 @@ def parse_claude_usage(usage: Usage | MessageDeltaUsage | BetaUsage) -> MessageM
     if isinstance(usage, (Usage, BetaUsage)) and usage.service_tier:
         provider_metrics["service_tier"] = usage.service_tier
     context_usage = {
-        "input_tokens": metrics.input_tokens,
-        "cache_read_tokens": metrics.cache_read_tokens,
-        "cache_write_tokens": metrics.cache_write_tokens,
+        "input_tokens": counts.input_tokens,
+        "cache_read_tokens": counts.cache_read_tokens,
+        "cache_write_tokens": counts.cache_write_tokens,
     }
     if isinstance(usage, BetaUsage) and usage.iterations:
         iterations = usage.iterations
-        metrics.input_tokens = sum(iteration.input_tokens for iteration in iterations)
-        metrics.output_tokens = sum(iteration.output_tokens for iteration in iterations)
-        metrics.cache_read_tokens = sum(iteration.cache_read_input_tokens for iteration in iterations)
-        metrics.cache_write_tokens = sum(iteration.cache_creation_input_tokens for iteration in iterations)
+        counts = TokenCounts(
+            input_tokens=sum(iteration.input_tokens for iteration in iterations),
+            output_tokens=sum(iteration.output_tokens for iteration in iterations),
+            cache_read_tokens=sum(iteration.cache_read_input_tokens for iteration in iterations),
+            cache_write_tokens=sum(iteration.cache_creation_input_tokens for iteration in iterations),
+        )
         last = iterations[-1]
         context_usage = {
             "input_tokens": last.input_tokens,
             "cache_read_tokens": last.cache_read_input_tokens,
             "cache_write_tokens": last.cache_creation_input_tokens,
         }
-    metrics.total_tokens = metrics.input_tokens + metrics.output_tokens
     provider_metrics["context_usage"] = context_usage
-    metrics.provider_metrics = provider_metrics
-    return metrics
+    return MessageMetrics(tokens=counts.with_totals(), provider_metrics=provider_metrics)
 
 
 def tool_call_from_block(block: Any) -> dict[str, Any]:  # noqa: ANN401

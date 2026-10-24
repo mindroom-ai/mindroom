@@ -608,8 +608,12 @@ async def test_compaction_iterations_are_billed_and_the_last_one_is_the_context(
     turn = await claude_turn(provider, ModelRequest(messages=[_user("Hi")], native_compaction=native, stream=False))
 
     metrics = turn.message.metrics
-    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) == (62000, 1100, 63100)
-    assert (metrics.cache_read_tokens, metrics.cache_write_tokens) == (530, 120)
+    assert (metrics.tokens.input_tokens, metrics.tokens.output_tokens, metrics.tokens.total_tokens) == (
+        62000,
+        1100,
+        63100,
+    )
+    assert (metrics.tokens.cache_read_tokens, metrics.tokens.cache_write_tokens) == (530, 120)
     assert metrics.provider_metrics["context_usage"] == {
         "input_tokens": 2000,
         "cache_read_tokens": 30,

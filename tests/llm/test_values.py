@@ -41,7 +41,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -162,11 +162,11 @@ def test_message_is_mutable_and_copies_independently() -> None:
     message = Message(role="assistant", content="draft", provider_data={"signature": "s"})
     message.content = "final"
     message.from_history = True
-    message.metrics.input_tokens = 7
+    message.metrics.tokens = TokenCounts(input_tokens=7)
     duplicate = copy.deepcopy(message)
     duplicate.provider_data["signature"] = "other"  # type: ignore[index]
 
-    assert (message.content, message.from_history, message.metrics.input_tokens) == ("final", True, 7)
+    assert (message.content, message.from_history, message.metrics.tokens.input_tokens) == ("final", True, 7)
     assert message.provider_data == {"signature": "s"}
     assert replace(message, from_history=False).from_history is False
 
@@ -275,12 +275,94 @@ def test_team_run_record_defaults() -> None:
 
 def test_run_metrics_sum_keeps_the_cost_only_one_run_reported() -> None:
     # A team turn sums its member runs, and only some providers, such as OpenRouter, report a request's cost.
-    priced = RunMetrics(input_tokens=10, cost=0.25, duration=2.0)
-    unpriced = RunMetrics(input_tokens=5, duration=1.0)
+    priced = RunMetrics(tokens=TokenCounts(input_tokens=10), cost=0.25, duration=2.0)
+    unpriced = RunMetrics(tokens=TokenCounts(input_tokens=5), duration=1.0)
 
     total = priced + unpriced
-    assert (total.input_tokens, total.cost, total.duration) == (15, 0.25, 3.0)
+    assert (total.tokens.input_tokens, total.cost, total.duration) == (15, 0.25, 3.0)
     assert (unpriced + priced).cost == 0.25
+
+
+def test_token_counts_add_and_subtract_every_counter() -> None:
+    first = TokenCounts(input_tokens=10, output_tokens=2, cache_read_tokens=4, audio_output_tokens=1)
+    second = TokenCounts(input_tokens=3, reasoning_tokens=5, audio_total_tokens=7)
+
+    assert first + second == TokenCounts(
+        input_tokens=13,
+        output_tokens=2,
+        cache_read_tokens=4,
+        reasoning_tokens=5,
+        audio_output_tokens=1,
+        audio_total_tokens=7,
+    )
+    assert (first + second) - second == first
+
+
+def test_token_counts_with_totals_sums_input_and_output_and_the_audio_parts() -> None:
+    counts = TokenCounts(
+        input_tokens=10,
+        output_tokens=2,
+        total_tokens=99,
+        cache_read_tokens=8,
+        audio_input_tokens=3,
+        audio_output_tokens=1,
+    )
+
+    assert counts.with_totals() == TokenCounts(
+        input_tokens=10,
+        output_tokens=2,
+        total_tokens=12,
+        cache_read_tokens=8,
+        audio_input_tokens=3,
+        audio_output_tokens=1,
+        audio_total_tokens=4,
+    )
+
+
+def test_token_counts_from_mapping_passes_every_counter_through_the_reader() -> None:
+    seen: list[object] = []
+
+    def read(value: object) -> int:
+        seen.append(value)
+        return value if isinstance(value, int) else 0
+
+    counts = TokenCounts.from_mapping({"input_tokens": 3, "output_tokens": "4", "other": 9}, read)
+
+    assert counts == TokenCounts(input_tokens=3)
+    assert seen == [3, "4", None, None, None, None, None, None, None]
+
+
+def test_token_counts_dict_lists_every_counter_in_report_order() -> None:
+    assert list(TokenCounts().to_dict()) == [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "audio_input_tokens",
+        "audio_output_tokens",
+        "audio_total_tokens",
+    ]
+    assert set(TokenCounts().to_dict().values()) == {0}
+
+
+def test_token_counts_dict_puts_the_first_names_first_and_keeps_every_other_counter() -> None:
+    counts = TokenCounts(input_tokens=1, reasoning_tokens=6, audio_total_tokens=9)
+
+    assert list(counts.to_dict(first=("audio_total_tokens", "input_tokens")).items()) == [
+        ("audio_total_tokens", 9),
+        ("input_tokens", 1),
+        ("output_tokens", 0),
+        ("total_tokens", 0),
+        ("cache_read_tokens", 0),
+        ("cache_write_tokens", 0),
+        ("reasoning_tokens", 6),
+        ("audio_input_tokens", 0),
+        ("audio_output_tokens", 0),
+    ]
+    with pytest.raises(KeyError, match="retired_tokens"):
+        counts.to_dict(first=("input_tokens", "retired_tokens"))
 
 
 # --- provider --------------------------------------------------------------------------------------------------
@@ -309,14 +391,14 @@ async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
         role="assistant",
         content="Hello there",
         tool_calls=[{"id": "c1"}],
-        metrics=MessageMetrics(input_tokens=3),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=3)),
     )
     provider = _ScriptedProvider(
         [
             TextDelta("Hello"),
             ReasoningDelta("hmm"),
             ToolCallReady({"id": "c1"}),
-            UsageReported(MessageMetrics(input_tokens=3), final=False),
+            UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=3)), final=False),
             StreamProgress(),
             TextDelta(" there"),
             TurnCompleted(message=final, stop_reason="tool_use"),
@@ -333,7 +415,7 @@ async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
     assert (turn.content, turn.tool_calls, turn.usage) == (
         "Hello there",
         [{"id": "c1"}],
-        MessageMetrics(input_tokens=3),
+        MessageMetrics(tokens=TokenCounts(input_tokens=3)),
     )
     assert provider.requests == [request]
 
@@ -397,7 +479,7 @@ def test_run_events_are_frozen_values() -> None:
         ReasoningDelta("why"),
         ToolStarted(tool.call),
         ToolCompleted(tool.call),
-        RequestCompleted(model_id="m", provider="P", usage=MessageMetrics(output_tokens=1)),
+        RequestCompleted(model_id="m", provider="P", usage=MessageMetrics(tokens=TokenCounts(output_tokens=1))),
         RunFinished(record),
     ]
 

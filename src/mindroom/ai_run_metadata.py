@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.llm.runs import RunStatus
-from mindroom.llm.usage import RunMetrics
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.model_usage import context_input_tokens_from_counts, uncached_input_tokens_from_counts
 from mindroom.providers.names import canonical_provider
 
@@ -20,18 +21,55 @@ if TYPE_CHECKING:
     from mindroom.history.types import PreparedHistoryState
 
 _AI_RUN_METADATA_VERSION = 1
+# The ``usage`` object lists the counters first, in this order; a counter it omits follows them.
+_PUBLISHED_COUNTERS = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
+    "audio_total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+)
 
 
-def _serialize_metrics(metrics: RunMetrics | None) -> dict[str, Any] | None:
-    if metrics is None:
-        return None
-    sanitized: dict[str, Any] = {}
-    for key, value in metrics.to_dict().items():
-        if isinstance(value, (str, int)) or value is None:
-            sanitized[key] = value
-        elif isinstance(value, float):
-            sanitized[key] = format(value, ".12g")
-    return sanitized or None
+@dataclass(frozen=True, slots=True)
+class _ReplyUsage:
+    """The ``usage`` object of a reply's ``io.mindroom.ai_run`` metadata, kept apart from how runs store usage.
+
+    Zero counters and unset values are left out, and fractions are published as decimal strings, because Matrix
+    event JSON forbids floats.
+    """
+
+    tokens: TokenCounts
+    cost: float | None
+    time_to_first_token: float | None
+    duration: float | None
+    uncached_input_tokens: int | None = None
+
+    @classmethod
+    def of(cls, metrics: RunMetrics, *, uncached_input_tokens: int | None = None) -> _ReplyUsage:
+        """Return the usage a run's metrics publish."""
+        return cls(metrics.tokens, metrics.cost, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
+
+    def to_wire(self) -> dict[str, Any]:
+        """Return the published object, empty when nothing was reported; the uncached input is published as given."""
+        values = {
+            **self.tokens.to_dict(first=_PUBLISHED_COUNTERS),
+            "cost": self.cost,
+            "time_to_first_token": self.time_to_first_token,
+            "duration": self.duration,
+        }
+        wire: dict[str, Any] = {
+            key: format(value, ".12g") if isinstance(value, float) else value
+            for key, value in values.items()
+            if isinstance(value, (float, str)) or (isinstance(value, int) and value != 0)
+        }
+        if wire and self.uncached_input_tokens is not None:
+            wire["uncached_input_tokens"] = self.uncached_input_tokens
+        return wire
 
 
 def _build_context_payload(
@@ -168,9 +206,9 @@ def _uncached_input_tokens(
     if entries:
         return sum(
             uncached_input_tokens_from_counts(
-                input_tokens=entry.input_tokens,
-                cache_read_tokens=entry.cache_read_tokens,
-                cache_write_tokens=entry.cache_write_tokens,
+                input_tokens=entry.tokens.input_tokens,
+                cache_read_tokens=entry.tokens.cache_read_tokens,
+                cache_write_tokens=entry.tokens.cache_write_tokens,
                 provider=entry.provider,
                 configured_provider=None,
                 model_id=entry.id,
@@ -220,7 +258,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
 
-    usage_payload = _serialize_metrics(metrics)
+    usage_payload = _ReplyUsage.of(metrics).to_wire() if metrics is not None else None
     usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
     if not isinstance(usage_input_tokens, int):
         usage_input_tokens = None
@@ -280,7 +318,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     if provider is not None:
         model_payload["provider"] = provider
     payload["model"] = model_payload
-    if usage_payload:
+    if metrics is not None and usage_payload:
         uncached_input_tokens = _uncached_input_tokens(
             metrics,
             usage_payload,
@@ -288,9 +326,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
             configured_provider=model_config.provider if model_config is not None else None,
             model_id=model_id,
         )
-        if uncached_input_tokens is not None:
-            usage_payload["uncached_input_tokens"] = uncached_input_tokens
-        payload["usage"] = usage_payload
+        payload["usage"] = _ReplyUsage.of(metrics, uncached_input_tokens=uncached_input_tokens).to_wire()
     cost = run_cost_usd(
         metrics,
         usage_payload,

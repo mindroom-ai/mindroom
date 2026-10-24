@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.llm.usage import ModelMetrics, RunMetrics
+from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
@@ -240,7 +240,7 @@ def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) 
                     model_provider="openai",
                     model="gpt-6-astra",
                     status=RunStatus.completed,
-                    metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
+                    metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
                 ),
             ],
             created_at=1_723_837_600,
@@ -353,7 +353,7 @@ def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) 
         model_provider="openai",
         model="gpt-6-astra",
         status=RunStatus.completed,
-        metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
     )
     storage.save_run(session, run, record_usage=True)
     storage.save_run(session, replace(run, created_at=1_723_924_000), record_usage=True)
@@ -384,17 +384,13 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
             run_id="team-run",
             team_id="engineering",
             metrics=RunMetrics(
-                input_tokens=7,
-                output_tokens=3,
-                total_tokens=10,
+                tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
                 details={
                     "model": [
                         ModelMetrics(
+                            tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
                             id="model-a",
                             provider="provider-a",
-                            input_tokens=7,
-                            output_tokens=3,
-                            total_tokens=10,
                         ),
                     ],
                 },
@@ -409,17 +405,13 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
             agent_id="code",
             parent_run_id="team-run",
             metrics=RunMetrics(
-                input_tokens=14,
-                output_tokens=6,
-                total_tokens=20,
+                tokens=TokenCounts(input_tokens=14, output_tokens=6, total_tokens=20),
                 details={
                     "model": [
                         ModelMetrics(
+                            tokens=TokenCounts(input_tokens=14, output_tokens=6, total_tokens=20),
                             id="model-b",
                             provider="provider-b",
-                            input_tokens=14,
-                            output_tokens=6,
-                            total_tokens=20,
                         ),
                     ],
                 },

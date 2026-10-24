@@ -61,7 +61,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
@@ -767,7 +767,7 @@ class SummaryCalls:
     ) -> str:
         self.inputs.append(summary_input)
         if on_usage is not None:
-            await on_usage(MessageMetrics(input_tokens=7, output_tokens=3))
+            await on_usage(MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3)))
         if self.cancel:
             raise asyncio.CancelledError
         if self.fail:

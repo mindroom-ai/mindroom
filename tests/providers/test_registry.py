@@ -753,7 +753,7 @@ async def test_a_refusal_fails_the_request_once_and_its_usage_is_counted(
     assert (raised.value.provider, raised.value.retryable) == ("Anthropic", False)
     assert not any(isinstance(event, TurnCompleted) for event in events)
     final_usage = [event.usage for event in events if isinstance(event, UsageReported) and event.final]
-    assert [(usage.input_tokens, usage.output_tokens) for usage in final_usage] == [(40, 9)]
+    assert [(usage.tokens.input_tokens, usage.tokens.output_tokens) for usage in final_usage] == [(40, 9)]
     (usage_line,) = [entry for entry in logs if entry["event"] == "LLM usage"]
     assert (usage_line["input_tokens"], usage_line["output_tokens"]) == (40, 9)
 
@@ -820,7 +820,7 @@ async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn
     events = [event async for event in provider.stream(request)]
 
     reports = [
-        (event.usage.input_tokens, event.usage.output_tokens, event.final)
+        (event.usage.tokens.input_tokens, event.usage.tokens.output_tokens, event.final)
         for event in events
         if isinstance(event, UsageReported)
     ]
@@ -828,7 +828,7 @@ async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn
     assert isinstance(turn, TurnCompleted)
     # Each attempt reports its usage as it arrives; the guidance retry settles the malformed attempt's report first.
     assert reports == [(30, 5, False), (30, 5, True), (40, 9, False), (40, 9, True)]
-    assert (turn.message.metrics.input_tokens, turn.message.metrics.output_tokens) == (70, 14)
+    assert (turn.message.metrics.tokens.input_tokens, turn.message.metrics.tokens.output_tokens) == (70, 14)
     assert (turn.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
     assert len(wire.requests) == 2
 

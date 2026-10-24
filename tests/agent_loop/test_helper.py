@@ -25,7 +25,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.llm.runs import RunStatus
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from tests.agno_parity.prompt_scenarios import message_dict
 
@@ -53,7 +53,7 @@ class _RecordingProvider:
         yield TextDelta(self.answer)
         if not self.finish:
             return
-        usage = MessageMetrics(input_tokens=12, output_tokens=5, total_tokens=17)
+        usage = MessageMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=5, total_tokens=17))
         yield UsageReported(usage)
         message = Message(role="assistant", content=self.answer, metrics=usage)
         stamp_model(message, self.identity)

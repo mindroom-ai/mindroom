@@ -34,7 +34,7 @@ from mindroom.history.types import CompactionOutcome
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -276,7 +276,7 @@ async def test_folded_request_usage_survives_approval_resume(
 ) -> None:
     model = _PausingLoop(
         tool_rounds=9,
-        usage=lambda number: MessageMetrics(input_tokens=1001 * number, output_tokens=1),
+        usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=1001 * number, output_tokens=1)),
     )
     agent = _resumable(tmp_path, monkeypatch, model)
 
@@ -301,7 +301,7 @@ async def test_resumed_run_does_not_anchor_on_its_paused_response(
     """The response that paused reported a request near the window; the resume sizes its own request afresh."""
     model = _PausingLoop(
         tool_rounds=5,
-        usage=lambda number: MessageMetrics(input_tokens=999_900 if number == 5 else 10),
+        usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_900 if number == 5 else 10)),
     )
     agent = _resumable(tmp_path, monkeypatch, model, context_window=1_000_000)
 

@@ -38,6 +38,7 @@ from mindroom.llm import usage as llm_usage
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import UsageReported
 from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import TokenCounts
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
@@ -347,24 +348,22 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
     run.model = "reply-model"
     run.model_provider = "test-provider"
     run.metrics = llm_usage.RunMetrics(
-        input_tokens=7,
-        output_tokens=3,
-        total_tokens=10,
+        tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
         details={
             "model": [
                 llm_usage.ModelMetrics(
+                    tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
                     id="reply-model",
                     provider="test-provider",
-                    input_tokens=7,
-                    output_tokens=3,
-                    total_tokens=10,
                 ),
             ],
         },
     )
     for message in run.messages or []:
         if message.role == "assistant":
-            message.metrics = llm_usage.MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+            message.metrics = llm_usage.MessageMetrics(
+                tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
+            )
             message.created_at = 1_790_000_000
             message.provider_data = {"mindroom_model": {"id": "reply-model", "provider": "test-provider"}}
     session = _session("session", runs=[run])
@@ -416,7 +415,7 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     """Discarding a returned extractor's metrics loses paid retries and rejected output."""
     run = _completed_run("ordinary")
     run.user_id = "@previous:localhost"
-    run.metrics = llm_usage.RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+    run.metrics = llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
     session = _session("session", runs=[run])
     config, paths, storage, _scope, context = _forced_compaction_context(tmp_path, session=session)
     identity = build_execution_identity_from_runtime_context(context)
@@ -648,7 +647,10 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         assert owner.initial_session is not None
         context.storage.update_metadata(_session("session"), lambda _metadata: {"marker": "concurrent session"})
         await record_helper_usage(
-            RunRecord(run_id="paid", metrics=llm_usage.RunMetrics(input_tokens=10, output_tokens=1, total_tokens=11)),
+            RunRecord(
+                run_id="paid",
+                metrics=llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=1, total_tokens=11)),
+            ),
             owner=owner,
             invocation_id="paid",
             kind="dynamic_workflow",
@@ -684,7 +686,7 @@ async def test_returned_helper_usage_write_finishes_after_cancellation(tmp_path:
             record_helper_usage(
                 RunRecord(
                     run_id="paid-attempt",
-                    metrics=llm_usage.RunMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
+                    metrics=llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)),
                 ),
                 owner=HelperUsageOwner(create_storage, "session"),
                 invocation_id="paid-attempt",

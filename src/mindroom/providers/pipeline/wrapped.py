@@ -20,9 +20,8 @@ from typing import TYPE_CHECKING, Any
 from mindroom.llm.errors import ProviderError, incomplete_stream_error
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY
 from mindroom.llm.provider import ReasoningDelta, ReportedUsage, StreamProgress, TextDelta, ToolCallReady, TurnCompleted
-from mindroom.llm.usage import add_usage
+from mindroom.llm.usage import TokenCounts, add_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.usage.storage import has_token_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -151,7 +150,7 @@ def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> S
     if carried is None or not isinstance(event, TurnCompleted):
         return event
     message = event.message
-    if has_token_usage(carried.to_dict()):
+    if carried.tokens != TokenCounts():
         message.provider_data = {**(message.provider_data or {}), AGGREGATE_USAGE_KEY: True}
     message.metrics = message.metrics + carried
     return event

@@ -18,7 +18,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import ModelMetrics, RunMetrics
+from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
@@ -736,42 +736,45 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
     storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     first_day = int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
     metrics = RunMetrics(
-        input_tokens=17,
-        output_tokens=7,
-        total_tokens=24,
-        cache_read_tokens=10,
-        cache_write_tokens=3,
+        tokens=TokenCounts(
+            input_tokens=17,
+            output_tokens=7,
+            total_tokens=24,
+            cache_read_tokens=10,
+            cache_write_tokens=3,
+        ),
         details={
             "model": [
                 ModelMetrics(
+                    tokens=TokenCounts(
+                        input_tokens=10,
+                        output_tokens=4,
+                        total_tokens=14,
+                        cache_read_tokens=6,
+                        cache_write_tokens=2,
+                    ),
                     id="model-a",
                     provider="provider-a",
-                    input_tokens=10,
-                    output_tokens=4,
-                    total_tokens=14,
-                    cache_read_tokens=6,
-                    cache_write_tokens=2,
                 ),
             ],
             "reasoning_model": [
                 ModelMetrics(
+                    tokens=TokenCounts(input_tokens=2, output_tokens=1, total_tokens=3, cache_read_tokens=1),
                     id="model-a",
                     provider="provider-a",
-                    input_tokens=2,
-                    output_tokens=1,
-                    total_tokens=3,
-                    cache_read_tokens=1,
                 ),
             ],
             "output_model": [
                 ModelMetrics(
+                    tokens=TokenCounts(
+                        input_tokens=5,
+                        output_tokens=2,
+                        total_tokens=7,
+                        cache_read_tokens=3,
+                        cache_write_tokens=1,
+                    ),
                     id="model-b",
                     provider="provider-b",
-                    input_tokens=5,
-                    output_tokens=2,
-                    total_tokens=7,
-                    cache_read_tokens=3,
-                    cache_write_tokens=1,
                 ),
             ],
         },
@@ -805,11 +808,13 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
                     model="model-a",
                     created_at=first_day,
                     metrics=RunMetrics(
-                        input_tokens=20,
-                        output_tokens=3,
-                        total_tokens=23,
-                        cache_read_tokens=12,
-                        cache_write_tokens=4,
+                        tokens=TokenCounts(
+                            input_tokens=20,
+                            output_tokens=3,
+                            total_tokens=23,
+                            cache_read_tokens=12,
+                            cache_write_tokens=4,
+                        ),
                     ),
                 ),
                 RunRecord(
@@ -818,7 +823,9 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
                     model_provider="provider-a",
                     model="model-a",
                     created_at=first_day + 86400,
-                    metrics=RunMetrics(input_tokens=4, output_tokens=1, total_tokens=5, cache_read_tokens=2),
+                    metrics=RunMetrics(
+                        tokens=TokenCounts(input_tokens=4, output_tokens=1, total_tokens=5, cache_read_tokens=2),
+                    ),
                 ),
             ],
         ),
@@ -975,7 +982,7 @@ def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: o
             model_provider="provider-a",
             model="model-a",
             created_at=1_700_000_000,
-            metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
+            metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
         ),
         record_usage=True,
     )

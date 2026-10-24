@@ -12,14 +12,14 @@ import inspect
 import json
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
@@ -429,22 +429,22 @@ def _extra(model: BaseModel | None) -> dict[str, Any]:
 
 
 def _openai_usage(usage: CompletionUsage) -> MessageMetrics:
-    metrics = MessageMetrics(
+    details, completion_details = usage.prompt_tokens_details, usage.completion_tokens_details
+    counts = TokenCounts(
         input_tokens=usage.prompt_tokens or 0,
         output_tokens=usage.completion_tokens or 0,
-        total_tokens=usage.total_tokens or 0,
-    )
-    if details := usage.prompt_tokens_details:
-        metrics.audio_input_tokens = details.audio_tokens or 0
-        metrics.cache_read_tokens = details.cached_tokens or 0
-        metrics.cache_write_tokens = details.cache_write_tokens or 0
-    if completion_details := usage.completion_tokens_details:
-        metrics.audio_output_tokens = completion_details.audio_tokens or 0
-        metrics.reasoning_tokens = completion_details.reasoning_tokens or 0
-    metrics.audio_total_tokens = metrics.audio_input_tokens + metrics.audio_output_tokens
+        cache_read_tokens=(details.cached_tokens or 0) if details else 0,
+        cache_write_tokens=(details.cache_write_tokens or 0) if details else 0,
+        reasoning_tokens=(completion_details.reasoning_tokens or 0) if completion_details else 0,
+        audio_input_tokens=(details.audio_tokens or 0) if details else 0,
+        audio_output_tokens=(completion_details.audio_tokens or 0) if completion_details else 0,
+    ).with_totals()
     cost = _extra(usage).get("cost")
-    metrics.cost = cost if isinstance(cost, int | float) else None
-    return metrics
+    # The total is the one the provider reports.
+    return MessageMetrics(
+        tokens=replace(counts, total_tokens=usage.total_tokens or 0),
+        cost=cost if isinstance(cost, int | float) else None,
+    )
 
 
 def _detail(usage: Mapping[str, Any], section: str, name: str) -> int:
@@ -458,24 +458,19 @@ def _counted_usage(usage: Mapping[str, Any], dialect: Literal["groq", "cerebras"
 
     Cerebras keeps its zero counters; Groq keeps only the counters that are set.
     """
-    input_tokens = usage.get("prompt_tokens") or 0
-    output_tokens = usage.get("completion_tokens") or 0
-    metrics = MessageMetrics(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
-        cache_read_tokens=_detail(usage, "prompt_tokens_details", "cached_tokens"),
-        reasoning_tokens=_detail(usage, "completion_tokens_details", "reasoning_tokens"),
-    )
     if dialect == "cerebras":
         timings = {key: usage[key] for key in ("time_system", "time_prompt") if usage.get(key) is not None}
     else:
         timings = {
             key: usage[key] for key in ("completion_time", "prompt_time", "queue_time", "total_time") if usage.get(key)
         }
-    if timings:
-        metrics.provider_metrics = timings
-    return metrics
+    counts = TokenCounts(
+        input_tokens=usage.get("prompt_tokens") or 0,
+        output_tokens=usage.get("completion_tokens") or 0,
+        cache_read_tokens=_detail(usage, "prompt_tokens_details", "cached_tokens"),
+        reasoning_tokens=_detail(usage, "completion_tokens_details", "reasoning_tokens"),
+    )
+    return MessageMetrics(tokens=counts.with_totals(), provider_metrics=timings or None)
 
 
 def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> None:

@@ -209,7 +209,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     second = model.requests[1]
     assert second.messages == tuple(messages[:5])
     assert record.metrics is not None
-    assert (record.metrics.input_tokens, record.metrics.output_tokens) == (30, 6)
+    assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 6)
 
 
 async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts() -> None:
@@ -612,7 +612,11 @@ async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None
     assert (settled.content, settled.metrics) == (None, usage(50, 2))
     assert settled.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
     assert record.metrics is not None
-    assert (record.metrics.input_tokens, record.metrics.output_tokens, record.metrics.total_tokens) == (50, 2, 52)
+    assert (
+        record.metrics.tokens.input_tokens,
+        record.metrics.tokens.output_tokens,
+        record.metrics.tokens.total_tokens,
+    ) == (50, 2, 52)
     assert record.metrics.details is not None
     assert len(record.metrics.details["model"]) == 1
     assert record.content is None
@@ -673,7 +677,11 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
         "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
     }
     assert record.metrics is not None
-    assert (record.metrics.input_tokens, record.metrics.output_tokens, record.metrics.total_tokens) == (50, 2, 52)
+    assert (
+        record.metrics.tokens.input_tokens,
+        record.metrics.tokens.output_tokens,
+        record.metrics.tokens.total_tokens,
+    ) == (50, 2, 52)
     assert record.metrics.details is not None
     assert len(record.metrics.details["model"]) == 1
 
@@ -692,7 +700,7 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
 
     assert messages[-1].metrics == usage(7, 0)
     assert record.metrics is not None
-    assert record.metrics.input_tokens == 7
+    assert record.metrics.tokens.input_tokens == 7
 
 
 async def test_a_cut_off_request_without_usage_leaves_no_message_behind() -> None:

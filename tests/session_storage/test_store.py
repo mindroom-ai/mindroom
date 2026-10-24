@@ -16,7 +16,7 @@ import pytest
 
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.store import (
@@ -59,7 +59,7 @@ def _session(session_id: str = "s1", *, kind: SessionKind = "agent", owner: str 
 def _usage(input_tokens: int, *, model: str = "code-model") -> RunMetrics:
     metrics = RunMetrics()
     metrics.add(
-        MessageMetrics(input_tokens=input_tokens, output_tokens=1, total_tokens=input_tokens + 1),
+        MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens, output_tokens=1, total_tokens=input_tokens + 1)),
         model_id=model,
         provider="P",
     )

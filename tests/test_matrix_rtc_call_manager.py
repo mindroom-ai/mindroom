@@ -33,6 +33,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
+from mindroom.llm.usage import TokenCounts
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import (
@@ -2651,7 +2652,7 @@ async def test_realtime_call_instructions_include_validated_origin_brief(
     assert client.room_get_state.await_count == 1
     record_usage = bridge.agent_options.record_usage
     assert record_usage is not None
-    response = _RealtimeResponseUsage(1_700_000_010, input_tokens=900, output_tokens=300)
+    response = _RealtimeResponseUsage(1_700_000_010, TokenCounts(input_tokens=900, output_tokens=300))
     await record_usage(RealtimeCallUsage("call-1", "gpt-realtime-2.1", 1_700_000_000, (response,)))
     report = collect_admin_usage(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
     assert [(row.user_id, row.totals.total_tokens) for row in report.user_breakdown] == [("@alice:example.org", 1200)]

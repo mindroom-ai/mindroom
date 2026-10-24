@@ -79,7 +79,7 @@ async def test_model_that_keeps_requesting_tools_ends_its_run(shape: str) -> Non
     assert record.content == "Working. " * _CAP
     # The refused request reached no provider, so it adds no usage of its own.
     assert record.metrics is not None
-    assert record.metrics.input_tokens == 10 * _CAP
+    assert record.metrics.tokens.input_tokens == 10 * _CAP
     assert [
         (entry["entity"], entry["budget"], entry["model_requests"], entry["log_level"]) for entry in _cap_warnings(logs)
     ] == [("code", _BUDGET, _CAP, "warning")]

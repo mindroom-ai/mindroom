@@ -256,6 +256,9 @@ async def _append_response_events(
 
 def child_response_usage(response: RunRecord) -> dict[str, object] | None:
     """Return the usage one child attempt reports."""
+    # TODO(simplify): the usage record is the stored run metrics dict, per-model details and provider metrics included.
+    # Record the usage a reply publishes (``ai_run_metadata._ReplyUsage``) instead. Agents reading events.jsonl and
+    # run.json would notice.
     return response.metrics.to_dict() if response.metrics is not None else None
 
 

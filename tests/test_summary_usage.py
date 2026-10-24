@@ -19,7 +19,7 @@ from mindroom.history.storage import record_summary_usage
 from mindroom.history.summary_call import _CompactionSummaryTimeoutError, generate_compaction_summary
 from mindroom.history.types import HistoryScopeState
 from mindroom.llm.messages import Message
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.tool_system.runtime_context import (
@@ -62,10 +62,14 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
     run.model = "answer-model"
     run.model_provider = "test-provider"
     run.user_id = "@previous:localhost"
-    run.metrics = RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+    run.metrics = RunMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
     run.metrics.details = {
         "model": [
-            ModelMetrics(id="answer-model", provider="test-provider", input_tokens=7, output_tokens=3, total_tokens=10),
+            ModelMetrics(
+                tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
+                id="answer-model",
+                provider="test-provider",
+            ),
         ],
     }
     session = _session("session", runs=[run])
@@ -75,11 +79,13 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
             summary_turn(
                 content,
                 usage=MessageMetrics(
-                    input_tokens=100,
-                    output_tokens=10,
-                    total_tokens=110,
-                    cache_read_tokens=40,
-                    reasoning_tokens=2,
+                    tokens=TokenCounts(
+                        input_tokens=100,
+                        output_tokens=10,
+                        total_tokens=110,
+                        cache_read_tokens=40,
+                        reasoning_tokens=2,
+                    ),
                 ),
             ),
         ],
@@ -182,7 +188,7 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
         *[
             summary_turn(
                 "A complete summary.",
-                usage=MessageMetrics(input_tokens=100, output_tokens=10, total_tokens=110),
+                usage=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=10, total_tokens=110)),
             ),
         ],
     )
@@ -228,8 +234,14 @@ async def test_retry_keeps_cost_of_rejected_attempt(tmp_path: Path) -> None:
     assert isinstance(storage, ConversationStore)
     model = _summary_model(
         *[
-            summary_turn("", usage=MessageMetrics(input_tokens=100, output_tokens=10, total_tokens=110)),
-            summary_turn("Complete.", usage=MessageMetrics(input_tokens=50, output_tokens=5, total_tokens=55)),
+            summary_turn(
+                "",
+                usage=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=10, total_tokens=110)),
+            ),
+            summary_turn(
+                "Complete.",
+                usage=MessageMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=5, total_tokens=55)),
+            ),
         ],
     )
     result = await _summarize_chunk(
@@ -269,7 +281,10 @@ async def test_usage_storage_timeout_cannot_issue_another_paid_summary(tmp_path:
 
     model = _summary_model(
         *[
-            summary_turn(content, usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22))
+            summary_turn(
+                content,
+                usage=MessageMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)),
+            )
             for content in ("Complete summary.", "Unnecessary second summary.")
         ],
     )
@@ -305,7 +320,10 @@ async def test_summary_waits_for_locked_usage_storage_without_provider_timeout(
     recorded = asyncio.Event()
     model = _summary_model(
         *[
-            summary_turn("Complete summary.", usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22)),
+            summary_turn(
+                "Complete summary.",
+                usage=MessageMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)),
+            ),
         ],
     )
 
@@ -363,7 +381,7 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
 
     late_summary = summary_turn(
         "Late summary.",
-        usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
+        usage=MessageMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)),
     )
     model = _summary_model([Await(ignore_cancellation), *summary_steps(late_summary)])
 

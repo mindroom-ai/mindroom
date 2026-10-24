@@ -15,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
@@ -72,26 +72,31 @@ def _run() -> RunRecord:
         created_at=1_700_000_000,
         content="private output",
         metrics=RunMetrics(
-            **totals,
-            details={"model": [ModelMetrics(id="test-model", provider="test-provider", **totals)]},
+            tokens=TokenCounts(**totals),
+            details={"model": [ModelMetrics(tokens=TokenCounts(**totals), id="test-model", provider="test-provider")]},
         ),
         messages=[
-            Message(role="assistant", content="private history", from_history=True, metrics=MessageMetrics(**_FIRST)),
-            Message(role="user", content="private prompt", metrics=MessageMetrics(**_FIRST)),
+            Message(
+                role="assistant",
+                content="private history",
+                from_history=True,
+                metrics=MessageMetrics(tokens=TokenCounts(**_FIRST)),
+            ),
+            Message(role="user", content="private prompt", metrics=MessageMetrics(tokens=TokenCounts(**_FIRST))),
             Message(
                 role="assistant",
                 content="private first response",
                 created_at=1_700_000_001,
-                metrics=MessageMetrics(**_FIRST),
+                metrics=MessageMetrics(tokens=TokenCounts(**_FIRST)),
                 provider_data={"secret": "private provider metadata"},
             ),
-            Message(role="tool", content="private tool output", metrics=MessageMetrics(**_FIRST)),
+            Message(role="tool", content="private tool output", metrics=MessageMetrics(tokens=TokenCounts(**_FIRST))),
             Message(role="assistant", content="private unmetered response"),
             Message(
                 role="assistant",
                 content="private second response",
                 created_at=1_700_000_002,
-                metrics=MessageMetrics(**_SECOND),
+                metrics=MessageMetrics(tokens=TokenCounts(**_SECOND)),
             ),
         ],
     )
@@ -254,8 +259,8 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
     assert run.metrics is not None
     run.metrics.details = {
         "model": [
-            ModelMetrics(id="first-model", provider="first-provider", **_FIRST),
-            ModelMetrics(id="second-model", provider="second-provider", **_SECOND),
+            ModelMetrics(tokens=TokenCounts(**_FIRST), id="first-model", provider="first-provider"),
+            ModelMetrics(tokens=TokenCounts(**_SECOND), id="second-model", provider="second-provider"),
         ],
     }
     first_day = int(datetime(2023, 11, 15, tzinfo=UTC).timestamp())
@@ -266,7 +271,7 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
     ):
         # What the owned loop stamps on each request's assistant message: its usage and the model that answered.
         message.created_at = created_at
-        message.metrics = MessageMetrics(**metrics)
+        message.metrics = MessageMetrics(tokens=TokenCounts(**metrics))
         message.provider_data = {
             "secret": "private provider metadata",
             "mindroom_model": {"id": model_id, "provider": provider},

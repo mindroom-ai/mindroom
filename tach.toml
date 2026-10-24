@@ -2665,7 +2665,6 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.providers.errors",
     "mindroom.timing",
-    "mindroom.usage.storage",
 ]
 
 [[modules]]
@@ -4630,7 +4629,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix_rtc.voice_agent"
-depends_on = ["mindroom.logging_config", "mindroom.tool_system.dependencies"]
+depends_on = ["mindroom.llm", "mindroom.logging_config", "mindroom.tool_system.dependencies"]
 
 [[modules]]
 path = "mindroom.matrix_rtc.spoken_turns"
@@ -6016,7 +6015,6 @@ depends_on = [
     "mindroom.model_usage",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
-    "mindroom.usage.storage",
 ]
 
 [[modules]]
@@ -8944,7 +8942,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = ["mindroom.llm"]
-visibility = ["mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_call", "mindroom.history.summary_input", "mindroom.providers.pipeline"]
+visibility = ["mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"

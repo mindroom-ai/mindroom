@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from mindroom.llm.messages import Message, model_provenance, read_model_provenance
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -25,50 +25,35 @@ _calls: ContextVar[list[Message] | None] = ContextVar("mem0_usage_calls", defaul
 _PROVIDER_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ollama": "Ollama"}
 
 
-def _metrics(
-    input_tokens: int,
-    output_tokens: int,
-    *,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
-    reasoning_tokens: int = 0,
-) -> MessageMetrics:
-    return MessageMetrics(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_write_tokens=cache_write_tokens,
-        reasoning_tokens=reasoning_tokens,
-    )
-
-
 def _openai_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an OpenAI SDK chat completion
     usage = response.usage
     if usage is None:
         return MessageMetrics()
     prompt_details = usage.prompt_tokens_details
     completion_details = usage.completion_tokens_details
-    return _metrics(
-        usage.prompt_tokens or 0,
-        usage.completion_tokens or 0,
+    counts = TokenCounts(
+        input_tokens=usage.prompt_tokens or 0,
+        output_tokens=usage.completion_tokens or 0,
         cache_read_tokens=(prompt_details.cached_tokens or 0) if prompt_details else 0,
         reasoning_tokens=(completion_details.reasoning_tokens or 0) if completion_details else 0,
     )
+    return MessageMetrics(tokens=counts.with_totals())
 
 
 def _anthropic_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an Anthropic SDK message
     usage = response.usage
-    return _metrics(
-        usage.input_tokens or 0,
-        usage.output_tokens or 0,
+    counts = TokenCounts(
+        input_tokens=usage.input_tokens or 0,
+        output_tokens=usage.output_tokens or 0,
         cache_read_tokens=usage.cache_read_input_tokens or 0,
         cache_write_tokens=usage.cache_creation_input_tokens or 0,
     )
+    return MessageMetrics(tokens=counts.with_totals())
 
 
 def _ollama_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an Ollama client chat response
-    return _metrics(response.prompt_eval_count or 0, response.eval_count or 0)
+    counts = TokenCounts(input_tokens=response.prompt_eval_count or 0, output_tokens=response.eval_count or 0)
+    return MessageMetrics(tokens=counts.with_totals())
 
 
 def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401 - a Mem0 LLM of the configured provider
@@ -79,7 +64,7 @@ def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401
         def counted_call(*args: object, **kwargs: object) -> object:
             response = call(*args, **kwargs)
             calls = _calls.get()
-            if calls is not None and (metrics := read(response)).total_tokens:
+            if calls is not None and (metrics := read(response)).tokens.total_tokens:
                 provenance = model_provenance(model_id, label)
                 calls.append(Message(role="assistant", metrics=metrics, provider_data=provenance))
             return response

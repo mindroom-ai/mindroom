@@ -137,7 +137,11 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
     assert len(streamed) - len(events) >= 3
     assert isinstance(events[0], UsageReported)
     assert events[0].final is False
-    assert (events[0].usage.input_tokens, events[0].usage.output_tokens, events[0].usage.cache_read_tokens) == (
+    assert (
+        events[0].usage.tokens.input_tokens,
+        events[0].usage.tokens.output_tokens,
+        events[0].usage.tokens.cache_read_tokens,
+    ) == (
         40,
         1,
         5,
@@ -149,15 +153,23 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
     )
     delta_usage, final_usage, completed = events[4], events[5], events[6]
     assert isinstance(delta_usage, UsageReported)
-    assert (delta_usage.final, delta_usage.usage.input_tokens, delta_usage.usage.output_tokens) == (False, 40, 9)
+    assert (delta_usage.final, delta_usage.usage.tokens.input_tokens, delta_usage.usage.tokens.output_tokens) == (
+        False,
+        40,
+        9,
+    )
     assert isinstance(final_usage, UsageReported)
     assert final_usage.final is True
     assert isinstance(completed, TurnCompleted)
     assert completed.stop_reason == "tool_use"
     message = completed.message
     assert final_usage.usage is message.metrics
-    assert (message.metrics.input_tokens, message.metrics.output_tokens, message.metrics.total_tokens) == (40, 9, 49)
-    assert (message.metrics.cache_read_tokens, message.metrics.cache_write_tokens) == (5, 3)
+    assert (
+        message.metrics.tokens.input_tokens,
+        message.metrics.tokens.output_tokens,
+        message.metrics.tokens.total_tokens,
+    ) == (40, 9, 49)
+    assert (message.metrics.tokens.cache_read_tokens, message.metrics.tokens.cache_write_tokens) == (5, 3)
     assert message.metrics.provider_metrics == {
         "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
     }
@@ -264,7 +276,12 @@ async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumul
     completed = await claude_turn(route_provider("anthropic", tmp_path, wire), ModelRequest(messages=_user()))
 
     metrics = completed.message.metrics
-    assert (metrics.input_tokens, metrics.output_tokens, metrics.cache_read_tokens, metrics.cache_write_tokens) == (
+    assert (
+        metrics.tokens.input_tokens,
+        metrics.tokens.output_tokens,
+        metrics.tokens.cache_read_tokens,
+        metrics.tokens.cache_write_tokens,
+    ) == (
         1200,
         50,
         48000,
@@ -341,7 +358,7 @@ async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) ->
     completed = await claude_turn(provider, ModelRequest(messages=_user(), stream=False))
     assert completed.stop_reason == "refusal"
     assert completed.message.content is None
-    assert completed.message.metrics.input_tokens == 40
+    assert completed.message.metrics.tokens.input_tokens == 40
 
 
 @pytest.mark.asyncio
@@ -776,7 +793,11 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
     assert (state["route"], state["threshold"], state["checkpoint_prefix"]) == (replay.route, 60000, True)
     assert state["items"] == [checkpoint, {"type": "text", "text": "Done."}]
     metrics = first.message.metrics
-    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) == (60040, 909, 60949)
+    assert (metrics.tokens.input_tokens, metrics.tokens.output_tokens, metrics.tokens.total_tokens) == (
+        60040,
+        909,
+        60949,
+    )
     assert metrics.provider_metrics == {
         "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
     }

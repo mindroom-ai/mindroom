@@ -38,7 +38,7 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.llm.provider import ModelIdentity, ModelRequest
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import ModelMetrics, RunMetrics
+from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
     CallAgentTooling,
@@ -1657,11 +1657,15 @@ async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage
         # Like claude_agent, a paid helper tool records its usage under the bound owner.
         owner = get_helper_usage_owner()
         assert owner is not None
-        model = ModelMetrics(id="claude-haiku-5-5", provider="Anthropic", input_tokens=100, total_tokens=100)
+        model = ModelMetrics(
+            tokens=TokenCounts(input_tokens=100, total_tokens=100),
+            id="claude-haiku-5-5",
+            provider="Anthropic",
+        )
         await record_helper_usage(
             RunRecord(
                 run_id="turn",
-                metrics=RunMetrics(input_tokens=100, total_tokens=100, details={"model": [model]}),
+                metrics=RunMetrics(tokens=TokenCounts(input_tokens=100, total_tokens=100), details={"model": [model]}),
             ),
             owner=owner,
             invocation_id="turn",

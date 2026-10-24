@@ -1,63 +1,73 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Token usage and timing metrics, with the dict shapes stored in runs, session rows, usage rows, and ``io.mindroom.ai_run``.
+"""Token usage and timing metrics, with the dict shapes stored in runs, session rows, and usage rows.
 
-``to_dict`` omits None, zero integers, and empty containers: the stored shape that ``usage/storage.py``, the budget
-code, and MindRoom Chat read.
+``to_dict`` omits None, zero integers, and empty containers: the stored shape that ``usage/storage.py`` and the budget
+code read.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 
-@dataclass(slots=True)
-class _Stored:
-    """A record stored as its fields without None, zero integers, and empty containers (``_compact``)."""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape."""
-        return _compact(asdict(self))
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> Self:
-        """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**known_fields(cls, data))
-
-
-@dataclass(slots=True, kw_only=True)
-class _Counts(_Stored):
-    """The token counters and cost every usage record carries, first in its stored dict."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TokenCounts:
+    """The token counters a request, a run, or a usage report holds, in the order usage rows and reports list them."""
 
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
-    audio_input_tokens: int = 0
-    audio_output_tokens: int = 0
-    audio_total_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
-    cost: float | None = None
+    audio_input_tokens: int = 0
+    audio_output_tokens: int = 0
+    audio_total_tokens: int = 0
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, object], read: Callable[[object], int]) -> TokenCounts:
+        """Read each counter of a stored dict, None when it is missing, through the reader's own validation rule."""
+        return cls(**{name: read(values.get(name)) for name in TOKEN_FIELDS})
+
+    def with_totals(self) -> TokenCounts:
+        """Return these counts with ``total_tokens`` and ``audio_total_tokens`` the sums of their parts."""
+        return replace(
+            self,
+            total_tokens=self.input_tokens + self.output_tokens,
+            audio_total_tokens=self.audio_input_tokens + self.audio_output_tokens,
+        )
+
+    def to_dict(self, *, first: tuple[str, ...] = ()) -> dict[str, int]:
+        """Return every counter, zero included: the ``first`` names in that order, then the rest in report order."""
+        counters = asdict(self)
+        return {**{name: counters.pop(name) for name in first}, **counters}
+
+    def __add__(self, other: TokenCounts) -> TokenCounts:
+        """Add the counters one by one."""
+        return TokenCounts(**{name: getattr(self, name) + getattr(other, name) for name in TOKEN_FIELDS})
+
+    def __sub__(self, other: TokenCounts) -> TokenCounts:
+        """Subtract the counters one by one."""
+        return TokenCounts(**{name: getattr(self, name) - getattr(other, name) for name in TOKEN_FIELDS})
 
 
-_TOKEN_FIELDS = tuple(item.name for item in fields(_Counts) if item.name != "cost")
-
-
-def _add_token_counts(target: _Counts, source: _Counts, *, sign: int = 1) -> None:
-    """Add every token counter of ``source``, times ``sign``, into ``target`` in place."""
-    for name in _TOKEN_FIELDS:
-        setattr(target, name, getattr(target, name) + sign * getattr(source, name))
-
-
-def _add_counts(target: _Counts, source: _Counts, *, sign: int = 1) -> None:
-    """Add the token counters and any cost of ``source``, times ``sign``, into ``target`` in place."""
-    _add_token_counts(target, source, sign=sign)
-    if source.cost is not None:
-        target.cost = (target.cost or 0) + sign * source.cost
+TOKEN_FIELDS = tuple(item.name for item in fields(TokenCounts))
+# Stored usage dicts list the counters first, in this order, as main stored them; a counter it omits follows them.
+_STORED_COUNTER_ORDER = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
+    "audio_total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+)
 
 
 def _compact(values: Mapping[str, Any], *, keep_empty: bool = False) -> dict[str, Any]:
@@ -75,6 +85,42 @@ def known_fields(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the entries of a stored dict that name a field of the dataclass ``cls``."""
     names = {item.name for item in fields(cls)}
     return {key: value for key, value in data.items() if key in names}
+
+
+def _flattened(record: _Counts) -> dict[str, Any]:
+    """Return a usage record's fields with its ``tokens`` spread out first, in stored order."""
+    values = asdict(record)
+    del values["tokens"]
+    return {**record.tokens.to_dict(first=_STORED_COUNTER_ORDER), **values}
+
+
+def _known_counts(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the entries of a stored usage dict that name a field of ``cls``, its counters read into ``tokens``."""
+    return {**known_fields(cls, data), "tokens": TokenCounts(**known_fields(TokenCounts, data))}
+
+
+@dataclass(slots=True, kw_only=True)
+class _Counts:
+    """The token counters and cost every usage record carries, first in its stored dict."""
+
+    tokens: TokenCounts = TokenCounts()
+    cost: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stored dict shape."""
+        return _compact(_flattened(self))
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
+        """Rebuild from a stored dict, ignoring keys this type does not model."""
+        return cls(**_known_counts(cls, data))
+
+
+def _add_counts(target: _Counts, source: _Counts, *, sign: int = 1) -> None:
+    """Add the token counters and any cost of ``source``, times ``sign``, into ``target`` in place."""
+    target.tokens = target.tokens + source.tokens if sign > 0 else target.tokens - source.tokens
+    if source.cost is not None:
+        target.cost = (target.cost or 0) + sign * source.cost
 
 
 def _sum_optional(left: float | None, right: float | None) -> float | None:
@@ -111,14 +157,13 @@ class MessageMetrics(_Counts):
     def __add__(self, other: MessageMetrics) -> MessageMetrics:
         """Sum counters, cost, and duration; keep the first time to first token."""
         result = MessageMetrics(
+            tokens=self.tokens + other.tokens,
             cost=_sum_optional(self.cost, other.cost),
             duration=_sum_optional(self.duration, other.duration),
             time_to_first_token=(
                 self.time_to_first_token if self.time_to_first_token is not None else other.time_to_first_token
             ),
         )
-        _add_token_counts(result, self)
-        _add_token_counts(result, other)
         if self.provider_metrics is not None or other.provider_metrics is not None:
             merged: dict[str, Any] = dict(self.provider_metrics or {})
             _merge_numeric(merged, other.provider_metrics)
@@ -154,7 +199,7 @@ def _details_to_dict(details: Mapping[str, list[ModelMetrics]]) -> dict[str, lis
     # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
     # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
     return {
-        model_type: [_compact(asdict(entry), keep_empty=True) for entry in entries]
+        model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
         for model_type, entries in details.items()
     }
 
@@ -182,12 +227,12 @@ class RunMetrics(_Counts):
         counters stored on an earlier assistant message.
         """
         entry = ModelMetrics(
+            tokens=usage.tokens,
             cost=usage.cost,
             id=model_id,
             provider=provider,
             provider_metrics=None if usage.provider_metrics is None else dict(usage.provider_metrics),
         )
-        _add_token_counts(entry, usage)
         if self.details is None:
             self.details = {}
         entries = self.details.setdefault("model", [])
@@ -200,16 +245,16 @@ class RunMetrics(_Counts):
         _add_counts(self, usage)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape, which is also the ``io.mindroom.ai_run`` usage payload."""
-        values = asdict(self)
+        """Return the stored dict shape."""
+        values = _flattened(self)
         if self.details is not None:
             values["details"] = _details_to_dict(self.details)
         return _compact(values)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> RunMetrics:
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
-        values = known_fields(cls, data)
+        values = _known_counts(cls, data)
         if values.get("details") is not None:
             values["details"] = _details_from_dict(values["details"])
         return cls(**values)
@@ -217,11 +262,10 @@ class RunMetrics(_Counts):
     def __add__(self, other: RunMetrics) -> RunMetrics:
         """Sum two runs' usage, merging ``details`` by model type, provider, and id."""
         result = RunMetrics(
+            tokens=self.tokens + other.tokens,
             cost=_sum_optional(self.cost, other.cost),
             duration=_sum_optional(self.duration, other.duration),
         )
-        _add_token_counts(result, self)
-        _add_token_counts(result, other)
         first_tokens = [t for t in (self.time_to_first_token, other.time_to_first_token) if t is not None]
         if first_tokens:
             result.time_to_first_token = min(first_tokens)
@@ -270,15 +314,15 @@ class SessionMetrics(_Counts):
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape."""
-        values = asdict(self)
+        values = _flattened(self)
         if self.details is not None:
             values["details"] = _details_to_dict(self.details)
         return _compact(values)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> SessionMetrics:
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Rebuild from a stored dict, ignoring keys this type does not model and a ``details`` that is not a mapping."""
-        values = known_fields(cls, data)
+        values = _known_counts(cls, data)
         details = values.pop("details", None)
         if isinstance(details, dict):
             values["details"] = _details_from_dict(
@@ -288,14 +332,13 @@ class SessionMetrics(_Counts):
 
 
 def _signed_model(entry: ModelMetrics, sign: int) -> ModelMetrics:
-    signed = ModelMetrics(
+    return ModelMetrics(
+        tokens=entry.tokens if sign > 0 else TokenCounts() - entry.tokens,
         cost=None if entry.cost is None else sign * entry.cost,
         id=entry.id,
         provider=entry.provider,
         provider_metrics=None if entry.provider_metrics is None else _scaled(entry.provider_metrics, sign),
     )
-    _add_token_counts(signed, entry, sign=sign)
-    return signed
 
 
 def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
@@ -317,19 +360,30 @@ def _scaled(values: Mapping[str, Any], sign: int) -> dict[str, Any]:
 
 
 @dataclass(slots=True, kw_only=True)
-class ToolCallMetrics(_Stored):
+class ToolCallMetrics:
     """Wall-clock timing of one tool call."""
 
     start_time: float | None = None
     end_time: float | None = None
     duration: float | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stored dict shape."""
+        return _compact(asdict(self))
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ToolCallMetrics:
+        """Rebuild from a stored dict, ignoring keys this type does not model."""
+        return cls(**known_fields(cls, data))
+
 
 __all__ = [
+    "TOKEN_FIELDS",
     "MessageMetrics",
     "ModelMetrics",
     "RunMetrics",
     "SessionMetrics",
+    "TokenCounts",
     "ToolCallMetrics",
     "add_usage",
     "known_fields",

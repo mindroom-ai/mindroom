@@ -20,7 +20,7 @@ from mindroom.llm.provider import (
     UsageReported,
     hosted_tool_started,
 )
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state, native_replay_messages
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
@@ -386,17 +386,17 @@ def responses_request_kwargs(
 
 
 def _usage(usage: ResponseUsage) -> MessageMetrics:
-    metrics = MessageMetrics(
+    input_details, output_details = usage.input_tokens_details, usage.output_tokens_details
+    counts = TokenCounts(
         input_tokens=usage.input_tokens or 0,
         output_tokens=usage.output_tokens or 0,
+        # The total is the one the provider reports.
         total_tokens=usage.total_tokens or 0,
+        cache_read_tokens=(input_details.cached_tokens or 0) if input_details else 0,
+        cache_write_tokens=(input_details.cache_write_tokens or 0) if input_details else 0,
+        reasoning_tokens=(output_details.reasoning_tokens or 0) if output_details else 0,
     )
-    if input_details := usage.input_tokens_details:
-        metrics.cache_read_tokens = input_details.cached_tokens or 0
-        metrics.cache_write_tokens = input_details.cache_write_tokens or 0
-    if output_details := usage.output_tokens_details:
-        metrics.reasoning_tokens = output_details.reasoning_tokens or 0
-    return metrics
+    return MessageMetrics(tokens=counts)
 
 
 @dataclass(slots=True, kw_only=True)

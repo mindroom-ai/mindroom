@@ -18,7 +18,7 @@ from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
@@ -270,17 +270,13 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
     model = build_model_provider(config, paths, "astra").identity
     storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     metrics = RunMetrics(
-        input_tokens=1_000_000,
-        output_tokens=100_000,
-        total_tokens=1_100_000,
+        tokens=TokenCounts(input_tokens=1_000_000, output_tokens=100_000, total_tokens=1_100_000),
         details={
             "model": [
                 ModelMetrics(
+                    tokens=TokenCounts(input_tokens=1_000_000, output_tokens=100_000, total_tokens=1_100_000),
                     id=model.id,
                     provider=model.provider_name,
-                    input_tokens=1_000_000,
-                    output_tokens=100_000,
-                    total_tokens=1_100_000,
                 ),
             ],
         },
@@ -326,17 +322,19 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
             role="assistant",
             created_at=created_at,
             provider_data={"mindroom_model": {"id": model.id, "provider": model.provider_name}},
-            metrics=MessageMetrics(input_tokens=1_000_000, total_tokens=1_000_000),
+            metrics=MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000)),
         )
 
     def metrics(tokens: int) -> RunMetrics:
         model_metrics = ModelMetrics(
+            tokens=TokenCounts(input_tokens=tokens, total_tokens=tokens),
             id=model.id,
             provider=model.provider_name,
-            input_tokens=tokens,
-            total_tokens=tokens,
         )
-        return RunMetrics(input_tokens=tokens, total_tokens=tokens, details={"model": [model_metrics]})
+        return RunMetrics(
+            tokens=TokenCounts(input_tokens=tokens, total_tokens=tokens),
+            details={"model": [model_metrics]},
+        )
 
     run = RunRecord(
         run_id="run-1",

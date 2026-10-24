@@ -29,7 +29,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
@@ -273,18 +273,15 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
 
 
 def _usage(chunk: ChatResponse) -> MessageMetrics:
-    input_tokens = chunk.prompt_eval_count or 0
-    output_tokens = chunk.eval_count or 0
     timings = {
         "total_duration": chunk.total_duration,
         "load_duration": chunk.load_duration,
         "prompt_eval_duration": chunk.prompt_eval_duration,
         "eval_duration": chunk.eval_duration,
     }
+    counts = TokenCounts(input_tokens=chunk.prompt_eval_count or 0, output_tokens=chunk.eval_count or 0)
     return MessageMetrics(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
+        tokens=counts.with_totals(),
         provider_metrics={name: value for name, value in timings.items() if value is not None} or None,
     )
 

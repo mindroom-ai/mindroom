@@ -226,17 +226,7 @@ async def record_call_token_usage(
     metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider="OpenAI")]})
     messages: list[Message] = []
     for response in usage.responses:
-        response_metrics = MessageMetrics(
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
-            total_tokens=response.input_tokens + response.output_tokens,
-            cache_read_tokens=response.cache_read_tokens,
-            cache_write_tokens=response.cache_write_tokens,
-            audio_input_tokens=response.audio_input_tokens,
-            audio_output_tokens=response.audio_output_tokens,
-            audio_total_tokens=response.audio_input_tokens + response.audio_output_tokens,
-            reasoning_tokens=response.reasoning_tokens,
-        )
+        response_metrics = MessageMetrics(tokens=response.tokens.with_totals())
         metrics.add(response_metrics, model_id=usage.model, provider="OpenAI")
         messages.append(
             Message(

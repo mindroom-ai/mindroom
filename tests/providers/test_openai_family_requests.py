@@ -803,12 +803,12 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
         ).usage
 
     assert usage is not None
-    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (15_000, 50, 15_050)
-    assert usage.cache_read_tokens == 12_000
-    assert usage.cache_write_tokens == (3_000 if include_cache_write else 0)
-    assert usage.reasoning_tokens == 7
+    assert (usage.tokens.input_tokens, usage.tokens.output_tokens, usage.tokens.total_tokens) == (15_000, 50, 15_050)
+    assert usage.tokens.cache_read_tokens == 12_000
+    assert usage.tokens.cache_write_tokens == (3_000 if include_cache_write else 0)
+    assert usage.tokens.reasoning_tokens == 7
     audio = (11, 13, 24) if route == "chat" else (0, 0, 0)
-    assert (usage.audio_input_tokens, usage.audio_output_tokens, usage.audio_total_tokens) == audio
+    assert (usage.tokens.audio_input_tokens, usage.tokens.audio_output_tokens, usage.tokens.audio_total_tokens) == audio
 
 
 @pytest.mark.parametrize("route", ["groq", "cerebras"])
@@ -839,8 +839,8 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
     usage = parse_chat_completion(completion, adapter.wire, provider=adapter.identity.provider_name).usage
 
     assert usage is not None
-    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (5000, 300, 5300)
-    assert (usage.cache_read_tokens, usage.reasoning_tokens) == (4608, 120)
+    assert (usage.tokens.input_tokens, usage.tokens.output_tokens, usage.tokens.total_tokens) == (5000, 300, 5300)
+    assert (usage.tokens.cache_read_tokens, usage.tokens.reasoning_tokens) == (4608, 120)
 
 
 # A value for every Chat request setting that travels in the request body.

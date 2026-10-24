@@ -23,10 +23,10 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
+from mindroom.llm.usage import TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.providers.errors import is_context_window_error
 from mindroom.timing import timed
-from mindroom.usage.storage import has_token_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -212,7 +212,7 @@ async def _request_summary(
         turn = refusal
     finally:
         provider_done.set_result(None)
-    if on_usage is not None and has_token_usage(turn.usage.to_dict()):
+    if on_usage is not None and turn.usage.tokens != TokenCounts():
         try:
             await on_usage(turn.usage)
         except Exception as error:
@@ -259,7 +259,7 @@ async def generate_compaction_summary(
         message = turn.message
         msg = (
             "summary generation returned no result "
-            f"(output_tokens={turn.usage.output_tokens}, "
+            f"(output_tokens={turn.usage.tokens.output_tokens}, "
             f"has_reasoning={bool(message.reasoning_content or message.redacted_reasoning_content)})"
         )
         raise _CompactionSummaryEmptyResultError(msg)

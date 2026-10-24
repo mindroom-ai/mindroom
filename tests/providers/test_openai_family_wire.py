@@ -175,7 +175,9 @@ async def test_usage_on_several_chat_chunks_adds_up_as_agno_summed_it(tmp_path: 
     events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
 
     reports = [event for event in events if isinstance(event, UsageReported)]
-    assert [(report.usage.input_tokens, report.usage.output_tokens, report.final) for report in reports] == [
+    assert [
+        (report.usage.tokens.input_tokens, report.usage.tokens.output_tokens, report.final) for report in reports
+    ] == [
         (40, 1, False),
         (82, 13, False),
         (82, 13, True),
@@ -741,7 +743,7 @@ async def test_failed_response_reports_its_usage_before_raising(tmp_path: Path) 
     with pytest.raises(ContextWindowExceeded):
         await drain()
 
-    assert [event.usage.input_tokens for event in events if isinstance(event, UsageReported)] == [42]
+    assert [event.usage.tokens.input_tokens for event in events if isinstance(event, UsageReported)] == [42]
 
 
 _REASONING_ITEM = {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Rain is likely."}]}

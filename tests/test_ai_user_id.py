@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai
+from mindroom import agents, ai, ai_run_metadata
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
     _compose_current_turn_prompt,
@@ -29,10 +29,7 @@ from mindroom.ai import (
     collect_streamed_response_content,
     stream_agent_response,
 )
-from mindroom.ai_run_metadata import (
-    _serialize_metrics,
-    build_ai_run_metadata_content,
-)
+from mindroom.ai_run_metadata import _ReplyUsage, build_ai_run_metadata_content
 from mindroom.bot import AgentBot
 from mindroom.budgets.pricing import PricedModel
 from mindroom.config.agent import AgentConfig
@@ -68,7 +65,7 @@ from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
@@ -254,9 +251,49 @@ def _model_runtime_context(
     )
 
 
-def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
-    """Run metrics serialize only the counters the provider reported."""
-    payload = _serialize_metrics(RunMetrics(input_tokens=6, output_tokens=0, cache_read_tokens=46449))
+def test_reply_usage_publishes_its_keys_in_order_with_fractions_as_decimal_strings() -> None:
+    """The ``usage`` object lists the counters, then cost and timing, then the uncached input, zero included."""
+    counts = TokenCounts(**{name: index for index, name in enumerate(TokenCounts().to_dict(), start=1)})
+    metrics = RunMetrics(tokens=counts, cost=0.5, time_to_first_token=0.25, duration=1 / 3)
+
+    payload = _ReplyUsage.of(metrics, uncached_input_tokens=0).to_wire()
+
+    assert list(payload.items()) == [
+        ("input_tokens", 1),
+        ("output_tokens", 2),
+        ("total_tokens", 3),
+        ("audio_input_tokens", 7),
+        ("audio_output_tokens", 8),
+        ("audio_total_tokens", 9),
+        ("cache_read_tokens", 4),
+        ("cache_write_tokens", 5),
+        ("reasoning_tokens", 6),
+        ("cost", "0.5"),
+        ("time_to_first_token", "0.25"),
+        ("duration", "0.333333333333"),
+        ("uncached_input_tokens", 0),
+    ]
+    assert _ReplyUsage.of(RunMetrics(), uncached_input_tokens=5).to_wire() == {}
+
+
+def test_reply_usage_publishes_a_counter_its_order_omits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The published order only orders the counters, so a counter it does not name is still published after the rest."""
+    monkeypatch.setattr(
+        ai_run_metadata,
+        "_PUBLISHED_COUNTERS",
+        tuple(name for name in ai_run_metadata._PUBLISHED_COUNTERS if name != "input_tokens"),
+    )
+
+    payload = _ReplyUsage.of(RunMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2), cost=0.5)).to_wire()
+
+    assert list(payload.items()) == [("output_tokens", 2), ("input_tokens", 5), ("cost", "0.5")]
+
+
+def test_reply_usage_preserves_zero_usage_fields_from_metrics() -> None:
+    """Run metrics publish only the counters the provider reported."""
+    payload = _ReplyUsage.of(
+        RunMetrics(tokens=TokenCounts(input_tokens=6, output_tokens=0, cache_read_tokens=46449)),
+    ).to_wire()
 
     assert payload == {
         "input_tokens": 6,
@@ -347,7 +384,7 @@ def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
         status="completed",
         model="claude-sonnet-5",
         model_provider="google",
-        metrics=RunMetrics(input_tokens=3_277, cache_read_tokens=99_772, cache_write_tokens=49_886),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=3_277, cache_read_tokens=99_772, cache_write_tokens=49_886)),
         context_input_tokens=30_210,
         context_raw_input_tokens=1_777,
         context_cache_read_tokens=49_886,
@@ -372,7 +409,7 @@ def test_ai_run_metadata_records_reply_cost_as_a_decimal_string() -> None:
         status="completed",
         model="test-model",
         model_provider="OpenAI",
-        metrics=RunMetrics(input_tokens=1_000, output_tokens=10),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         prices={("OpenAI", "test-model"): PricedModel(ModelPricing(input=2, output=8), input_includes_cache=True)},
     )
 
@@ -399,7 +436,7 @@ def test_an_agent_reply_on_a_priced_model_publishes_its_cost(tmp_path: Path) -> 
     identity = build_model_provider(config, paths, "default").identity
     metrics = RunMetrics()
     metrics.add(
-        MessageMetrics(input_tokens=1_000, output_tokens=10),
+        MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         model_id=identity.id,
         provider=identity.provider_name,
     )
@@ -436,7 +473,7 @@ def test_ai_run_metadata_omits_cost_without_prices() -> None:
         status="completed",
         model="test-model",
         model_provider="OpenAI",
-        metrics=RunMetrics(input_tokens=1_000, output_tokens=10),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         prices={},
     )
 
@@ -446,18 +483,18 @@ def test_ai_run_metadata_omits_cost_without_prices() -> None:
 def test_ai_run_metadata_splits_uncached_input_per_model() -> None:
     """A team mixing providers counts each model's new input by that provider's cache accounting."""
     metrics = RunMetrics(
-        input_tokens=1_100,
-        cache_read_tokens=1_300,
-        cache_write_tokens=10,
+        tokens=TokenCounts(input_tokens=1_100, cache_read_tokens=1_300, cache_write_tokens=10),
         details={
             "model": [
-                ModelMetrics(id="gpt-6-luna", provider="OpenAI", input_tokens=1_000, cache_read_tokens=400),
                 ModelMetrics(
+                    tokens=TokenCounts(input_tokens=1_000, cache_read_tokens=400),
+                    id="gpt-6-luna",
+                    provider="OpenAI",
+                ),
+                ModelMetrics(
+                    tokens=TokenCounts(input_tokens=100, cache_read_tokens=900, cache_write_tokens=10),
                     id="claude-sonnet-5-5",
                     provider="Anthropic",
-                    input_tokens=100,
-                    cache_read_tokens=900,
-                    cache_write_tokens=10,
                 ),
             ],
         },
@@ -488,7 +525,7 @@ def test_ai_run_metadata_splits_uncached_input_from_streamed_counters() -> None:
         status="completed",
         model="gpt-6-luna",
         model_provider="OpenAI",
-        metrics=RunMetrics(input_tokens=1_674, cache_read_tokens=1_408, output_tokens=31),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_674, cache_read_tokens=1_408, output_tokens=31)),
     )
 
     assert metadata[AI_RUN_METADATA_KEY]["usage"]["uncached_input_tokens"] == 266

@@ -27,7 +27,7 @@ from mindroom.history.storage import _with_scope_state
 from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -260,7 +260,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         role="assistant",
         content="Ready",
         # Billed for the transcript the checkpoint replaced, over the 183,516-token hard budget.
-        metrics=MessageMetrics(input_tokens=190000),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=190000)),
     )
     record_native_checkpoint(answer, _CHECKPOINT, model.native_compaction_settings(threshold=120000))
     run = _completed_run("old", messages=[Message(role="user", content="large old transcript " * 50000), answer])
@@ -323,7 +323,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
             role="assistant",
             content="Ready",
             provider_data={"response_id": "resp_large_context"},
-            metrics=MessageMetrics(input_tokens=9000, output_tokens=10),
+            metrics=MessageMetrics(tokens=TokenCounts(input_tokens=9000, output_tokens=10)),
         ),
     ]
     session = _session(

@@ -42,7 +42,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.prompt_message_tags import render_msg_tag
@@ -144,7 +144,9 @@ class _ScriptedModel:
         # Like a provider, usage reports what the request sent, so input budgets see real sizes.
         input_tokens = sum(map(len, contents)) // 4
         self.input_tokens.append(input_tokens)
-        usage = MessageMetrics(input_tokens=input_tokens, output_tokens=3, total_tokens=input_tokens + 3)
+        usage = MessageMetrics(
+            tokens=TokenCounts(input_tokens=input_tokens, output_tokens=3, total_tokens=input_tokens + 3),
+        )
         yield UsageReported(usage)
         if not self.script:
             done = Message(role="assistant", content="Done.", metrics=usage)
@@ -1669,7 +1671,7 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
         captured = _with_final_request_messages(captured, captured.request.messages[:-1])
     elif reason == "conversation too long to fork":
         # The final request already used more than a quarter of the default 120,000-token review budget.
-        captured.request.messages[-1].metrics.input_tokens = 40_000
+        captured.request.messages[-1].metrics.tokens = TokenCounts(input_tokens=40_000)
     replay = _model()
     with patch(_REVIEW_MODEL, return_value=replay):
         await _review(config, paths, captured=None if reason == "no capture" else captured)

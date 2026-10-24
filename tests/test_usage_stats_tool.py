@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import RunMetrics
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
@@ -117,11 +117,13 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
                     model="test-model",
                     created_at=int(datetime(2026, 9, 15, tzinfo=UTC).timestamp()),
                     metrics=RunMetrics(
-                        input_tokens=12,
-                        output_tokens=8,
-                        total_tokens=20,
-                        cache_read_tokens=9,
-                        cache_write_tokens=2,
+                        tokens=TokenCounts(
+                            input_tokens=12,
+                            output_tokens=8,
+                            total_tokens=20,
+                            cache_read_tokens=9,
+                            cache_write_tokens=2,
+                        ),
                     ),
                 ),
             ],

@@ -262,7 +262,11 @@ async def test_decision_usage_is_included_in_run_metrics() -> None:
     _, record = await _reply(model, ParticipationGate())
 
     assert record.metrics is not None
-    assert (record.metrics.input_tokens, record.metrics.output_tokens, record.metrics.cache_read_tokens) == (50, 10, 30)
+    assert (
+        record.metrics.tokens.input_tokens,
+        record.metrics.tokens.output_tokens,
+        record.metrics.tokens.cache_read_tokens,
+    ) == (50, 10, 30)
 
 
 @pytest.mark.asyncio

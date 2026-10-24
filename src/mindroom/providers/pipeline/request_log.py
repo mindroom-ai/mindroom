@@ -138,23 +138,24 @@ def _log_usage(
         payload["served_provider"] = served_provider
     payload |= _attribution(context)
     if usage is not None:
+        counts = usage.tokens
         context_tokens = context_input_tokens_from_counts(
-            input_tokens=usage.input_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
+            input_tokens=counts.input_tokens,
+            cache_read_tokens=counts.cache_read_tokens,
+            cache_write_tokens=counts.cache_write_tokens,
             provider=identity.provider,
             configured_provider=log.configured_provider,
             model_id=identity.id,
         )
         payload |= {
-            "input_tokens": usage.input_tokens,
+            "input_tokens": counts.input_tokens,
             "context_input_tokens": context_tokens,
-            "output_tokens": usage.output_tokens,
-            "reasoning_tokens": usage.reasoning_tokens,
-            "cache_read_tokens": usage.cache_read_tokens,
-            "cache_write_tokens": usage.cache_write_tokens,
-            "uncached_input_tokens": context_tokens - usage.cache_read_tokens if context_tokens is not None else None,
-            "cache_read_ratio": round(usage.cache_read_tokens / context_tokens, 6) if context_tokens else 0.0,
+            "output_tokens": counts.output_tokens,
+            "reasoning_tokens": counts.reasoning_tokens,
+            "cache_read_tokens": counts.cache_read_tokens,
+            "cache_write_tokens": counts.cache_write_tokens,
+            "uncached_input_tokens": context_tokens - counts.cache_read_tokens if context_tokens is not None else None,
+            "cache_read_ratio": round(counts.cache_read_tokens / context_tokens, 6) if context_tokens else 0.0,
         }
     logger.info("LLM usage", **payload)
 
@@ -210,10 +211,10 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                     **_attribution(context),
                     "model_id": inner.identity.id,
                     "usage": {
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                        "cache_read_tokens": usage.cache_read_tokens,
-                        "cache_write_tokens": usage.cache_write_tokens,
+                        "input_tokens": usage.tokens.input_tokens,
+                        "output_tokens": usage.tokens.output_tokens,
+                        "cache_read_tokens": usage.tokens.cache_read_tokens,
+                        "cache_write_tokens": usage.tokens.cache_write_tokens,
                     },
                 }
                 await asyncio.to_thread(_write_line, log_path, response)
