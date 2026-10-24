@@ -5107,9 +5107,12 @@ class ResponseRunner:
             reply_event=reply_event,
         )
 
+    # TODO(simplify): the span registry keeps each attempt's run id only for its "Hard cancelling" log line.
+    # Drop that field and `_note_run_id`; the turn recorders keep their own run ids.
+    # Operators would notice: the Stop log line loses its `run_id`.
     @staticmethod
     def _note_run_id(run_id: str | None) -> None:
-        """Tell the span registry which run the current span's attempt is on, so a Stop cancels it too."""
+        """Tell the span registry which run the current span's attempt is on, for the Stop log."""
         handle = current_span()
         assert handle is not None, "every response attempt runs in a reply span"
         handle.runtime.spans.update_run_id(handle.span_id, run_id)
