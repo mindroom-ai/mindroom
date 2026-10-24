@@ -76,7 +76,7 @@ Totals support cost estimates, but provider-specific charging rules and calls ou
 
 With [prices](configuration/models.md#model-config-fields) set on a model, each agent or team reply that uses it records its cost in USD, priced the same way as [budget spend](budgets.md#how-spend-is-counted).
 MindRoom Chat shows the cost beside each reply, the conversation's cost up to that reply in the reply's details, and the thread's total in the thread banner.
-A reply's cost covers its own model calls, including team members on other models; helper work such as compaction summaries, memory extraction, and thread titles is not shown on messages but still counts toward budgets.
+A reply's cost covers its own model calls, including team members on other models; subagents it delegates to and helper work such as compaction summaries, memory extraction, and thread titles are not shown on messages but still count toward budgets.
 A thread total adds up the replies MindRoom Chat has loaded and reads "at least" while older messages are not loaded.
 A regenerated reply shows the cost of its latest run only.
 Replies on models without prices show no cost.

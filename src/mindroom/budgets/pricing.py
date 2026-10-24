@@ -147,7 +147,15 @@ def run_cost_usd(
     """
     details = metrics.details if metrics is not None else None
     entries = [
-        ((entry.provider, entry.id), _usage_totals(entry.to_dict()))
+        (
+            (entry.provider, entry.id),
+            TokenTotals(
+                input_tokens=entry.input_tokens,
+                output_tokens=entry.output_tokens,
+                cache_read_tokens=entry.cache_read_tokens,
+                cache_write_tokens=entry.cache_write_tokens,
+            ),
+        )
         for model_type_entries in (details or {}).values()
         for entry in model_type_entries
     ]
