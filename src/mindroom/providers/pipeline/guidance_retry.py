@@ -1,9 +1,8 @@
 """Request once more, with guidance, after the model wrote a tool call the provider could not parse.
 
-Agno answered Gemini's MALFORMED_FUNCTION_CALL by appending a temporary user message with its guidance text and
-requesting again; this stage does the same for any route that fails with ``MALFORMED_TOOL_CALL`` before the
-attempt committed. The guidance travels on the retried request only, so it never reaches the conversation the caller stores.
-A second malformed call fails the request.
+A request that fails with ``MALFORMED_TOOL_CALL`` before the attempt committed is sent once more with a temporary
+user message telling the model how to write the call. The guidance travels on the retried request only, so it never
+reaches the conversation the caller stores. A second malformed call fails the request.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ __all__ = ["MALFORMED_FUNCTION_CALL_GUIDANCE", "guidance_retry_stream"]
 
 logger = get_logger(__name__)
 
-# The guidance Agno's retry loop sent once after a malformed function call; this stage sends the same text.
+# Model-visible text, kept as main behaves.
 MALFORMED_FUNCTION_CALL_GUIDANCE = """The previous function call was malformed. Please try again with a valid function call.
 
 Guidelines:
