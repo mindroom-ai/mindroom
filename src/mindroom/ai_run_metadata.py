@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
@@ -48,10 +48,10 @@ class _ReplyUsage:
     cost: float | None
     time_to_first_token: float | None
     duration: float | None
-    uncached_input_tokens: int | None = None
+    uncached_input_tokens: int | None
 
     @classmethod
-    def of(cls, metrics: RunMetrics, *, uncached_input_tokens: int | None = None) -> _ReplyUsage:
+    def of(cls, metrics: RunMetrics, *, uncached_input_tokens: int | None) -> _ReplyUsage:
         """Return the usage a run's metrics publish."""
         return cls(metrics.tokens, metrics.cost, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
 
@@ -259,13 +259,11 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
 
-    reply_usage = _ReplyUsage.of(metrics) if metrics is not None else None
-    usage_payload = reply_usage.to_wire() if reply_usage is not None else None
     # The reply's counters, a zero one read as unreported, as the published usage leaves it out.
     tokens = metrics.tokens if metrics is not None else TokenCounts()
     usage_input_tokens = tokens.input_tokens or None
-    # Native compaction adds a billed sampling iteration. Its cost is included
-    # above, while the final iteration alone describes the active context.
+    # Native compaction adds a billed sampling iteration. The reply's usage and cost
+    # include it, while the final iteration alone describes the active context.
     if native_counts := _native_context_counts(context_metrics, model_id, provider):
         context_raw_input_tokens, context_cache_read_tokens, context_cache_write_tokens = native_counts
     explicit_context_scope = any(
@@ -312,14 +310,15 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     if provider is not None:
         model_payload["provider"] = provider
     payload["model"] = model_payload
-    if metrics is not None and reply_usage is not None and usage_payload:
+    if metrics is not None:
         uncached_input_tokens = _uncached_input_tokens(
             metrics,
             provider=provider,
             configured_provider=model_config.provider if model_config is not None else None,
             model_id=model_id,
         )
-        payload["usage"] = replace(reply_usage, uncached_input_tokens=uncached_input_tokens).to_wire()
+        if usage := _ReplyUsage.of(metrics, uncached_input_tokens=uncached_input_tokens).to_wire():
+            payload["usage"] = usage
     cost = run_cost_usd(
         metrics,
         tokens.to_dict() if metrics is not None else None,
