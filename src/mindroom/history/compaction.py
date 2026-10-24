@@ -348,11 +348,7 @@ async def compact_scope_history(
     history_settings = summarizer.history_settings
     visible_runs = scope_visible_runs(session, scope)
     over_budget = available_history_budget is not None and before_tokens > available_history_budget
-    runs = (
-        _runs_with_stable_ids(visible_runs, session_id=session.session_id, scope=scope)
-        if state.force_compact_before_next_run or over_budget
-        else []
-    )
+    runs = visible_runs if state.force_compact_before_next_run or over_budget else []
     if not runs:
         await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
         return None
@@ -882,26 +878,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
         )
         later = replace(summarizer, model=summary_model, fallback=fallback_model, shrunk_budget_tokens=shrunk_budget)
         return _SummaryChunk(summary=summary, included_runs=[*source.unread_runs, *included_runs], summarizer=later)
-
-
-def _runs_with_stable_ids(
-    runs: Sequence[AnyRunRecord],
-    *,
-    session_id: str,
-    scope: HistoryScope,
-) -> list[AnyRunRecord]:
-    # TODO(simplify): every run a session holds has a generated run id, so only a test's in-memory run lacks one.
-    # Compact every visible run and drop this guard; nobody but
-    # test_compact_scope_history_ignores_runs_without_stable_ids would notice.
-    stable_runs = [run for run in runs if run.run_id]
-    if len(stable_runs) < len(runs):
-        logger.warning(
-            "Compaction skipped runs without stable run IDs",
-            session_id=session_id,
-            scope=scope.key,
-            skipped_runs=len(runs) - len(stable_runs),
-        )
-    return stable_runs
 
 
 def _iso_utc_now() -> str:

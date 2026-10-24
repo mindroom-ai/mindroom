@@ -1905,22 +1905,11 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
 
 
 @pytest.mark.asyncio
-async def test_compact_scope_history_ignores_runs_without_stable_ids(
-    tmp_path: Path,
-) -> None:
+async def test_forced_compact_scope_history_without_visible_runs_stores_nothing(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    unremovable_run = RunRecord(
-        run_id="",
-        agent_id="test_agent",
-        status=RunStatus.completed,
-        messages=[
-            Message(role="user", content="question"),
-            Message(role="assistant", content="answer"),
-        ],
-    )
-    working_session = _session("session-1", runs=[unremovable_run])
+    working_session = _session("session-1", runs=[])
 
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
@@ -1947,7 +1936,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
     assert storage.load_session("session-1", "agent") is None
     assert mock_generate.await_count == 0
     assert working_session.summary is None
-    assert working_session.runs == [unremovable_run]
+    assert working_session.runs == []
 
 
 @pytest.mark.asyncio
