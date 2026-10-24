@@ -29,8 +29,8 @@ type ToolChoice = Literal["none"]
 class ModelIdentity:
     """Who answers a request.
 
-    ``id`` is the effective model id, ``provider`` the stored ``model_provider`` string (Agno's ``Model.provider``),
-    and ``provider_name`` the metrics provider string (Agno's ``get_provider()``) that usage rows and pricing key by.
+    ``id`` is the effective model id, ``provider`` the stored ``model_provider`` string, and ``provider_name`` the
+    metrics provider string that usage rows and pricing key by.
     ``endpoint`` is the base URL requests go to, when the route has one; capabilities learned from provider
     errors and native-compaction routes are keyed by it.
     """
@@ -63,10 +63,8 @@ class Capabilities:
 class ToolSpec:
     """A model-facing tool definition; ``parameters`` is the final JSON schema.
 
-    ``description`` and the flags keep Agno's tri-state: None means the tool never set the value, so wires that send
-    the field inside each function definition omit it, as Agno's ``Function.to_dict()`` did.
-    The approval flags are not policy here: OpenAI-family wires send them inside each function definition exactly as
-    Agno did, so request bodies and prompt caches stay unchanged.
+    ``description`` and the flags are None when the tool never set them, so wires that send the field inside each
+    function definition omit it. The approval flags are not policy here.
     """
 
     name: str

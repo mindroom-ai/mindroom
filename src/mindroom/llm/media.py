@@ -1,10 +1,9 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Media attached to messages, with dict codecs that match the stored Agno 3 shapes.
+"""Media attached to messages, with the dict codecs of their stored shapes.
 
-Every kind keeps Agno's scalar field names so stored runs, summary-row segments, tool-job payloads,
-and the worker media envelope decode without migration.
-``content`` travels as base64 text in dicts; ``File`` keeps Agno's exception of writing ``text/*``
-content as UTF-8 text.
+Field names are the keys stored runs, summary-row segments, tool-job payloads, and the worker media envelope hold, so
+they decode without migration. ``content`` travels as base64 text in dicts, except that ``File`` writes UTF-8
+``text/*`` content as text.
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ def _require_one_source(url: str | None, filepath: str | None, content: bytes | 
 
 
 def _decode_base64(text: str) -> bytes:
-    # Agno decoded every stored ``content`` string this way, falling back to the raw UTF-8 bytes.
+    # Text that fails to decode as base64 reads as its UTF-8 bytes, kept as main reads it.
     try:
         return base64.b64decode(text)
     except Exception:
@@ -226,8 +225,8 @@ def _is_text(mime_type: str | None) -> bool:
 class File:
     """A document, usually given by ``url``, ``filepath``, or ``content``.
 
-    Agno accepted a file identified by its id alone or by a provider-side ``external`` object, and stored
-    runs hold such files, so no source is required; the owned ``id`` always identifies it.
+    Stored runs hold files identified by their id alone or by a provider-side ``external`` object, so no source is
+    required; the ``id`` always identifies it.
     ``mime_type`` is free text: the stored-row readers never rejected any value, and the provider
     adapters decide what each model accepts.
     """
@@ -262,7 +261,7 @@ class File:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> File:
-        """Rebuild from a stored dict; text content decodes by ``mime_type`` as Agno wrote it."""
+        """Rebuild from a stored dict; ``text/*`` content reads as UTF-8 text, other content as base64."""
         raw = data.get("content")
         content: bytes | None = None
         if isinstance(raw, str):

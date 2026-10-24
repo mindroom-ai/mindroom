@@ -25,7 +25,7 @@ def arguments_object(value: object) -> dict[str, Any] | None:
             try:
                 value = json.loads(value)
             except json.JSONDecodeError:
-                # Agno accepted Python-literal arguments on direct calls, so stored and incoming calls may hold them.
+                # The tool executor reads Python-literal arguments too (``parse_tool_arguments``).
                 value = ast.literal_eval(value)
         if value == []:
             # A call whose arguments are an empty list runs as a call without arguments.
