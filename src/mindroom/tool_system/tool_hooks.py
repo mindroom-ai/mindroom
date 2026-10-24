@@ -14,7 +14,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -690,33 +689,6 @@ async def dispatch_external_tool_hooks(
     return None
 
 
-def build_tool_hook_bridge(
-    hook_registry: HookRegistry,
-    agent_name: str | None,
-    dispatch_context: ToolDispatchContext | None = None,
-    config: Config | None = None,
-    runtime_paths: RuntimePaths | None = None,
-    origin: BackgroundScriptToolOrigin | None = None,
-    approval_gate: _ToolApprovalGate | None = None,
-) -> Callable[..., Any]:
-    """Return the tool-call policy as one ``(name, func, args)`` hook around ``func``, which the middleware wraps.
-
-    ``func`` is the middleware's async continuation, which runs the rest of the call.
-    """
-    return partial(
-        _execute_bridge,
-        hook_registry=hook_registry,
-        agent_name=agent_name,
-        dispatch_context=dispatch_context,
-        config=config,
-        runtime_paths=runtime_paths,
-        has_before_hooks=hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL),
-        has_after_hooks=hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL),
-        origin=origin,
-        approval_gate=approval_gate,
-    )
-
-
 def build_tool_hook_middleware(
     hook_registry: HookRegistry,
     agent_name: str | None,
@@ -733,20 +705,26 @@ def build_tool_hook_middleware(
     script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a declined call then
     returns ``BackgroundToolApprovalDenied`` without running.
     """
-    bridge = build_tool_hook_bridge(
-        hook_registry,
-        agent_name,
-        dispatch_context,
-        config,
-        runtime_paths,
-        origin=origin,
-        approval_gate=approval_gate,
-    )
+    has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
+    has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
 
     async def middleware(call: ToolCall, call_next: ToolNext) -> object:
         async def run(**arguments: Any) -> object:  # noqa: ANN401 - the hook chain passes arguments as kwargs
             return await call_next(arguments)
 
-        return await bridge(call.function.name, run, call.arguments)
+        return await _execute_bridge(
+            call.function.name,
+            run,
+            call.arguments,
+            hook_registry=hook_registry,
+            agent_name=agent_name,
+            dispatch_context=dispatch_context,
+            config=config,
+            runtime_paths=runtime_paths,
+            has_before_hooks=has_before_hooks,
+            has_after_hooks=has_after_hooks,
+            origin=origin,
+            approval_gate=approval_gate,
+        )
 
     return middleware

@@ -1,4 +1,4 @@
-"""Find and run the tool functions an agent build offers, the way the owned loop runs them."""
+"""Find and run the tool functions an agent build offers, and single calls through the tool-call policy."""
 
 from __future__ import annotations
 
@@ -10,12 +10,16 @@ import pytest
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.declarations import tool_schema_source
-from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.invocation import ToolCall, ToolCallContext, execute_tool_call
+from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.hooks import HookRegistry
     from mindroom.tool_system.invocation import ToolOutcome
-    from mindroom.tool_system.tool_function import ToolFunction
 
 
 def offered_function(build: AgentBuild, name: str) -> ToolFunction:
@@ -55,3 +59,25 @@ def source_toolkit(function: ToolFunction) -> object:
     if owner is None:
         pytest.fail(f"{function.name} does not call a toolkit method")
     return owner
+
+
+def tool_policy(
+    hook_registry: HookRegistry,
+    agent_name: str | None,
+    **policy: Any,  # noqa: ANN401 - forwarded to build_tool_hook_middleware
+) -> Callable[[str, Callable[..., Awaitable[object]], dict[str, Any]], Awaitable[object]]:
+    """Return the tool-call policy as a call around a named async function and its keyword arguments.
+
+    The policy is ``build_tool_hook_middleware``'s, run on its own outside any loop or run.
+    """
+    middleware = build_tool_hook_middleware(hook_registry, agent_name, **policy)
+
+    async def call(name: str, func: Callable[..., Awaitable[object]], arguments: dict[str, Any]) -> object:
+        function = ToolFunction(name=name, description=None, parameters={}, entrypoint=func)
+        context = ToolCallContext(run_id="run", session_id="session")
+        return await middleware(
+            ToolCall(function=function, arguments=arguments, context=context),
+            lambda forwarded: func(**forwarded),
+        )
+
+    return call

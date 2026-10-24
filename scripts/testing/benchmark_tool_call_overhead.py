@@ -25,7 +25,9 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -61,6 +63,7 @@ def _registry_with_hooks() -> HookRegistry:
             SimpleNamespace(
                 name="tool-call-benchmark",
                 discovered_hooks=(_benchmark_before_hook, _benchmark_after_hook),
+                discovered_automations=(),
                 entry_config=PluginEntryConfig(path="./scripts/testing/benchmark_tool_call_overhead.py", settings={}),
                 plugin_order=0,
             ),
@@ -97,14 +100,16 @@ async def _run_case(
     iterations: int,
     warmup: int,
 ) -> dict[str, object]:
-    bridge = build_tool_hook_bridge(hook_registry, agent_name="benchmark")
+    middleware = (build_tool_hook_middleware(hook_registry, agent_name="benchmark"),)
+    function = ToolFunction(name="noop", description=None, parameters={}, entrypoint=func)
+    context = ToolCallContext(run_id="benchmark", session_id="benchmark")
     for _ in range(warmup):
-        await bridge("noop", func, {"value": 1})
+        await run_tool_call(function, {"value": 1}, context, middleware=middleware)
 
     samples: list[float] = []
     for _ in range(iterations):
         started_at = time.perf_counter()
-        await bridge("noop", func, {"value": 1})
+        await run_tool_call(function, {"value": 1}, context, middleware=middleware)
         samples.append((time.perf_counter() - started_at) * 1000)
     return {"case": label, **summarize_samples(samples)}
 

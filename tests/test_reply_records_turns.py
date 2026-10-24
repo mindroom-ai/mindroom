@@ -28,10 +28,10 @@ from mindroom.response_runner import PostLockRequestPreparationError, ResponseRe
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnStore
+from tests.agent_tool_helpers import tool_policy
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import message_origin, patch_response_runner_module, unwrap_extracted_collaborator
 from tests.journal_membership_helpers import admit_room_membership
@@ -1316,7 +1316,7 @@ async def test_a_replay_of_an_attempt_that_showed_only_its_placeholder_is_warned
 async def test_each_tool_call_of_a_reply_is_recorded_on_its_span_before_it_runs(tmp_path: Path) -> None:
     """A tool call the model makes is on the reply's records before the tool runs, whatever the reply shows."""
     bot = await _streaming_bot(tmp_path)
-    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="general")
+    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
     seen_before_run: list[tuple[ToolTraceEntry, ...]] = []
 
     async def counter() -> str:
@@ -1343,7 +1343,7 @@ async def test_a_tool_result_stands_when_recording_its_finish_fails(
 ) -> None:
     """A journal failure after the tool ran never replaces its result; the call stays recorded as started."""
     bot = await _streaming_bot(tmp_path)
-    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="general")
+    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
     runtime = bot._reply_runtime
 
     async def failing_finish(*_args: object, **_kwargs: object) -> None:
