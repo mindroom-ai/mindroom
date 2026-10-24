@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class MemberEvent:
-    """One of a member run's events, tagged with the member and its run; ``ToolCompleted`` names the team run as parent."""
+    """One of a member run's events, tagged with the member and its run."""
 
     member_id: str
     member_name: str
@@ -120,7 +120,7 @@ def continue_team(
     Decisions are keyed by ``TeamCallKey``: the member whose run waits for the call, None for the leader's own
     calls. Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision
     must name a waiting call, else ``ValueError`` here before anything runs.
-    A member that completes hands the leader its text in Agno's member-results message, which replaces every
+    A member that completes hands the leader its text in the member-results message, which replaces every
     delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
     requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
     (``resume_request_template``).
@@ -130,7 +130,7 @@ def continue_team(
     # notice (#3075).
     record = resumed_record(paused)
     record.member_responses = []
-    # Agno's continuation started the leader's text afresh; the paused notice is not part of the answer.
+    # The paused notice is not part of the answer; the leader's text starts afresh.
     record.content = None
     member_requirements = [r for r in record.requirements or () if r.member_agent_id is not None]
     record.requirements = [r for r in record.requirements or () if r.member_agent_id is None]
@@ -176,19 +176,16 @@ def continue_team(
 
 
 def team_paused_content(record: TeamRunRecord) -> str:
-    """Return Agno's text for a team run paused without text of its own: who waits for which confirmation.
+    """Return the text of a team run paused without text of its own: who waits for which confirmation.
 
     The only externally executed calls are the silent delegation calls, so a pause on delegations alone has no text.
     """
-    parts: list[str] = []
-    for requirement in record.requirements or ():
-        if requirement.needs_confirmation:
-            member = requirement.member_agent_name or "team"
-            name = requirement.tool_execution.tool_name or "unknown"
-            parts.append(f"- {member}: {name} requires confirmation")
-    if not parts:
-        return ""
-    return "Team run paused. The following require input:\n" + "\n".join(parts)
+    parts = [
+        f"- {r.member_agent_name or 'team'}: {r.tool_execution.tool_name or 'unknown'} requires confirmation"
+        for r in record.requirements or ()
+        if r.needs_confirmation
+    ]
+    return "Team run paused. The following require input:\n" + "\n".join(parts) if parts else ""
 
 
 def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
@@ -289,8 +286,8 @@ def _plan_member_resumes(
             msg = f"Paused team run {paused.run_id!r} no longer holds member run {run_id!r}"
             raise ValueError(msg)
         decided = decisions.take(member_id, {requirement.tool_execution.tool_call_id for requirement in group})
-        # The member resumes from its own record; its requirements name the member, as Agno's copies did, so the
-        # resumed member row keeps the member fields the team run's requirements carry.
+        # The member resumes from its own record with its requirements naming the member, as the team run's copies
+        # do, so the resumed member row stores those fields as main stores them.
         named = replace(
             member_record,
             requirements=[
@@ -320,15 +317,15 @@ def _answer_delegations(
     resumed: Sequence[TeamMember],
     results: Sequence[str],
 ) -> None:
-    """Replace every delegation result that waited on a member with the members' results, as Agno's continuation did.
+    """Replace every delegation result that waited on a member with the members' results.
 
     A result waited on one of the ``resumed`` members when it is the notice the delegation gave for that member's
     pause (``waited_on_member``). The replacement lands on the run's tool entries and on the leader's request, so the
     leader reads the members' results where it read the pause notice.
     """
     # TODO(simplify): ``results`` holds only the members resumed in this call, so a collaborate sibling that completed
-    # earlier, or a member completed in an earlier chained resume, never reaches the leader (Agno 3.0.9 lost it too).
-    # Hand the leader every member's result. Models would notice (#3075).
+    # earlier, or a member completed in an earlier chained resume, never reaches the leader. Hand the leader every
+    # member's result. Models would notice (#3075).
     text = "\n".join(["Member results after human-in-the-loop resolution:", *results])
     answered: set[str | None] = set()
     for tool in record.tools or ():
@@ -354,7 +351,7 @@ def _base_leader_spec(spec: TeamSpec) -> AgentSpec:
 def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner, *, stream: bool) -> AgentSpec:
     """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run.
 
-    ``stream`` is whether the run's leader requests stream, as Agno's team chose its delegation's result rules by it.
+    ``stream`` is whether the run's leader requests stream, which selects the delegation's result rules.
     """
     base = _base_leader_spec(spec)
     delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member, stream=stream)
@@ -380,8 +377,8 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
 class _MemberRuns:
     """Run and resume the members of one team run, forwarding their events tagged with the member.
 
-    ``stream`` is whether the team run's leader requests stream; every member request follows it, as Agno ran and
-    continued each member with its team run's ``stream``.
+    ``stream`` is whether the team run's leader requests stream; every member request follows it, kept as main
+    behaves.
     """
 
     spec: TeamSpec
@@ -426,7 +423,7 @@ class _MemberRuns:
 
     async def _persist(self, record: RunRecord) -> None:
         # The team keeps member runs in the order they first ended; a member resumed within the run ends twice, and
-        # its later record replaces the paused one where it stood, as Agno continued the paused output in place.
+        # its later record replaces the paused one where it stood.
         run_ids = [run.run_id for run in self.record.ended_member_runs]
         if record.run_id in run_ids:
             self.record.ended_member_runs[run_ids.index(record.run_id)] = record
@@ -438,19 +435,15 @@ class _MemberRuns:
     async def _finish(self, member: TeamMember, run_id: str, stream: AsyncIterator[RunEvent]) -> RunRecord:
         """Forward the member's events and return the terminal record its loop stored however it ended.
 
-        A member whose run fails is stored ``ERROR`` by its loop and still reaches the leader, as Agno absorbed a
-        member's error into the member's run, with the reason its record carries (``handover_content``); only
-        cancellation propagates.
+        A member whose run fails is stored ``ERROR`` by its loop and still reaches the leader, with the reason its
+        record carries (``handover_content``), so one member's failure does not fail the team run; only cancellation
+        propagates.
         """
         try:
             async with closing_async_stream(stream):
                 async for event in stream:
-                    if isinstance(event, RunFinished):
-                        continue
-                    tagged = (
-                        replace(event, parent_run_id=self.record.run_id) if isinstance(event, ToolCompleted) else event
-                    )
-                    self.emit(MemberEvent(member.spec.id, member.spec.name, run_id, tagged))
+                    if not isinstance(event, RunFinished):
+                        self.emit(MemberEvent(member.spec.id, member.spec.name, run_id, event))
         except Exception as error:
             logger.warning(
                 "team_member_run_failed",

@@ -333,9 +333,9 @@ def blocking_team_pause(
     display_names: Sequence[str],
     show_tool_calls: bool,
 ) -> PausedAttempt:
-    """Render a blocking team pause from its runs' records into the document the resume continues, as Agno's did.
+    """Render a blocking team pause from its runs' records into the document the resume continues.
 
-    Each run's text fills its slot first, Agno's paused notices included: the leader's is the consensus, and each
+    Each run's text fills its slot first, paused notices included: the leader's is the consensus, and each
     member run that ended adds its own to its member's slot. Every run's tool calls follow in their slots, still
     pending where the pause waits on them; a member's own delegation card waits on that member's call.
     """
@@ -526,9 +526,7 @@ async def continue_paused_team_run(
                             await publish_team_presentation(progress, presentation)
             continued = attempt.records.terminal(entity_name)
             # Each resumed run's slot shows what the run hands over beyond what it carried over from the pause and its
-            # events did not show, as Agno's resume added their content: a paused notice, or a failed member run's
-            # reason. A run that adds nothing new shows nothing, where Agno's resume repeated the text it wrote before
-            # the pause, or a paused notice that no longer held.
+            # events did not show: a paused notice, or a failed member run's reason.
             for run in (continued, *continued.ended_member_runs):
                 attempt.show_unshown_handover(run)
             paused = paused_attempt_from_response(
@@ -543,9 +541,9 @@ async def continue_paused_team_run(
                 raise RuntimeError(str(continued.handover_content or "Team continuation did not complete"))
             if tool_trace_collector is not None and show_tool_calls:
                 tool_trace_collector.extend(presentation.tool_trace)
-            # A resume whose document stays empty, every run's text blank, shows the leader's own text, as Agno's did, or
-            # the no-reply note. The document already holds what each run handed over beyond what it carried over, so
-            # rendering the member runs again could add only what they carried over.
+            # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
+            # note. The document already holds what each run handed over beyond what it carried over, so rendering the
+            # member runs again could add only what they carried over.
             response_text = presentation.render_body() or (
                 format_team_header(members.display_names) + (finished_run_text(continued) or NO_TEAM_RESPONSE)
             )
