@@ -133,7 +133,7 @@ class _NoopResponseLifecycle:
     def __init__(self) -> None:
         self.session_thread_ids: list[str | None] = []
 
-    def setup_session_watch(self, **kwargs: object) -> object:
+    async def setup_session_watch(self, **kwargs: object) -> object:
         thread_id = kwargs["thread_id"]
         assert isinstance(thread_id, str) or thread_id is None
         self.session_thread_ids.append(thread_id)

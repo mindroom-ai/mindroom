@@ -129,6 +129,20 @@ class ConversationStore:
             return None
         return SessionFields(metadata=decoded_mapping(row[4]), session_state=_session_state(row[3]))
 
+    def has_session(self, session_id: str, kind: SessionKind) -> bool:
+        """Return whether a ``kind`` session ``session_id`` is stored, the condition under which a load finds it."""
+        with self.transaction(write=False) as connection:
+            if self.names.sessions not in table_names(connection):
+                return False
+            return (
+                connection.execute(
+                    f"SELECT 1 FROM {quote_identifier(self.names.sessions)} "  # noqa: S608
+                    "WHERE session_id = ? AND session_type = ?",
+                    (session_id, kind),
+                ).fetchone()
+                is not None
+            )
+
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
 

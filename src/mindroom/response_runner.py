@@ -4670,7 +4670,7 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
         )
-        session_started_watch = lifecycle.setup_session_watch(
+        session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             session_id=session_id,
             session_type=session_scope.kind,
@@ -5396,7 +5396,7 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_started_watch = lifecycle.setup_session_watch(
+        session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
             session_type=session_scope.kind,
@@ -5533,7 +5533,7 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_started_watch = lifecycle.setup_session_watch(
+        session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
             session_type=session_scope.kind,

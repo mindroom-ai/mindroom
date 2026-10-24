@@ -643,18 +643,22 @@ def test_a_store_without_tables_reads_as_empty(tmp_path: Path) -> None:
     store = _store(tmp_path)
 
     assert store.load_session("s1", "agent") is None
+    assert not store.has_session("s1", "agent")
     assert store.list_runs("s1") == []
     assert store.get_run("r1") is None
     assert store.list_updated_sessions("agent", "code", since=0) == []
 
 
 def test_load_returns_none_for_a_missing_session_or_one_of_another_kind(store: ConversationStore) -> None:
-    """An agent load never returns a team session, nor a team load an agent one."""
+    """An agent load never returns a team session, nor a team load an agent one; ``has_session`` agrees."""
     _seed(store, [_team_run("t1")], _session(kind="team", owner="eng"))
 
     assert store.load_session("s1", "agent") is None
     assert store.load_session("missing", "team") is None
     assert _loaded_ids(store, "team") == ["t1"]
+    assert not store.has_session("s1", "agent")
+    assert not store.has_session("missing", "team")
+    assert store.has_session("s1", "team")
 
 
 def test_runs_of_another_type_never_load(store: ConversationStore) -> None:
