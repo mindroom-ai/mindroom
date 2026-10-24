@@ -440,7 +440,7 @@ def _openai_usage(usage: CompletionUsage) -> MessageMetrics:
         audio_output_tokens=(completion_details.audio_tokens or 0) if completion_details else 0,
     ).with_totals()
     cost = _extra(usage).get("cost")
-    # The total is the one the provider reports.
+    # ``with_totals`` derives the audio total; the token total is the one the provider reports.
     return MessageMetrics(
         tokens=replace(counts, total_tokens=usage.total_tokens or 0),
         cost=cost if isinstance(cost, int | float) else None,
