@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from mindroom.agent_loop.tool_search import resolve_call_tool_calls
+from mindroom.llm.tool_search import resolve_call_tool_calls
 
 
 def _call(call_id: str, name: str, arguments: str) -> dict[str, Any]:

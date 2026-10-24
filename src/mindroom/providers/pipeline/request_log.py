@@ -99,7 +99,7 @@ def _write_request_record(
             "message_count": len(messages),
             "tools": tools,
             "tool_count": len(tools),
-            "deferred_tool_names": sorted(request.deferred_tool_names),
+            "deferred_tool_names": sorted(request.deferred_tools.names),
             "model_params": model_params,
         },
     )

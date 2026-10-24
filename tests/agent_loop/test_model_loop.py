@@ -26,7 +26,7 @@ from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
-from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics
@@ -139,16 +139,16 @@ async def test_request_settings_come_from_the_template_and_tools_from_the_spec()
         messages=(),
         tool_choice="none",
         response_format=Shape,
-        deferred_tool_names=frozenset({"add"}),
+        deferred_tools=DeferredTools(names=frozenset({"add"}), portable=True),
     )
 
     await _run(spec(model, toolkit(add, echo)), _prompt(), request_template=template)
 
     [request] = model.requests
-    assert (request.tool_choice, request.response_format, request.deferred_tool_names) == (
+    assert (request.tool_choice, request.response_format, request.deferred_tools) == (
         "none",
         Shape,
-        frozenset({"add"}),
+        template.deferred_tools,
     )
     assert [tool.name for tool in request.tools] == ["add", "echo"]
     assert request.tools[0].parameters == prepare_run_tools(spec(model, toolkit(add))).functions["add"].parameters

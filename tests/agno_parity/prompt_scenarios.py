@@ -207,7 +207,7 @@ class Recorder:
             tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
             tool_choice=request.tool_choice,
             response_format=request.response_format,
-            deferred_tool_names=sorted(request.deferred_tool_names),
+            deferred_tool_names=sorted(request.deferred_tools.names),
         )
         self.calls.append(call)
         return self.responder(call)

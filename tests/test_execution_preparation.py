@@ -680,7 +680,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
 
     tools = prepare_run_tools(build.spec).specs()
     assert tools
-    estimator = build_static_token_estimator(system_message, tools, build.request_template.deferred_tool_names)
+    estimator = build_static_token_estimator(system_message, tools, build.request_template.deferred_tools.names)
     assert prepared.prepared_history.prepared_context_tokens == estimator.estimate(
         render_prepared_messages_text(prepared.turn.in_request_order()),
     )

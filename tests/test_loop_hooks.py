@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tool_search import resolve_call_tool_calls
 from mindroom.config.main import Config
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
-from mindroom.llm.provider import Capabilities, ModelRequest
+from mindroom.llm.provider import Capabilities, DeferredTools, ModelRequest
+from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
 from mindroom.participation import ParticipationGate
 from mindroom.skill_learning.capture import SkillReviewCapture
@@ -50,7 +50,10 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     build = AgentBuild(
         spec=AgentSpec(id="general", name="General", model=model, system_message=None),
         prompt=PromptSpec(role="test"),
-        request_template=ModelRequest(messages=(), deferred_tool_names=frozenset({"deferred_tool"})),
+        request_template=ModelRequest(
+            messages=(),
+            deferred_tools=DeferredTools(names=frozenset({"deferred_tool"}), portable=True),
+        ),
         history_settings=settings,
         store=None,
         tool_owners={},

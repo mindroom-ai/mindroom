@@ -241,12 +241,12 @@ def test_deferred_toolkits_fill_the_request_template_and_the_surface(tmp_path: P
 
     if agent_mode == "standard":
         assert "search_wikipedia" in _offered(build)
-        assert build.request_template.deferred_tool_names == frozenset({"search_wikipedia"})
+        assert build.request_template.deferred_tools.names == frozenset({"search_wikipedia"})
         assert build.surface.deferred == ()
         assert any("Deferred Tool Discovery" in instruction for instruction in build.prompt.instructions)
     else:
         assert "search_wikipedia" not in _offered(build)
-        assert build.request_template.deferred_tool_names == frozenset()
+        assert build.request_template.deferred_tools.names == frozenset()
         assert [deferred.name for deferred in build.surface.deferred] == ["wikipedia"]
         assert build.surface.mode == "minimal"
 
@@ -329,7 +329,7 @@ def test_a_deferred_function_an_earlier_one_shadows_is_offered_nowhere_and_never
     assert offered["ping"] is calculator.functions[0]
     assert [function.name for function in wikipedia.functions] == ["search_knowledge_base"]
     assert arxiv.functions == ()
-    assert build.request_template.deferred_tool_names == frozenset({"search_knowledge_base"})
+    assert build.request_template.deferred_tools.names == frozenset({"search_knowledge_base"})
     assert not [log for log in logs if log["event"] == "duplicate_tool_name"]
     assert not [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
 
@@ -397,7 +397,7 @@ def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp
         build = _build(config, runtime_paths, persist_runtime_state=False)
 
     assert [toolkit.name for toolkit in build.spec.toolkits] == ["calculator", "skills"]
-    assert build.request_template.deferred_tool_names == frozenset()
+    assert build.request_template.deferred_tools.names == frozenset()
     assert not any("Deferred Tool Discovery" in instruction for instruction in build.prompt.instructions)
     [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
     assert (warning["tool"], warning["error"]) == ("wikipedia", "Tool function 'search_wikipedia' has no entrypoint")

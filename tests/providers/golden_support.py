@@ -23,7 +23,7 @@ import httpx
 from pydantic import BaseModel
 
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted
+from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, TurnCompleted
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.tool_policy import without_provider_tools
@@ -332,8 +332,8 @@ def tool_spec_from_dict(tool: dict[str, Any]) -> ToolSpec:
 def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | None = None) -> ModelRequest:
     """Return the owned request a golden's input describes.
 
-    Deferred tool names always travel on the request: the portable tool-search stage hides them behind
-    ``call_tool`` on routes without native tool search, and the adapters defer them server-side elsewhere.
+    Deferred tools travel on the request in the golden's recorded mode: the portable tool-search stage hides
+    portable ones behind ``call_tool``, and the adapters defer native ones server-side.
     A native-compaction input becomes the replay settings of the route's ``native`` history, as history planning
     asks for them.
     """
@@ -362,7 +362,9 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
         tool_choice=tool_choice,
         response_format=response_format_from_golden(case_input["response_format"]),
         stream=case_input["stream"],
-        deferred_tool_names=frozenset(deferred["tool_names"]) if deferred is not None else frozenset(),
+        deferred_tools=DeferredTools()
+        if deferred is None
+        else DeferredTools(names=frozenset(deferred["tool_names"]), portable=deferred["mode"] == "portable"),
         portable_replay=bool(case_input["portable_replay"]),
         native_compaction=native_compaction,
     )

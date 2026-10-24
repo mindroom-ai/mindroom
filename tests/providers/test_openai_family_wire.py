@@ -29,6 +29,7 @@ from mindroom.llm.errors import (
 from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
+    DeferredTools,
     ModelRequest,
     NativeCompactionReplay,
     ReasoningDelta,
@@ -1106,7 +1107,7 @@ async def test_responses_decisions_keep_the_deferred_tool_search_prefix(tmp_path
     request = ModelRequest(
         messages=[_user()],
         tools=[_DECISION_TOOL],
-        deferred_tool_names=frozenset({"get_weather"}),
+        deferred_tools=DeferredTools(names=frozenset({"get_weather"})),
     )
 
     regular, decision = await _regular_and_decision_bodies(tmp_path, _OPENAI_RESPONSES, request)

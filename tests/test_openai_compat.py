@@ -565,7 +565,7 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_pa
     search_result = json.loads(tool_search.entrypoint("todo"))
 
     assert search_result["matches"] == []
-    assert build.request_template.deferred_tool_names == frozenset({"sleep"})
+    assert build.request_template.deferred_tools.names == frozenset({"sleep"})
 
 
 def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
