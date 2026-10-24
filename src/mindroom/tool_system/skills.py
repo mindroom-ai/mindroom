@@ -206,31 +206,15 @@ class SkillsToolkit(Toolkit):
         self._skills = dict(skills)
         # The workspace root of each skill that came from an agent workspace.
         self._workspace_roots = dict(workspace_roots)
-        self._output_file_policy = output_file_policy
-        for function in self._new_functions():
+        for entrypoint, description in (
+            (self.get_skill_instructions, _GET_SKILL_INSTRUCTIONS_DESCRIPTION),
+            (self.get_skill_reference, _GET_SKILL_REFERENCE_DESCRIPTION),
+            (self.get_skill_script, _GET_SKILL_SCRIPT_DESCRIPTION),
+        ):
+            function = Function(name=entrypoint.__name__, description=description, entrypoint=entrypoint)
+            if output_file_policy is not None:
+                function = wrap_function_for_output_files(function, output_file_policy)
             self.functions[function.name] = function
-
-    def _new_functions(self) -> list[Function]:
-        functions = [
-            Function(
-                name="get_skill_instructions",
-                description=_GET_SKILL_INSTRUCTIONS_DESCRIPTION,
-                entrypoint=self.get_skill_instructions,
-            ),
-            Function(
-                name="get_skill_reference",
-                description=_GET_SKILL_REFERENCE_DESCRIPTION,
-                entrypoint=self.get_skill_reference,
-            ),
-            Function(
-                name="get_skill_script",
-                description=_GET_SKILL_SCRIPT_DESCRIPTION,
-                entrypoint=self.get_skill_script,
-            ),
-        ]
-        if self._output_file_policy is None:
-            return functions
-        return [wrap_function_for_output_files(function, self._output_file_policy) for function in functions]
 
     @property
     def skills(self) -> tuple[Skill, ...]:
