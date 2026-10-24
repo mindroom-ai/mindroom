@@ -289,7 +289,8 @@ class SessionMetrics(_Counts):
     """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row.
 
     ``count_run`` adds a run's token counters, in total and per model, which is the usage the session's ledger records;
-    a cost or additional metrics that stored totals already hold are kept as they are.
+    the run's cost, timing, and provider metrics are not counted, and a cost or additional metrics that stored totals
+    already hold are kept as they are.
     """
 
     details: dict[str, list[ModelMetrics]] | None = None
@@ -302,7 +303,7 @@ class SessionMetrics(_Counts):
         self._accumulate(metrics, sign=1)
 
     def _accumulate(self, metrics: RunMetrics, *, sign: int) -> None:
-        self.tokens = self.tokens + metrics.tokens if sign > 0 else self.tokens - metrics.tokens
+        self.tokens = self.tokens + _signed_tokens(metrics.tokens, sign)
         for model_type, entries in (metrics.details or {}).items():
             if self.details is None:
                 self.details = {}
@@ -326,13 +327,14 @@ class SessionMetrics(_Counts):
         return cls(**values)
 
 
+def _signed_tokens(tokens: TokenCounts, sign: int) -> TokenCounts:
+    """Return ``tokens``, negated when ``sign`` is negative."""
+    return tokens if sign > 0 else TokenCounts() - tokens
+
+
 def _signed_model(entry: ModelMetrics, sign: int) -> ModelMetrics:
     """Return the token counters of a model entry, negated when ``sign`` is negative, under its provider and id."""
-    return ModelMetrics(
-        tokens=entry.tokens if sign > 0 else TokenCounts() - entry.tokens,
-        id=entry.id,
-        provider=entry.provider,
-    )
+    return ModelMetrics(tokens=_signed_tokens(entry.tokens, sign), id=entry.id, provider=entry.provider)
 
 
 def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
