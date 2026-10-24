@@ -25,7 +25,12 @@ from mindroom.history.storage import (
     update_scope_state_on_latest,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
-from mindroom.history.summary_input import build_summary_input, messages_for_runs, minimum_summary_input_tokens
+from mindroom.history.summary_input import (
+    build_summary_input,
+    messages_for_runs,
+    minimum_summary_input_tokens,
+    whole_run_input_tokens,
+)
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
@@ -38,6 +43,7 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
+from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.names import provider_route
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -98,6 +104,8 @@ class Summarizer:
     scope: HistoryScope
     # Receives the usage of every summary response that reports it, including rejected ones.
     on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None
+    # The input budget a failed chunk shrank to; later chunks start there unless their first run needs more.
+    shrunk_budget_tokens: int | None = None
 
 
 @timed("system_prompt_assembly.history_prepare.compaction_model_init")
@@ -211,6 +219,15 @@ def scope_usage_recorder(
         session_id=session_id,
         requester_id=requester_context.requester_id if requester_context is not None else None,
     )
+
+
+@dataclass(frozen=True)
+class _SummarySource:
+    """What a summary input builds on: the previous summary and the runs after it, plus the runs it folds unread."""
+
+    unread_runs: list[AnyRunRecord]
+    previous_summary: str | None
+    runs: list[AnyRunRecord]
 
 
 @dataclass(frozen=True)
@@ -687,44 +704,82 @@ def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], in
     return estimator, kind
 
 
-async def _summarize_chunk(  # noqa: PLR0915
+def _after_native_checkpoint(previous_summary: str | None, runs: Sequence[AnyRunRecord]) -> _SummarySource | None:
+    """Split off the runs before the latest readable native checkpoint, with its text as their summary.
+
+    A provider checkpoint summarizes everything its request replayed before it, including the previous summary,
+    whichever model wrote it. It stands in only while that is still ``previous_summary`` and the runs before its run:
+    a run that waited for approval sorts after the turns it waited for, and retiring a summary keeps its runs.
+    Its text also covers its own run's prompt, so that run stays in the input: the summary built on the text then
+    always folds it, and an edit or redaction of that run removes the summary too.
+    """
+    for index in range(len(runs) - 1, 0, -1):
+        basis = replay_basis(previous_summary, runs[:index])
+        for message in reversed(runs[index].messages):
+            if not message.from_history and (summary := checkpoint_summary(message, basis)) is not None:
+                return _SummarySource(list(runs[:index]), summary, list(runs[index:]))
+    return None
+
+
+async def _summarize_chunk(  # noqa: C901, PLR0915
     summarizer: Summarizer,
     previous_summary: str | None,
     runs: Sequence[AnyRunRecord],
 ) -> _SummaryChunk | None:
     """Summarize the longest prefix of ``runs`` that fits one summary input; None when not even one run fits.
 
-    A failed attempt retries the same or a smaller input when safe. A safeguard refusal from the primary model
-    switches once to the fallback model, rebuilding the input only when it exceeds the fallback's own budget; a
-    refusal or failure from the fallback propagates. The switch counts against the retry policy's attempt bound, so a
-    refusal after an earlier shrink or transient retry propagates without a fallback call.
+    The runs before the latest readable native checkpoint fold without being read, since its text summarizes them.
+
+    A failed attempt retries the same or a smaller input when safe, and a shrunk size carries to later chunks. A
+    safeguard refusal from the primary model switches once to the fallback model, rebuilding the input only when it
+    exceeds the fallback's own budget; a refusal or failure from the fallback propagates. The switch counts against the
+    retry policy's attempt bound, so a refusal after an earlier shrink or transient retry propagates without a
+    fallback call.
     """
     summary_model = summarizer.model
     fallback_model = summarizer.fallback
-    budget = summary_model.input_budget_tokens
+    shrunk_budget = summarizer.shrunk_budget_tokens
     token_estimator, estimate_kind = _compaction_sizing(summary_model.model)
+    original = _SummarySource([], previous_summary, list(runs))
+    sources = [source for source in (_after_native_checkpoint(previous_summary, runs), original) if source is not None]
 
-    def build(
+    async def build(
         max_input_tokens: int,
         estimator: Callable[[str], int],
-    ) -> Awaitable[tuple[str, list[AnyRunRecord]]]:
-        return asyncio.to_thread(
-            build_summary_input,
-            previous_summary=previous_summary,
-            compacted_runs=runs,
-            history_settings=summarizer.history_settings,
-            max_input_tokens=max_input_tokens,
-            token_estimator=estimator,
-        )
+    ) -> tuple[str, list[AnyRunRecord], _SummarySource]:
+        # A checkpoint too large to leave room for its own run gives way to the history it summarized.
+        for candidate in sources:
+            built_input, built_runs = await asyncio.to_thread(
+                build_summary_input,
+                previous_summary=candidate.previous_summary,
+                compacted_runs=candidate.runs,
+                history_settings=summarizer.history_settings,
+                max_input_tokens=max_input_tokens,
+                token_estimator=estimator,
+            )
+            if built_runs:
+                return built_input, built_runs, candidate
+        return "", [], original
 
-    summary_input, included_runs = await build(budget, token_estimator)
+    budget = summary_model.input_budget_tokens
+    if shrunk_budget is not None:
+        whole_first_run = await asyncio.to_thread(
+            whole_run_input_tokens,
+            previous_summary=sources[0].previous_summary,
+            first_run=sources[0].runs[0],
+            history_settings=summarizer.history_settings,
+            token_estimator=token_estimator,
+        )
+        # Start where an earlier failure shrank the input, without truncating a run the full budget holds whole.
+        budget = min(budget, max(shrunk_budget, whole_first_run))
+    summary_input, included_runs, source = await build(budget, token_estimator)
     if not included_runs:
         return None
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
     minimum_progress_input_tokens = await asyncio.to_thread(
         minimum_summary_input_tokens,
-        previous_summary=previous_summary,
-        first_run=runs[0],
+        previous_summary=source.previous_summary,
+        first_run=source.runs[0],
         token_estimator=token_estimator,
     )
     attempt = 1
@@ -735,7 +790,8 @@ async def _summarize_chunk(  # noqa: PLR0915
             "scope": summarizer.scope.key,
             "model_name": summary_model.name,
             "attempt": attempt,
-            "candidate_runs": len(runs),
+            "native_checkpoint_runs": len(source.unread_runs),
+            "candidate_runs": len(source.runs),
             "included_runs": len(included_runs),
             "summary_input_estimate": summary_input_estimate,
             "summary_input_estimate_kind": estimate_kind,
@@ -769,8 +825,8 @@ async def _summarize_chunk(  # noqa: PLR0915
                     await asyncio.to_thread(fallback_token_estimator, summary_input)
                     <= fallback_model.input_budget_tokens
                 )
-                rebuilt_input, rebuilt_runs = (
-                    (summary_input, included_runs)
+                rebuilt_input, rebuilt_runs, rebuilt_source = (
+                    (summary_input, included_runs, source)
                     if fits_fallback
                     else await build(fallback_model.input_budget_tokens, fallback_token_estimator)
                 )
@@ -788,7 +844,9 @@ async def _summarize_chunk(  # noqa: PLR0915
                 summary_model = fallback_model
                 summary_input = rebuilt_input
                 included_runs = rebuilt_runs
+                source = rebuilt_source
                 budget = fallback_model.input_budget_tokens
+                shrunk_budget = None
                 token_estimator = fallback_token_estimator
                 estimate_kind = fallback_estimate_kind
                 fallback_model = None
@@ -807,13 +865,14 @@ async def _summarize_chunk(  # noqa: PLR0915
                 await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
                 attempt += 1
                 continue
-            rebuilt_input, rebuilt_runs = await build(retry_decision.budget, token_estimator)
+            rebuilt_input, rebuilt_runs, rebuilt_source = await build(retry_decision.budget, token_estimator)
             # A shrink that does not rebuild a smaller input with some run in it cannot help.
             if not rebuilt_runs or await asyncio.to_thread(token_estimator, rebuilt_input) >= summary_input_estimate:
                 raise
             summary_input = rebuilt_input
             included_runs = rebuilt_runs
-            budget = retry_decision.budget
+            source = rebuilt_source
+            budget = shrunk_budget = retry_decision.budget
             attempt += 1
             continue
         logger.info(
@@ -821,12 +880,8 @@ async def _summarize_chunk(  # noqa: PLR0915
             **attempt_fields,
             duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
         )
-        later = (
-            summarizer
-            if summary_model is summarizer.model
-            else replace(summarizer, model=replace(summary_model, input_budget_tokens=budget), fallback=None)
-        )
-        return _SummaryChunk(summary=summary, included_runs=included_runs, summarizer=later)
+        later = replace(summarizer, model=summary_model, fallback=fallback_model, shrunk_budget_tokens=shrunk_budget)
+        return _SummaryChunk(summary=summary, included_runs=[*source.unread_runs, *included_runs], summarizer=later)
 
 
 def _runs_with_stable_ids(

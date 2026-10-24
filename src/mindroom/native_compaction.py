@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord
 
 logger = get_logger(__name__)
 
@@ -49,6 +50,8 @@ def record_native_checkpoint(
     state: dict[str, Any] | None = None
     if settings is not None:
         state = {"route": settings.route, "threshold": settings.threshold}
+        if settings.basis is not None:
+            state["basis"] = settings.basis
         last = next(
             (index for index in range(len(items) - 1, -1, -1) if _is_checkpoint(items[index])),
             None,
@@ -84,7 +87,8 @@ def recorded_native_settings(message: Message) -> NativeCompactionReplay | None:
         return None
     if threshold is not None and (type(threshold) is not int or threshold <= 0):
         return None
-    return NativeCompactionReplay(route=route, threshold=threshold)
+    basis = state.get("basis")
+    return NativeCompactionReplay(route=route, threshold=threshold, basis=basis if isinstance(basis, str) else None)
 
 
 def native_replay_route_matches(message: Message, route: str | None) -> bool | None:
@@ -130,6 +134,40 @@ def native_checkpoint_id(message: Message) -> str | None:
     if not isinstance(state, dict) or not checkpoint_items(message, state.get("route")):
         return None
     return message.id
+
+
+def replay_basis(summary: str | None, runs: Sequence[AnyRunRecord]) -> str:
+    """Identify the history a request replays: the summary in force and the runs after it, in order."""
+    return hashlib.sha256(json.dumps([summary, [run.run_id for run in runs]]).encode()).hexdigest()
+
+
+def request_replay_basis(summary: str | None, runs: Sequence[AnyRunRecord], route: str) -> str:
+    """Return the basis a native request on ``route`` records; empty when its replay leaves out some of ``runs``.
+
+    The request replays from the latest checkpoint on its route, which covers only what its own request replayed:
+    a run that checkpointed before waiting for approval sorts after the turns it waited for. A checkpoint whose
+    history is unknown, such as one recorded before bases existed, counts as covering, as native replay assumes.
+    """
+    for index in range(len(runs) - 1, -1, -1):
+        for message in reversed(runs[index].messages):
+            if checkpoint_items(message, route):
+                recorded = (message.provider_data or {})[_NATIVE_CHECKPOINT_KEY].get("basis")
+                covering = recorded is None or recorded == replay_basis(summary, runs[:index])
+                return replay_basis(summary, runs) if covering else ""
+    return replay_basis(summary, runs)
+
+
+def checkpoint_summary(message: Message, basis: str) -> str | None:
+    """Return the readable text of the message's checkpoint, whatever its route, if its request replayed ``basis``.
+
+    Encrypted checkpoints have no readable text, and checkpoints of unknown history never match.
+    """
+    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    if not isinstance(state, dict) or state.get("basis") != basis:
+        return None
+    items = checkpoint_items(message, state.get("route"))
+    content = items[0].get("content") if items else None
+    return content if isinstance(content, str) else None
 
 
 def native_replay_messages(messages: Sequence[Message], route: str | None) -> list[Message]:

@@ -61,6 +61,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.native_compaction import replay_basis
 from mindroom.participation import ParticipationGate
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
@@ -1025,7 +1026,11 @@ async def test_a_reply_on_a_natively_compacting_route_sends_the_native_history_i
     await _stream(reply)
 
     [request] = reply.model.requests
-    assert request.native_compaction == NativeCompactionReplay(route="route-a", threshold=30_000)
+    assert request.native_compaction == NativeCompactionReplay(
+        route="route-a",
+        threshold=30_000,
+        basis=replay_basis(None, []),
+    )
     assert request.portable_replay is True
 
 

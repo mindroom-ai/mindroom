@@ -43,7 +43,8 @@ Only a worker isolates `shell`, `python`, and `docker`, because they execute cod
 
 When an agent has a workspace, it is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
 `python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
-`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; without a workspace, these tools use the process's current directory.
+`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; without a workspace, `shell` and `python` use the process's current directory, and so do `file` and `coding` under `file_access: unrestricted`.
+Under the default `file_access: workspace`, `file` and `coding` of an agent without a workspace refuse every path outside its shared directories, except in a worker with worker-specific storage (Docker and Kubernetes workers, and `static_runner` calls of agents with a [`worker_scope`](../deployment/sandbox-proxy.md#worker-scopes)), where they use that worker's own directory; give the agent a workspace with `memory_backend: file` or a `private` configuration.
 
 Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
@@ -109,6 +110,7 @@ Prefer [`coding`](#coding) for code-editing agents.
 ```yaml
 agents:
   editor:
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file:
           enable_delete_file: true
@@ -231,6 +233,7 @@ Paths follow the agent's [`file_access`](../architecture/security-posture.md#fil
 ```yaml
 agents:
   code:
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - coding
 ```

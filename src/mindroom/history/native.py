@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.history.replay import compaction_summary_message, current_summary_text
 from mindroom.history.types import NativeHistory
-from mindroom.native_compaction import recorded_native_settings
+from mindroom.native_compaction import recorded_native_settings, request_replay_basis
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.history.types import ResolvedHistoryExecutionPlan, ResolvedHistorySettings
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest
@@ -24,10 +26,12 @@ def configure_native_history(
     history_settings: ResolvedHistorySettings,
     session: ConversationSession | None,
     allowed: bool,
+    runs: Sequence[AnyRunRecord] = (),
 ) -> NativeHistory | None:
     """Return the native settings of a run's requests, with compaction only when it keeps the scope's authored semantics.
 
-    None means the provider route manages no history of its own, so the requests carry no native settings.
+    None means the provider route manages no history of its own, so the requests carry no native settings. ``runs``
+    are the scope's visible runs, which these requests replay after the summary.
     """
     history_route = provider.native_history_route
     if history_route is None:
@@ -45,14 +49,15 @@ def configure_native_history(
         and hard_budget is not None
         and static_tokens < threshold < static_tokens + hard_budget
     )
-    return NativeHistory(
-        native_compaction=history_route.native_compaction_settings(
-            threshold=threshold if enabled else None,
-            history_generation=_history_generation(session),
-            allow_authored=enabled,
-        ),
-        portable_replay=hard_budget is not None,
+    native = history_route.native_compaction_settings(
+        threshold=threshold if enabled else None,
+        history_generation=_history_generation(session),
+        allow_authored=enabled,
     )
+    if native is not None:
+        summary = current_summary_text(session) if session is not None else None
+        native = replace(native, basis=request_replay_basis(summary, runs, native.route))
+    return NativeHistory(native_compaction=native, portable_replay=hard_budget is not None)
 
 
 def restore_native_history(
@@ -72,8 +77,9 @@ def restore_native_history(
         history_generation=_history_generation(session),
         allow_authored=saved is not None and saved.threshold is None,
     )
-    if native is not None and saved is not None and native.route != saved.route:
-        native = None
+    if native is not None and saved is not None:
+        # The continuation replays at least what the paused request did, so its checkpoints cover that history.
+        native = replace(native, basis=saved.basis) if native.route == saved.route else None
     return NativeHistory(native_compaction=native, portable_replay=_restored_portable_replay(latest))
 
 

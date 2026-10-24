@@ -85,7 +85,7 @@ _TEXT = "contract text\n"
 class _ToolProbe:
     tool_name: str
     entry_point: str
-    read: Callable[[Path, pytest.MonkeyPatch, Path, FileAccess, str], Awaitable[bool]]
+    read: Callable[[Path, pytest.MonkeyPatch, Path | None, FileAccess, str], Awaitable[bool]]
     resolver_module: ModuleType | None
     """Module whose ``resolve_agent_file`` the probe calls; None for tools that run in a worker by default."""
     filename: str = "doc.png"
@@ -94,7 +94,7 @@ class _ToolProbe:
 async def _register_attachment(
     tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -110,7 +110,7 @@ async def _register_attachment(
 async def _send_attachment_path(
     tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -130,7 +130,7 @@ async def _send_attachment_path(
 async def _view_file(
     _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -141,7 +141,7 @@ async def _view_file(
 async def _stage_gmail_attachment(
     tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -157,7 +157,7 @@ async def _stage_gmail_attachment(
 async def _upload_to_google_drive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -181,7 +181,7 @@ async def _upload_to_google_drive(
 async def _upload_in_browser(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -199,7 +199,7 @@ async def _upload_in_browser(
 async def _upload_to_e2b(
     _tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -224,7 +224,7 @@ class _AudioEndpoint:
 async def _transcribe_with_openai(
     _tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -239,7 +239,7 @@ async def _transcribe_with_openai(
 async def _transcribe_with_groq(
     _tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -253,7 +253,7 @@ async def _transcribe_with_groq(
 async def _extract_audio_with_moviepy(
     _tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -274,7 +274,7 @@ async def _extract_audio_with_moviepy(
 async def _read_dag_file(
     _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -285,7 +285,7 @@ async def _read_dag_file(
 async def _show_canvas_path(
     tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -302,7 +302,7 @@ async def _show_canvas_path(
 async def _read_with_file_tool(
     _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -313,18 +313,18 @@ async def _read_with_file_tool(
 async def _read_with_coding_tool(
     _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    tool = CodingTools(base_dir=str(workspace), file_access=file_access)
+    tool = CodingTools(base_dir=None if workspace is None else str(workspace), file_access=file_access)
     return _TEXT.strip() in tool.read_file(raw_path)
 
 
 async def _upload_to_microsoft_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -348,7 +348,7 @@ async def _upload_to_microsoft_files(
 async def _attach_with_outlook_mail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    workspace: Path,
+    workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
@@ -397,6 +397,7 @@ _PROBES = (
     _ToolProbe("coding", "read_file", _read_with_coding_tool, None, "doc.txt"),
 )
 _LINK_DEFENDING_PROBES = tuple(probe for probe in _PROBES if probe.resolver_module is not None)
+_WORKER_PATH_PROBES = tuple(probe for probe in _PROBES if probe.resolver_module is None)
 
 
 def _probe_id(probe: _ToolProbe) -> str:
@@ -458,6 +459,37 @@ async def test_outside_files_follow_file_access(
 ) -> None:
     """Paths outside the workspace are refused in workspace mode and read in unrestricted mode."""
     assert await probe.read(tmp_path, monkeypatch, workspace, file_access, str(outside / probe.filename)) is readable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe", _PROBES, ids=_probe_id)
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute"])
+async def test_agent_without_a_workspace_reads_nothing_under_workspace_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outside: Path,
+    probe: _ToolProbe,
+    absolute: bool,
+) -> None:
+    """Without a workspace, workspace access never falls back to the process working directory."""
+    monkeypatch.chdir(outside)
+    raw_path = str(outside / probe.filename) if absolute else probe.filename
+
+    assert not await probe.read(tmp_path, monkeypatch, None, "workspace", raw_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe", _WORKER_PATH_PROBES, ids=_probe_id)
+async def test_unrestricted_worker_path_tools_without_a_workspace_resolve_from_the_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outside: Path,
+    probe: _ToolProbe,
+) -> None:
+    """Unrestricted access without a workspace still resolves relative paths from the process working directory."""
+    monkeypatch.chdir(outside)
+
+    assert await probe.read(tmp_path, monkeypatch, None, "unrestricted", probe.filename)
 
 
 @pytest.mark.asyncio

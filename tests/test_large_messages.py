@@ -40,6 +40,7 @@ from mindroom.matrix.large_messages import (
     should_send_oversized_nonterminal_streaming_edit,
 )
 from mindroom.matrix.media import parse_matrix_media_event_source
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
@@ -987,6 +988,96 @@ async def test_prepare_terminal_edit_keeps_the_largest_outer_preview_that_fits()
     one_more_byte = dict(result)
     one_more_byte["body"] = f"* {text[: visible_prefix_length + 1]}\n\n[Message continues in attached file]"
     assert calculate_event_size(one_more_byte) > _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_terminal_edit_preview_keeps_the_rendered_answer_when_only_the_tool_trace_is_large() -> None:
+    """A reply pushed over the limit by its tool trace still renders in full before the sidecar loads."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/trace-heavy-final-edit"))
+    markers = "\n\n".join(f"🔧 `matrix_read_room_recent` [{index}]" for index in range(1, 82))
+    text = f"{markers}\n\nAsked @mindroom_code:localhost. All **healthy**:\n\n| Service | Status |\n|---|---|\n| `auth_gateway` | ok |"
+    pill = '<a href="https://matrix.to/#/@mindroom_code:localhost">@mindroom_code:localhost</a>'
+    formatted_body = markdown_to_html(text).replace("@mindroom_code:localhost", pill)
+    tool_trace = {
+        "version": 2,
+        "events": [
+            {"type": "tool_call_completed", "tool_name": "matrix_read_room_recent", "result_preview": "r" * 700}
+            for _ in range(81)
+        ],
+    }
+    edit_content = {
+        "body": f"* {text}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": formatted_body,
+        "m.new_content": {
+            "body": text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": formatted_body,
+            "msgtype": "m.text",
+            _TOOL_TRACE_KEY: tool_trace,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    inner = result["m.new_content"]
+    assert inner["msgtype"] == "m.file"
+    assert inner["body"] == text
+    assert inner["format"] == "org.matrix.custom.html"
+    # The reply's own HTML, pill included, not a re-render of its body.
+    assert inner["formatted_body"] == formatted_body
+    assert pill in inner["formatted_body"]
+    assert "<table>" in inner["formatted_body"]
+    assert _TOOL_TRACE_KEY not in inner
+    assert calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_edit", [False, True])
+@pytest.mark.parametrize("room_encrypted", [False, True])
+async def test_prepare_large_message_preview_html_follows_the_truncated_text(
+    room_encrypted: bool,
+    is_edit: bool,
+) -> None:
+    """A truncated preview renders exactly the text it shows and still fits the event limit."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/truncated-rich-preview"))
+    text = "Some **bold** words and a `code` span.\n\n" * 3000
+    message = {
+        "body": text,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(text),
+        "msgtype": "m.text",
+    }
+    content = (
+        {
+            **message,
+            "body": f"* {text}",
+            "m.new_content": message,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        }
+        if is_edit
+        else message
+    )
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=room_encrypted)
+
+    preview = result["m.new_content"] if is_edit else result
+    assert preview["body"].endswith("[Message continues in attached file]")
+    assert preview["format"] == "org.matrix.custom.html"
+    assert preview["formatted_body"] == markdown_to_html(preview["body"])
+
+    def size(event: dict[str, object]) -> int:
+        if room_encrypted:
+            return _actual_encrypted_event_size(event, room_id="!room:server")
+        return calculate_event_size(event)
+
+    assert size(result) <= _MATRIX_EVENT_HARD_LIMIT
+    # The shrink keeps most of the room: a quarter more text would not fit, even with no outer fallback.
+    longer_body = _create_preview(text, int(len(preview["body"].encode("utf-8")) * 1.25))
+    longer = {**preview, "body": longer_body, "formatted_body": markdown_to_html(longer_body)}
+    assert size({**result, "body": "", "m.new_content": longer} if is_edit else longer) > _MATRIX_EVENT_HARD_LIMIT
 
 
 @pytest.mark.asyncio

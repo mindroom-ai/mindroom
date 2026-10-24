@@ -3071,6 +3071,7 @@ MindRoom supports automatic [OpenAI Responses compaction](https://developers.ope
 Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the hard request limit.
 An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the hard budget uses text compaction instead.
 Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
+When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
 A completed response that carries a provider checkpoint logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's conservative size estimate (`checkpoint_tokens`, from byte length for OpenAI's encrypted checkpoints).
 The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch pipeline timing` cover text compaction only.
@@ -6982,6 +6983,7 @@ agents:
     display_name: Assistant
     role: A helpful assistant with file and web access
     model: sonnet
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file
       - shell
@@ -7009,6 +7011,7 @@ defaults:
 
 agents:
   code:
+    memory_backend: file                 # gives the agent a workspace for file paths
     tools:
       - file                               # no inline settings
       - shell:                             # this agent only
@@ -7527,6 +7530,7 @@ agents:
   assistant:
     display_name: Assistant
     role: Help in chat
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - shell
       - coding: {defer: true, initial: true}
@@ -8835,7 +8839,8 @@ Only a worker isolates `shell`, `python`, and `docker`, because they execute cod
 
 When an agent has a workspace, it is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
 `python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
-`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; without a workspace, these tools use the process's current directory.
+`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; without a workspace, `shell` and `python` use the process's current directory, and so do `file` and `coding` under `file_access: unrestricted`.
+Under the default `file_access: workspace`, `file` and `coding` of an agent without a workspace refuse every path outside its shared directories, except in a worker with worker-specific storage (Docker and Kubernetes workers, and `static_runner` calls of agents with a [`worker_scope`](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes)), where they use that worker's own directory; give the agent a workspace with `memory_backend: file` or a `private` configuration.
 
 Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
@@ -8901,6 +8906,7 @@ Prefer [`coding`](#coding) for code-editing agents.
 ```yaml
 agents:
   editor:
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file:
           enable_delete_file: true
@@ -9023,6 +9029,7 @@ Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture
 ```yaml
 agents:
   code:
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - coding
 ```
@@ -13258,6 +13265,7 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
+    memory_backend: file  # gives the agent a workspace for file paths
     tools: [coding, shell]
     delegate_to: [research]  # can delegate further
 

@@ -48,7 +48,10 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.scheduling.scheduled_tool_calls import bind_live_tools
 from mindroom.session_storage import agent_storage
-from mindroom.shared_directories.paths import describe_agent_shared_directories
+from mindroom.shared_directories.paths import (
+    describe_agent_shared_directories,
+    primary_tools_reach_shared_directories,
+)
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_jobs.authorization import authority_snapshot
@@ -931,6 +934,7 @@ def _render_tool_execution_environment(
     worker_routed_tool_names: tuple[str, ...],
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
+    has_workspace: bool,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
@@ -943,8 +947,14 @@ def _render_tool_execution_environment(
     if not worker_routed_tool_names and not local_tool_names:
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
+    primary_shares = shared_directories and primary_tools_reach_shared_directories(runtime_paths)
+    without_workspace = "attachments and the shared directories below" if primary_shares else "attachments"
     file_access_description = {
-        "workspace": "agent workspace and attachments only",
+        "workspace": (
+            "agent workspace and attachments only"
+            if has_workspace
+            else f"this agent has no workspace, so path tools in the primary runtime reach only {without_workspace}"
+        ),
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
@@ -1619,6 +1629,7 @@ def _build_agent_role_context(
             worker_routed_tool_names=worker_routed_tool_names,
             worker_scope=agent_runtime.execution.execution_scope,
             file_access=config.resolve_entity(agent_name).file_access,
+            has_workspace=agent_runtime.tool_base_dir is not None,
             unconfined_tool_names=_unconfined_tool_names(
                 (*local_tool_names, *worker_routed_tool_names),
                 requires_primary_runtime=False,

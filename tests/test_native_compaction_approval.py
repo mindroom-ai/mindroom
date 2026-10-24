@@ -22,7 +22,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.native_compaction import _NATIVE_CHECKPOINT_KEY, record_native_checkpoint
+from mindroom.native_compaction import _NATIVE_CHECKPOINT_KEY, record_native_checkpoint, replay_basis
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -296,7 +296,11 @@ async def test_a_team_approval_resumes_the_paused_leader_requests_native_replay(
 
     assert isinstance(result, CompletedApprovalRun)
     paused, resumed = leader.requests
-    assert paused.native_compaction == NativeCompactionReplay(route="route-a", threshold=30_000)
+    assert paused.native_compaction == NativeCompactionReplay(
+        route="route-a",
+        threshold=30_000,
+        basis=replay_basis(None, [earlier]),
+    )
     assert paused.portable_replay is True
     assert (resumed.native_compaction, resumed.portable_replay) == (paused.native_compaction, paused.portable_replay)
     for request in (paused, resumed):

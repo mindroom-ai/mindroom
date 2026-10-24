@@ -129,6 +129,24 @@ _ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
 )
 
 
+def checkpointed_answer(item: dict[str, object], basis: str, *, from_history: bool = False) -> Message:
+    """Return an assistant message carrying a provider checkpoint, as native compaction records one."""
+    return Message(
+        role="assistant",
+        content="answer after the checkpoint",
+        from_history=from_history,
+        provider_data={
+            "mindroom_native_compaction": {
+                "route": "another-model-route",
+                "threshold": 50_000,
+                "checkpoint_prefix": True,
+                "items": [item],
+                "basis": basis,
+            },
+        },
+    )
+
+
 def _summarizer(
     model: ModelProvider | None = None,
     input_budget_tokens: int = 16_000,

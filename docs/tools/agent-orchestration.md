@@ -49,6 +49,7 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
+    memory_backend: file  # gives the agent a workspace for file paths
     tools: [coding, shell]
     delegate_to: [research]  # can delegate further
 

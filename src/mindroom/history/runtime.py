@@ -156,6 +156,7 @@ def _native_history(
     session: ConversationSession | None,
     *,
     allowed: bool,
+    runs: Sequence[AnyRunRecord] = (),
 ) -> NativeHistory | None:
     """Return the native settings of the run's requests; a run sized by estimate alone sends none."""
     if model is None:
@@ -166,6 +167,7 @@ def _native_history(
         history_settings=resolved_inputs.history_settings,
         session=session,
         allowed=allowed,
+        runs=runs,
     )
 
 
@@ -215,7 +217,14 @@ async def prepare_scope_history(
             execution_plan=execution_plan,
         ),
     )
-    native_history = _native_history(model, resolved_inputs, session, allowed=allow_native_compaction)
+    visible_runs = scope_visible_runs(session, scope_context.scope)
+    native_history = _native_history(
+        model,
+        resolved_inputs,
+        session,
+        allowed=allow_native_compaction,
+        runs=visible_runs,
+    )
     if state.force_compact_before_next_run and native_history is not None:
         native_history = native_history.without_native_compaction()
     compaction_reply_outcome: CompactionReplyOutcome = "none"
@@ -229,7 +238,6 @@ async def prepare_scope_history(
         native_route=native_route,
         replay_model=replay_estimator,
     )
-    visible_runs = scope_visible_runs(session, scope_context.scope)
     # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
     reported_history_tokens = (
         _reported_history_tokens(

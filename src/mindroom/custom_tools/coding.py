@@ -560,6 +560,8 @@ class CodingTools(Toolkit):
         shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
     ) -> None:
         self.base_dir = resolve_tool_base_dir(base_dir)
+        # Without a workspace the base dir is only the process working directory, which workspace access refuses.
+        self.has_workspace = bool(base_dir)
         self.restrict_to_base_dir = file_access == "workspace"
         self.shared_directory_roots = shared_directory_roots
         super().__init__(

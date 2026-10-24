@@ -3,6 +3,8 @@
 A path inside a shared directory is handed to a copy of the toolkit rooted at that
 directory, so the toolkit's existing workspace confinement, no-follow reads, and
 atomic writes apply unchanged with the shared directory as the root.
+A toolkit without a workspace reaches only those shared directories, never the
+process working directory its base dir falls back to.
 """
 
 from __future__ import annotations
@@ -32,33 +34,45 @@ def no_shared_directory_roots() -> tuple[SharedDirectoryRoot, ...]:
     return ()
 
 
+def _no_workspace_error(raw_path: object, *, has_shares: bool) -> str:
+    # A path argument left at its default names the working directory.
+    remedy = "Without one, only the agent's shared directories are reachable; give it" if has_shares else "Give it"
+    return (
+        f"Error: Path '{raw_path or '.'}' requires an agent workspace; file_access is 'workspace'. "
+        f"{remedy} a workspace with memory_backend: file or a private configuration."
+    )
+
+
 class _SharedDirectoryAwareToolkit(Protocol):
     base_dir: Path
+    # False when MindRoom gave the toolkit no workspace, so base_dir is only the process working directory.
+    has_workspace: bool
     restrict_to_base_dir: bool
     shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]]
 
 
-def _matching_root(
-    raw_path: object,
-    base_dir: Path,
-    roots: Callable[[], tuple[SharedDirectoryRoot, ...]],
-) -> tuple[SharedDirectoryRoot, Path] | None:
+def _matching_root(raw_path: object, toolkit: _SharedDirectoryAwareToolkit) -> tuple[SharedDirectoryRoot, Path] | None:
     """Return the shared directory a path names and the path below it."""
     if not isinstance(raw_path, str) or not raw_path:
         return None
     requested = Path(raw_path).expanduser()
     # Lexical only: the rooted toolkit resolves links itself and refuses any that leave the root.
-    candidate = Path(os.path.normpath(requested if requested.is_absolute() else base_dir / requested))
-    if candidate.is_relative_to(base_dir):
+    candidate = Path(os.path.normpath(requested if requested.is_absolute() else toolkit.base_dir / requested))
+    # Paths inside a workspace stay the workspace's; without one, base_dir is only the process working directory,
+    # which may hold the default shared directories and must not hide them.
+    if toolkit.has_workspace and candidate.is_relative_to(toolkit.base_dir):
         return None
-    for root in roots():
+    for root in toolkit.shared_directory_roots():
         if candidate.is_relative_to(root.path):
             return root, candidate.relative_to(root.path)
     return None
 
 
 def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Callable[..., str]], Callable[..., str]]:
-    """Route a workspace-confined tool method to the shared directory its path argument names."""
+    """Route a workspace-confined tool method to the shared directory its path argument names.
+
+    Without a workspace, every other path is refused.
+    """
 
     def decorator(method: Callable[..., str]) -> Callable[..., str]:
         signature = inspect.signature(method)
@@ -70,9 +84,11 @@ def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Ca
             if not toolkit.restrict_to_base_dir:
                 return method(*args, **kwargs)
             raw_path = bound.arguments.get(path_parameter)
-            match = _matching_root(raw_path, toolkit.base_dir, toolkit.shared_directory_roots)
+            match = _matching_root(raw_path, toolkit)
             if match is None:
-                return method(*args, **kwargs)
+                if toolkit.has_workspace:
+                    return method(*args, **kwargs)
+                return _no_workspace_error(raw_path, has_shares=bool(toolkit.shared_directory_roots()))
             root, relative = match
             if writes and not root.writable:
                 return f"Error: {raw_path} is in a shared directory you can only read."
@@ -85,6 +101,8 @@ def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Ca
             except ValueError as exc:
                 return f"Error: {exc}"
             rooted.shared_directory_roots = no_shared_directory_roots
+            # The shared directory is the copy's workspace, so its nested calls stay inside it.
+            rooted.has_workspace = True
             bound.arguments["self"] = rooted
             # An absolute path below the pinned root keeps the toolkit's own messages absolute too.
             bound.arguments[path_parameter] = str(rooted.base_dir / relative)

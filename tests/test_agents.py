@@ -539,6 +539,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         worker_routed_tool_names=("shell",),
         worker_scope=worker_scope,
         file_access="workspace",
+        has_workspace=True,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -559,6 +560,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
+        has_workspace=True,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -584,6 +586,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
+        has_workspace=True,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -594,13 +597,29 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
-    ("file_access", "expected"),
+    ("file_access", "has_workspace", "expected"),
     [
-        ("workspace", "- File access for path tools: `workspace` (agent workspace and attachments only)."),
-        ("unrestricted", "- File access for path tools: `unrestricted` (any path the tool's process can reach)."),
+        ("workspace", True, "- File access for path tools: `workspace` (agent workspace and attachments only)."),
+        (
+            "workspace",
+            False,
+            "- File access for path tools: `workspace` "
+            "(this agent has no workspace, so path tools in the primary runtime reach only attachments).",
+        ),
+        ("unrestricted", True, "- File access for path tools: `unrestricted` (any path the tool's process can reach)."),
+        (
+            "unrestricted",
+            False,
+            "- File access for path tools: `unrestricted` (any path the tool's process can reach).",
+        ),
     ],
 )
-def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_access: str, expected: str) -> None:
+def test_tool_execution_environment_reports_file_access(
+    tmp_path: Path,
+    file_access: str,
+    has_workspace: bool,
+    expected: str,
+) -> None:
     """The model should learn which files its path tools may use and which tools are never confined."""
     for worker_routed in ((), ("shell",)):
         rendered = _render_tool_execution_environment(
@@ -609,6 +628,7 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             worker_routed_tool_names=worker_routed,
             worker_scope=None,
             file_access=file_access,
+            has_workspace=has_workspace,
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
             shared_directories=(),
@@ -624,7 +644,7 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
 def test_agent_role_lists_the_shared_directories_the_agent_reaches(
     tmp_path: Path,
 ) -> None:
-    """An agent learns the path, owner, and access of each shared directory it owns or joined."""
+    """An agent without a workspace learns that its path tools reach its shared directories, and each one's access."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     create_shared_directory(runtime_paths, owner="general", name="report")
@@ -640,6 +660,46 @@ def test_agent_role_lists_the_shared_directories_the_agent_reaches(
         f"`{shares / 'general' / 'report'}` (from general, read-only)."
     ) in _role(calculator)
     assert f"- Shared directories: `{shares / 'general' / 'report'}` (yours, read-write)." in _role(general)
+    file_access_line = (
+        "- File access for path tools: `workspace` (this agent has no workspace, "
+        "so path tools in the primary runtime reach only attachments and the shared directories below)."
+    )
+    assert file_access_line in _role(calculator)
+    assert file_access_line in _role(general)
+
+
+@pytest.mark.parametrize(
+    "process_env",
+    [{"MINDROOM_WORKER_BACKEND": "kubernetes"}, {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox:8766"}],
+)
+def test_no_workspace_line_omits_shared_directories_primary_tools_cannot_reach(
+    tmp_path: Path,
+    process_env: dict[str, str],
+) -> None:
+    """Beside workers, primary-process path tools reach no shared directory, so the line names only attachments."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env,
+    )
+
+    rendered = _render_tool_execution_environment(
+        runtime_paths=runtime_paths,
+        local_tool_names=("file",),
+        worker_routed_tool_names=("shell",),
+        worker_scope=None,
+        file_access="workspace",
+        has_workspace=False,
+        unconfined_tool_names=("shell",),
+        primary_only_unconfined_tool_names=(),
+        shared_directories=("`/shares/general/report` (yours, read-write)",),
+    )
+
+    assert (
+        "- File access for path tools: `workspace` (this agent has no workspace, "
+        "so path tools in the primary runtime reach only attachments)."
+    ) in rendered
+    assert "- Shared directories: `/shares/general/report` (yours, read-write)." in rendered
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
@@ -650,6 +710,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         worker_routed_tool_names=(),
         worker_scope=None,
         file_access="workspace",
+        has_workspace=True,
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -2389,25 +2450,84 @@ def test_create_agent_passes_authored_shell_runtime_overrides(
     }
 
 
-@patch("mindroom.agents.get_tool_by_name")
-def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
-    mock_get_tool_by_name: MagicMock,
-) -> None:
-    """Agents without file-backed workspace semantics should keep tool defaults."""
-    mock_get_tool_by_name.return_value = MagicMock()
+def _run_directory_with_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make a process working directory that holds a runtime secret, as the backend's run directory does."""
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    (run_directory / ".env").write_text("OPENAI_API_KEY=run-directory-secret\n", encoding="utf-8")
+    monkeypatch.chdir(run_directory)
+    return run_directory
 
+
+def _tool_entrypoints(build: AgentBuild) -> dict[str, dict[str, Callable[..., str]]]:
+    """Return what each of the build's toolkits runs for a call, by toolkit and function name."""
+    return {
+        toolkit.name: {function.name: function.entrypoint for function in toolkit.functions}
+        for toolkit in build.spec.toolkits
+    }
+
+
+def test_agent_without_a_workspace_cannot_read_the_run_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared agent without file memory has no workspace, so its file tools refuse the process working directory."""
+    run_directory = _run_directory_with_secret(tmp_path, monkeypatch)
     config = _test_config()
-    config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
+    config.agents["general"].tools = ["file", "coding"]
     config.agents["general"].include_default_tools = False
 
-    _create_agent_for_test("general", config=config)
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path / "storage")))
 
-    overrides_by_tool = {
-        call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
-    }
-    assert overrides_by_tool["coding"] is None
-    assert overrides_by_tool["shell"] is None
-    assert overrides_by_tool["duckduckgo"] is None
+    file_tools, coding = (_tool_entrypoints(agent)[name] for name in ("file_tools", "coding"))
+    results = [
+        *(file_tools["read_file"](path) for path in (".env", str(run_directory / ".env"))),
+        *(coding["read_file"](path) for path in (".env", str(run_directory / ".env"))),
+        file_tools["list_files"](),
+        file_tools["search_files"]("*"),
+        file_tools["search_content"]("run-directory-secret"),
+        coding["ls"](),
+        coding["grep"]("run-directory-secret"),
+        coding["find_files"]("*"),
+        file_tools["save_file"]("x", "planted.txt"),
+        coding["write_file"]("planted.txt", "x"),
+    ]
+    assert all(
+        result.startswith("Error: Path '") and "requires an agent workspace; file_access is 'workspace'." in result
+        for result in results
+    )
+    assert not (run_directory / "planted.txt").exists()
+    assert (
+        "- File access for path tools: `workspace` "
+        "(this agent has no workspace, so path tools in the primary runtime reach only attachments)."
+    ) in _role(agent)
+
+
+def test_agent_workspace_file_tools_stay_inside_the_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With file memory the same tools work in the agent workspace and still refuse the run directory."""
+    run_directory = _run_directory_with_secret(tmp_path, monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path / "storage")
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "general")
+    workspace.mkdir(parents=True)
+    (workspace / "notes.md").write_text("workspace notes\n", encoding="utf-8")
+    config = _test_config()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].tools = ["file", "coding"]
+    config.agents["general"].include_default_tools = False
+
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+
+    file_tools, coding = (_tool_entrypoints(agent)[name] for name in ("file_tools", "coding"))
+    assert file_tools["read_file"]("notes.md") == "workspace notes\n"
+    assert "workspace notes" in coding["read_file"]("notes.md")
+    assert coding["write_file"]("draft.md", "draft\n").startswith("Wrote")
+    assert (workspace / "draft.md").read_text(encoding="utf-8") == "draft\n"
+    assert file_tools["read_file"](str(run_directory / ".env")).startswith("Error")
+    assert "run-directory-secret" not in coding["read_file"](str(run_directory / ".env"))
+    assert "- File access for path tools: `workspace` (agent workspace and attachments only)." in _role(agent)
 
 
 @patch("mindroom.agents.load_plugins")

@@ -109,6 +109,13 @@ def _mounted_roots(root: Path) -> tuple[SharedDirectoryRoot, ...]:
     return tuple(roots)
 
 
+def primary_tools_reach_shared_directories(runtime_paths: RuntimePaths) -> bool:
+    """Return whether path tools in the primary process may use shared directories in this runtime."""
+    # Workers write shared directories, and file and coding list and search by path after checking it, so worker
+    # code could swap an entry for a link that a primary-process search would follow into primary-only storage.
+    return not (primary_worker_backend_is_dedicated(runtime_paths) or sandbox_proxy_config(runtime_paths).proxy_url)
+
+
 def shared_directory_roots(
     config: Config | None,
     runtime_paths: RuntimePaths,
@@ -117,11 +124,7 @@ def shared_directory_roots(
     """Return the shared directories one agent's path tools may use in this runtime."""
     if runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
         return _mounted_roots(runner_storage_root(runtime_paths) / SHARED_DIRECTORIES_DIRNAME)
-    if config is None or agent_name is None:
-        return ()
-    if primary_worker_backend_is_dedicated(runtime_paths) or sandbox_proxy_config(runtime_paths).proxy_url:
-        # Workers write shared directories, and file and coding list and search by path after checking it, so worker
-        # code could swap an entry for a link that a primary-process search would follow into primary-only storage.
+    if config is None or agent_name is None or not primary_tools_reach_shared_directories(runtime_paths):
         return ()
     return tuple(
         SharedDirectoryRoot(path=view.path, writable=view.writable)

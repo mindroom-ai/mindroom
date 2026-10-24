@@ -28,7 +28,7 @@ from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.usage import MessageMetrics
-from mindroom.native_compaction import record_native_checkpoint
+from mindroom.native_compaction import checkpoint_summary, record_native_checkpoint, replay_basis
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.types import NativeHistory
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
     from mindroom.llm.runs import RunRecord
     from mindroom.providers.openai.responses import ResponsesAdapter
 
@@ -470,6 +470,63 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     assert prepared.native_history.native_compaction.route != old.route
 
 
+def test_native_requests_record_the_history_they_replay(tmp_path: Path) -> None:
+    """A request replaying from a checkpoint that skips runs records an empty basis; unknown history counts as covering.
+
+    A run that checkpointed before waiting for approval sorts after the turns it waited for, which replay then skips.
+    """
+    config, _ = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+    )
+    model = responses_adapter(tmp_path, store=False)
+    resolved = _inputs(config)
+
+    def configured(runs: list[RunRecord]) -> NativeCompactionReplay:
+        native = configure_native_history(
+            model,
+            plan=resolved.execution_plan,
+            history_settings=resolved.history_settings,
+            session=None,
+            allowed=True,
+            runs=runs,
+        )
+        assert native is not None
+        assert native.native_compaction is not None
+        return native.native_compaction
+
+    first, waited = _completed_run("first"), _completed_run("waited")
+    settings = configured([])
+
+    def resumed(basis: str | None, *, route: str = settings.route, run_id: str = "resumed") -> RunRecord:
+        answer = Message(role="assistant", content="Done")
+        items = [{"type": "compaction", "encrypted_content": "checkpoint"}]
+        record_native_checkpoint(answer, items, replace(settings, route=route, basis=basis))
+        return _completed_run(run_id, messages=[Message(role="user", content="Go"), answer])
+
+    covering = resumed(replay_basis(None, [first, waited]))
+    assert configured([first, waited, covering]).basis == replay_basis(None, [first, waited, covering])
+    skipping = resumed(replay_basis(None, [first]))
+    assert configured([first, waited, skipping]).basis == ""
+    # A checkpoint recorded before bases existed counts as covering, as native replay assumes.
+    unknown = resumed(None)
+    assert configured([first, waited, unknown]).basis == replay_basis(None, [first, waited, unknown])
+    # Replay starts from the latest checkpoint on its own route, so one on another route does not vouch for it.
+    elsewhere = resumed(replay_basis(None, [first, waited, skipping]), route="other-route", run_id="elsewhere")
+    assert configured([first, waited, skipping, elsewhere]).basis == ""
+
+    # An approval continuation records what the paused request replayed, so its checkpoints stay reusable.
+    paused_settings = configured([first])
+    waiting = Message(role="assistant", content="Waiting for approval")
+    record_native_checkpoint(waiting, [], paused_settings)
+    paused = _completed_run("paused", messages=[Message(role="user", content="Go"), waiting])
+    restored = restore_native_history(responses_adapter(tmp_path, store=False), persisted_run=paused, session=None)
+    assert restored is not None
+    assert restored.native_compaction is not None
+    assert restored.native_compaction.basis == paused_settings.basis
+
+
 @pytest.mark.asyncio
 async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) -> None:
     """A summary left in the session row cannot name the route checkpoints are recorded under."""
@@ -479,9 +536,10 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
     model = responses_adapter(tmp_path, store=False)
+    later = _completed_run("later", messages=[Message(role="user", content="Later")])
     seeded = _session(
         "session",
-        runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")])],
+        runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")]), later],
         summary=ScopeSummary(text="Stale summary.", updated_at=datetime.now(UTC)),
     )
     db = create_state_storage("test_agent", tmp_path)
@@ -515,6 +573,14 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     assert prepared.native_history is not None
     assert prepared.native_history.native_compaction is not None
     assert prepared.native_history.native_compaction.route == expected.native_compaction.route
+    # A checkpoint records the history its request replayed, so text compaction can tell where it still stands in.
+    answer = Message(role="assistant", content="Done")
+    record_native_checkpoint(
+        answer,
+        [{"type": "compaction", "content": "Checkpoint."}],
+        prepared.native_history.native_compaction,
+    )
+    assert checkpoint_summary(answer, replay_basis("Archived summary.", [later])) == "Checkpoint."
 
 
 @pytest.mark.asyncio
@@ -553,7 +619,9 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     assert prepared.native_history is not None
     native = prepared.native_history.native_compaction
     assert native is not None
-    assert native == leader.native_compaction_settings(threshold=120000)
+    expected = leader.native_compaction_settings(threshold=120000)
+    assert expected is not None
+    assert native == replace(expected, basis=replay_basis(None, session.runs))
     member = responses_adapter(tmp_path, "gpt-6-luna", store=False).native_compaction_settings(threshold=30000)
     assert member is not None
     assert (native.route, native.threshold) != (member.route, member.threshold)

@@ -2645,6 +2645,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.llm",
     "mindroom.logging_config",
+    "mindroom.native_compaction",
     "mindroom.providers.names",
     "mindroom.providers.registry",
     "mindroom.timing",
@@ -2701,6 +2702,7 @@ visibility = [
     "mindroom.history.replay",
     "mindroom.history.native",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.compaction",
     "mindroom.providers.openai",
 ]
 

@@ -100,11 +100,13 @@ class NativeCompactionReplay:
 
     ``route`` identifies the model, endpoint, and history generation whose stored checkpoints may be
     replayed; ``threshold`` is the input-token trigger MindRoom asks for, or None to keep the authored
-    provider policy while still replaying that route's checkpoints.
+    provider policy while still replaying that route's checkpoints. ``basis`` names the history the request
+    replays (``native_compaction.replay_basis``): empty when it leaves some out, None when unknown.
     """
 
     route: str
     threshold: int | None = None
+    basis: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
