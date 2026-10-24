@@ -27,7 +27,7 @@ from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history import session_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.store import ConversationStore, persist_to
+from mindroom.session_storage.store import ConversationStore, delete_run_subtrees_in_transaction, persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -122,8 +122,8 @@ def _reloaded(store: ConversationStore, session_id: str = SESSION, kind: Session
 
 def _cut(store: ConversationStore, run_id: str, session_id: str = SESSION) -> None:
     """Remove ``run_id`` as a redaction's cut does: delete its rows and record it, so a later save of it is refused."""
-    store.delete_run_subtrees([run_id], session_id=session_id)
-    with closing(sqlite3.connect(store.path)) as connection, connection:
+    with store.transaction(write=True) as connection:
+        delete_run_subtrees_in_transaction(connection, store.names, [run_id], session_id=session_id)
         connection.execute(
             f'INSERT INTO "{store.names.removed_runs}" (run_id, session_id) VALUES (?, ?)',  # noqa: S608
             (run_id, session_id),

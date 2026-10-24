@@ -352,22 +352,14 @@ class ConversationStore:
         _record_stored_state(session, created)
         session.metadata = updated
 
-    def delete_run_subtrees(
-        self,
-        run_ids: Collection[str],
-        *,
-        session_id: str | None = None,
-        session: ConversationSession | None = None,
-    ) -> set[str]:
-        """Delete ``run_ids`` with every member run below them, within session ``session_id`` when given.
+    def delete_run_subtrees(self, session: ConversationSession, run_ids: Collection[str]) -> set[str]:
+        """Delete ``session``'s runs ``run_ids`` with every member run below them.
 
-        Returns the deleted ids. Once the delete commits, ``session``, a loaded copy of that session, holds none of
-        them, nor any run below them.
+        Returns the deleted ids. Once the delete commits, ``session`` holds none of them, nor any run below them.
         """
         with self.transaction(write=True) as connection:
-            deleted = delete_run_subtrees_in_transaction(connection, self.names, run_ids, session_id=session_id)
-        if session is not None:
-            session.runs = runs_without(session.runs, deleted)
+            deleted = delete_run_subtrees_in_transaction(connection, self.names, run_ids, session_id=session.session_id)
+        session.runs = runs_without(session.runs, deleted)
         return deleted
 
     def get_run(self, run_id: str) -> AnyRunRecord | None:
@@ -840,28 +832,28 @@ def delete_run_subtrees_in_transaction(
     names: TableNames,
     run_ids: Collection[str],
     *,
-    session_id: str | None,
+    session_id: str,
 ) -> set[str]:
-    """Delete ``run_ids`` and every run below them in the caller's write transaction; return the deleted ids.
+    """Delete session ``session_id``'s runs ``run_ids`` and every run below them in the caller's write transaction.
 
-    Team member runs are rows whose ``parent_run_id`` is the team run, so a deleted run takes its whole subtree.
+    Returns the deleted ids. Team member runs are rows whose ``parent_run_id`` is the team run, so a deleted run
+    takes its whole subtree.
     """
     runs = quote_identifier(names.runs)
-    scope, scope_parameters = ("session_id = ? AND ", (session_id,)) if session_id is not None else ("", ())
     found = {run_id for run_id in run_ids if run_id}
     frontier = found
     while frontier:
         frontier = {
             run_id
             for (run_id,) in connection.execute(
-                f"SELECT run_id FROM {runs} WHERE {scope}parent_run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
-                (*scope_parameters, json.dumps(sorted(frontier))),
+                f"SELECT run_id FROM {runs} WHERE session_id = ? AND parent_run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
+                (session_id, json.dumps(sorted(frontier))),
             )
         } - found
         found |= frontier
     connection.execute(
-        f"DELETE FROM {runs} WHERE {scope}run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
-        (*scope_parameters, json.dumps(sorted(found))),
+        f"DELETE FROM {runs} WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
+        (session_id, json.dumps(sorted(found))),
     )
     return found
 

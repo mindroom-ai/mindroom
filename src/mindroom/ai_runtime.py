@@ -563,7 +563,7 @@ def discard_empty_completed_run(
     if scope_context is None or not run_id:
         return
     try:
-        scope_context.storage.delete_run_subtrees([run_id], session_id=session_id, session=scope_context.session)
+        scope_context.storage.delete_run_subtrees(scope_context.stored_or_first_session(), [run_id])
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",

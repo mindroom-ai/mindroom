@@ -1232,7 +1232,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         if second_chunk == "fails":
             msg = "summary failed"
             raise RuntimeError(msg)
-        storage.delete_run_subtrees(["run-3"])
+        storage.delete_run_subtrees(_session("session-1"), ["run-3"])
         return "stale second summary"
 
     summary_mock = AsyncMock(side_effect=summarize)
@@ -1761,12 +1761,12 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
 
     def basis_after_a_redaction_cuts_a_run(*args: object, **kwargs: object) -> object:
         if race == "before_summary":
-            storage.delete_run_subtrees(["run-1"])
+            storage.delete_run_subtrees(_session("session-1"), ["run-1"])
         return read_chunk_basis(*args, **kwargs)
 
     async def summary_while_a_redaction_cuts_a_run(**_kwargs: object) -> str:
         if race == "during_summary":
-            storage.delete_run_subtrees(["run-1"])
+            storage.delete_run_subtrees(_session("session-1"), ["run-1"])
         return "stale summary"
 
     install_model_providers(monkeypatch, {"default": summary_model()})

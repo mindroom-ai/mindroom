@@ -150,7 +150,10 @@ def test_team_export_counts_each_saved_call_once(
     )
     with _stored_team(paths, config, team_id) as storage:
         if not retained_conversation:
-            storage.delete_run_subtrees(["leader"], session_id="session")
+            storage.delete_run_subtrees(
+                ConversationSession(session_id="session", kind="team", owner_id=team_id),
+                ["leader"],
+            )
         report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
 
     assert report.totals.input_tokens == 60

@@ -163,7 +163,7 @@ def test_a_refused_save_of_a_removed_run_still_records_usage(usage_db: Conversat
 def test_run_cleanup_preserves_usage_before_regeneration(usage_db: ConversationStore) -> None:
     """Replay cleanup cannot erase incurred usage, and the replacement run adds its own work."""
     _save(usage_db, _run())
-    usage_db.delete_run_subtrees(["run-1"])
+    usage_db.delete_run_subtrees(_session(), ["run-1"])
     _save(usage_db, _run(20, run_id="run-2"))
 
     assert [(run_id, payload["metrics"]["total_tokens"]) for run_id, payload in _rows(usage_db)] == [
@@ -209,7 +209,7 @@ def test_nested_run_usage_retains_parent_identity(usage_db: ConversationStore) -
     """Losing parent identity would let reporting count nested usage twice."""
     _save(usage_db, _run())
     _save(usage_db, _run(5, run_id="member", parent_run_id="run-1"))
-    usage_db.delete_run_subtrees(["run-1"])
+    usage_db.delete_run_subtrees(_session(), ["run-1"])
 
     rows = _rows(usage_db)
     assert len(rows) == 2

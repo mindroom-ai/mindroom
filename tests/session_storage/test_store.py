@@ -243,7 +243,7 @@ def test_loaded_runs_drop_their_stored_tool_schemas(store: ConversationStore) ->
 def test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors(store: ConversationStore) -> None:
     """A new run never reuses a position below a surviving run."""
     _seed(store, [_run("r0"), _run("r1"), _run("r2")])
-    store.delete_run_subtrees(["r0", "r1"])
+    store.delete_run_subtrees(_session(), ["r0", "r1"])
 
     _seed(store, [_run("r3")])
 
@@ -255,7 +255,7 @@ def test_new_runs_sort_after_every_summary_row(store: ConversationStore) -> None
     """Deleting the newest runs must not let a new run reuse an index a summary row sorts after."""
     _seed(store, [_run(f"r{index}") for index in range(3)])
     _summary_after(store, "r2")
-    store.delete_run_subtrees(["r1", "r2"])
+    store.delete_run_subtrees(_session(), ["r1", "r2"])
 
     _seed(store, [_run("r3")])
 
@@ -447,10 +447,10 @@ def test_deleting_a_team_run_takes_its_member_rows_along(store: ConversationStor
     )
     _seed(store, [_run("elsewhere", parent="team1")], other)
 
-    assert store.delete_run_subtrees(["team1"], session_id="s1") == {"team1", "m1", "m1-child"}
+    assert store.delete_run_subtrees(team, ["team1"]) == {"team1", "m1", "m1-child"}
     assert _loaded_ids(store, "team") == ["team2"]
     assert _has_row(store, "elsewhere")
-    assert store.delete_run_subtrees(["team2", ""]) == {"team2"}
+    assert store.delete_run_subtrees(team, ["team2", ""]) == {"team2"}
     assert _loaded(store, "team").runs == []
 
 
@@ -556,7 +556,7 @@ async def test_a_removed_save_takes_the_run_and_its_members_out_of_the_session(s
         team,
     )
     session = _loaded(store, "team")
-    store.delete_run_subtrees(["t0"])
+    store.delete_run_subtrees(team, ["t0"])
     _remove(store, "t0")
 
     await persist_to(store, session)(_team_run("t0", RunStatus.cancelled))
@@ -626,7 +626,7 @@ def test_a_delete_takes_the_runs_and_their_members_out_of_the_session(store: Con
     _seed(store, [_run("m0", parent="t0", agent_id="helper"), _team_run("t0"), _team_run("t1")], team)
     session = _loaded(store, "team")
 
-    assert store.delete_run_subtrees(["t0"], session_id="s1", session=session) == {"t0", "m0"}
+    assert store.delete_run_subtrees(session, ["t0"]) == {"t0", "m0"}
 
     assert [run.run_id for run in session.runs] == ["t1"]
     assert _as_stored(session) == _as_stored(_loaded(store, "team"))

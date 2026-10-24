@@ -136,7 +136,7 @@ def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_pa
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
 
-    store.delete_run_subtrees(["run-2"])
+    store.delete_run_subtrees(ConversationSession(kind="agent", session_id="session-1", owner_id="code"), ["run-2"])
     store.save_runs(loaded, [_run("run-4")])
     reopened = _open(tmp_path).load_session("session-1", "agent")
 
