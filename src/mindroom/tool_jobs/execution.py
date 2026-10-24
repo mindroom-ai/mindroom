@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -40,7 +41,7 @@ from mindroom.tool_jobs.execution_authority import (
     JobTool,
     authorized_tool_call,
     check_current_execution_authority,
-    nested_tool_call,
+    enclosing_grant,
 )
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
@@ -295,17 +296,21 @@ def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int) -> float | N
 
 
 async def _run_here(call: JobCall | None, call_next: ToolNext, arguments: dict[str, Any]) -> object:
-    """Run a call in this task; inside a managed job, the job owns its synchronous leaf and checks it as its own."""
+    """Run a call in this task; inside a managed job, the job owns its synchronous leaf.
+
+    A function the framework generated, which has no ``call``, runs there under its enclosing call's grant.
+    """
     if not job_owns_execution():
         return await call_next(arguments)
-    return await _owned_by_job(call, lambda: call_next(arguments))
+    with enclosing_grant() if call is None else nullcontext():
+        return await _owned_by_job(lambda: call_next(arguments))
 
 
-async def _owned_by_job(call: JobCall | None, run: Callable[[], Awaitable[object]]) -> object:
+async def _owned_by_job(run: Callable[[], Awaitable[object]]) -> object:
     """Run one call inside a managed job, which keeps its resources until a synchronous leaf it started finishes."""
     tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR)
     try:
-        with track_sync_tool_completion(tracker), nested_tool_call(call):
+        with track_sync_tool_completion(tracker):
             return await run()
     finally:
         started = tracker.started_task()
@@ -475,10 +480,7 @@ async def _run_job_call(
 ) -> tuple[object, str | None]:
     """Run the job's call through the actor's tool-call policy: what it returned, or the text of what it raised."""
     try:
-        returned = await _owned_by_job(
-            call,
-            lambda: run_tool_call(function, call.arguments, call.context, middleware=inner),
-        )
+        returned = await _owned_by_job(lambda: run_tool_call(function, call.arguments, call.context, middleware=inner))
     except Exception as error:
         return None, str(error)
     return (tool_value(returned) if isinstance(returned, ToolResult) else returned), None
