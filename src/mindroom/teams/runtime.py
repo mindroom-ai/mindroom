@@ -132,11 +132,11 @@ def continue_team(
     record.member_responses = []
     # The paused notice is not part of the answer; the leader's text starts afresh.
     record.content = None
-    member_requirements = [r for r in record.requirements or () if r.member_agent_id is not None]
-    record.requirements = [r for r in record.requirements or () if r.member_agent_id is None]
+    leader_requirements = [r for r in record.requirements or () if r.member_agent_id is None]
+    record.requirements = leader_requirements
     decisions = _TeamDecisions(approved, denied, external_results)
-    plans = _plan_member_resumes(spec, paused, member_requirements, decisions)
-    leader = decisions.take(None, {r.tool_execution.tool_call_id for r in record.requirements or ()})
+    plans = _plan_member_resumes(spec, paused, decisions)
+    leader = decisions.take(None, {r.tool_execution.tool_call_id for r in leader_requirements})
     decided = decide_requirements(
         record,
         approved=leader.approved,
@@ -257,18 +257,17 @@ class _MemberResume:
     plan: ResumePlan
 
 
-def _plan_member_resumes(
-    spec: TeamSpec,
-    paused: TeamRunRecord,
-    requirements: Sequence[RunRequirement],
-    decisions: _TeamDecisions,
-) -> list[_MemberResume]:
-    """Plan one resume per paused member run, checking every member's decisions before any member runs."""
+def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: _TeamDecisions) -> list[_MemberResume]:
+    """Plan one resume per paused member run, checking every member's decisions before any member runs.
+
+    The paused member runs are the ones the team run's requirements name.
+    """
     members = {member.spec.id: member for member in spec.members}
     embedded = {member.run_id: member for member in paused.member_responses}
     by_run: dict[tuple[str, str], list[RunRequirement]] = {}
-    for requirement in requirements:
-        assert requirement.member_agent_id is not None
+    for requirement in paused.requirements or ():
+        if requirement.member_agent_id is None:
+            continue
         if requirement.member_run_id is None:
             msg = f"Saved member approval of {requirement.member_agent_id!r} has no paused run identity; retry the request"
             raise ValueError(msg)
