@@ -33,7 +33,6 @@ from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime, response_cli_lifetime
 from mindroom.ai_turn_state import AITurnState
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
-from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
@@ -430,11 +429,9 @@ class ResumedAttempt:
 
 @dataclass(frozen=True)
 class ExcludedAttempt:
-    """One attempt whose provider result is excluded from model history."""
+    """One failed attempt whose provider result is excluded from model history."""
 
-    original_status: RunStatus = RunStatus.cancelled
     response_text: str = ""
-    reason: str | None = None
     partial_text: str = ""
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     interrupted_tools: tuple[ToolTraceEntry, ...] = ()
@@ -639,7 +636,7 @@ class SkippedAttempt:
 
 
 BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | SkippedAttempt
-StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | HandledAttempt | SkippedAttempt
+StreamAttemptResolution = CompletedAttempt | PausedAttempt | HandledAttempt | SkippedAttempt
 
 
 @dataclass(frozen=True)
@@ -746,12 +743,12 @@ def _interrupted_run_metadata(
 
 def _settle_excluded_attempt(
     ctx: ResponseTurnContext,
-    adapter: _TurnAdapter,
+    adapter: BlockingTurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: ExcludedAttempt,
 ) -> str:
-    """Record an excluded attempt as the turn's interrupted outcome and return its reply text; a cancellation raises."""
+    """Record a failed attempt as the turn's interrupted outcome and return its reply text."""
     _publish_run_metadata(sinks, resolution.metadata_content)
     run_metadata = _interrupted_run_metadata(ctx, sinks, run)
     run.turn_state.record_interrupted(
@@ -760,7 +757,7 @@ def _settle_excluded_attempt(
         assistant_text=resolution.partial_text,
         completed_tools=list(resolution.completed_tools),
         interrupted_tools=list(resolution.interrupted_tools),
-        original_status=resolution.original_status,
+        original_status=RunStatus.error,
     )
     if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
         adapter.persist_standalone_replay(
@@ -771,12 +768,10 @@ def _settle_excluded_attempt(
                 completed_tools=run.turn_state.completed_tools_for(resolution.completed_tools),
                 interrupted_tools=list(resolution.interrupted_tools),
                 run_metadata=run_metadata,
-                original_status=resolution.original_status,
+                original_status=RunStatus.error,
             ),
         )
         run.standalone_replay_persisted = True
-    if resolution.original_status is RunStatus.cancelled:
-        raise build_cancelled_error(resolution.reason)
     return resolution.response_text
 
 
@@ -1029,9 +1024,8 @@ async def run_blocking_response_turn(
                 continuation = settled
             _raise_continuation_budget_exhausted()
     except asyncio.CancelledError:
-        # The blocking envelope re-records from the recorder's canonical state so
-        # an in-attempt cancellation (recorded above with attempt-local partials)
-        # and an external task cancel converge on the same interrupted turn.
+        # Kept as main behaves: a blocking turn records a cancel from the recorder's state,
+        # a streaming turn from the adapter's live snapshot.
         _record_turn_excluded_fallback(
             ctx,
             adapter,
@@ -1323,10 +1317,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             original_status=RunStatus.error,
                             use_recorder_state=False,
                         )
-                        return
-                    if isinstance(resolution, ExcludedAttempt):
-                        if response_text := _settle_excluded_attempt(ctx, adapter, sinks, run, resolution):
-                            yield adapter.make_text_chunk(response_text)
                         return
                     settle = _settle_completed_attempt(
                         ctx,

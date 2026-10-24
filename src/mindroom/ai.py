@@ -1654,8 +1654,7 @@ async def ai_response(  # noqa: C901
             logger.exception("Error preparing agent", agent=agent_name)
             # A failure before the participation decision stays quiet; an approved turn replies with the error.
             return skip_unapproved_attempt(ctx.participation, reason="preparation_failed") or ExcludedAttempt(
-                RunStatus.error,
-                get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths),
+                response_text=get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths),
             )
         prepared_run = run_context.prepared_run
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
@@ -1693,9 +1692,7 @@ async def ai_response(  # noqa: C901
                 record.tools if record is not None else None,
             )
             return ExcludedAttempt(
-                original_status=RunStatus.error,
                 response_text=get_user_friendly_error_message(error, agent_name, runtime_paths=runtime_paths),
-                reason=str(error),
                 partial_text=_own_assistant_text(record),
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),

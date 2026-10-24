@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import json
 import threading
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import Mock
 
@@ -969,7 +969,7 @@ def test_blocking_errored_attempt_returns_user_text() -> None:
     log = _AdapterLog()
 
     async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> ExcludedAttempt:
-        return ExcludedAttempt(RunStatus.error, "friendly error")
+        return ExcludedAttempt("friendly error")
 
     result = asyncio.run(
         run_blocking_response_turn(
@@ -990,7 +990,7 @@ def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
     recorder = _FakeTurnRecorder(run_metadata=seeded_metadata)
 
     async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> ExcludedAttempt:
-        return ExcludedAttempt(RunStatus.error, "friendly error")
+        return ExcludedAttempt("friendly error")
 
     result = asyncio.run(
         run_blocking_response_turn(
@@ -1015,47 +1015,54 @@ def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
     }
 
 
-def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
-    """A cancelled attempt without recorder persists one standalone replay and raises."""
+def test_blocking_errored_attempt_persists_standalone_replay() -> None:
+    """An errored attempt without recorder persists one standalone replay and returns its text."""
     log = _AdapterLog()
 
     async def _attempt(run: TurnRunState, _c: TurnContinuationRunState) -> ExcludedAttempt:
         run.run_metadata = {"room_id": "!room"}
         return ExcludedAttempt(
-            reason="user stop",
+            "friendly error",
             partial_text="partial",
             completed_tools=(_trace("search"),),
             interrupted_tools=(_trace("browse"),),
             run_id="run-live",
         )
 
-    async def _run() -> None:
-        await run_blocking_response_turn(
+    result = asyncio.run(
+        run_blocking_response_turn(
             _ctx(),
             _blocking_adapter(log, _attempt),
             TurnSinks(),
             continuation=_continuation(),
-        )
+        ),
+    )
 
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(_run())
-
+    assert result == "friendly error"
     assert len(log.persisted) == 1
     snapshot = log.persisted[0]
     assert snapshot.run_id == "run-live"
     assert snapshot.partial_text == "partial"
     assert snapshot.run_metadata == {"room_id": "!room"}
+    assert snapshot.original_status is RunStatus.error
     assert log.finalized == 1
 
 
-def test_blocking_cancelled_attempt_with_recorder_records_twice() -> None:
-    """An in-attempt cancellation records once inline and once from the outer handler."""
+def test_blocking_external_cancel_with_recorder_records_its_synced_state() -> None:
+    """An external cancel of a blocking turn records the recorder's synced partial state."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
 
-    async def _attempt(run: TurnRunState, _c: TurnContinuationRunState) -> ExcludedAttempt:
+    async def _attempt(run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
         run.run_metadata = {"room_id": "!room"}
-        return ExcludedAttempt(RunStatus.cancelled, reason="stop", partial_text="partial")
+        run.turn_state.sync_partial(
+            cast("Any", recorder),
+            run_metadata=run.run_metadata,
+            assistant_text="partial",
+            completed_tools=[_trace("search")],
+            interrupted_tools=[],
+        )
+        raise asyncio.CancelledError
 
     async def _run() -> None:
         await run_blocking_response_turn(
@@ -1068,10 +1075,14 @@ def test_blocking_cancelled_attempt_with_recorder_records_twice() -> None:
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(_run())
 
-    assert len(recorder.interrupted_calls) == 2
-    assert recorder.interrupted_calls[0]["assistant_text"] == "partial"
-    # The outer handler re-records from the recorder's canonical state.
-    assert recorder.interrupted_calls[1]["run_metadata"] == {"room_id": "!room"}
+    assert recorder.interrupted_calls == [
+        {
+            "run_metadata": {"room_id": "!room"},
+            "assistant_text": "partial",
+            "completed_tools": [_trace("search")],
+            "interrupted_tools": [],
+        },
+    ]
     assert log.persisted == []
 
 
@@ -1106,17 +1117,20 @@ def test_blocking_external_cancel_builds_fallback_metadata() -> None:
 
 
 def test_blocking_external_cancel_skips_persist_after_inline_persist() -> None:
-    """The standalone replay is not persisted twice for one cancelled turn."""
+    """A cancel after an errored attempt persisted its replay does not persist a second one."""
     log = _AdapterLog()
 
     async def _attempt(run: TurnRunState, _c: TurnContinuationRunState) -> ExcludedAttempt:
         run.run_metadata = {"room_id": "!room"}
-        return ExcludedAttempt(RunStatus.cancelled, reason="stop")
+        return ExcludedAttempt("friendly error")
+
+    async def _cancel_while_finalizing(_scope: ScopeSessionContext | None) -> None:
+        raise asyncio.CancelledError
 
     async def _run() -> None:
         await run_blocking_response_turn(
             _ctx(),
-            _blocking_adapter(log, _attempt),
+            replace(_blocking_adapter(log, _attempt), finalize_attempt=_cancel_while_finalizing),
             TurnSinks(),
             continuation=_continuation(),
         )
@@ -1373,7 +1387,7 @@ def test_blocking_discarded_empty_run_metadata_stays_out_of_collector() -> None:
                 run_id="run-empty",
                 metadata_content={"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
             )
-        return ExcludedAttempt(RunStatus.error, "friendly error")
+        return ExcludedAttempt("friendly error")
 
     result = asyncio.run(
         run_blocking_response_turn(
@@ -1526,82 +1540,6 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
     assert recorder.completed_calls == []
     assert len(recorder.interrupted_calls) == 1
     assert log.finalized == 1
-
-
-def test_streaming_cancelled_attempt_records_updates_collector_and_raises() -> None:
-    """A cancelled streaming attempt records, publishes metadata, persists, and raises."""
-    log = _AdapterLog()
-    collector: dict[str, Any] = {}
-
-    async def _attempt(
-        run: TurnRunState,
-        _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
-        run.run_metadata = {"room_id": "!room"}
-        yield "partial"
-        yield AttemptResolved(
-            ExcludedAttempt(
-                reason="stop",
-                partial_text="partial",
-                metadata_content={"io.mindroom.ai_run": {"status": "cancelled"}},
-            ),
-        )
-
-    collected: list[str] = []
-
-    async def _run() -> None:
-        async for chunk in stream_response_turn(
-            _ctx(),
-            _streaming_adapter(log, _attempt),
-            TurnSinks(run_metadata_collector=collector),
-            continuation=_continuation(),
-        ):
-            # A comprehension would lose the chunks yielded before the cancel.
-            collected.append(chunk)  # noqa: PERF401
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(_run())
-
-    assert collected == ["partial"]
-    assert collector == {"io.mindroom.ai_run": {"status": "cancelled"}}
-    assert len(log.persisted) == 1
-    assert log.finalized == 1
-
-
-def test_streaming_cancelled_attempt_with_recorder_records_twice() -> None:
-    """An in-attempt stream cancel records inline, then again from the live snapshot."""
-    log = _AdapterLog()
-    recorder = _FakeTurnRecorder()
-    log.snapshot = TurnPartialSnapshot(assistant_text="snapshot partial")
-
-    async def _attempt(
-        run: TurnRunState,
-        _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
-        run.run_metadata = {"room_id": "!room"}
-        yield "partial"
-        yield AttemptResolved(
-            ExcludedAttempt(RunStatus.cancelled, reason="stop", partial_text="attempt partial"),
-        )
-
-    async def _run() -> None:
-        async for _chunk in stream_response_turn(
-            _ctx(),
-            _streaming_adapter(log, _attempt),
-            TurnSinks(turn_recorder=cast("Any", recorder)),
-            continuation=_continuation(),
-        ):
-            pass
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(_run())
-
-    assert len(recorder.interrupted_calls) == 2
-    assert recorder.interrupted_calls[0]["assistant_text"] == "attempt partial"
-    # Unlike blocking, the streaming outer handler re-records from the live
-    # snapshot rather than the recorder's canonical state.
-    assert recorder.interrupted_calls[1]["assistant_text"] == "snapshot partial"
-    assert log.persisted == []
 
 
 def test_streaming_external_cancel_records_snapshot_partials() -> None:
@@ -1934,10 +1872,10 @@ def test_fresh_continuation_saves_count_before_first_approval(streaming: bool) -
 
 @pytest.mark.parametrize(
     "resolution",
-    [HandledAttempt(), ExcludedAttempt(original_status=RunStatus.error), SkippedAttempt(reason="quiet")],
+    [HandledAttempt(), SkippedAttempt(reason="quiet")],
 )
 def test_noncompletion_does_not_publish_completed_attempt(resolution: StreamAttemptResolution) -> None:
-    """Handled errors, excluded runs and quiet turns cannot report typed success."""
+    """Handled errors and quiet turns cannot report typed success."""
     completed: list[CompletedAttempt] = []
 
     async def attempt(

@@ -674,9 +674,7 @@ class _TeamTurn:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
             snapshot = attempt.partial_snapshot()
             return ExcludedAttempt(
-                original_status=RunStatus.error,
                 response_text=self.error_text(error),
-                reason=str(error),
                 partial_text=snapshot.assistant_text,
                 completed_tools=snapshot.completed_tools,
                 interrupted_tools=snapshot.interrupted_tools,
