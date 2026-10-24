@@ -925,7 +925,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         result = await run_tool_call(refused, {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
         assert result == _TEXT_CHAT_REQUIRED_MESSAGE
     create_scope_session_storage_mock.assert_called_once_with(
-        agent_name=AGENT,
         scope=HistoryScope(kind="agent", scope_id=AGENT),
         config=config,
         runtime_paths=runtime_paths,
