@@ -288,7 +288,7 @@ async def test_open_sse_validates_transport_url_off_event_loop(
     validator_thread_ids: list[int] = []
     streams = cast("_TransportStreams", (object(), object()))
 
-    def fake_validate_server_fetch_url(url: str) -> str:
+    def fake_validate_server_fetch_url(url: str, **_kwargs: object) -> str:
         validator_thread_ids.append(threading.get_ident())
         if threading.get_ident() == loop_thread_id:
             msg = "URL validation should not run on the event-loop thread"
@@ -377,13 +377,32 @@ async def test_open_streamable_http_rejects_metadata_transport_url(
 
 
 @pytest.mark.asyncio
-async def test_mcp_http_client_factory_rejects_private_request_url() -> None:
-    """The MCP HTTP client factory should validate redirects and request URLs through server-fetch transport."""
-    async with _server_fetch_mcp_http_client(follow_redirects=False, verify=False, future_sdk_option=True) as client:
+@pytest.mark.parametrize("private_networks", [(), transport_module._PRIVATE_NETWORKS])
+@pytest.mark.parametrize(
+    ("request_url", "reason"),
+    [
+        ("http://127.0.0.1:8000/mcp", "private_address"),
+        ("http://localhost:8000/mcp", "private_hostname"),
+        ("http://169.254.1.1/mcp", "blocked_address"),
+        ("http://169.254.169.254/latest/meta-data/", "metadata_address"),
+    ],
+)
+async def test_mcp_http_client_factory_rejects_unsafe_request_url(
+    private_networks: tuple[object, ...],
+    request_url: str,
+    reason: str,
+) -> None:
+    """The MCP HTTP client validates every request URL, redirects included, even with private networks allowed."""
+    async with _server_fetch_mcp_http_client(
+        follow_redirects=False,
+        verify=False,
+        future_sdk_option=True,
+        private_networks=private_networks,
+    ) as client:
         with pytest.raises(ServerFetchUrlError) as exc_info:
-            await client.get("http://127.0.0.1:8000/mcp")
+            await client.get(request_url)
 
-    assert exc_info.value.reason == "private_address"
+    assert exc_info.value.reason == reason
 
 
 @pytest.mark.asyncio
@@ -462,6 +481,103 @@ async def test_sdk_http_client_dials_only_the_validated_address(
     assert dialed == [("93.184.216.34", 443)]
 
 
+def _internal_url(transport: MCPTransport) -> str:
+    return f"http://internal-mcp:8000/{'sse' if transport == 'sse' else 'mcp'}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+async def test_private_network_server_is_refused_unless_it_opts_in(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport: MCPTransport,
+) -> None:
+    """A cluster-internal hostname that resolves to a private address is refused by default, dialed after opting in."""
+    dialed: list[tuple[str, int]] = []
+
+    async def record_connect(_backend: object, host: str, port: int, *_args: object, **_kwargs: object) -> object:
+        dialed.append((host, port))
+        msg = "connection refused"
+        raise httpcore2.ConnectError(msg)
+
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("10.60.16.5"),
+    )
+    monkeypatch.setattr(AnyIOBackend, "connect_tcp", record_connect)
+    default = build_transport_handle(
+        "demo",
+        MCPServerConfig(transport=transport, url=_internal_url(transport)),
+        _runtime_paths(tmp_path),
+    )
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        async with default.opener():
+            pass
+    assert exc_info.value.reason == "private_address"
+
+    opted_in = build_transport_handle(
+        "demo",
+        MCPServerConfig(transport=transport, url=_internal_url(transport), allow_private_network=True),
+        _runtime_paths(tmp_path),
+    )
+    with pytest.raises(BaseException) as exc_info:  # noqa: PT011 - SSE raises directly, streamable HTTP in a group
+        await _initialize_over(opted_in)
+
+    assert any(isinstance(exc, httpx2.ConnectError) for exc in _nested_exceptions(exc_info.value))
+    assert dialed == [("10.60.16.5", 8000)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+@pytest.mark.parametrize(
+    ("unsafe_address", "reason"),
+    [
+        ("127.0.0.1", "private_address"),
+        ("169.254.1.1", "blocked_address"),
+        ("169.254.169.254", "metadata_address"),
+    ],
+)
+async def test_opted_in_server_still_refuses_loopback_link_local_and_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport: MCPTransport,
+    unsafe_address: str,
+    reason: str,
+) -> None:
+    """`allow_private_network` opens private networks only, at open time and when the SDK dials."""
+    server_config = MCPServerConfig(transport=transport, url=_internal_url(transport), allow_private_network=True)
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo(unsafe_address),
+    )
+    with pytest.raises(ServerFetchUrlError) as open_error:
+        async with build_transport_handle("demo", server_config, _runtime_paths(tmp_path)).opener():
+            pass
+    assert open_error.value.reason == reason
+
+    lookups: list[str] = []
+    dialed: list[str] = []
+
+    def rebinding_getaddrinfo(host: str, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        lookups.append(host)
+        return _addrinfo("10.60.16.5" if len(lookups) == 1 else unsafe_address)
+
+    async def record_connect(_backend: object, host: str, *_args: object, **_kwargs: object) -> object:
+        dialed.append(host)
+        msg = "connection refused"
+        raise httpcore2.ConnectError(msg)
+
+    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", rebinding_getaddrinfo)
+    monkeypatch.setattr(AnyIOBackend, "connect_tcp", record_connect)
+    with pytest.raises(BaseException) as dial_error:  # noqa: PT011 - SSE raises directly, streamable HTTP in a group
+        await _initialize_over(build_transport_handle("demo", server_config, _runtime_paths(tmp_path)))
+
+    errors = [exc for exc in _nested_exceptions(dial_error.value) if isinstance(exc, ServerFetchUrlError)]
+    assert [error.reason for error in errors] == [reason]
+    assert lookups == ["internal-mcp", "internal-mcp"]
+    assert dialed == []
+
+
 @pytest.mark.asyncio
 async def test_streamable_http_401_is_latched_through_the_sdk(
     monkeypatch: pytest.MonkeyPatch,
@@ -472,7 +588,11 @@ async def test_streamable_http_401_is_latched_through_the_sdk(
     def unauthorized(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(401, text="secret provider response", request=request)
 
-    monkeypatch.setattr(transport_module, "ServerFetchAsyncHTTPX2Transport", lambda: httpx2.MockTransport(unauthorized))
+    monkeypatch.setattr(
+        transport_module,
+        "ServerFetchAsyncHTTPX2Transport",
+        lambda **_kwargs: httpx2.MockTransport(unauthorized),
+    )
     handle = build_transport_handle(
         "demo",
         MCPServerConfig(transport="streamable-http", url="https://mcp.example/mcp"),
@@ -498,7 +618,11 @@ async def test_sse_401_is_latched_and_classified_through_the_sdk(
     def unauthorized(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(401, text="secret provider response", request=request)
 
-    monkeypatch.setattr(transport_module, "ServerFetchAsyncHTTPX2Transport", lambda: httpx2.MockTransport(unauthorized))
+    monkeypatch.setattr(
+        transport_module,
+        "ServerFetchAsyncHTTPX2Transport",
+        lambda **_kwargs: httpx2.MockTransport(unauthorized),
+    )
     handle = build_transport_handle(
         "demo",
         MCPServerConfig(transport="sse", url="https://mcp.example/sse"),
@@ -548,7 +672,11 @@ async def test_remote_transports_deliver_results_larger_than_one_mebibyte(
 ) -> None:
     """Tool results are not cut off by the SDK's per-event SSE cap, which 1.x did not have."""
     monkeypatch.setattr(transport_module, "validate_server_fetch_url", lambda url, **_kwargs: url)
-    monkeypatch.setattr(transport_module, "ServerFetchAsyncHTTPX2Transport", httpx2.AsyncHTTPTransport)
+    monkeypatch.setattr(
+        transport_module,
+        "ServerFetchAsyncHTTPX2Transport",
+        lambda **_kwargs: httpx2.AsyncHTTPTransport(),
+    )
     async with _serve_large_result_server(transport) as url:
         handle = build_transport_handle(
             "large",

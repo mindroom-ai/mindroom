@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import ipaddress
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -33,6 +34,13 @@ if TYPE_CHECKING:
     from mindroom.mcp.config import MCPServerConfig, MCPTransport
 
     _RemoteTransportClient = Callable[..., AbstractAsyncContextManager[_TransportStreams]]
+    _IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+# The private networks a server with `allow_private_network` may reach: RFC 1918 and IPv6 unique-local addresses.
+# Server-fetch validation never opens loopback, link-local or cloud metadata addresses through them.
+_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
 
 
 @dataclass(frozen=True)
@@ -82,12 +90,13 @@ def _server_fetch_mcp_http_client(
     timeout: httpx2.Timeout | None = None,
     auth: httpx2.Auth | None = None,
     authorization_tracker: _MCPHTTPAuthorizationTracker | None = None,
+    private_networks: tuple[_IPNetwork, ...] = (),
     **_ignored: object,
 ) -> httpx2.AsyncClient:
     """Create an MCP HTTP client that validates requests, redirects, and dialed addresses."""
     kwargs: dict[str, Any] = {
         "follow_redirects": True,
-        "transport": ServerFetchAsyncHTTPX2Transport(),
+        "transport": ServerFetchAsyncHTTPX2Transport(private_networks=private_networks),
     }
     if timeout is not None:
         kwargs["timeout"] = timeout
@@ -102,8 +111,9 @@ def _server_fetch_mcp_http_client(
 
 def _tracked_mcp_http_client_factory(
     authorization_tracker: _MCPHTTPAuthorizationTracker,
+    private_networks: tuple[_IPNetwork, ...],
 ) -> Callable[..., httpx2.AsyncClient]:
-    """Bind one response-status latch to one deferred remote transport."""
+    """Bind one response-status latch and one server's network policy to one deferred remote transport."""
 
     def factory(
         headers: dict[str, str] | None = None,
@@ -116,6 +126,7 @@ def _tracked_mcp_http_client_factory(
             timeout=timeout,
             auth=auth,
             authorization_tracker=authorization_tracker,
+            private_networks=private_networks,
             **kwargs,
         )
 
@@ -184,7 +195,11 @@ async def _open_remote_transport(
     if server_config.url is None:
         msg = f"{transport} MCP servers require url"
         raise ValueError(msg)
-    url = await asyncio.to_thread(validate_server_fetch_url, server_config.url)
+    url = await asyncio.to_thread(
+        validate_server_fetch_url,
+        server_config.url,
+        private_networks=_server_private_networks(server_config),
+    )
     headers = {
         **_interpolate_mcp_headers(server_config.headers, runtime_paths),
         **(dict(extra_headers) if extra_headers is not None else {}),
@@ -197,6 +212,10 @@ async def _open_remote_transport(
         httpx_client_factory=httpx_client_factory,
     ) as streams:
         yield streams
+
+
+def _server_private_networks(server_config: MCPServerConfig) -> tuple[_IPNetwork, ...]:
+    return _PRIVATE_NETWORKS if server_config.allow_private_network else ()
 
 
 def build_transport_handle(
@@ -218,7 +237,10 @@ def build_transport_handle(
                 runtime_paths,
                 transport="sse",
                 client=sse_client,
-                httpx_client_factory=_tracked_mcp_http_client_factory(authorization_tracker),
+                httpx_client_factory=_tracked_mcp_http_client_factory(
+                    authorization_tracker,
+                    _server_private_networks(server_config),
+                ),
                 extra_headers=extra_headers,
             ),
             authorization_rejected=authorization_tracker.is_rejected,
@@ -232,7 +254,10 @@ def build_transport_handle(
                 runtime_paths,
                 transport="streamable-http",
                 client=_streamable_http_client,
-                httpx_client_factory=_tracked_mcp_http_client_factory(authorization_tracker),
+                httpx_client_factory=_tracked_mcp_http_client_factory(
+                    authorization_tracker,
+                    _server_private_networks(server_config),
+                ),
                 extra_headers=extra_headers,
             ),
             authorization_rejected=authorization_tracker.is_rejected,

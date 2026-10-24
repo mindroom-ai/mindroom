@@ -49,6 +49,7 @@ mcp_servers:
 ```
 
 Remote transports refuse loopback and private-network addresses; run local servers with `stdio` instead.
+A remote server on a private network, such as a cluster-internal service, needs `allow_private_network: true`; loopback, link-local and cloud metadata addresses stay refused.
 
 ### Credentials in Server Config
 
@@ -119,6 +120,7 @@ Without a usable icon, Connections picks one matching the server's name, or a pl
 | `env` | map[string,string] | `{}` | `stdio` environment variables; supports `${ENV_VAR}` |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
 | `headers` | map[string,string] | `{}` | Remote request headers; supports `${ENV_VAR}` |
+| `allow_private_network` | bool | `false` | Let a remote server's URL reach private-network addresses (RFC 1918 or IPv6 unique-local), such as a cluster-internal service; loopback, link-local and cloud metadata addresses stay refused |
 | `auth` | object | `null` | OAuth settings for remote servers; see [OAuth Settings](#oauth-settings) |
 | `tool_prefix` | string | server ID | Prefix for model-visible function names; letters, numbers, and underscores |
 | `include_tools` | list[string] | `[]` | Allowlist of remote tool names |

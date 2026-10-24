@@ -3038,6 +3038,12 @@
           "description": "Remote URL for SSE or streamable HTTP",
           "title": "Url"
         },
+        "allow_private_network": {
+          "default": false,
+          "description": "Let a remote server's URL reach private-network addresses (RFC 1918 or IPv6 unique-local), such as a cluster-internal service; loopback, link-local and cloud metadata addresses stay blocked",
+          "title": "Allow Private Network",
+          "type": "boolean"
+        },
         "headers": {
           "additionalProperties": {
             "type": "string"

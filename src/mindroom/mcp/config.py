@@ -143,6 +143,13 @@ class MCPServerConfig(BaseModel):
         json_schema_extra=dashboard_hint(secret=True),
     )
     url: str | None = Field(default=None, description="Remote URL for SSE or streamable HTTP")
+    allow_private_network: bool = Field(
+        default=False,
+        description=(
+            "Let a remote server's URL reach private-network addresses (RFC 1918 or IPv6 unique-local), such as a "
+            "cluster-internal service; loopback, link-local and cloud metadata addresses stay blocked"
+        ),
+    )
     headers: dict[str, str] = Field(
         default_factory=dict,
         description="HTTP headers for remote transports",
@@ -190,6 +197,9 @@ class MCPServerConfig(BaseModel):
             raise ValueError(msg)
         if self.headers:
             msg = "stdio MCP servers do not allow headers"
+            raise ValueError(msg)
+        if self.allow_private_network:
+            msg = "stdio MCP servers do not allow allow_private_network"
             raise ValueError(msg)
         if self.auth is not None:
             msg = "OAuth-backed MCP servers require remote HTTP transport"
