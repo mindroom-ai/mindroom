@@ -18,7 +18,6 @@ from mindroom.history.runtime import (
     _compact_before_reply,
     _run_scope_compaction_with_lifecycle,
     prepare_scope_history,
-    resolve_agent_preparation_inputs,
     resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
@@ -52,11 +51,13 @@ if TYPE_CHECKING:
 
 def _agent_inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
-    return resolve_agent_preparation_inputs(
-        agent_name="test_agent",
+    return resolve_entity_preparation_inputs(
+        entity_name="test_agent",
         history_settings=config.resolve_entity("test_agent").history_settings,
         config=config,
         static_prompt_tokens=100,
+        active_model_name=None,
+        active_context_window=None,
     )
 
 
@@ -285,6 +286,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     resolved = resolve_entity_preparation_inputs(
         config=config,
         entity_name="test_agent",
+        history_settings=config.resolve_entity("test_agent").history_settings,
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,

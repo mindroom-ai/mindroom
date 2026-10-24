@@ -721,6 +721,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         runtime_paths=runtime_paths,
         config=config,
         team_name=None,
+        history_settings=config.resolve_entity(None).history_settings,
         active_model_name=None,
         active_context_window=None,
     )

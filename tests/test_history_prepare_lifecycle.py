@@ -24,7 +24,7 @@ from mindroom.history.runtime import (
     PreparedScopeHistory,
     prepare_bound_scope_history,
     prepare_scope_history,
-    resolve_agent_preparation_inputs,
+    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -839,11 +839,13 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
         compaction_timeout_seconds=600.0,
     )
     resolved_inputs = replace(
-        resolve_agent_preparation_inputs(
-            agent_name="test_agent",
+        resolve_entity_preparation_inputs(
+            entity_name="test_agent",
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
             static_prompt_tokens=0,
+            active_model_name=None,
+            active_context_window=None,
         ),
         execution_plan=execution_plan,
     )
@@ -926,11 +928,13 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         compaction_timeout_seconds=600.0,
     )
     resolved_inputs = replace(
-        resolve_agent_preparation_inputs(
-            agent_name="test_agent",
+        resolve_entity_preparation_inputs(
+            entity_name="test_agent",
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
             static_prompt_tokens=0,
+            active_model_name=None,
+            active_context_window=None,
         ),
         execution_plan=execution_plan,
     )
@@ -1909,11 +1913,13 @@ async def _prepare_with_reported_usage(
         history_settings=history_settings,
     )
     resolved_inputs = replace(
-        resolve_agent_preparation_inputs(
-            agent_name="test_agent",
+        resolve_entity_preparation_inputs(
+            entity_name="test_agent",
             history_settings=history_settings,
             config=config,
             static_prompt_tokens=0,
+            active_model_name=None,
+            active_context_window=None,
         ),
         execution_plan=_REPORTED_USAGE_PLAN,
     )

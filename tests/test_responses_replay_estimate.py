@@ -101,6 +101,7 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     resolved = resolve_entity_preparation_inputs(
         config=config,
         entity_name="test_agent",
+        history_settings=config.resolve_entity("test_agent").history_settings,
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,
@@ -532,6 +533,7 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
     inputs = resolve_entity_preparation_inputs(
         config=config,
         entity_name="test_agent",
+        history_settings=config.resolve_entity("test_agent").history_settings,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,

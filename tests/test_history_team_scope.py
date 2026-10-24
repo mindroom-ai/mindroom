@@ -145,6 +145,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
             model=built.spec.model,
             runtime_paths=runtime_paths,
             config=config,
+            history_settings=built.history_settings,
             static_prompt_tokens=estimator.estimate("Current prompt"),
             non_prompt_tokens=estimator.non_prompt_tokens(),
             scope_context=scope_context,
@@ -252,6 +253,26 @@ def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
         ("alpha", "Alpha"),
     ]
     assert ad_hoc.spec.max_tool_calls_per_turn == config.defaults.max_tool_calls_per_turn
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("squad_probe")
+async def test_a_team_turn_replays_the_history_its_configured_team_authors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader's request replays the one run the team authors, where the defaults would replay every run."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.")])
+    team.config.teams["squad"].num_history_runs = 1
+    assert team.config.resolve_entity(None).history_settings.policy.mode == "all"
+    past = [_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")]
+    seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=past))
+
+    await team.stream(show_tool_calls=False)
+
+    [request] = team.models["default"].requests
+    replayed = [str(message.content) for message in request.messages if message.from_history]
+    assert replayed == ["past-2 team question", "past-2 team answer"]
 
 
 @pytest.mark.asyncio
@@ -369,6 +390,7 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
             model=None,
             runtime_paths=runtime_paths,
             config=config,
+            history_settings=config.resolve_entity(None).history_settings,
             scope_context=scope_context,
             static_prompt_tokens=5,
             non_prompt_tokens=2,

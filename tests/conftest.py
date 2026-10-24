@@ -111,7 +111,7 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_agent_preparation_inputs,
+    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -528,11 +528,10 @@ async def prepare_history_for_run_for_test(
     static_token_estimator = build_static_token_estimator(Message(role="system", content=""), (), frozenset())
     if static_prompt_tokens is None:
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
-    resolved_inputs = resolve_agent_preparation_inputs(
-        agent_name=agent_name,
-        history_settings=history_settings
-        or config.resolve_entity(agent_name if agent_name in config.agents else None).history_settings,
+    resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
+        entity_name=agent_name,
+        history_settings=history_settings or config.resolve_entity(agent_name).history_settings,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,

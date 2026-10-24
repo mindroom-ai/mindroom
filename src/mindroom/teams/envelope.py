@@ -234,6 +234,7 @@ async def prepare_materialized_team_execution(
         runtime_paths=runtime_paths,
         config=config,
         entity_name=configured_team_name,
+        history_settings=built.history_settings,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
         response_sender_id=response_sender_id,

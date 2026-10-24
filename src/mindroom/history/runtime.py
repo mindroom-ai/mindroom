@@ -771,6 +771,7 @@ async def prepare_bound_scope_history(
     model: ModelProvider | None,
     runtime_paths: RuntimePaths,
     config: Config,
+    history_settings: ResolvedHistorySettings,
     static_prompt_tokens: int,
     non_prompt_tokens: int,
     scope_context: ScopeSessionContext | None = None,
@@ -783,7 +784,8 @@ async def prepare_bound_scope_history(
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run.
 
-    ``model`` is the leader's provider, whose native compaction the scope may use.
+    ``model`` is the leader's provider, whose native compaction the scope may use, and ``history_settings`` the built
+    team's, which its replay plan follows. ``team_name`` is the configured team, or None for an ad hoc one.
     """
     if scope_context is not None:
         # A team without a named member has no history, whether or not its scope is open.
@@ -794,7 +796,8 @@ async def prepare_bound_scope_history(
         has_scope = resolve_bound_team_scope(member_names=member_names, config=config, team_name=team_name) is not None
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
-        entity_name=team_name if team_name in config.teams else None,
+        entity_name=team_name,
+        history_settings=history_settings,
         static_prompt_tokens=static_prompt_tokens,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
@@ -818,14 +821,14 @@ def resolve_entity_preparation_inputs(
     *,
     config: Config,
     entity_name: str | None,
+    history_settings: ResolvedHistorySettings,
     static_prompt_tokens: int,
     active_model_name: str | None,
     active_context_window: int | None,
-    history_settings: ResolvedHistorySettings | None = None,
 ) -> HistoryPreparationInputs:
-    """Resolve history settings, compaction config, runtime model, and plan for one agent or team scope.
+    """Resolve the compaction config, runtime model, and plan for one agent or team scope.
 
-    ``history_settings`` replaces the entity's authored settings, for an agent that is not configured.
+    ``history_settings`` are the ones the entity's build resolved, which the scope's replay follows.
     """
     resolved_entity = config.resolve_entity(entity_name)
     runtime_model = config.resolve_runtime_model(
@@ -834,7 +837,7 @@ def resolve_entity_preparation_inputs(
         active_context_window=active_context_window,
     )
     return HistoryPreparationInputs(
-        history_settings=history_settings or resolved_entity.history_settings,
+        history_settings=history_settings,
         compaction_config=resolved_entity.compaction_config,
         has_authored_compaction_config=resolved_entity.has_authored_compaction_config,
         active_model_name=runtime_model.model_name,
@@ -847,26 +850,6 @@ def resolve_entity_preparation_inputs(
             active_context_window=runtime_model.context_window,
             static_prompt_tokens=static_prompt_tokens,
         ),
-    )
-
-
-def resolve_agent_preparation_inputs(
-    *,
-    agent_name: str,
-    history_settings: ResolvedHistorySettings,
-    config: Config,
-    static_prompt_tokens: int,
-    active_model_name: str | None = None,
-    active_context_window: int | None = None,
-) -> HistoryPreparationInputs:
-    """Resolve every history-preparation input for one agent run under the history settings its build resolved."""
-    return resolve_entity_preparation_inputs(
-        config=config,
-        entity_name=agent_name if agent_name in config.agents else None,
-        static_prompt_tokens=static_prompt_tokens,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-        history_settings=history_settings,
     )
 
 

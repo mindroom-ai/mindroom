@@ -20,7 +20,7 @@ from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
-    resolve_agent_preparation_inputs,
+    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import _with_scope_state
@@ -69,11 +69,13 @@ def _no_provider_environment() -> Iterator[None]:
 
 def _inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
-    return resolve_agent_preparation_inputs(
-        agent_name="test_agent",
+    return resolve_entity_preparation_inputs(
+        entity_name="test_agent",
         history_settings=config.resolve_entity("test_agent").history_settings,
         config=config,
         static_prompt_tokens=100,
+        active_model_name=None,
+        active_context_window=None,
     )
 
 
@@ -593,6 +595,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         member_names=["test_agent"],
         model=leader,
         team_name="team",
+        history_settings=config.resolve_entity("team").history_settings,
         config=config,
         runtime_paths=paths,
         scope_context=ScopeSessionContext(HistoryScope(kind="team", scope_id="team"), db, session, "session"),
