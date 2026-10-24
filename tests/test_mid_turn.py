@@ -110,7 +110,7 @@ async def _resume_turn(
             approved=(),
             denied={},
             external_results=external_results,
-            ctx=context(run_id=paused.run_id),
+            context=lambda run_id: context(run_id=run_id),
             hooks=_NOTICE_HOOKS,
             persist=None,
             request_template=EMPTY_REQUEST,

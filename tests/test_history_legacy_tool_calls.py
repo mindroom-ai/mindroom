@@ -239,7 +239,7 @@ async def test_a_resumed_legacy_run_is_stored_in_the_current_shape() -> None:
             approved=[approved],
             denied={},
             external_results={},
-            ctx=context(),
+            context=lambda run_id: context(run_id=run_id),
             hooks=NO_HOOKS,
             persist=None,
             request_template=EMPTY_REQUEST,

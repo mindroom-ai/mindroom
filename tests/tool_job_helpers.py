@@ -453,7 +453,7 @@ async def resume_job_turn(
         approved=approved,
         denied={},
         external_results={},
-        ctx=RunContext(run_id=paused.run_id, session=session),
+        context=lambda run_id: RunContext(run_id=run_id, session=session),
         hooks=hooks,
         persist=persist,
         request_template=EMPTY_REQUEST,

@@ -105,8 +105,8 @@ def resume_from_session(
         external_results={
             call_id: result for (member, call_id), result in decisions.external_results.items() if member is None
         },
-        ctx=RunContext(
-            run_id=paused.run_id,
+        context=lambda run_id: RunContext(
+            run_id=run_id,
             user_id=user_id,
             metadata=deepcopy(paused.metadata),
             session=session,

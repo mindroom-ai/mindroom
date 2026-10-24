@@ -89,7 +89,7 @@ async def test_a_failed_resume_keeps_its_error_and_runs_the_approved_tool_once(t
                 approved=[approved],
                 denied={},
                 external_results={},
-                ctx=context(),
+                context=lambda run_id: context(run_id=run_id),
                 hooks=NO_HOOKS,
                 persist=persist,
                 request_template=EMPTY_REQUEST,

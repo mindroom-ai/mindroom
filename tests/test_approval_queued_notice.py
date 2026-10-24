@@ -112,7 +112,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
                     approved=approved,
                     denied={},
                     external_results={},
-                    ctx=context(),
+                    context=lambda run_id: context(run_id=run_id),
                     hooks=_hooks(),
                     persist=None,
                     request_template=EMPTY_REQUEST,

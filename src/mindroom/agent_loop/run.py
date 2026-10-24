@@ -113,14 +113,15 @@ def resume_agent(
     approved: Sequence[ApprovedCall],
     denied: Mapping[str, str | None],
     external_results: Mapping[str, str],
-    ctx: RunContext,
+    context: Callable[[str], RunContext],
     hooks: LoopHooks,
     persist: Persist[RunRecord] | None,
     request_template: ModelRequest,
 ) -> AsyncIterator[RunEvent]:
     """Resume a paused run with the decisions on exactly the calls it waits for, then continue its loop.
 
-    ``messages`` is the resume request the history subsystem built from ``paused``. Every call the record waits for
+    ``messages`` is the resume request the history subsystem built from ``paused``, and ``context`` returns the
+    context of the run with a given id, which the resume calls with ``paused``'s. Every call the record waits for
     must be covered once: a confirmation by one approved call whose name and argument digest match or by a denial,
     an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
     ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
@@ -133,7 +134,7 @@ def resume_agent(
         spec,
         plan,
         messages,
-        ctx=ctx,
+        context=context,
         hooks=hooks,
         persist=persist,
         request_template=request_template,
@@ -171,20 +172,20 @@ def resume_planned(
     plan: ResumePlan,
     messages: list[Message],
     *,
-    ctx: RunContext,
+    context: Callable[[str], RunContext],
     hooks: LoopHooks,
     persist: Persist[RunRecord] | None,
     request_template: ModelRequest,
 ) -> AsyncIterator[RunEvent]:
     """Run a planned resume: answer the decided calls, then continue the loop over ``messages``.
 
-    The requests stream (``resume_request_template``).
+    The run's context is ``context`` of the planned record's run id. The requests stream (``resume_request_template``).
     """
     return drive_run(
         spec,
         plan.record,
         messages,
-        ctx=ctx,
+        ctx=context(plan.record.run_id),
         hooks=hooks,
         persist=persist,
         template=resume_request_template(request_template),
