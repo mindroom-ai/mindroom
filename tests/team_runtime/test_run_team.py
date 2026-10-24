@@ -22,7 +22,7 @@ from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageR
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
-from mindroom.teams.runtime import MemberEvent, run_team, team_paused_content, team_usage
+from mindroom.teams.runtime import MemberEvent, team_paused_content, team_usage
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
@@ -39,6 +39,7 @@ from tests.team_runtime.squad import (
     run_context,
     scripted,
     squad,
+    start_team,
 )
 
 if TYPE_CHECKING:
@@ -116,7 +117,7 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
             yield event
 
     events, record = await collect(
-        noting_the_store(run_team(squad(leader, writer, checker), prompt(team_row), ctx=ctx, persist=store)),
+        noting_the_store(start_team(squad(leader, writer, checker), prompt(team_row), ctx=ctx, persist=store)),
     )
 
     assert comparable(record.to_dict()) == comparable(team_row)
@@ -167,7 +168,7 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
 
     with capture_logs() as logs:
         _, record = await collect(
-            run_team(squad(leader, scripted("writer-model"), checker), prompt(team_row), ctx=ctx, persist=store),
+            start_team(squad(leader, scripted("writer-model"), checker), prompt(team_row), ctx=ctx, persist=store),
         )
 
     assert comparable(record.to_dict()) == comparable(team_row)
@@ -202,7 +203,7 @@ async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
     store = Store()
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt(team_row),
             ctx=run_context("team-paused", SQUAD, golden_metadata(team_row)),
@@ -243,7 +244,7 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
     store = Store()
 
     events, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt(team_row),
             ctx=run_context("panel-completed", PANEL, golden_metadata(team_row)),
@@ -290,7 +291,7 @@ async def test_an_unknown_member_id_answers_the_leader_with_agno_s_roster_notice
     store = Store()
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -322,7 +323,7 @@ async def test_a_collaborate_member_that_pauses_adds_agno_s_notice_in_its_place_
     store = Store()
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -353,7 +354,7 @@ async def test_a_leader_level_confirmation_pauses_the_team_without_member_fields
     store = Store()
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -391,7 +392,7 @@ async def test_a_member_s_external_call_pauses_the_team_with_the_member_s_raw_ca
     store = Store()
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -431,7 +432,7 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
 
     async def consume() -> None:
         try:
-            async for _ in run_team(
+            async for _ in start_team(
                 team,
                 prompt({"messages": [{"role": "user", "content": "hi"}]}),
                 ctx=run_context("r", SQUAD),
@@ -508,7 +509,7 @@ async def test_a_blocking_collaborate_run_gives_the_leader_agno_s_labeled_member
     )
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -573,7 +574,7 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
     store = Store()
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -604,7 +605,7 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
     store = Store()
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -648,7 +649,7 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_del
     )
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -671,7 +672,7 @@ async def test_every_member_request_streams_exactly_when_the_team_turn_does(mode
     team = squad(leader, writer, checker, mode=mode, checker_toolkits=())
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
@@ -721,7 +722,7 @@ async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_withou
     store = Store()
 
     _, record = await collect(
-        run_team(
+        start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),

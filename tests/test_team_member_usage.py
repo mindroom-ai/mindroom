@@ -20,12 +20,11 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.store import persist_to
-from mindroom.teams.runtime import continue_team, run_team
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import gated, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
-from tests.team_runtime.squad import approval, collect, scripted
+from tests.team_runtime.squad import approval, collect, resume_team, scripted, start_team
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -81,7 +80,7 @@ class _Squad:
     async def run(self) -> TeamRunRecord:
         """Run the team to its end and return the stored team record."""
         _, record = await collect(
-            run_team(self.spec, _GO, ctx=self.ctx(), persist=persist_to(self.store, self.session)),
+            start_team(self.spec, _GO, ctx=self.ctx(), persist=persist_to(self.store, self.session)),
         )
         return record
 
@@ -164,7 +163,7 @@ async def test_stopped_team_member_keeps_its_usage(tmp_path: Path, collaborate: 
     )
 
     await squad.run_until_stopped(
-        run_team(squad.spec, _GO, ctx=squad.ctx(), persist=persist_to(squad.store, squad.session)),
+        start_team(squad.spec, _GO, ctx=squad.ctx(), persist=persist_to(squad.store, squad.session)),
     )
 
     assert squad.model_tokens() == {"leader-model": 10, "member-model": 1100}
@@ -218,7 +217,7 @@ async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path) -> 
     assert isinstance(stored, TeamRunRecord)
 
     await squad.run_until_stopped(
-        continue_team(
+        resume_team(
             squad.spec,
             stored,
             _GO,

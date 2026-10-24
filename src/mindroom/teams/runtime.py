@@ -15,7 +15,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
 from mindroom.agent_loop.run import (
     Persist,
     ResumePlan,
@@ -47,6 +46,7 @@ from mindroom.tool_system.context_bound_streams import callback_event_stream, cl
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
+    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, ReasoningDelta, ToolSpec
@@ -79,9 +79,9 @@ def run_team(
     run_input: Sequence[Message],
     *,
     ctx: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[AnyRunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    hooks: LoopHooks,
+    persist: Persist[AnyRunRecord],
+    request_template: ModelRequest,
 ) -> AsyncIterator[TeamRunEvent]:
     """Run one team turn: the leader's system message, then ``run_input`` as the history subsystem built it.
 
@@ -111,13 +111,13 @@ def continue_team(
     paused: TeamRunRecord,
     messages: list[Message],
     *,
-    approved: Mapping[TeamCallKey, ApprovedCall] = {},
-    denied: Mapping[TeamCallKey, str | None] = {},
-    external_results: Mapping[TeamCallKey, str] = {},
+    approved: Mapping[TeamCallKey, ApprovedCall],
+    denied: Mapping[TeamCallKey, str | None],
+    external_results: Mapping[TeamCallKey, str],
     ctx: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[AnyRunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    hooks: LoopHooks,
+    persist: Persist[AnyRunRecord],
+    request_template: ModelRequest,
 ) -> AsyncIterator[TeamRunEvent]:
     """Resume a paused team run: its paused members with the decisions on their calls, then the leader.
 
@@ -383,7 +383,7 @@ class _MemberRuns:
     record: TeamRunRecord
     ctx: RunContext
     emit: Emit
-    persist: Persist[AnyRunRecord] | None
+    persist: Persist[AnyRunRecord]
     stream: bool
 
     async def run(self, member: TeamMember, task: str) -> RunRecord:
@@ -427,8 +427,7 @@ class _MemberRuns:
             self.record.ended_member_runs[run_ids.index(record.run_id)] = record
         else:
             self.record.ended_member_runs.append(record)
-        if self.persist is not None:
-            await self.persist(record)
+        await self.persist(record)
 
     async def _finish(self, member: TeamMember, run_id: str, stream: AsyncIterator[RunEvent]) -> RunRecord:
         """Forward the member's events and return the terminal record its loop stored however it ended.
@@ -460,7 +459,7 @@ async def _drive_team(
     *,
     ctx: RunContext,
     hooks: LoopHooks,
-    persist: Persist[AnyRunRecord] | None,
+    persist: Persist[AnyRunRecord],
     template: ModelRequest,
     entry: Callable[[_MemberRuns], Awaitable[None]] | None = None,
     resumed: Sequence[RunRequirement] | None = None,
@@ -480,7 +479,10 @@ async def _drive_team(
             prepare_run_tools(leader),
             ctx=ctx,
             hooks=hooks,
-            persist=persist,
+            # The leader's loop stores only the team record. A store of any run is a store of team records, but ty
+            # infers the loop's record type as the union of both arguments', so the cast names the team record that
+            # ``pause_content`` takes.
+            persist=cast("Persist[TeamRunRecord]", persist),
             template=template,
             entry=None if entry is None else lambda: entry(members),
             resumed=resumed,

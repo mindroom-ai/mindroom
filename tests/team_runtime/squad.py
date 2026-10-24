@@ -23,17 +23,19 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import TeamRunRecord
+from mindroom.teams.runtime import continue_team, run_team
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
 from tests.llm.agno_dict_helpers import expected_run_dict
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.agent_loop.run import ApprovedCall, Persist
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRecord
-    from mindroom.teams.runtime import TeamRunEvent
+    from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
 STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage"
@@ -187,6 +189,50 @@ class Store:
     def statuses(self) -> list[tuple[str, str]]:
         """Return ``(owner id, status)`` per stored record, members by agent id and the team by team id."""
         return [(record.get("agent_id") or record["team_id"], record["status"]) for record in self.records]
+
+
+async def no_store(record: AnyRunRecord) -> None:
+    """Store nothing: the persist callback of a run whose stored rows the test does not read."""
+    del record
+
+
+def start_team(
+    team: TeamSpec,
+    run_input: Sequence[Message],
+    *,
+    ctx: RunContext,
+    persist: Persist[AnyRunRecord] = no_store,
+    request_template: ModelRequest = EMPTY_REQUEST,
+) -> AsyncIterator[TeamRunEvent]:
+    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store."""
+    return run_team(team, run_input, ctx=ctx, hooks=NO_HOOKS, persist=persist, request_template=request_template)
+
+
+def resume_team(
+    team: TeamSpec,
+    paused: TeamRunRecord,
+    messages: list[Message],
+    *,
+    ctx: RunContext,
+    approved: Mapping[TeamCallKey, ApprovedCall] = {},
+    denied: Mapping[TeamCallKey, str | None] = {},
+    external_results: Mapping[TeamCallKey, str] = {},
+    persist: Persist[AnyRunRecord] = no_store,
+    request_template: ModelRequest = EMPTY_REQUEST,
+) -> AsyncIterator[TeamRunEvent]:
+    """Resume ``paused`` (``continue_team``) with the test's decisions under no hooks, storing nothing unless asked."""
+    return continue_team(
+        team,
+        paused,
+        messages,
+        approved=approved,
+        denied=denied,
+        external_results=external_results,
+        ctx=ctx,
+        hooks=NO_HOOKS,
+        persist=persist,
+        request_template=request_template,
+    )
 
 
 async def collect(stream: AsyncIterator[TeamRunEvent]) -> tuple[list[TeamRunEvent], TeamRunRecord]:
