@@ -26,15 +26,15 @@ def _ready_receipt(result: ToolResult) -> dict[str, Any] | None:
     return receipt if isinstance(receipt, dict) and receipt.get("view_status") == "ready" else None
 
 
-def _retain_tool_media(result: object) -> object:
+def _retain_tool_media(result: ToolResult, context: ToolRuntimeContext) -> ToolResult:
     """Keep delivered bytes for reuse; never resolve paths supplied by a worker."""
-    context = get_tool_runtime_context()
-    if not isinstance(result, ToolResult) or not result.images or context is None or context.storage_path is None:
+    images = result.images or []
+    if context.storage_path is None or len(images) != 1:
         return result
-    metadata = _ready_receipt(result) if len(result.images) == 1 else None
+    metadata = _ready_receipt(result)
     if metadata is None or metadata.get("attachment_id"):
         return result
-    image = result.images[0]
+    image = images[0]
     if not isinstance(image.content, bytes) or image.mime_type not in {"image/png", "image/jpeg"}:
         return result
     attachment_id = f"att_{uuid4().hex[:16]}"
@@ -68,11 +68,9 @@ def _active_model_omits_images(context: ToolRuntimeContext) -> bool:
     return "image" in model_capabilities(config, context.runtime_paths, model_name).omitted_media
 
 
-def _image_marked_unsupported(result: object, context: ToolRuntimeContext) -> object:
+def _image_marked_unsupported(result: ToolResult, context: ToolRuntimeContext) -> ToolResult:
     """Turn a ready image view into an explicit unsupported result when the active model cannot see it."""
-    if not isinstance(result, ToolResult) or not result.images or not _active_model_omits_images(context):
-        return result
-    receipt = _ready_receipt(result)
+    receipt = _ready_receipt(result) if _active_model_omits_images(context) else None
     if receipt is None:
         return result
     receipt["view_status"] = "unsupported"
@@ -83,6 +81,6 @@ def _image_marked_unsupported(result: object, context: ToolRuntimeContext) -> ob
 def finalize_tool_media(result: object) -> object:
     """Retain artifacts before reporting a known model-adapter limitation."""
     context = get_tool_runtime_context()
-    if context is None:
+    if context is None or not isinstance(result, ToolResult) or not result.images:
         return result
-    return _image_marked_unsupported(_retain_tool_media(result), context)
+    return _image_marked_unsupported(_retain_tool_media(result, context), context)
