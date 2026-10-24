@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import threading
+from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno reads tool annotations at runtime.
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -48,6 +49,7 @@ from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_tool_hooks import _tool_runtime_context
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.api.connection_agents import AgentToolContext
@@ -1322,6 +1324,39 @@ async def test_a_tool_image_reaches_the_gateway_client_as_a_reference_beside_the
     assert await _invoke_mcp_echo(context, monkeypatch, planned) == {
         "result": {"content": "captured", "attachments": [{"kind": "image", "mime_type": "image/png"}]},
     }
+
+
+def _sync_stream() -> Iterator[str]:
+    """Stream a result in parts."""
+    yield "first "
+    yield "second"
+
+
+async def _async_stream() -> AsyncIterator[str]:
+    """Stream a result in parts."""
+    yield "first "
+    yield "second"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [_sync_stream, _async_stream])
+async def test_a_streaming_tool_runs_through_the_gateway(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: Callable[[], object],
+) -> None:
+    """A tool that streams its result runs to the end of its stream under the selection check at its entrypoint."""
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[stream]))
+
+    result = await gateway.invoke_tool(
+        context,
+        toolkit="calculator",
+        function=stream.__name__,
+        arguments={},
+        require_current_config=lambda: None,
+    )
+
+    assert result == {"result": "first second"}
 
 
 @pytest.mark.asyncio

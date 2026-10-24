@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import inspect
 import json
 from dataclasses import dataclass, field, replace
 from threading import Event
@@ -815,10 +814,6 @@ class ScriptToolBroker:
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
         execution_identity = _validate_resolved_authority(run, context, worker_authority)
         function = _toolkit_function(toolkit, call.grant.function_name)
-        if inspect.isgeneratorfunction(function.entrypoint) or inspect.isasyncgenfunction(function.entrypoint):
-            self._close_rejected_toolkit(toolkit)
-            msg = "Generator tool entrypoints are not supported for background scripts."
-            raise ScriptCapabilityError(msg)
         return _PreparedExecution(
             context=context,
             correlation_id=correlation_id,
