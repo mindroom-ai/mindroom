@@ -20,6 +20,7 @@ from mindroom.providers.anthropic.repairs import (
     with_replay_safe_tool_search_results,
     with_supported_inline_media,
     without_replayed_citations,
+    without_unavailable_tool_references,
 )
 from mindroom.providers.cache_ladder import (
     MAX_CACHE_MARKERS,
@@ -93,20 +94,28 @@ def _with_prompt_cache_ladder(body: dict[str, Any], cache_control: dict[str, str
     if marker_budget <= 0:
         return body
     prepared = dict(body)
-    messages = prepared["messages"]
-    if messages:
-        marked_messages, markers_added = mark_message_cache_rungs(
-            messages,
-            cache_control,
-            min(MESSAGE_RUNG_COUNT, marker_budget),
-        )
-        prepared["messages"] = marked_messages
-        marker_budget -= markers_added
+    prepared["messages"], markers_added = mark_message_cache_rungs(
+        body["messages"],
+        cache_control,
+        min(MESSAGE_RUNG_COUNT, marker_budget),
+    )
+    marker_budget -= markers_added
     if marker_budget > 0:
         marked_tools, tools_marked = mark_last_tool(prepared.get("tools"), cache_control)
         if tools_marked:
             prepared["tools"] = marked_tools
     return prepared
+
+
+def _with_system_prompt(body: dict[str, Any], system: str, cache_control: dict[str, str] | None) -> dict[str, Any]:
+    """Send the conversation's system text as one block, marked when the model caches its prompt.
+
+    Without system text, a ``system`` the raw request overrides set goes as authored.
+    """
+    if not system:
+        return body
+    marker = {} if cache_control is None else {"cache_control": dict(cache_control)}
+    return {**body, "system": [{"text": system, "type": "text", **marker}]}
 
 
 def _with_shared_system_prefix(body: dict[str, Any]) -> dict[str, Any]:
@@ -145,69 +154,6 @@ def _with_deferred_tool_search(body: dict[str, Any], deferred_tool_names: frozen
     return {**body, "tools": [{"type": TOOL_SEARCH_TOOL_TYPE, "name": TOOL_SEARCH_TOOL_NAME}, *kept, *deferred]}
 
 
-def _request_tool_names(body: dict[str, Any]) -> frozenset[str]:
-    return frozenset(
-        name
-        for tool in body.get("tools") or []
-        if (tool_dict := as_dict(tool)) is not None and isinstance(name := tool_dict.get("name"), str)
-    )
-
-
-def _search_result_with_available_references(
-    block: dict[str, Any],
-    available: frozenset[str],
-) -> dict[str, Any] | None:
-    """Return one search result without references to unavailable tools, or None when all are available."""
-    result = as_dict(block.get("content"))
-    references = result.get("tool_references") if result is not None else None
-    if result is None or not isinstance(references, list):
-        return None
-    kept = [
-        reference
-        for reference in references
-        if (reference_dict := as_dict(reference)) is not None and reference_dict.get("tool_name") in available
-    ]
-    if len(kept) == len(references):
-        return None
-    return {**block, "content": {**result, "tool_references": kept}}
-
-
-def _content_without_unavailable_references(content: list[Any], available: frozenset[str]) -> list[Any] | None:
-    """Return one turn's blocks with stale search references removed, or None when nothing changed."""
-    prepared: list[Any] | None = None
-    for index, block in enumerate(content):
-        block_dict = as_dict(block)
-        if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
-            continue
-        filtered = _search_result_with_available_references(block_dict, available)
-        if filtered is None:
-            continue
-        if prepared is None:
-            prepared = list(content)
-        prepared[index] = filtered
-    return prepared
-
-
-def _without_unavailable_tool_references(body: dict[str, Any]) -> dict[str, Any]:
-    """Drop replayed tool-search references to tools absent from this request.
-
-    A search result can reference tools a later request no longer offers, which Claude rejects. A search left
-    without references stays as an empty result, like a search that matched nothing, so the signed thinking
-    around it is not moved.
-    """
-    messages = body["messages"]
-    available = _request_tool_names(body)
-    prepared_messages: list[Any] | None = None
-    for message_index, message in enumerate(messages):
-        prepared_content = _content_without_unavailable_references(message["content"], available)
-        if prepared_content is None:
-            continue
-        if prepared_messages is None:
-            prepared_messages = list(messages)
-        prepared_messages[message_index] = {**message, "content": prepared_content}
-    return body if prepared_messages is None else {**body, "messages": prepared_messages}
-
-
 def _with_tool_choice(body: dict[str, Any], tool_choice: ToolChoice | None) -> dict[str, Any]:
     """Turn tool selection off for a ``"none"`` request that offers tools; the API rejects a choice without them.
 
@@ -226,6 +172,7 @@ def _with_tool_choice(body: dict[str, Any], tool_choice: ToolChoice | None) -> d
 def prepare_request_body(
     body: dict[str, Any],
     *,
+    system: str,
     route: ClaudeRouteKind,
     deferred_tool_names: frozenset[str],
     tool_choice: ToolChoice | None,
@@ -234,12 +181,12 @@ def prepare_request_body(
 ) -> dict[str, Any]:
     """Return the request body as it goes on the wire.
 
-    ``body`` is the request the adapter built around ``format_claude_messages``. Repairs come first, then the
-    deferred tool search, the tool choice, and finally the cache breakpoints when the model caches its prompt.
-    The input body is never mutated.
+    ``body`` is the request the adapter built around ``format_claude_messages``, and ``system`` is that
+    conversation's system text. Repairs come first, then the deferred tool search, the tool choice, the system
+    prompt, and finally the cache breakpoints when the model caches its prompt. The input body is never mutated.
     """
     prepared = with_replay_safe_tool_search_results(body)
-    prepared = _without_unavailable_tool_references(prepared)
+    prepared = without_unavailable_tool_references(prepared)
     prepared = without_replayed_citations(prepared)
     prepared = with_leading_tool_results(prepared)
     prepared = with_supported_inline_media(
@@ -249,8 +196,9 @@ def prepare_request_body(
     )
     prepared = _with_deferred_tool_search(prepared, deferred_tool_names)
     prepared = _with_tool_choice(prepared, tool_choice)
-    if cache_system_prompt:
-        cache_control = prompt_cache_control(extended_cache_time=extended_cache_time)
+    cache_control = prompt_cache_control(extended_cache_time=extended_cache_time) if cache_system_prompt else None
+    prepared = _with_system_prompt(prepared, system, cache_control)
+    if cache_control is not None:
         prepared = _with_shared_system_prefix(prepared)
         prepared = _with_prompt_cache_ladder(prepared, cache_control)
     return prepared

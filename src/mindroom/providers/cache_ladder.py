@@ -48,11 +48,6 @@ def has_cache_marker(block: object) -> bool:
     return block_dict is not None and block_dict.get("cache_control") is not None
 
 
-def _is_transient_context_block(block: object) -> bool:
-    block_dict = as_dict(block)
-    return block_dict is not None and block_dict.get("type") == "text" and is_transient_context(block_dict.get("text"))
-
-
 def _is_markable_block(block: object) -> bool:
     """Return whether a wire-format content block may carry cache_control."""
     block_dict = as_dict(block)
@@ -64,7 +59,7 @@ def _is_markable_block(block: object) -> bool:
     if block_type not in _MARKABLE_BLOCK_TYPES:
         return False
     if block_type == "text":
-        return bool(block_dict.get("text")) and not _is_transient_context_block(block)
+        return bool(block_dict.get("text")) and not is_transient_context(block_dict.get("text"))
     if block_type == "tool_result":
         return bool(block_dict.get("content"))
     return True
@@ -100,13 +95,9 @@ def mark_message_cache_rungs(
                 break
             if not _is_markable_block(block):
                 continue
-            marked_block = dict(as_dict(block) or {})
-            marked_block["cache_control"] = dict(cache_control)
             marked_content = list(content)
-            marked_content[block_index] = marked_block
-            marked_message = dict(message_dict)
-            marked_message["content"] = marked_content
-            marked_messages[message_index] = marked_message
+            marked_content[block_index] = {**block, "cache_control": dict(cache_control)}
+            marked_messages[message_index] = {**message_dict, "content": marked_content}
             rungs_occupied += 1
             markers_added += 1
             break
@@ -132,9 +123,7 @@ def mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object
         if tool_dict is None or has_cache_marker(tool_dict):
             return tools, 0
         marked_tools = list(tools)
-        marked_tool = dict(tool_dict)
-        marked_tool["cache_control"] = dict(cache_control)
-        marked_tools[tool_index] = marked_tool
+        marked_tools[tool_index] = {**tool_dict, "cache_control": dict(cache_control)}
         return marked_tools, 1
     return tools, 0
 
@@ -142,7 +131,7 @@ def mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object
 def split_shared_system_prefix(system: list[Any]) -> list[Any]:
     """Move a marked first system text block's cache marker to the shared instructions.
 
-    The session-context suffix becomes a separate unmarked block, so dates and learning can change without
+    The session-context suffix becomes a separate unmarked block, so the session context can change without
     invalidating the shared prefix. Returns the input list unchanged when there is no marked boundary to split.
     """
     if not system:

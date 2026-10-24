@@ -62,7 +62,6 @@ from mindroom.providers.anthropic.native_compaction import (
     native_compaction_supported,
     native_replay_messages_for_route,
     record_native_checkpoint_on,
-    reject_paused_compaction,
     request_uses_native_checkpoint,
     uses_compaction_edit,
 )
@@ -75,7 +74,6 @@ from mindroom.providers.anthropic.settings import (
 )
 from mindroom.providers.anthropic.wire import (
     assistant_message_from_response,
-    build_system_blocks,
     format_claude_messages,
     format_claude_tools,
     inline_url_media,
@@ -107,19 +105,18 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message
-    from mindroom.llm.provider import NativeHistoryRoute, StopReason
+    from mindroom.llm.provider import NativeHistoryRoute
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
 logger = get_logger(__name__)
 
-PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
+_PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
     "anthropic": "Anthropic",
     "vertexai_claude": "VertexAI",
     "bedrock_claude": "AwsBedrock",
 }
-STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
+_STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
 _VERTEX_ENDPOINTS = {
     "global": "https://aiplatform.googleapis.com/v1",
     "us": "https://aiplatform.us.rep.googleapis.com/v1",
@@ -251,16 +248,11 @@ class ClaudeProvider:
                 response = await (
                     client.beta.messages.create(**kwargs) if prepared.beta else client.messages.create(**kwargs)
                 )
-                message, stop_reason = self._finish(
-                    response,
-                    request,
-                    prepared,
-                    started,
-                    first_output_at,
-                    streamed=False,
-                )
-                yield UsageReported(message.metrics)
-                yield TurnCompleted(message=message, stop_reason=stop_reason)
+                # TODO(simplify): A non-streaming reply leaves time_to_first_token unset. Stamp it when the whole
+                # reply arrives, as the other adapters do. Stored run metrics and operators would notice (#3075).
+                usage, completed = self._finished_turn(response, request, prepared, started, None, streamed=False)
+                yield usage
+                yield completed
                 return
             manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
@@ -269,7 +261,7 @@ class ClaudeProvider:
                         # The SDK has already added the event's usage to its accumulated message.
                         yield UsageReported(parse_claude_usage(events.current_message_snapshot.usage), final=False)
                     elif isinstance(event, (ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
-                        message, stop_reason = self._finish(
+                        usage, completed = self._finished_turn(
                             event.message,
                             request,
                             prepared,
@@ -277,8 +269,8 @@ class ClaudeProvider:
                             first_output_at,
                             streamed=True,
                         )
-                        yield UsageReported(message.metrics)
-                        yield TurnCompleted(message=message, stop_reason=stop_reason)
+                        yield usage
+                        yield completed
                     elif (output := _output_event(event)) is not None:
                         first_output_at = first_output_at or time.monotonic()
                         yield output
@@ -289,7 +281,7 @@ class ClaudeProvider:
         except Exception as error:
             raise _provider_error(error, provider=self.identity.provider_name) from error
 
-    def _finish(
+    def _finished_turn(
         self,
         response: AnthropicMessage | BetaMessage,
         request: ModelRequest,
@@ -298,8 +290,8 @@ class ClaudeProvider:
         first_output_at: float | None,
         *,
         streamed: bool,
-    ) -> tuple[Message, StopReason | None]:
-        """Build the finished assistant message with MindRoom's provenance keys and timings."""
+    ) -> tuple[UsageReported, TurnCompleted]:
+        """Return the usage and completion of a finished response, its message stamped with provenance and timings."""
         message = assistant_message_from_response(
             response,
             record_context_management=self.settings.context_management is not None,
@@ -318,7 +310,7 @@ class ClaudeProvider:
             )
         elif stop_reason == "refusal":
             logger.warning("claude_safeguard_refusal", model_id=self.identity.id, stop_reason=raw_stop_reason)
-        return message, stop_reason
+        return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
 
     def _output_format(self, response_format: type[BaseModel] | Mapping[str, Any] | None) -> dict[str, Any] | None:
         """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead.
@@ -383,12 +375,11 @@ class ClaudeProvider:
         """
         params = self._with_sampling_in_extra_body(self._authored_params(request))
         extra_body = params.get("extra_body") or {}
-        context_management = extra_body.get("context_management", params.get("context_management")) or {}
-        reject_paused_compaction(context_management)
+        compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
         betas = list(self.settings.betas or [])
         if output_format is not None or (strict_tools and self.route == "anthropic"):
-            betas.append(STRUCTURED_OUTPUTS_BETA)
-        if request.native_compaction is not None or uses_compaction_edit(context_management):
+            betas.append(_STRUCTURED_OUTPUTS_BETA)
+        if request.native_compaction is not None or compaction_edit:
             betas.append(COMPACTION_BETA)
         if betas:
             params["betas"] = list(dict.fromkeys(betas))
@@ -422,22 +413,16 @@ class ClaudeProvider:
             "messages": conversation.messages,
             **self._request_params(request, output_format, strict_tools=strict_tools),
         }
-        cache_system_prompt = settings.cache_system_prompt and overrides.prompt_cache is not False
-        if conversation.system:
-            body["system"] = build_system_blocks(
-                conversation.system,
-                cache_system_prompt=cache_system_prompt,
-                extended_cache_time=settings.extended_cache_time,
-            )
         if tools:
             body["tools"] = tools
         body = prepare_request_body(
             body,
+            system=conversation.system,
             route=self.route,
             deferred_tool_names=request.deferred_tool_names,
             tool_choice=request.tool_choice,
             extended_cache_time=settings.extended_cache_time,
-            cache_system_prompt=cache_system_prompt,
+            cache_system_prompt=settings.cache_system_prompt and overrides.prompt_cache is not False,
         )
         return _PreparedRequest(
             client=self._client(caller_retries=overrides.caller_retries),
@@ -468,7 +453,9 @@ class ClaudeProvider:
             return AsyncAnthropic(**kwargs)
         if self.route == "vertexai_claude":
             return self._vertex_client(kwargs)
-        return _bedrock_client(kwargs)
+        from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
+
+        return AsyncAnthropicBedrockMantle(**kwargs)
 
     def _route_client_kwargs(self) -> dict[str, Any]:
         """Return the credentials and endpoint of this route, before ``client_params`` and the HTTP client."""
@@ -602,25 +589,17 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
     }
 
 
-def _bedrock_client(kwargs: dict[str, Any]) -> AsyncAnthropicBedrockMantle:
-    from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
-
-    return AsyncAnthropicBedrockMantle(**kwargs)
-
-
-def claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> Capabilities:
+def _claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> Capabilities:
     """Return what one Claude route offers for this model."""
-    provider = PROVIDER_NAMES[route]
-    endpoint = native_compaction_endpoint(route, settings)
     return Capabilities(
         structured_output="native" if route == "anthropic" and supports_structured_outputs(model_id) else "json_mode",
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=native_tool_search_supported(route, model_id),
         native_compaction=native_compaction_supported(
-            provider=provider,
+            provider=_PROVIDER_NAMES[route],
             model_id=model_id,
             settings=settings,
-            endpoint=endpoint,
+            endpoint=native_compaction_endpoint(route, settings),
         ),
         # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
         # non-default sampling on every route.
@@ -728,17 +707,10 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     else:
         authored = _bedrock_kwargs(authored, runtime_paths)
     settings = parse_claude_settings(route, authored)
-    provider_name = PROVIDER_NAMES[route]
+    provider_name = _PROVIDER_NAMES[route]
     identity = ModelIdentity(id=model_config.id, provider=provider_name, provider_name=provider_name)
-    capabilities = claude_capabilities(route, model_config.id, settings)
+    capabilities = _claude_capabilities(route, model_config.id, settings)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 
 
-__all__ = [
-    "PROVIDER_NAMES",
-    "STRUCTURED_OUTPUTS_BETA",
-    "ClaudeProvider",
-    "build_provider",
-    "claude_capabilities",
-    "native_compaction_endpoint",
-]
+__all__ = ["ClaudeProvider", "build_provider", "native_compaction_endpoint"]

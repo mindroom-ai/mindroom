@@ -78,8 +78,7 @@ _NON_STRUCTURED_OUTPUT_ALIASES = frozenset(
     },
 )
 
-TRAILING_USER_MESSAGE = "continue"
-_ROLE_MAP = {"system": "system", "developer": "system", "user": "user", "assistant": "assistant", "tool": "user"}
+_TRAILING_USER_MESSAGE = "continue"
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 _IMAGE_MEDIA_TYPES = {
     "jpeg": "image/jpeg",
@@ -184,10 +183,12 @@ def format_claude_messages(
         else:
             msg = f"Claude requests cannot carry a message with role {message.role!r}"
             raise ValueError(msg)
-        turns.append({"role": _ROLE_MAP[message.role], "content": content})
+        turns.append({"role": "assistant" if message.role == "assistant" else "user", "content": content})
     merged = _merged_turns(turns)
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
-        merged.append({"role": "user", "content": [{"type": "text", "text": TRAILING_USER_MESSAGE}]})
+        merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
+    # TODO(simplify): System and developer messages join with one space, as Agno joined them, so a later one runs on
+    # from the end of the previous one. Join them with a blank line. Models would notice.
     return FormattedConversation(messages=merged, system=" ".join(system_texts))
 
 
@@ -364,12 +365,12 @@ def _document_block(file: File, *, citations: bool) -> dict[str, Any] | None:
     return block
 
 
-def serialize_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
+def _serialized_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
     """Serialize response blocks or stored block dicts in order; an unknown spelling of redacted thinking is fixed."""
     serialized: list[dict[str, Any]] = []
     for block in blocks:
-        block_dict = as_dict(block) if isinstance(block, dict) else block.model_dump(exclude_none=True)
-        if block_dict is None or not block_dict.get("type"):
+        block_dict = block if isinstance(block, dict) else block.model_dump(exclude_none=True)
+        if not block_dict.get("type"):
             continue
         if block_dict.get("type") == "redacted_reasoning_content":
             block_dict = {**block_dict, "type": "redacted_thinking"}
@@ -389,7 +390,7 @@ def _stored_assistant_blocks(message: Message) -> list[dict[str, Any]] | None:
     tool_call_ids = {call.get("id") for call in message.tool_calls or [] if isinstance(call, dict)}
     return [
         dict(block)
-        for block in serialize_content_blocks(stored)
+        for block in _serialized_content_blocks(stored)
         if block.get("type") != "tool_use" or block.get("id") in tool_call_ids
     ]
 
@@ -445,17 +446,6 @@ def _tool_result_block(message: Message) -> dict[str, Any]:
     else:
         payload = "" if content is None else str(content)
     return {"type": "tool_result", "tool_use_id": message.tool_call_id, "content": payload}
-
-
-def build_system_blocks(system: str, *, cache_system_prompt: bool, extended_cache_time: bool) -> list[dict[str, Any]]:
-    """Return the ``system`` array: one text block, marked for caching when the model caches its prompt."""
-    block: dict[str, Any] = {"text": system, "type": "text"}
-    if cache_system_prompt:
-        cache_control: dict[str, str] = {"type": "ephemeral"}
-        if extended_cache_time:
-            cache_control["ttl"] = "1h"
-        block["cache_control"] = cache_control
-    return [block]
 
 
 def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
@@ -602,7 +592,7 @@ def assistant_message_from_response(
             server_tool_blocks.append(block.model_dump())
     provider_data: dict[str, Any] = {}
     if response.content:
-        provider_data["content_blocks"] = serialize_content_blocks(response.content)
+        provider_data["content_blocks"] = _serialized_content_blocks(response.content)
     if thinking:
         provider_data["signature"] = signature
     if server_tool_blocks:
@@ -622,21 +612,20 @@ def assistant_message_from_response(
 
 
 def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
+    # TODO(simplify): A non-streamed reply stores only its last thinking and redacted-thinking block while a streamed
+    # one joins them all, as Agno did. Join them in both modes. Stored runs would notice.
     if not blocks:
         return None
     return "".join(blocks) if streamed else blocks[-1]
 
 
 __all__ = [
-    "TRAILING_USER_MESSAGE",
     "FormattedConversation",
     "assistant_message_from_response",
-    "build_system_blocks",
     "format_claude_messages",
     "format_claude_tools",
     "inline_url_media",
     "parse_claude_usage",
-    "serialize_content_blocks",
     "stop_reason_of",
     "supports_prefill",
     "supports_structured_outputs",

@@ -1321,3 +1321,25 @@ async def test_the_shared_instructions_stay_cacheable_when_the_session_context_c
     assert monday["system"][1] != tuesday["system"][1]
     assert monday["messages"][-1]["content"][-1]["cache_control"] == cache_control
     assert len(_markers(monday)) <= 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authored_system",
+    [
+        "Authored system.",
+        [{"type": "text", "text": "Authored system."}],
+        [{"type": "text", "text": "Authored system.", "cache_control": {"type": "ephemeral"}}],
+    ],
+    ids=["string", "unmarked-blocks", "marked-blocks"],
+)
+async def test_a_raw_system_override_goes_as_authored_without_a_system_message(
+    tmp_path: Path,
+    authored_system: str | list[dict[str, Any]],
+) -> None:
+    """Without a system message, ``request_params.system`` reaches the API unchanged, its cache markers included."""
+    wire = Wire(json_reply([{"type": "text", "text": "Hi."}]))
+    settings = {"cache_system_prompt": True, "extended_cache_time": True, "request_params": {"system": authored_system}}
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=settings)
+    await claude_turn(provider, ModelRequest(messages=[Message(role="user", content="Hello")], stream=False))
+    assert wire.body()["system"] == authored_system

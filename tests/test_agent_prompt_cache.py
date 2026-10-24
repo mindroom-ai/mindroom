@@ -155,6 +155,7 @@ def test_system_boundary_preserves_custom_blocks_and_cache_budget(
     def prepare(body: dict[str, Any]) -> dict[str, Any]:
         return prepare_request_body(
             body,
+            system="",
             route=route,
             deferred_tool_names=frozenset(),
             tool_choice=None,
