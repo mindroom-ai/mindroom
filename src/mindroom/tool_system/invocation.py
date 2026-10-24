@@ -11,7 +11,7 @@ Whatever arguments reach the leaf, a value sent for a framework-injected paramet
 ``current_tool_call()`` names the call being run to the middleware and the entrypoint below it, so a tool that needs
 its own call id reads it there instead of taking it as a parameter.
 ``run_tool_call`` is the same execution for runners outside the loop that need the tool's own return value, and
-``client_tool_result`` reads that value for the MCP gateway, script runs, and voice calls, which hand it on.
+``client_tool_result`` reads that value for a runner that hands it to a client.
 """
 
 from __future__ import annotations
@@ -27,14 +27,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.tool_system.agno_toolkits import (
     StreamCollector,
-    ToolResult,
     framework_arguments,
     model_arguments,
+    read_tool_value,
     tool_value,
 )
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
 if TYPE_CHECKING:
@@ -256,8 +256,8 @@ async def run_tool_call(
 ) -> object:
     """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it returned.
 
-    Runners outside the model loop that need the tool's own value use this; those that hand it to a client (the MCP
-    gateway, script runs, voice calls) read it through ``client_tool_result``. An exception the call raises propagates.
+    Runners outside the model loop that need the tool's own value use this; one that hands the value to a client reads
+    it through ``client_tool_result``. An exception the call raises propagates.
     Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
     running from its stored arguments is as clean as a freshly parsed one.
     """
@@ -277,19 +277,10 @@ def client_tool_result(result: object) -> object:
     beside ``attachments``, one reference per medium with its kind, its MIME type, and its URL when it has one, so
     the media's bytes never reach the client. Any other value passes unchanged, for the runner to encode as JSON.
     """
-    if not isinstance(result, ToolResult | ToolValue):
+    value = read_tool_value(result)
+    if value is None:
         return result
-    value = tool_value(result)
-    attachments = [
-        {"kind": kind, "mime_type": item.mime_type, **({"url": item.url} if item.url else {})}
-        for kind, items in (
-            ("image", value.images),
-            ("audio", value.audios),
-            ("video", value.videos),
-            ("file", value.files),
-        )
-        for item in items
-    ]
+    attachments = [media_reference(kind, item) for kind, item in value.media()]
     if not attachments:
         return value.content
     return {"content": value.content, "attachments": attachments}

@@ -306,14 +306,20 @@ class StreamCollector:
 
 
 def tool_value(result: object) -> ToolValue:
-    """Read a tool's return value: a ``ToolResult`` carries text and media, anything else is its text.
+    """Read a tool's return value: a ``ToolResult`` carries text and media, anything else is its text."""
+    value = read_tool_value(result)
+    return ToolValue(content=str(result)) if value is None else value
+
+
+def read_tool_value(result: object) -> ToolValue | None:
+    """Read a ``ToolResult``'s text and media; None for a value that is neither a ``ToolResult`` nor a ``ToolValue``.
 
     A value already in owned terms, as a tool job's saved result or minimal mode's Bash facade returns, stands as it is.
     """
     if isinstance(result, ToolValue):
         return result
     if not isinstance(result, ToolResult):
-        return ToolValue(content=str(result))
+        return None
     return ToolValue(
         content=result.content,
         images=tuple(_owned_image(image) for image in result.images or ()),
@@ -417,6 +423,7 @@ __all__ = [
     "framework_arguments",
     "injected_parameters",
     "model_arguments",
+    "read_tool_value",
     "tool_value",
     "warm_agno_tool_imports",
 ]

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.llm.provider import ToolSpec
 
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.invocation import ToolMiddleware
 
+type _MediaKind = Literal["image", "audio", "video", "file"]
 type ToolkitClose = Callable[[], Awaitable[None]]
 type ToolkitConnect = Callable[[], Awaitable[ToolkitClose | None]]
 
@@ -164,3 +165,22 @@ class ToolValue:
     audios: tuple[Audio, ...] = ()
     videos: tuple[Video, ...] = ()
     files: tuple[File, ...] = ()
+
+    def media(self) -> Iterator[tuple[_MediaKind, Image | Audio | Video | File]]:
+        """Yield each medium with its kind: the images, then the audio clips, videos, and files."""
+        for kind, items in (
+            ("image", self.images),
+            ("audio", self.audios),
+            ("video", self.videos),
+            ("file", self.files),
+        ):
+            for item in items:
+                yield kind, item
+
+
+def media_reference(kind: _MediaKind, medium: Image | Audio | Video | File) -> dict[str, object]:
+    """Return a client's reference to one medium without its bytes: its kind, its MIME type, and its URL if any."""
+    reference: dict[str, object] = {"kind": kind, "mime_type": medium.mime_type}
+    if medium.url:
+        reference["url"] = medium.url
+    return reference

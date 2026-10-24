@@ -337,6 +337,7 @@ depends_on = [
 path = "mindroom.agent_cli.projection"
 depends_on = [
     "mindroom.tool_system.output_files",
+    "mindroom.tool_system.tool_function",
     "mindroom.llm",
 ]
 visibility = [
