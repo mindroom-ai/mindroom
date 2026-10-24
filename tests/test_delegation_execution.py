@@ -34,6 +34,7 @@ from mindroom.llm.errors import ModelOutputLimitError, ProviderError
 from mindroom.llm.events import ToolCompleted
 from mindroom.llm.provider import Capabilities, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -41,6 +42,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.usage.storage import usage_table_name
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
 from tests.delegation_helpers import (
@@ -823,6 +825,33 @@ async def test_the_driver_saves_the_parent_as_it_was_handed_over(tmp_path: Path)
     stored = store.get_run("parent-run")
     assert stored is not None
     assert stored.content == "as handed over"
+    assert DELEGATION_STATE_KEY in (stored.metadata or {})
+
+
+@pytest.mark.asyncio
+async def test_the_driver_rewrites_the_parent_without_touching_its_recorded_usage(tmp_path: Path) -> None:
+    """The loop records a paused run's usage when it stores the pause, so the driver's rewrite leaves that record."""
+    paths = _runtime_paths(tmp_path)
+    store = create_session_storage("leader", _config(paths), paths, _leader_identity())
+    session = new_scope_session(session_id="parent", scope_id="leader", is_team=False)
+    recorded = RunRecord(
+        run_id="parent-run",
+        session_id="parent",
+        status=RunStatus.paused,
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2)),
+    )
+    store.save_run(session, deepcopy(recorded), record_usage=True)
+
+    rewritten = replace(recorded, metrics=RunMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=20)))
+    await execution.persist_delegation_state(store, session, rewritten, DelegationState())
+
+    with store.transaction(write=False) as connection:
+        rows = connection.execute(
+            f"SELECT run_id, usage_data FROM {usage_table_name(store.names.sessions)}",  # noqa: S608
+        ).fetchall()
+    assert [(run_id, json.loads(data)["metrics"]["input_tokens"]) for run_id, data in rows] == [("parent-run", 5)]
+    stored = store.get_run("parent-run")
+    assert stored is not None
     assert DELEGATION_STATE_KEY in (stored.metadata or {})
 
 
