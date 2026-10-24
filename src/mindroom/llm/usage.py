@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Token usage and timing metrics, with the dict shapes stored in runs, session rows, usage rows, and ``io.mindroom.ai_run``.
+"""Token usage and timing metrics, with the dict shapes stored in runs, session rows, and usage rows.
 
-``to_dict`` omits None, zero integers, and empty containers: the stored shape that ``usage/storage.py``, the budget
-code, and MindRoom Chat read.
+``to_dict`` omits None, zero integers, and empty containers: the stored shape that ``usage/storage.py`` and the budget
+code read.
 """
 
 from __future__ import annotations
@@ -243,7 +243,7 @@ class RunMetrics(_Counts):
         _add_counts(self, usage)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape, which is also the ``io.mindroom.ai_run`` usage payload."""
+        """Return the stored dict shape."""
         values = _flattened(asdict(self))
         if self.details is not None:
             values["details"] = _details_to_dict(self.details)

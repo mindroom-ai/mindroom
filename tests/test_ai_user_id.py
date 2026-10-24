@@ -29,10 +29,7 @@ from mindroom.ai import (
     collect_streamed_response_content,
     stream_agent_response,
 )
-from mindroom.ai_run_metadata import (
-    _serialize_metrics,
-    build_ai_run_metadata_content,
-)
+from mindroom.ai_run_metadata import _ReplyUsage, build_ai_run_metadata_content
 from mindroom.bot import AgentBot
 from mindroom.budgets.pricing import PricedModel
 from mindroom.config.agent import AgentConfig
@@ -265,11 +262,11 @@ def _model_runtime_context(
     )
 
 
-def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
-    """Run metrics serialize only the counters the provider reported."""
-    payload = _serialize_metrics(
+def test_reply_usage_preserves_zero_usage_fields_from_metrics() -> None:
+    """Run metrics publish only the counters the provider reported."""
+    payload = _ReplyUsage.of(
         RunMetrics(tokens=TokenCounts(input_tokens=6, output_tokens=0, cache_read_tokens=46449)),
-    )
+    ).to_wire()
 
     assert payload == {
         "input_tokens": 6,
