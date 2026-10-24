@@ -45,7 +45,6 @@ from mindroom.teams.members import (
     build_team_spec,
     materialize_exact_requested_team_members,
     materialize_team_members,
-    team_label,
 )
 from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
 from mindroom.teams.spec import TeamMode
@@ -912,7 +911,6 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         mode=team.mode,
         config=team.config,
         runtime_paths=team.runtime_paths,
-        team_display_name=team_label(members.requested_agent_names),
         scope_context=scope_context,
         execution_identity=team.identity,
         model_name="default",

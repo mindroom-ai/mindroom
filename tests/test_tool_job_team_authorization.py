@@ -472,7 +472,6 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
-            team_display_name="Pair",
             scope_context=None,
             execution_identity=identity,
             model_name="default",

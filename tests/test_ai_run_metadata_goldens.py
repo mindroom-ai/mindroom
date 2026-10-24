@@ -248,6 +248,10 @@ async def _team_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: s
         await team.stream(ctx=ctx, run_metadata_collector=published)
     else:
         await team.respond(ctx=ctx, run_metadata_collector=published)
+    # The stored team run is named for its members, as Agno named it.
+    stored = team.storage.get_run(run_id)
+    assert isinstance(stored, TeamRunRecord)
+    assert stored.team_name == record.team_name
     return published
 
 

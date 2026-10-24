@@ -41,7 +41,6 @@ from mindroom.teams.members import (
     configured_team,
     materialize_exact_team_members,
     materialized_team_label,
-    team_label,
 )
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
@@ -445,7 +444,6 @@ async def continue_paused_team_run(
             mode=mode,
             config=config,
             runtime_paths=runtime_paths,
-            team_display_name=team_label(member_names),
             scope_context=scope,
             execution_identity=execution_identity,
             model_name=model_name,

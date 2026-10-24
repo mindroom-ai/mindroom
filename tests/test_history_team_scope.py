@@ -93,7 +93,6 @@ def _build_pair(
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime_paths,
-        team_display_name="Team-zeta-alpha",
         scope_context=scope_context,
         execution_identity=None,
         model_name="default",

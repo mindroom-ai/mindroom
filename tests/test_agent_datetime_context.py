@@ -164,7 +164,6 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
-            team_display_name="Team-general",
             scope_context=None,
             execution_identity=None,
             model_name="default",

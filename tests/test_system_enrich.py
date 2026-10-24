@@ -365,7 +365,6 @@ def _built_team(config: Config, members: ResolvedExactTeamMembers, *, system_enr
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        team_display_name="Code + Research",
         scope_context=None,
         execution_identity=None,
         model_name="default",

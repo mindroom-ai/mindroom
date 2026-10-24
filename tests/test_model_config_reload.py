@@ -120,7 +120,6 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime.runtime_paths,
-        team_display_name="Team",
         scope_context=None,
         execution_identity=None,
         model_name=config.resolve_entity("team").model_name,

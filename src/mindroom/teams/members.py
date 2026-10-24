@@ -304,11 +304,6 @@ def resolve_team_turn_models(
     )
 
 
-def team_label(member_names: Sequence[str]) -> str:
-    """Return the stored ``team_name`` of a team of these members, kept as main stores it."""
-    return f"Team-{'-'.join(member_names)}"
-
-
 def materialized_team_label(display_names: Sequence[str]) -> str:
     """Return the entity label an ad hoc team's turn and resume carry in their logs and notices."""
     return f"Team ({', '.join(display_names)})"
@@ -398,7 +393,6 @@ def build_team_spec(
     mode: TeamMode,
     config: Config,
     runtime_paths: RuntimePaths,
-    team_display_name: str,
     scope_context: ScopeSessionContext | None,
     execution_identity: ToolExecutionIdentity | None,
     model_name: str,
@@ -407,10 +401,10 @@ def build_team_spec(
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
-    The leader prompt holds each member's roster role, the leader's tool instructions in offer order, the provider
-    family's note, and the date context with ``system_enrichment`` appended; the team's own history settings and
-    call budget come from the configured team ``configured_team_name``, or the defaults when it is None for an ad
-    hoc one.
+    The team is named for its requested members, as main stores its ``team_name``. The leader prompt holds each
+    member's roster role, the leader's tool instructions in offer order, the provider family's note, and the date
+    context with ``system_enrichment`` appended; the team's own history settings and call budget come from the
+    configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
     model = provider_registry.build_model_provider(
         config,
@@ -418,6 +412,7 @@ def build_team_spec(
         model_name,
         execution_identity=execution_identity,
     )
+    team_display_name = f"Team-{'-'.join(members.requested_agent_names)}"
     team_view = config.resolve_entity(configured_team_name)
     if scope_context is not None:
         team_id = scope_context.scope.scope_id
@@ -489,5 +484,4 @@ __all__ = [
     "resolve_team_member_model_names",
     "resolve_team_turn_models",
     "select_model_for_team",
-    "team_label",
 ]
