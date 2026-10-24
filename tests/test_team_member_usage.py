@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -20,11 +19,12 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.store import persist_to
-from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
+from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import gated, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
-from tests.team_runtime.squad import approval, collect, resume_team, scripted, start_team
+from tests.team_runtime.squad import approval, collect, resume_team, scripted, start_team, team_spec
+from tests.team_runtime.squad import member as team_member
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -120,27 +120,21 @@ def _squad(tmp_path: Path, *, leader: list[list[Any]], member: list[list[Any]], 
 
     leader_model = scripted("leader-model", *leader)
     member_model = scripted("member-model", *[[Await(hang)] if turn == _HANG else turn for turn in member])
-    worker = TeamMember(
-        spec=AgentSpec(
-            id="worker",
-            name="worker",
-            model=member_model,
-            system_message=Message(role="system", content="You work."),
-            toolkits=(toolkit(lookup, name="lookup"), gated(publish, name="publish")),
-        ),
-        role="Does the work.",
-        new_hooks=lambda: NO_HOOKS,
-        request_template=EMPTY_REQUEST,
+    worker = team_member(
+        "worker",
+        "worker",
+        member_model,
+        toolkit(lookup, name="lookup"),
+        gated(publish, name="publish"),
+        system="You work.",
     )
-    spec = TeamSpec(
-        id="squad",
-        name="Squad",
+    spec = team_spec(
+        "squad",
+        "Squad",
+        leader_model,
+        "You lead.",
+        (worker,),
         mode=TeamMode.COLLABORATE if collaborate else TeamMode.COORDINATE,
-        model=leader_model,
-        system_message=Message(role="system", content="You lead."),
-        toolkits=(),
-        max_tool_calls_per_turn=None,
-        members=(worker,),
     )
     return _Squad(config, runtime_paths, spec, store, session, leader_model, member_model, hanging)
 

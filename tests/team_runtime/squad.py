@@ -17,12 +17,14 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import TeamRunRecord
+from mindroom.teams.members import BuiltTeam
 from mindroom.teams.runtime import continue_team, run_team
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -109,6 +111,39 @@ def member(
     return TeamMember(spec=spec, role=f"{name} role.", new_hooks=lambda: NO_HOOKS, request_template=EMPTY_REQUEST)
 
 
+def team_spec(
+    team_id: str,
+    name: str,
+    model: ModelProvider,
+    system: str,
+    members: Sequence[TeamMember],
+    *,
+    mode: TeamMode = TeamMode.COORDINATE,
+    toolkits: Sequence[AdaptedToolkit] = (),
+) -> TeamSpec:
+    """Return a team of ``members`` led by ``model``, with the leader prompt ``system`` and no call budget."""
+    return TeamSpec(
+        id=team_id,
+        name=name,
+        mode=mode,
+        model=model,
+        system_message=Message(role="system", content=system),
+        toolkits=tuple(toolkits),
+        max_tool_calls_per_turn=None,
+        members=tuple(members),
+    )
+
+
+def built_team(spec: TeamSpec) -> BuiltTeam:
+    """Return ``spec`` as a built team under the default history settings, with no leader middleware or jobs."""
+    return BuiltTeam(
+        spec=spec,
+        history_settings=Config().resolve_entity(None).history_settings,
+        leader_middleware=(),
+        leader_jobs=None,
+    )
+
+
 def squad(
     leader: ScriptedModel,
     writer: ModelProvider,
@@ -125,18 +160,17 @@ def squad(
     """Return the capture's team: the writer with the calculator, the checker with the gated calculator."""
     writer_tools = (calculator(gate_multiply=False),) if writer_toolkits is None else tuple(writer_toolkits)
     checker_tools = (calculator(gate_multiply=True),) if checker_toolkits is None else tuple(checker_toolkits)
-    return TeamSpec(
-        id=team_id,
-        name=TEAM_NAME,
-        mode=mode,
-        model=leader,
-        system_message=Message(role="system", content=system),
-        toolkits=tuple(leader_toolkits),
-        max_tool_calls_per_turn=None,
-        members=(
+    return team_spec(
+        team_id,
+        TEAM_NAME,
+        leader,
+        system,
+        (
             member("writer", "Writer", writer, *writer_tools),
             member("checker", "Checker", checker, *checker_tools, system=checker_system),
         ),
+        mode=mode,
+        toolkits=leader_toolkits,
     )
 
 

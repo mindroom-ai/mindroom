@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from agno.run import RunContext as AgnoRunContext
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.spec import RunContext
     from mindroom.ai import ResponseTurnContext
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
@@ -36,9 +37,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 
 from mindroom import constants
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
-from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle, openai_compat
@@ -82,7 +81,7 @@ from mindroom.teams import envelope
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
-from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
+from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_calls import record_tool_success
@@ -95,6 +94,8 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
+from tests.team_runtime.squad import built_team, team_spec
+from tests.team_runtime.squad import member as team_member
 
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
@@ -3197,29 +3198,13 @@ def _scripted_team(
     member offers ``member_toolkits``.
     """
     leader = ScriptedModel([list(turn) for turn in leader_turns], identity=leader_identity)
-    spec = TeamSpec(
-        id=team_id,
-        name="Test Team",
+    spec = team_spec(
+        team_id,
+        "Test Team",
+        leader,
+        "You lead the team.",
+        [team_member(member_id, name, model, *member_toolkits) for member_id, name, model in members],
         mode=mode,
-        model=leader,
-        system_message=Message(role="system", content="You lead the team."),
-        toolkits=(),
-        max_tool_calls_per_turn=None,
-        members=tuple(
-            TeamMember(
-                spec=AgentSpec(
-                    id=member_id,
-                    name=name,
-                    model=model,
-                    system_message=Message(role="system", content=f"You are {name}."),
-                    toolkits=member_toolkits,
-                ),
-                role=f"{name} role.",
-                new_hooks=lambda: NO_HOOKS,
-                request_template=EMPTY_REQUEST,
-            )
-            for member_id, name, model in members
-        ),
     )
     resolved = ResolvedExactTeamMembers(
         requested_agent_names=[member_id for member_id, _name, _model in members],
@@ -3227,16 +3212,7 @@ def _scripted_team(
         display_names=[name for _member_id, name, _model in members],
         failed_agent_names=[],
     )
-    return (
-        resolved,
-        BuiltTeam(
-            spec=spec,
-            history_settings=Config().resolve_entity(None).history_settings,
-            leader_middleware=(),
-            leader_jobs=None,
-        ),
-        mode,
-    )
+    return resolved, built_team(spec), mode
 
 
 def _finished(content: str) -> RunFinished:
