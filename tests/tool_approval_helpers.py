@@ -22,7 +22,9 @@ def gated_functions(
 ) -> dict[str, ToolFunction]:
     """Return ``toolkit``'s adapted functions by name, with the approval flags a native-approval agent sets.
 
-    The toolkit is registered as ``registered_tool_name``, or under its own name.
+    The toolkit is registered as ``registered_tool_name``, or under its own name. A toolkit named like a tool the gate
+    special-cases (``scheduler``, ``delegate``, a Matrix room-runtime tool) therefore gets that tool's rules unless it
+    is registered under another name.
     """
     adapted = apply_tool_approval_capability(
         adapt_toolkit(toolkit),
