@@ -5108,7 +5108,7 @@ class ResponseRunner:
         )
 
     # TODO(simplify): the span registry keeps each attempt's run id only for its "Hard cancelling" log line.
-    # Drop that field and `_note_run_id`; the turn recorders keep their own run ids.
+    # Drop that field, `_note_run_id`, and `_span_attempt`'s `run_id`; the turn recorders keep their own run ids.
     # Operators would notice: the Stop log line loses its `run_id`.
     @staticmethod
     def _note_run_id(run_id: str | None) -> None:
