@@ -16,7 +16,6 @@ from mindroom.conversation_state_writer import ConversationStateWriter, Conversa
 from mindroom.history.session_context import create_scope_session_storage, load_bound_scope_session
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session, test_runtime_paths
@@ -29,6 +28,23 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 async def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path) -> None:
     """Response linkage belongs in run metadata, not assistant-role content."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    writer = ConversationStateWriter(
+        ConversationStateWriterDeps(
+            runtime=SimpleNamespace(config=config),
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="test_agent",
+        ),
+    )
+    scope = writer.history_scope()
     run = RunRecord(
         run_id="run-1",
         agent_id="test_agent",
@@ -39,7 +55,7 @@ async def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path:
             Message(role="assistant", content="Final answer"),
         ],
     )
-    storage = create_state_storage("test_agent", tmp_path)
+    storage = writer.create_storage(None, scope=scope)
     seed_session(
         storage,
         ConversationSession(
@@ -51,19 +67,11 @@ async def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path:
             updated_at=1,
         ),
     )
-    writer = ConversationStateWriter(
-        ConversationStateWriterDeps(
-            runtime=MagicMock(),
-            logger=MagicMock(),
-            runtime_paths=test_runtime_paths(tmp_path),
-            agent_name="test_agent",
-        ),
-    )
 
     await writer.apersist_response_event_id_in_session_run(
-        create_storage=lambda: create_state_storage("test_agent", tmp_path),
+        execution_identity=None,
+        scope=scope,
         session_id="session-1",
-        session_type="agent",
         run_id="run-1",
         response_event_id="$answer",
     )

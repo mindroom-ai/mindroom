@@ -3676,9 +3676,9 @@ class ResponseRunner:
 
         async def persist_response_event_id(run_id: str, response_event_id: str) -> None:
             await self.deps.state_writer.apersist_response_event_id_in_session_run(
-                create_storage=partial(self.deps.state_writer.create_storage, execution_identity, scope=scope),
+                execution_identity=execution_identity,
+                scope=scope,
                 session_id=session_id,
-                session_type=scope.kind,
                 run_id=run_id,
                 response_event_id=response_event_id,
             )
