@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelIdentity, ModelProvider, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
-    from mindroom.session_storage.store import ConversationStore
+    from mindroom.run_storage import RunStorage
     from mindroom.session_storage.types import ConversationSession
 
 logger = get_logger(__name__)
@@ -75,10 +75,10 @@ logger = get_logger(__name__)
 class _MidTurnCompaction:
     """One run's mid-turn compaction policy and the state it keeps across that run's requests.
 
-    ``store``, ``session``, and ``scope`` are where the run's scope stores, and ``replay_plan`` is the plan its
-    requests replay stored history under: a fold appends a summary row to the scope when they replay some, and a run
-    that replays none keeps its summary as a message of its own. ``prompt_id`` names the turn's prompt, which every
-    fold keeps in place. Whether the provider compacts natively is read from each request, which a fallback changes.
+    ``storage`` is where the run stores, and ``replay_plan`` is the plan its requests replay the scope's stored history
+    under: a fold appends a summary row to the scope when they replay some, and a run that replays none keeps its
+    summary as a message of its own. ``prompt_id`` names the turn's prompt, which every fold keeps in place. Whether
+    the provider compacts natively is read from each request, which a fallback changes.
     """
 
     config: Config
@@ -89,9 +89,7 @@ class _MidTurnCompaction:
     model_name: str
     model: ModelProvider
     history_settings: ResolvedHistorySettings
-    store: ConversationStore | None
-    session: ConversationSession | None
-    scope: HistoryScope | None
+    storage: RunStorage | None
     replay_plan: ResolvedReplayPlan | None
     deferred_tool_names: frozenset[str]
     prompt_id: str | None
@@ -106,8 +104,11 @@ class _MidTurnCompaction:
     @property
     def scoped_session(self) -> ConversationSession | None:
         """Return the session a fold appends its summary row to, or None when the run's requests replay no history."""
+        storage = self.storage
+        if storage is None or storage.store is None or storage.scope is None:
+            return None
         replays_history = self.replay_plan is not None and self.replay_plan.add_history_to_context
-        return self.session if replays_history and self.store is not None and self.scope is not None else None
+        return storage.session if replays_history else None
 
 
 @dataclass(frozen=True)
@@ -134,9 +135,7 @@ def mid_turn_compaction_hook(
     model_name: str,
     model: ModelProvider,
     history_settings: ResolvedHistorySettings,
-    store: ConversationStore | None,
-    session: ConversationSession | None,
-    scope: HistoryScope | None,
+    storage: RunStorage | None,
     replay_plan: ResolvedReplayPlan | None,
     deferred_tool_names: frozenset[str],
     prompt_id: str | None,
@@ -145,9 +144,9 @@ def mid_turn_compaction_hook(
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
-    A fold lands in ``scope`` when the run's requests replay its stored history under ``replay_plan``; ``lifecycle``
-    shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an interrupted
-    record.
+    A fold lands in the scope of ``storage`` when the run's requests replay its stored history under ``replay_plan``;
+    ``lifecycle`` shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an
+    interrupted record.
     """
     binding = _MidTurnCompaction(
         config=config,
@@ -158,9 +157,7 @@ def mid_turn_compaction_hook(
         model_name=model_name,
         model=model,
         history_settings=history_settings,
-        store=store,
-        session=session,
-        scope=scope,
+        storage=storage,
         replay_plan=replay_plan,
         deferred_tool_names=deferred_tool_names,
         prompt_id=prompt_id,
@@ -288,8 +285,9 @@ async def _compact_scope(
     The row holds the run's folded part as its segment; the append leaves the turn's session as the store holds it,
     and once the row is stored, the run's request and record follow.
     """
-    storage = binding.store
-    scope = binding.scope
+    assert binding.storage is not None
+    storage = binding.storage.store
+    scope = binding.storage.scope
     assert storage is not None
     assert scope is not None
     basis = await asyncio.to_thread(read_fold_basis, storage, session, scope)
@@ -646,7 +644,7 @@ def _summary_usage_recorder(
             )
 
         return record_for_owner
-    storage = binding.store
+    storage = binding.storage.store if binding.storage is not None else None
     if storage is None or not record.session_id:
         logger.warning("Mid-turn summary usage has no storage owner", run_id=record.run_id)
         return None

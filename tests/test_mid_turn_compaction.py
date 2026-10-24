@@ -52,6 +52,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.model_usage import response_context_tokens
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -229,9 +230,7 @@ async def _run(
         model_name="default",
         model=agent.model,
         history_settings=settings,
-        store=store,
-        session=session,
-        scope=TEST_AGENT_SCOPE,
+        storage=RunStorage(store=store, session=session, scope=TEST_AGENT_SCOPE),
         replay_plan=configured_replay_plan(history_settings=settings, estimated_tokens=0)
         if agent.folds_into_scope
         else None,
@@ -312,9 +311,7 @@ def _binding(tmp_path: Path, deferred_tool_names: frozenset[str]) -> mid_turn_co
         model_name="default",
         model=ToolLoopModel(tool_rounds=0),
         history_settings=config.resolve_entity("test_agent").history_settings,
-        store=None,
-        session=None,
-        scope=None,
+        storage=None,
         replay_plan=None,
         deferred_tool_names=deferred_tool_names,
         prompt_id=None,

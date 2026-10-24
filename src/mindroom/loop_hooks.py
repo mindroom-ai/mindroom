@@ -37,11 +37,10 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.history.types import CompactionLifecycle, ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.llm.provider import ModelProvider
     from mindroom.participation import ParticipationGate
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession
+    from mindroom.run_storage import RunStorage
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.invocation import ToolMiddleware
@@ -51,19 +50,17 @@ if TYPE_CHECKING:
 class HookTurn:
     """What one run or resume takes from its turn for its hooks, the same for an agent's and a leader's.
 
-    ``store``, ``session``, and ``scope`` are where the run's scope stores, and ``replay_plan`` is the plan the run's
-    requests replay the scope's stored history under, so a fold lands there when they replay some; a run without a
-    scope or a plan compacts within itself. ``model_name`` is the configured name of the model the run resolved, and
-    ``prompt_id`` the turn's prompt; ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and
-    recorder, which a resume and a team member lack.
+    ``storage`` is where the run stores, and ``replay_plan`` is the plan the run's requests replay the scope's stored
+    history under, so a fold lands in the scope when they replay some; a run without a scope or a plan compacts within
+    itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
+    ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
+    member lack.
     """
 
     config: Config
     runtime_paths: RuntimePaths
     model_name: str
-    store: ConversationStore | None
-    session: ConversationSession | None
-    scope: HistoryScope | None
+    storage: RunStorage | None
     replay_plan: ResolvedReplayPlan | None
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None = None
@@ -87,11 +84,12 @@ def agent_loop_hooks(
     turn's notices; ``skill_review_capture`` records the final request of run ``run_id``.
     """
     jobs = build.tool_jobs
+    scope = turn.storage.scope if turn.storage is not None else None
     return _loop_hooks(
         turn,
         model=build.spec.model,
         entity_name=agent_name,
-        scope_id=turn.scope.scope_id if turn.scope is not None else agent_name,
+        scope_id=scope.scope_id if scope is not None else agent_name,
         is_team=False,
         history_settings=build.history_settings,
         deferred_tools=build.request_template.deferred_tools,
@@ -186,9 +184,7 @@ def _loop_hooks(
             model_name=turn.model_name,
             model=model,
             history_settings=history_settings,
-            store=turn.store,
-            session=turn.session,
-            scope=turn.scope,
+            storage=turn.storage,
             replay_plan=turn.replay_plan,
             deferred_tool_names=deferred_tools.names,
             prompt_id=turn.prompt_id,

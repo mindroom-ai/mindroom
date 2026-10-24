@@ -9,9 +9,9 @@ import pytest
 
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
+from mindroom.run_storage import scope_run_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
-from mindroom.teams.storage import scope_storage
 
 if TYPE_CHECKING:
     from mindroom.session_storage.types import SessionKind
@@ -49,7 +49,7 @@ def test_a_team_run_is_stored_in_the_stored_session_of_its_scope_context() -> No
     stored = ConversationSession(session_id="session-1", kind="team", owner_id="crew", created_at=1)
     context = _context("team", stored)
 
-    storage = scope_storage(context)
+    storage = scope_run_storage(context)
 
     assert storage.session is stored
     assert (storage.store, storage.scope) == (context.storage, context.scope)
@@ -57,7 +57,7 @@ def test_a_team_run_is_stored_in_the_stored_session_of_its_scope_context() -> No
 
 def test_a_team_scope_without_a_stored_session_stores_its_runs_in_its_first_one() -> None:
     """A team scope with no stored session gives its first run the team session under the context's id."""
-    storage = scope_storage(_context("team", None))
+    storage = scope_run_storage(_context("team", None))
 
     assert (storage.session.session_id, storage.session.kind, storage.session.owner_id) == ("session-1", "team", "crew")
 

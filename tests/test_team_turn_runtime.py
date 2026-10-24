@@ -600,7 +600,7 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     assert hooks.tool_middleware == ()
     [compaction] = [kwargs for kwargs in compactions if kwargs["is_team"]]
     assert (compaction["scope_id"], compaction["entity_name"]) == ("squad", "squad")
-    assert compaction["scope"] == TEAM_SCOPE
+    assert compaction["storage"].scope == TEAM_SCOPE
     assert compaction["model"] is team.models["default"]
     assert compaction["prompt_id"] is not None
 

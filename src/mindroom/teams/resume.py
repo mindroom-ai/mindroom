@@ -34,6 +34,7 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
+from mindroom.run_storage import persist_into, scope_run_storage
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.members import (
     build_team_spec,
@@ -49,12 +50,7 @@ from mindroom.teams.presentation import (
     publish_team_presentation,
 )
 from mindroom.teams.runtime import MemberEvent, continue_team
-from mindroom.teams.storage import (
-    configured_team,
-    persist_into,
-    scope_storage,
-    team_history_settings,
-)
+from mindroom.teams.storage import configured_team, team_history_settings
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -75,10 +71,10 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
     from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
+    from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.teams.spec import TeamMode, TeamSpec
-    from mindroom.teams.storage import TeamRunRecords, TeamStorage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -188,8 +184,8 @@ class TeamResume:
     """
 
     spec: TeamSpec
-    storage: TeamStorage
-    records: TeamRunRecords
+    storage: RunStorage
+    records: TerminalRecord[TeamRunRecord]
     hooks: LoopHooks
     request_template: ModelRequest
     settings: ResolvedHistorySettings
@@ -462,7 +458,7 @@ async def continue_paused_team_run(
             state=prior_presentation_state,
             tool_trace=prior_tool_trace,
         )
-        storage = scope_storage(scope)
+        storage = scope_run_storage(scope)
         attempt = TeamAttempt(
             run_id=run_id,
             members=members,
@@ -485,9 +481,7 @@ async def continue_paused_team_run(
                     config=config,
                     runtime_paths=runtime_paths,
                     model_name=model_name,
-                    store=storage.store,
-                    session=storage.session,
-                    scope=storage.scope,
+                    storage=storage,
                     replay_plan=plan,
                     prompt_id=None,
                 ),

@@ -37,6 +37,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
@@ -223,9 +224,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
                 config=agent.config,
                 runtime_paths=agent.runtime_paths,
                 model_name="default",
-                store=agent.store,
-                session=agent.session,
-                scope=TEST_AGENT_SCOPE,
+                storage=RunStorage(store=agent.store, session=agent.session, scope=TEST_AGENT_SCOPE),
                 replay_plan=plan if agent.replays_history else None,
                 prompt_id=turn.prompt.id,
             ),
@@ -420,9 +419,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
                 config=agent.config,
                 runtime_paths=agent.runtime_paths,
                 model_name="default",
-                store=agent.store,
-                session=agent.session,
-                scope=TEST_AGENT_SCOPE,
+                storage=RunStorage(store=agent.store, session=agent.session, scope=TEST_AGENT_SCOPE),
                 replay_plan=plan,
                 prompt_id=None,
             ),

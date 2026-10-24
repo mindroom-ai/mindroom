@@ -66,6 +66,7 @@ from mindroom.response_turn import (
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
+from mindroom.run_storage import attempt_run_storage, persist_into, scope_run_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.members import (
@@ -87,11 +88,7 @@ from mindroom.teams.presentation import (
 )
 from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs, run_team
-from mindroom.teams.storage import (
-    persist_into,
-    scope_storage,
-    team_history_settings,
-)
+from mindroom.teams.storage import team_history_settings
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -111,11 +108,11 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import EmptyRunDiscard, TurnRunState
+    from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
     from mindroom.teams.runtime import TeamRunEvent
     from mindroom.teams.spec import TeamMode, TeamSpec
-    from mindroom.teams.storage import TeamRunRecords, TeamStorage
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -295,7 +292,7 @@ class _LeaderRun:
     """How the leader of one prepared team turn runs: where it stores, its hooks, request settings, and model."""
 
     spec: TeamSpec
-    storage: TeamStorage | None
+    storage: RunStorage | None
     hooks: LoopHooks
     request_template: ModelRequest
     model_name: str
@@ -308,7 +305,7 @@ class _LeaderRun:
         session_id: str,
         user_id: str | None,
         metadata: dict[str, Any] | None,
-        records: TeamRunRecords | None,
+        records: TerminalRecord[TeamRunRecord] | None,
     ) -> AsyncIterator[TeamRunEvent]:
         """Start the run; its tools share the stored session's ``session_state``, which the store writes back."""
         return run_team(
@@ -335,7 +332,7 @@ def _leader_run(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    storage: TeamStorage | None,
+    storage: RunStorage | None,
     configured_team_name: str | None,
     stream: bool,
     compaction_lifecycle: CompactionLifecycle | None,
@@ -351,9 +348,7 @@ def _leader_run(
                 config=config,
                 runtime_paths=runtime_paths,
                 model_name=prepared.runtime_model_name,
-                store=storage.store if storage is not None else None,
-                session=storage.session if storage is not None else None,
-                scope=storage.scope if storage is not None else None,
+                storage=storage,
                 replay_plan=history.replay_plan,
                 prompt_id=prepared.turn.prompt.id,
                 lifecycle=compaction_lifecycle,
@@ -387,7 +382,7 @@ def run_prepared_team(
 
     The run and its usage are stored in the team scope, a scope without a stored session getting its first one.
     """
-    storage = scope_storage(scope_context) if scope_context is not None else None
+    storage = scope_run_storage(scope_context) if scope_context is not None else None
     leader = _leader_run(
         built,
         prepared,
@@ -588,11 +583,8 @@ class _TeamTurn:
             agents=members.display_names,
             prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
         )
-        # The turn's scope context keeps the session a run first gave it; a team without a bound scope stores nothing.
-        storage: TeamStorage | None = None
-        if run.scope_context is not None:
-            run.scope_context = run.scope_context.with_session()
-            storage = scope_storage(run.scope_context)
+        # A team without a bound scope stores nothing.
+        storage = attempt_run_storage(run)
         leader = _leader_run(
             built,
             prepared,

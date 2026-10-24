@@ -1062,9 +1062,10 @@ async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_repla
     chunks = await _stream(reply, scheduled_history_budget=budget)
 
     assert "".join(streamed_text(chunks)) == "ok"
-    assert bound["store"] is not None
-    assert bound["session"] is not None
-    assert bound["scope"] == HistoryScope(kind="agent", scope_id="assistant")
+    storage = bound["storage"]
+    assert storage.store is not None
+    assert storage.session is not None
+    assert storage.scope == HistoryScope(kind="agent", scope_id="assistant")
     plan = bound["replay_plan"]
     assert (plan is not None and plan.add_history_to_context) is replays_history
 

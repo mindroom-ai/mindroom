@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom import ai
+from mindroom import ai, run_storage
 from mindroom.approval.resume import ResumeDecisions
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -404,7 +404,7 @@ async def test_a_delegating_turn_leaves_its_parent_run_in_its_loaded_session_as_
         persisted.append(session)
         return persist_to(store, session)
 
-    monkeypatch.setattr(ai, "persist_to", recording_persist_to)
+    monkeypatch.setattr(run_storage, "persist_to", recording_persist_to)
     store = _store("leader", config, paths)
     _seed(store, "leader", _completed("run-0", "leader", "Earlier."))
 

@@ -334,9 +334,7 @@ def _team_member(
         config=config,
         runtime_paths=runtime_paths,
         model_name=model_name,
-        store=None,
-        session=None,
-        scope=None,
+        storage=None,
         replay_plan=None,
         prompt_id=None,
     )

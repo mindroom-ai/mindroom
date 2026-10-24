@@ -775,7 +775,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.pre_model_preparation",
     "mindroom.response_turn",
-    "mindroom.session_storage.store",
+    "mindroom.run_storage",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.context_bound_streams",
@@ -1280,6 +1280,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.loop_hooks",
     "mindroom.response_turn",
+    "mindroom.run_storage",
     "mindroom.session_storage.store",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
@@ -1300,6 +1301,11 @@ depends_on = [
     "mindroom.tool_jobs.notices",
 ]
 visibility = ["mindroom.ai", "mindroom.approval.resume", "mindroom.teams"]
+
+[[modules]]
+path = "mindroom.run_storage"
+depends_on = ["mindroom.llm", "mindroom.session_storage.store"]
+visibility = ["mindroom.ai", "mindroom.api.openai_compat", "mindroom.approval.resume", "mindroom.teams"]
 
 [[modules]]
 path = "mindroom.approval.tool_owners"
@@ -1806,6 +1812,7 @@ depends_on = [
     "mindroom.response_activity",
     "mindroom.response_turn",
     "mindroom.routing",
+    "mindroom.run_storage",
     "mindroom.teams",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
@@ -3349,8 +3356,8 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.providers.registry",
     "mindroom.response_turn",
+    "mindroom.run_storage",
     "mindroom.session_storage.lanes",
-    "mindroom.session_storage.store",
     "mindroom.system_prompt",
     "mindroom.thread_models",
     "mindroom.timing",
