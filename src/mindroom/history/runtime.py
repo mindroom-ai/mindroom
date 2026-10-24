@@ -59,7 +59,7 @@ from mindroom.history.types import (
 )
 from mindroom.llm.messages import is_own_model_message
 from mindroom.logging_config import get_logger
-from mindroom.model_usage import response_context_tokens
+from mindroom.model_usage import response_context
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import session_state_snapshot
@@ -396,12 +396,13 @@ def _reported_history_tokens(
 def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
     """Return the request-context size ``model`` reported with ``message``, configured as ``model_name``, if any."""
     configured = config.models.get(model_name)
-    return response_context_tokens(
+    context = response_context(
         message,
         provider=model.identity.provider_name,
         configured_provider=configured.provider if configured is not None else None,
         model_id=model.identity.id,
     )
+    return context.tokens if context is not None else None
 
 
 # Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.

@@ -219,7 +219,6 @@ class TeamAttempt:
     ) -> dict[str, Any]:
         """Return the stored run's metadata payload: the leader's identity, the team's usage, and the prepared history."""
         record = self.terminal_record()
-        prepared_history = self.prepared_history
         return build_ai_run_metadata_content(
             config=config,
             prices=model_prices(config, runtime_paths),
@@ -230,10 +229,9 @@ class TeamAttempt:
             model=record.model,
             model_provider=record.model_provider,
             metrics=team_usage(record),
-            context_metrics=record.metrics,
-            context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
+            context_run=record,
             tool_count=len(team_tool_executions(record)),
-            prepared_history=prepared_history,
+            prepared_history=self.prepared_history,
         )
 
 

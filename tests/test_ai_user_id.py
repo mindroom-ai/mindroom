@@ -59,16 +59,17 @@ from mindroom.hooks import (
 )
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.llm.events import ToolStarted
 from mindroom.llm.media import File
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
+from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.registry import build_model_provider
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
@@ -230,6 +231,17 @@ async def _respond(
     )
 
 
+def _answered(model_id: str, provider: str, **counters: int) -> RunRecord:
+    """Return a run whose one model request ``model_id`` answered, reporting ``counters``."""
+    message = Message(
+        role="assistant",
+        content="ok",
+        metrics=MessageMetrics(tokens=TokenCounts(**counters)),
+        provider_data=model_provenance(model_id, provider),
+    )
+    return RunRecord(run_id="run-1", agent_id="general", status=RunStatus.completed, messages=[message])
+
+
 def _model_runtime_context(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -315,10 +327,14 @@ def test_ai_run_metadata_prefers_provider_counters_over_estimate_for_cache_token
         status="completed",
         model="claude-sonnet-5",
         model_provider="google",
-        context_input_tokens=30_210,
-        context_raw_input_tokens=1_200,
-        context_cache_read_tokens=45_000,
-        context_cache_write_tokens=5_000,
+        context_run=_answered(
+            "claude-sonnet-5",
+            "google",
+            input_tokens=1_200,
+            cache_read_tokens=45_000,
+            cache_write_tokens=5_000,
+        ),
+        prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
 
     context = metadata[AI_RUN_METADATA_KEY]["context"]
@@ -340,9 +356,8 @@ def test_ai_run_metadata_context_uses_raw_input_for_non_cache_token_providers() 
         status="completed",
         model="test-model",
         model_provider="openai",
-        context_input_tokens=30_210,
-        context_raw_input_tokens=700,
-        context_cache_read_tokens=512,
+        context_run=_answered("test-model", "openai", input_tokens=700, cache_read_tokens=512),
+        prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
 
     context = metadata[AI_RUN_METADATA_KEY]["context"]
@@ -363,7 +378,6 @@ def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counter
         status="completed",
         model="claude-sonnet-5",
         model_provider="Anthropic",
-        context_input_tokens=30_210,
         prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
 
@@ -388,10 +402,8 @@ def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
         model="claude-sonnet-5",
         model_provider="google",
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=3_277, cache_read_tokens=99_772, cache_write_tokens=49_886)),
-        context_input_tokens=30_210,
-        context_raw_input_tokens=1_777,
-        context_cache_read_tokens=49_886,
-        context_cache_write_tokens=0,
+        context_run=_answered("claude-sonnet-5", "google", input_tokens=1_777, cache_read_tokens=49_886),
+        prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
 
     context = metadata[AI_RUN_METADATA_KEY]["context"]
@@ -2347,13 +2359,15 @@ class TestUserIdPassthrough:
         assert "utilization_pct" not in payload["context"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
-    async def test_stream_agent_response_prefers_latest_request_counters_over_estimate(
+    async def test_a_reply_s_context_reads_its_last_request(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        streaming: bool,
     ) -> None:
-        """Usage sums every request while the context block reads the latest request's counters."""
+        """Usage sums every request while the context block reads the last request's counters."""
         config, runtime_paths = _bound(
             tmp_path,
             Config(
@@ -2374,14 +2388,13 @@ class TestUserIdPassthrough:
         install_model_providers(monkeypatch, {"default": model})
         run_metadata: dict[str, Any] = {}
 
-        async for _chunk in stream_agent_response(
+        await _respond(
             make_turn_context("general", session_id="session1"),
-            prompt="test",
-            runtime_paths=runtime_paths,
-            config=config,
+            config,
+            runtime_paths,
+            streaming=streaming,
             run_metadata_collector=run_metadata,
-        ):
-            pass
+        )
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
         assert payload["status"] == "completed"
@@ -2390,21 +2403,24 @@ class TestUserIdPassthrough:
         assert payload["usage"]["total_tokens"] == 890
         assert payload["usage"]["cache_read_tokens"] == 576
         assert payload["usage"]["reasoning_tokens"] == 48
-        assert payload["context"]["input_tokens"] == 120
-        assert payload["context"]["cache_read_input_tokens"] == 64
-        assert payload["context"]["uncached_input_tokens"] == 56
-        assert "cached_input_tokens" not in payload["context"]
-        assert payload["context"]["window_tokens"] == 1000
+        assert payload["context"] == {
+            "input_tokens": 120,
+            "window_tokens": 1000,
+            "cache_read_input_tokens": 64,
+            "uncached_input_tokens": 56,
+        }
         assert isinstance(payload["prepared_context"]["tokens"], int)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
-    async def test_stream_agent_response_does_not_backfill_latest_context_cache_from_usage(
+    async def test_a_reply_s_context_does_not_backfill_cache_counters_from_earlier_requests(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        streaming: bool,
     ) -> None:
-        """Missing latest-request cache counters stay unknown instead of reusing cumulative totals."""
+        """Cache counters the last request did not report stay unknown instead of reusing the run's totals."""
         config, runtime_paths = _bound(
             tmp_path,
             Config(
@@ -2425,23 +2441,65 @@ class TestUserIdPassthrough:
         install_model_providers(monkeypatch, {"default": model})
         run_metadata: dict[str, Any] = {}
 
-        async for _chunk in stream_agent_response(
+        await _respond(
             make_turn_context("general", session_id="session1"),
-            prompt="test",
-            runtime_paths=runtime_paths,
-            config=config,
+            config,
+            runtime_paths,
+            streaming=streaming,
             run_metadata_collector=run_metadata,
-        ):
-            pass
+        )
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
         assert payload["usage"]["cache_read_tokens"] == 512
         assert payload["usage"]["cache_write_tokens"] == 32
-        assert payload["context"]["input_tokens"] == 120
-        assert "cache_read_input_tokens" not in payload["context"]
-        assert "cache_write_input_tokens" not in payload["context"]
-        assert "uncached_input_tokens" not in payload["context"]
-        assert payload["context"]["window_tokens"] == 1000
+        assert payload["context"] == {"input_tokens": 120, "window_tokens": 1000}
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
+    async def test_a_retried_streamed_reply_s_context_falls_back_to_the_estimate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A request retried after its failed attempt billed input describes no single context, so the estimate shows.
+
+        The provider reported the failed attempt's input before the connection dropped; the retry's finished turn
+        carries both attempts' usage, which the reply's usage bills.
+        """
+        config, runtime_paths = _bound(
+            tmp_path,
+            Config(
+                agents={"general": AgentConfig(display_name="General")},
+                models={"default": ModelConfig(provider="openai", id="test-model", context_window=100_000)},
+            ),
+        )
+        monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+
+        async def drop() -> None:
+            msg = "connection dropped"
+            raise ProviderUnavailable(msg, provider="OpenAI Chat")
+
+        model = _scripted_like(
+            config,
+            runtime_paths,
+            [[UsageReported(usage(700, 0), final=False), Await(drop)], answer("Response", usage(720, 20))],
+        )
+        install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
+        run_metadata: dict[str, Any] = {}
+
+        await _respond(
+            make_turn_context("general", session_id="session1"),
+            config,
+            runtime_paths,
+            streaming=True,
+            run_metadata_collector=run_metadata,
+        )
+
+        assert len(model.requests) == 2
+        payload = run_metadata[AI_RUN_METADATA_KEY]
+        assert payload["usage"]["input_tokens"] == 1420
+        estimate = payload["prepared_context"]["tokens"]
+        assert payload["context"] == {"input_tokens": estimate, "window_tokens": 100_000}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

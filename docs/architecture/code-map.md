@@ -233,7 +233,7 @@ Matrix sync callback
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `providers/credentials.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
 | `providers/key_checks.py` | The request that proves a provider API key valid, which `mindroom doctor` and the dashboard's provider setup send |
-| `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `canonical_provider`, its normalized spelling, in a module that imports nothing |
+| `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, in a module that imports nothing |
 | `providers/anthropic/messages.py` | The Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |

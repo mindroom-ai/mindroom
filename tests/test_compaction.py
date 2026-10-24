@@ -24,7 +24,9 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
-from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
@@ -249,21 +251,25 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
 
 
 def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_path: Path) -> None:
-    """Context cache counters should not exceed the context size exposed to clients."""
+    """Context cache counters should not exceed the context size exposed to clients.
+
+    An OpenAI-compatible server can report more cached tokens than prompt tokens.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent")},
             defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(
-                    provider="vertexai_claude",
-                    id="claude-opus-5",
-                    context_window=200_000,
-                ),
-            },
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=200_000)},
         ),
         runtime_paths,
+    )
+    counts = TokenCounts(input_tokens=153_294, cache_read_tokens=281_264, cache_write_tokens=500)
+    answer = Message(
+        role="assistant",
+        content="ok",
+        metrics=MessageMetrics(tokens=counts),
+        provider_data=model_provenance("test-model", "OpenAI Chat"),
     )
 
     metadata = build_ai_run_metadata_content(
@@ -273,12 +279,10 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
         run_id="run-1",
         session_id="session-1",
         status="completed",
-        model="claude-opus-5",
-        model_provider="VertexAI",
-        metrics=RunMetrics(tokens=TokenCounts(input_tokens=153_294, cache_read_tokens=281_264)),
-        context_input_tokens=153_294,
-        context_cache_read_tokens=281_264,
-        context_cache_write_tokens=500,
+        model="test-model",
+        model_provider="OpenAI",
+        metrics=RunMetrics(tokens=counts),
+        context_run=RunRecord(run_id="run-1", agent_id="test_agent", status=RunStatus.completed, messages=[answer]),
     )
 
     context = metadata[AI_RUN_METADATA_KEY]["context"]

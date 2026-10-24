@@ -842,7 +842,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.model_usage",
     "mindroom.llm",
-    "mindroom.providers.names",
 ]
 
 [[modules]]

@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunStatus
-from mindroom.llm.usage import RunMetrics, TokenCounts
-from mindroom.model_usage import context_input_tokens_from_counts, uncached_input_tokens_from_counts
-from mindroom.providers.names import canonical_provider
+from mindroom.model_usage import ResponseContext, response_context, uncached_input_tokens_from_counts
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -19,6 +18,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.types import PreparedHistoryState
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import RunMetrics, TokenCounts
 
 _AI_RUN_METADATA_VERSION = 1
 # The ``usage`` object lists the counters first, in this order; a counter it omits follows them. It equals the stored
@@ -73,31 +74,27 @@ class _ReplyUsage:
         return wire
 
 
-def _build_context_payload(
-    *,
-    context_input_tokens: int | None,
-    cache_read_tokens: int | None,
-    cache_write_tokens: int | None,
-    model_config: ModelConfig | None,
-) -> dict[str, Any] | None:
-    if context_input_tokens is None or model_config is None or model_config.context_window is None:
+def _build_context_payload(context: ResponseContext | None, model_config: ModelConfig | None) -> dict[str, Any] | None:
+    if context is None or model_config is None or model_config.context_window is None:
         return None
     context_window = model_config.context_window
     if context_window <= 0:
         return None
+    cache_read_tokens = context.cache_read_tokens
+    cache_write_tokens = context.cache_write_tokens
     payload = {
-        "input_tokens": context_input_tokens,
+        "input_tokens": context.tokens,
         "window_tokens": context_window,
     }
     bounded_cache_read_tokens: int | None = None
     if cache_read_tokens is not None and cache_read_tokens > 0:
-        bounded_cache_read_tokens = min(cache_read_tokens, context_input_tokens)
+        bounded_cache_read_tokens = min(cache_read_tokens, context.tokens)
         if bounded_cache_read_tokens > 0:
             payload["cache_read_input_tokens"] = bounded_cache_read_tokens
     uncached_input_tokens: int | None = None
     if cache_read_tokens is not None or cache_write_tokens is not None:
         # Cache writes were not read from cache, so they remain in the non-cache-read bucket.
-        uncached_input_tokens = context_input_tokens - (bounded_cache_read_tokens or 0)
+        uncached_input_tokens = context.tokens - (bounded_cache_read_tokens or 0)
         if uncached_input_tokens >= 0:
             payload["uncached_input_tokens"] = uncached_input_tokens
     if (
@@ -108,13 +105,6 @@ def _build_context_payload(
     ):
         payload["cache_write_input_tokens"] = cache_write_tokens
     return payload
-
-
-def _int_usage_value(usage_payload: dict[str, Any] | None, key: str) -> int | None:
-    if usage_payload is None:
-        return None
-    value = usage_payload.get(key)
-    return value if isinstance(value, int) else None
 
 
 def _build_compaction_metadata_payload(prepared_history: PreparedHistoryState | None) -> dict[str, Any] | None:
@@ -170,28 +160,31 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
-def _context_provider_key(provider: str | None) -> str:
-    key = canonical_provider(provider or "")
-    return {"vertexai_claude": "vertexai", "bedrock_claude": "awsbedrock"}.get(key, key)
-
-
-def _native_context_counts(
-    metrics: RunMetrics | None,
-    model_id: str | None,
+def _reply_context(
+    run: AnyRunRecord | None,
+    prepared_history: PreparedHistoryState | None,
+    *,
     provider: str | None,
-) -> tuple[int | None, int | None, int | None] | None:
-    """Read final-iteration context separately from accumulated billing."""
-    if isinstance(metrics, RunMetrics):
-        for detail in (metrics.details or {}).get("model", []):
-            if detail.id == model_id and _context_provider_key(detail.provider) == _context_provider_key(provider):
-                usage = (detail.provider_metrics or {}).get("context_usage")
-                if isinstance(usage, dict):
-                    return (
-                        _int_usage_value(usage, "input_tokens"),
-                        _int_usage_value(usage, "cache_read_tokens"),
-                        _int_usage_value(usage, "cache_write_tokens"),
-                    )
-    return None
+    configured_provider: str | None,
+    model_id: str | None,
+) -> ResponseContext | None:
+    """Return the context the run's last own model request reported, else the pre-flight estimate of its history.
+
+    The estimate stands in when the run holds no request its model answered, and when the last one reported no usage
+    of its own: on a route that reports none, or for a retried request whose usage sums its attempts.
+    """
+    own = [message for message in run.messages if is_own_model_message(message)] if run is not None else []
+    if own:
+        reported = response_context(
+            own[-1],
+            provider=provider,
+            configured_provider=configured_provider,
+            model_id=model_id,
+        )
+        if reported is not None:
+            return reported
+    estimate = prepared_history.prepared_context_tokens if prepared_history is not None else None
+    return None if estimate is None else ResponseContext(estimate)
 
 
 def _uncached_input_tokens(
@@ -227,7 +220,7 @@ def _uncached_input_tokens(
     )
 
 
-def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
+def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     *,
     config: Config,
     model_name: str,
@@ -238,11 +231,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     model_provider: str | None,
     prices: Mapping[tuple[str, str], PricedModel],
     metrics: RunMetrics | None = None,
-    context_metrics: RunMetrics | None = None,
-    context_raw_input_tokens: int | None = None,
-    context_input_tokens: int | None = None,
-    context_cache_read_tokens: int | None = None,
-    context_cache_write_tokens: int | None = None,
+    context_run: AnyRunRecord | None = None,
     tool_count: int | None = None,
     prepared_history: PreparedHistoryState | None = None,
 ) -> dict[str, Any]:
@@ -252,47 +241,14 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     It must not be re-resolved here: the per-thread override store can change
     mid-run (for example via `switch_thread_model`), and this metadata must
     describe the model that actually produced the response.
-    `context_metrics` belongs to that model run before team-member billing is aggregated.
+    `context_run` is the run whose last own model request's context the reply reports: the reply's run, or a team's
+    leader run, whose members' requests each held a context of their own.
     `prices` maps recorded (provider, model ID) identities to prices for the reply's cost.
     """
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
-
-    # The reply's counters, a zero one read as unreported, as the published usage leaves it out.
-    tokens = metrics.tokens if metrics is not None else TokenCounts()
-    usage_input_tokens = tokens.input_tokens or None
-    # Native compaction adds a billed sampling iteration. The reply's usage and cost
-    # include it, while the final iteration alone describes the active context.
-    if native_counts := _native_context_counts(context_metrics, model_id, provider):
-        context_raw_input_tokens, context_cache_read_tokens, context_cache_write_tokens = native_counts
-    explicit_context_scope = any(
-        value is not None
-        for value in (
-            context_raw_input_tokens,
-            context_cache_read_tokens,
-            context_cache_write_tokens,
-        )
-    )
-    # Provider usage counters are authoritative for context occupancy; the
-    # pre-flight `context_input_tokens` estimate is only a fallback when the
-    # provider reported nothing (for example a request that failed early).
-    resolved_context_input_tokens = context_input_tokens_from_counts(
-        input_tokens=context_raw_input_tokens if explicit_context_scope else usage_input_tokens,
-        cache_read_tokens=context_cache_read_tokens if explicit_context_scope else tokens.cache_read_tokens or None,
-        cache_write_tokens=context_cache_write_tokens if explicit_context_scope else tokens.cache_write_tokens or None,
-        provider=provider,
-        configured_provider=model_config.provider if model_config is not None else None,
-        model_id=model_id,
-    )
-    if resolved_context_input_tokens is None:
-        resolved_context_input_tokens = context_input_tokens
-    resolved_context_cache_read_tokens = context_cache_read_tokens
-    if resolved_context_cache_read_tokens is None and not explicit_context_scope:
-        resolved_context_cache_read_tokens = tokens.cache_read_tokens or None
-    resolved_context_cache_write_tokens = context_cache_write_tokens
-    if resolved_context_cache_write_tokens is None and not explicit_context_scope:
-        resolved_context_cache_write_tokens = tokens.cache_write_tokens or None
+    configured_provider = model_config.provider if model_config is not None else None
 
     payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
     if run_id is not None:
@@ -314,26 +270,28 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
         uncached_input_tokens = _uncached_input_tokens(
             metrics,
             provider=provider,
-            configured_provider=model_config.provider if model_config is not None else None,
+            configured_provider=configured_provider,
             model_id=model_id,
         )
         if usage := _ReplyUsage.of(metrics, uncached_input_tokens=uncached_input_tokens).to_wire():
             payload["usage"] = usage
     cost = run_cost_usd(
         metrics,
-        tokens.to_dict() if metrics is not None else None,
+        metrics.tokens.to_dict() if metrics is not None else None,
         model_provider=model_provider,
         model_id=model_id,
         prices=prices,
     )
     if cost is not None:
         payload["cost"] = {"usd": format_cost_usd(cost)}
-    context_payload = _build_context_payload(
-        context_input_tokens=resolved_context_input_tokens,
-        cache_read_tokens=resolved_context_cache_read_tokens,
-        cache_write_tokens=resolved_context_cache_write_tokens,
-        model_config=model_config,
+    context = _reply_context(
+        context_run,
+        prepared_history,
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
     )
+    context_payload = _build_context_payload(context, model_config)
     if context_payload:
         payload["context"] = context_payload
     if prepared_history is not None and prepared_history.prepared_context_tokens is not None:

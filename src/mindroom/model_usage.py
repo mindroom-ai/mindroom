@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.llm.messages import Message
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseContext:
+    """The request context one response reported: its size in tokens, and the cache reads and writes it counted.
+
+    A cache counter is None when the provider did not report it.
+    """
+
+    tokens: int
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
 
 def provider_reports_cache_tokens_outside_input(
@@ -69,16 +82,17 @@ def uncached_input_tokens_from_counts(
     return max(0, input_tokens - (cache_read_tokens or 0))
 
 
-def response_context_tokens(
+def response_context(
     message: Message,
     *,
     provider: str | None,
     configured_provider: str | None,
     model_id: str | None,
-) -> int | None:
-    """Return the request-context size one response reported, or None when its provider reported no usage.
+) -> ResponseContext | None:
+    """Return the request context one response reported, or None when its provider reported no usage.
 
-    A native compaction iteration's final ``context_usage`` describes the active context; billed counters can
+    A Claude response's ``context_usage`` holds its final iteration's counters, each one reported, a zero one too:
+    after a native compaction that iteration alone describes the active context, while the billed counters can
     include the transcript the checkpoint replaced.
     """
     if isinstance(message.provider_data, dict) and message.provider_data.get("mindroom_aggregate_usage") is True:
@@ -86,25 +100,27 @@ def response_context_tokens(
         return None
     metrics = message.metrics
     usage = (metrics.provider_metrics or {}).get("context_usage")
-    counts = (
-        usage
-        if isinstance(usage, dict)
-        else {
-            "input_tokens": metrics.tokens.input_tokens,
-            "cache_read_tokens": metrics.tokens.cache_read_tokens,
-            "cache_write_tokens": metrics.tokens.cache_write_tokens,
-        }
-    )
+    if isinstance(usage, dict):
+        input_tokens = _count(usage, "input_tokens")
+        cache_read_tokens = _count(usage, "cache_read_tokens")
+        cache_write_tokens = _count(usage, "cache_write_tokens")
+    else:
+        # A counter the provider did not report stays zero, so a zero cache counter counts as unreported.
+        input_tokens = metrics.tokens.input_tokens
+        cache_read_tokens = metrics.tokens.cache_read_tokens or None
+        cache_write_tokens = metrics.tokens.cache_write_tokens or None
     tokens = context_input_tokens_from_counts(
-        input_tokens=_count(counts, "input_tokens"),
-        cache_read_tokens=_count(counts, "cache_read_tokens"),
-        cache_write_tokens=_count(counts, "cache_write_tokens"),
+        input_tokens=input_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
         provider=provider,
         configured_provider=configured_provider,
         model_id=model_id,
     )
-    # Every counter starts at zero, so zero means the provider reported nothing.
-    return tokens or None
+    # A zero size means the provider reported nothing.
+    if not tokens:
+        return None
+    return ResponseContext(tokens, cache_read_tokens, cache_write_tokens)
 
 
 def _count(counts: Mapping[str, object], key: str) -> int | None:
