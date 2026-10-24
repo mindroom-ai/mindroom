@@ -49,15 +49,13 @@ _SESSION_COLUMNS = """
 """
 
 
-def _source(path: Path, *, storage_name: str = "code") -> UsageStorageSource:
+def _source(path: Path) -> UsageStorageSource:
     # Existing-history fixtures pass through the same one-time import as startup.
-    names = TableNames(storage_name)
-    migrate_usage_database(path, names)
+    migrate_usage_database(path, TableNames.of_database(path))
     return UsageStorageSource(
         path=path,
         path_label=path.name,
         scope="shared_agent",
-        names=names,
         source_agent_id="code",
         allowed_agent_ids=frozenset({"code"}),
         requester_isolated=False,
@@ -420,7 +418,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         ),
     )
 
-    source = _source(tmp_path / "sessions" / "engineering.db", storage_name="engineering")
+    source = _source(tmp_path / "sessions" / "engineering.db")
     if legacy_encoding:
         with sqlite3.connect(source.path) as connection:
             (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()
