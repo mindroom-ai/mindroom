@@ -18,7 +18,6 @@ from agno.tools import Toolkit
 
 from mindroom import agents
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.ai import ai_response
@@ -413,7 +412,7 @@ async def pause_parent(
         request,
         ctx=ctx,
         persist=persist_to(store, session),
-        request_template=EMPTY_REQUEST,
+        request_template=build.request_template,
     ):
         if isinstance(event, RunFinished):
             assert isinstance(event.record, RunRecord)

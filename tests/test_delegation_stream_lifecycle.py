@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agents import create_agent
@@ -253,7 +252,13 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         _events, paused = await collect(
-            run_agent(build.spec, request, ctx=ctx, persist=persist_to(store, session), request_template=EMPTY_REQUEST),
+            run_agent(
+                build.spec,
+                request,
+                ctx=ctx,
+                persist=persist_to(store, session),
+                request_template=build.request_template,
+            ),
         )
         assert paused.status is RunStatus.paused
         runner = ResumeRunner(

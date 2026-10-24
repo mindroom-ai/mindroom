@@ -25,7 +25,7 @@ from mindroom.agent_cli.minimal_agent import (
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
+from mindroom.agent_loop.model_loop import NO_HOOKS
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_modes import resolve_agent_mode, set_agent_mode
@@ -103,7 +103,7 @@ async def _run_attempt(build, runtime, session: ConversationSession, prompt: str
         ctx=run,
         hooks=hooks,
         persist=persist_to(build.store, session) if build.store is not None else None,
-        request_template=EMPTY_REQUEST,
+        request_template=build.request_template,
     )
     record = None
     async for event in events:
