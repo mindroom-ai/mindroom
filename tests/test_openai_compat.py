@@ -1701,6 +1701,33 @@ class TestStreamingCompletion:
         # [DONE] terminator
         assert lines[4] == "data: [DONE]"
 
+    @pytest.mark.parametrize(
+        ("deltas", "expected"),
+        [((), ["Whole answer"]), (("Whole ", "answer"), ["Whole ", "answer"])],
+        ids=["no-deltas", "streamed"],
+    )
+    def test_streaming_sends_a_finished_reply_that_streamed_no_text_once(
+        self,
+        app_client: TestClient,
+        deltas: tuple[str, ...],
+        expected: list[str],
+    ) -> None:
+        """A run that streamed no text sends its finished reply as one chunk; a streamed reply is not repeated."""
+
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta | RunFinished]:
+            for delta in deltas:
+                yield TextDelta(delta)
+            yield RunFinished(RunRecord(run_id="run", status=RunStatus.completed, content="Whole answer"))
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": True},
+            )
+
+        assert response.status_code == 200
+        assert _sse_contents(response.text) == expected
+
     def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
         """Streaming disables interactive question prompting for OpenAI compatibility."""
 
