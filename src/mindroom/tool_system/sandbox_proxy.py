@@ -40,6 +40,7 @@ from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_VIEW_FILE_PATH,
     WorkerCallCancellation,
     WorkerProxyClientConfig,
+    checked_worker_response,
     execute_worker_proxy_request,
     post_worker_proxy_json,
     record_proxy_response_failure_for_worker,
@@ -518,17 +519,6 @@ def attachment_save_uses_worker(
     )
 
 
-def _record_worker_failure(
-    *,
-    worker_handle: WorkerHandle | None,
-    worker_manager: WorkerBackend,
-    error: str,
-) -> None:
-    """Record a worker save or view protocol or integrity failure against worker health."""
-    if worker_handle is not None:
-        worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
-
-
 def _post_worker_file_request(
     proxy_config: _SandboxProxyConfig,
     runtime_paths: RuntimePaths,
@@ -550,21 +540,13 @@ def _post_worker_file_request(
         worker_operation=operation,
         client_factory=httpx.Client,
     )
-    if not isinstance(data, dict):
-        msg = f"Sandbox {operation} returned a non-object response."
-        _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
-        raise TypeError(msg)
-    response_data = {str(key): value for key, value in data.items()}
-    if response_data.get("ok") is not True:
-        error = str(response_data.get("error") or failure)
-        record_proxy_response_failure_for_worker(
-            worker_handle=worker_handle,
-            worker_manager=worker_manager,
-            error=error,
-            failure_kind=response_data.get("failure_kind"),
-        )
-        raise RuntimeError(error)
-    return response_data
+    return checked_worker_response(
+        data,
+        worker_handle=worker_handle,
+        worker_manager=worker_manager,
+        non_object_error=f"Sandbox {operation} returned a non-object response.",
+        failure=failure,
+    )
 
 
 def save_attachment_to_worker(
@@ -636,7 +618,12 @@ def save_attachment_to_worker(
             sha256=attachment_fields["sha256"],
         )
         if isinstance(receipt, str):
-            _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=receipt)
+            record_proxy_response_failure_for_worker(
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+                error=receipt,
+                failure_kind=None,
+            )
             raise RuntimeError(receipt)  # noqa: TRY004
         if worker_handle is not None:
             worker_manager.touch_worker(worker_handle.worker_key)
@@ -705,11 +692,21 @@ def view_file_from_worker(
         try:
             result = decode_media_result(response_data.get("result"))
         except ValueError as exc:
-            _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=str(exc))
+            record_proxy_response_failure_for_worker(
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+                error=str(exc),
+                failure_kind=None,
+            )
             raise
         if not isinstance(result, ToolResult):
             msg = "Sandbox view-file returned a non-media result."
-            _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
+            record_proxy_response_failure_for_worker(
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+                error=msg,
+                failure_kind=None,
+            )
             raise TypeError(msg)
         if worker_handle is not None:
             worker_manager.touch_worker(worker_handle.worker_key)
