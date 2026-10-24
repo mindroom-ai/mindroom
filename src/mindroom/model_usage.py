@@ -103,7 +103,7 @@ def response_context_tokens(
         configured_provider=configured_provider,
         model_id=model_id,
     )
-    # Agno starts every counter at zero, so zero means the provider reported nothing.
+    # Every counter starts at zero, so zero means the provider reported nothing.
     return tokens or None
 
 
