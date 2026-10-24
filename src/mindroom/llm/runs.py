@@ -379,7 +379,7 @@ class TeamRunRecord(_RunRecordCommon):
 
     team_id: str | None = None
     team_name: str | None = None
-    member_responses: list[RunRecord | TeamRunRecord] = field(default_factory=list)
+    member_responses: list[RunRecord] = field(default_factory=list)
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -400,24 +400,12 @@ class TeamRunRecord(_RunRecordCommon):
         return cls(
             team_id=data.get("team_id"),
             team_name=data.get("team_name"),
-            member_responses=[run_record_from_dict(member) for member in data.get("member_responses") or []],
+            member_responses=[RunRecord.from_dict(member) for member in data.get("member_responses") or []],
             **_common_from_dict(data),
         )
 
 
 type AnyRunRecord = RunRecord | TeamRunRecord
-
-
-def run_record_from_dict(data: Mapping[str, Any]) -> AnyRunRecord:
-    """Rebuild whichever record a stored dict holds.
-
-    A ``team_id`` key marks a team run; everything else is an agent run, including the usage-only records
-    MindRoom writes without an ``agent_id``.
-    """
-    if "team_id" in data:
-        return TeamRunRecord.from_dict(data)
-    return RunRecord.from_dict(data)
-
 
 __all__ = [
     "AnyRunRecord",
@@ -427,5 +415,4 @@ __all__ = [
     "TeamRunRecord",
     "ToolExecution",
     "denial_note_for",
-    "run_record_from_dict",
 ]

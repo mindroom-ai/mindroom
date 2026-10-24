@@ -27,7 +27,7 @@ from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.types import CompactionDecision, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord, run_record_from_dict
+from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
 from mindroom.teams.resume import blocking_team_pause
@@ -43,6 +43,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls
+from tests.llm.agno_dict_helpers import stored_run_record
 from tests.team_runtime.squad import SQUAD_APPROVED, STORAGE, approval, scripted
 from tests.team_turn_helpers import authored_team_config, build_team_turn, install_team_models
 
@@ -92,7 +93,7 @@ def _stored_runs() -> dict[str, AnyRunRecord]:
             _, path = key.split(":", 1)
             if path == data["run_id"]:
                 assert path not in runs
-                runs[path] = run_record_from_dict(data)
+                runs[path] = stored_run_record(data)
     return runs
 
 

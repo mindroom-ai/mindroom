@@ -264,7 +264,7 @@ def _plan_member_resumes(
 ) -> list[_MemberResume]:
     """Plan one resume per paused member run, checking every member's decisions before any member runs."""
     members = {member.spec.id: member for member in spec.members}
-    embedded = {member.run_id: member for member in paused.member_responses if isinstance(member, RunRecord)}
+    embedded = {member.run_id: member for member in paused.member_responses}
     by_run: dict[tuple[str, str], list[RunRequirement]] = {}
     for requirement in requirements:
         assert requirement.member_agent_id is not None

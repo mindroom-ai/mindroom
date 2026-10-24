@@ -4467,11 +4467,7 @@ class TestTeamCompletion:
                     content="done",
                     messages=[notice(True)],
                     member_responses=[
-                        RunRecord(
-                            run_id="member-run-queued-notice",
-                            session_id="session-openai-team-prep",
-                            messages=[notice(True)],
-                        ),
+                        RunRecord(run_id="member-run-queued-notice", session_id="session-openai-team-prep"),
                     ],
                 ),
             ]
