@@ -304,7 +304,7 @@ def resolve_team_turn_models(
 
 
 def team_label(member_names: Sequence[str]) -> str:
-    """Return the stored ``team_name`` of a team of these members, as Agno's team instances were named."""
+    """Return the stored ``team_name`` of a team of these members, kept as main stores it."""
     return f"Team-{'-'.join(member_names)}"
 
 
@@ -358,7 +358,7 @@ def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
     The turn's tool runtime context names the team. Tools that act for the running agent, such as ``todo``'s default
     assignee and workspace templates or ``claude_agent``'s sessions and model, read it from that context, so each
     call reaches its entrypoint with the member's name and the model it runs on. The tool-call policy around the
-    step still sees the turn's context, as it did when Agno ran the members.
+    step still sees the turn's context, kept as main behaves.
     """
 
     async def run_as_member(call: ToolCall, call_next: ToolNext) -> object:

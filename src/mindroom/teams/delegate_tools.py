@@ -2,9 +2,9 @@
 """The leader's delegation tools and what they tell the leader about a member's run.
 
 A coordinate team offers ``delegate_task_to_member(member_id, task)``, a collaborate team
-``delegate_task_to_members(task)``. Both are authored as Agno functions so Agno derives their schemas, as it did for
-its own, and both close over the team run they serve: a member's paused requirements are copied onto that run,
-naming the member, which pauses the leader's loop after the batch.
+``delegate_task_to_members(task)``. Both are authored as Agno functions, as every MindRoom tool is, and both close
+over the team run they serve: a member's paused requirements are copied onto that run, naming the member, which
+pauses the leader's loop after the batch.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord, TeamRunRecord, ToolExecution
     from mindroom.teams.spec import TeamMember
 
-# The texts Agno gave the leader for a member that paused, per mode, and for one that said nothing.
+# What the leader reads for a member that paused, per mode, and for one that said nothing.
 MEMBER_PAUSED_RESULT = "Member '{name}' requires human input before continuing."
 COLLABORATE_MEMBER_PAUSED_RESULT = "Agent {name}: Requires human input before continuing."
 NO_MEMBER_RESPONSE = "No response from the member agent."
@@ -46,8 +46,7 @@ def delegate_functions(
 ) -> AdaptedToolkit:
     """Return the delegation tool for ``mode`` as a toolkit bound to the team run ``record``.
 
-    ``stream`` says whether the leader's requests stream: without streaming, Agno's delegation told the leader about
-    a member's run by different rules.
+    ``stream`` says whether the leader's requests stream, which selects the rules of a member's result.
     """
     by_id = {member.spec.id: member for member in members}
 
@@ -81,7 +80,7 @@ def delegate_functions(
         Returns:
             str: The result of the delegated task.
 
-        """  # noqa: D205 - Agno's two-line summary, which its schema generator reads as the tool description.
+        """  # noqa: D205 - the two-line summary is the tool description the model reads.
         async with asyncio.TaskGroup() as group:
             runs = [group.create_task(run_member(member, task)) for member in members]
         return collaborate_result_text(members, [run.result() for run in runs], record, stream=stream)
@@ -92,10 +91,10 @@ def delegate_functions(
 
 
 def member_result_text(child: RunRecord, *, stream: bool) -> str:
-    """Return what a coordinate leader reads for a finished member run, by Agno's rules with or without streaming.
+    """Return what a coordinate leader reads for a finished member run, by the rules of the leader's stream mode.
 
     The rules read the content the run hands over (``handover_content``), so a failed member gives the reason its
-    run recorded, credentials redacted, where Agno gave the member's content: stale text, or the raw error.
+    run recorded, credentials redacted.
     """
     # TODO(simplify): The rules differ by stream mode: without streaming, a run with tools but no content reads
     # ``null`` and a blank run without tools reads empty. Use the streamed rules in both modes. Models would notice.
@@ -103,7 +102,7 @@ def member_result_text(child: RunRecord, *, stream: bool) -> str:
 
 
 def _streamed_result(child: RunRecord) -> str:
-    """Return the member's text, else its tool results, else Agno's notice."""
+    """Return the member's text, else its tool results, else the no-response notice."""
     content = child.handover_content
     if isinstance(content, str) and content.strip():
         return content
@@ -115,7 +114,7 @@ def _streamed_result(child: RunRecord) -> str:
 
 
 def _blocking_result(child: RunRecord) -> str:
-    """Return what Agno's non-stream delegation gave: the notice only for a run with neither text nor tools.
+    """Return the blocking result: the no-response notice only for a run with neither content nor tools.
 
     A run whose text is blank gives its tool results, which without tools leaves nothing; any other content, None
     among it, is JSON.
@@ -139,12 +138,11 @@ def collaborate_result_text(
     *,
     stream: bool,
 ) -> str:
-    """Return the collaborate result: one piece per member in member order, joined with no separator, as Agno's was.
+    """Return the collaborate result: one piece per member in member order, joined with no separator.
 
-    Streaming, a piece is the member's text, as Agno's streaming broadcast concatenated the members' output as it
-    arrived; member order makes the result deterministic and equal to Agno's whenever arrival order matched it.
-    Blocking, a piece is the member's result labeled with its name, as Agno's non-stream broadcast gave it. A paused
-    member contributes Agno's notice and its requirements reach the team run.
+    Streaming, a piece is the member's result (``_streamed_result``); blocking, it is the result labeled with the
+    member's name (``_labeled_result``). A paused member contributes its pause notice and its requirements reach the
+    team run.
     """
     # TODO(simplify): Pieces join with no separator, and a finished member's piece is labeled only without streaming,
     # by a third result rule (``_labeled_result``). Label every piece by one rule and separate pieces with blank lines.
