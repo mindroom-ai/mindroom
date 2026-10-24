@@ -581,9 +581,9 @@ def read_chunk(
         if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason is not None:
             # A blocked prompt gets feedback instead of a candidate, which ends the reply.
             reply.prompt_blocked = True
-        # TODO(simplify): a blocked prompt's usage counts only when the reply arrives whole. Count a blocking chunk's
-        # usage when streamed too, as it ends the reply, and drop ``whole_response``. Operators would see the usage
-        # of streamed blocked prompts.
+        # TODO(simplify): a blocked prompt's usage counts only when the reply arrives whole. Count a chunk without
+        # candidates only when it blocks the prompt, in both modes, and drop ``whole_response``. Operators would see
+        # the usage of streamed blocked prompts.
         if not whole_response or chunk.usage_metadata is None:
             return []
         reply.usage = _usage_metrics(chunk.usage_metadata)
