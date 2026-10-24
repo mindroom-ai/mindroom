@@ -1612,7 +1612,8 @@ def test_sync_refresh_adapter_reentrancy_fails_instead_of_deadlocking(tmp_path: 
     process = process_context.Process(target=_run_nested_sync_refresh, args=(str(tmp_path), result_queue))
 
     process.start()
-    process.join(timeout=2)
+    # A fresh interpreter's start and imports take seconds on a busy machine; a deadlock never ends.
+    process.join(timeout=30)
     if process.is_alive():
         process.terminate()
         process.join()
