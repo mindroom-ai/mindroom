@@ -50,7 +50,7 @@ def _mcp_toolkit(toolkit: Toolkit) -> _McpToolkit | None:
 
 def connects_per_run(toolkit: Toolkit) -> bool:
     """Whether ``toolkit`` holds a connection for one run, so each of its calls must finish inside that run."""
-    return toolkit.requires_connect or _mcp_toolkit(toolkit) is not None
+    return run_connection(toolkit) is not None
 
 
 def is_unconnected_mcp_toolkit(toolkit: Toolkit) -> bool:
