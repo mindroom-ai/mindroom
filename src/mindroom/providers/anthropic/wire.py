@@ -162,11 +162,11 @@ def format_claude_messages(
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
-    System messages are extracted and joined with a space. Consecutive same-role turns merge
-    into one, dropping the earlier assistant turn's thinking: the API verifies an assistant message's thinking
-    sequence against one original response. A conversation that ends with an assistant turn gets a trailing
-    ``continue`` user turn when the model rejects prefill. Documents ask for citations unless ``citations`` is
-    False, as a request with structured output must be: the API rejects citations beside an output format.
+    System messages are extracted and joined with a space. Consecutive same-role turns merge into one, dropping
+    the earlier assistant turn's thinking: the API verifies an assistant message's thinking sequence against one
+    original response. A conversation that ends with an assistant turn gets a trailing ``continue`` user turn when
+    the model rejects prefill. Documents ask for citations unless ``citations`` is False, as a request with
+    structured output must be: the API rejects citations beside an output format.
     """
     turns: list[dict[str, Any]] = []
     system_texts: list[str] = []
