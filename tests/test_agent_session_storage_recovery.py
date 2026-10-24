@@ -7,6 +7,7 @@ import os
 import sqlite3
 import stat
 import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -265,7 +266,7 @@ else:
 os._exit(0)
 """
     subprocess.run(
-        ["uv", "run", "--no-sync", "python", "-c", code, str(database), "wal" if wal else "rollback"],
+        [sys.executable, "-c", code, str(database), "wal" if wal else "rollback"],
         check=True,
         timeout=30,
         capture_output=True,
