@@ -69,7 +69,7 @@ class ScopeSessionContext:
 
 
 @dataclass(frozen=True)
-class BoundTeamScopeContext:
+class _BoundTeamScopeContext:
     """Resolved stable owner and scope for one live team run."""
 
     owner_agent_name: str
@@ -87,7 +87,7 @@ def resolve_bound_team_scope_context(
     config: Config,
     team_name: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> BoundTeamScopeContext | None:
+) -> _BoundTeamScopeContext | None:
     """Resolve the stable owner and scope backing one live team run."""
     owner_agent_name = resolve_bound_history_owner(member_names)
     if owner_agent_name is None:
@@ -103,7 +103,7 @@ def resolve_bound_team_scope_context(
         )
     if team_scope_id is None:
         return None
-    return BoundTeamScopeContext(
+    return _BoundTeamScopeContext(
         owner_agent_name=owner_agent_name,
         scope=HistoryScope(kind="team", scope_id=team_scope_id),
     )

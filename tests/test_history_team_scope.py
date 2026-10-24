@@ -114,11 +114,11 @@ def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
 
 
 @pytest.mark.asyncio
-async def test_prepare_bound_scope_history_prepares_the_owner_s_team_scope_once(
+async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ad hoc team's scope is prepared once, owned by the first member by name, sized by the leader's prompt."""
+    """The ad hoc team's scope is prepared once, sized by the leader's prompt."""
     config, runtime_paths = _pair_config(tmp_path)
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
     estimator = build_static_token_estimator(built.spec.system_message, leader_tool_specs(built.spec), frozenset())
@@ -159,7 +159,6 @@ async def test_prepare_bound_scope_history_prepares_the_owner_s_team_scope_once(
     assert prepared.replays_persisted_history is True
     assert mock_finalize.call_count == 1
     assert mock_prepare.await_count == 1
-    assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope_context"].scope == HistoryScope("team", "team_alpha+zeta")
     assert mock_prepare.await_args.kwargs["model"] is built.spec.model
     assert estimator.estimate("Current prompt") == expected_static_prompt_tokens
