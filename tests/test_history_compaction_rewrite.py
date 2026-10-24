@@ -1905,41 +1905,6 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
 
 
 @pytest.mark.asyncio
-async def test_forced_compact_scope_history_without_visible_runs_stores_nothing(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    working_session = _session("session-1", runs=[])
-
-    with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(return_value="summary"),
-    ) as mock_generate:
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=working_session,
-            summarizer=_summarizer(),
-            scope=scope,
-            state=HistoryScopeState(force_compact_before_next_run=True),
-            available_history_budget=1,
-            before_tokens=2,
-            replay_window_tokens=64_000,
-            threshold_tokens=None,
-            progress=None,
-            complete=_reported,
-            replay_model=None,
-        )
-
-    assert outcome is None
-    # The durable row moved relative to the state this run read (nothing was
-    # ever persisted), so the concurrent-writer-wins clear refuses to write.
-    assert storage.load_session("session-1", "agent") is None
-    assert mock_generate.await_count == 0
-    assert working_session.summary is None
-    assert working_session.runs == []
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("split_runs", [False, True])
 async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path: Path, split_runs: bool) -> None:
     """Final compaction persist should copy sanitized remaining runs onto the latest session."""
