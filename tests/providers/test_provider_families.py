@@ -332,7 +332,8 @@ async def test_every_family_encodes_a_tool_result_with_its_call_name_content_and
     """A failed call reads as a failure wherever the API has a field for it, and no result goes unanswered.
 
     Claude marks it ``is_error`` and Gemini sends it as the response's ``error``; Ollama names the tool that
-    answered; a result stored without content answers with empty content on every route.
+    answered. A result stored without content still answers its call with empty content, which the Ollama SDK leaves
+    out of the request.
     """
     spec = FAMILIES[family]
     wire = Wire(spec.reply())
