@@ -15,6 +15,7 @@ import httpx
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from tests.providers.anthropic_family_support import provider_for
 from tests.providers.gemini_ollama_support import build_adapter
@@ -211,6 +212,8 @@ def _openai_family_adapter(config: dict[str, Any], root: Path, wire: Wire) -> Mo
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime = ProviderRuntime(
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
+        execution_identity=None,
+        codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
         http_client=httpx.AsyncClient(transport=wire.transport),
     )
     return build_provider(ModelConfig(**config), runtime)

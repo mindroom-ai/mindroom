@@ -15,6 +15,7 @@ import httpx
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.responses import ResponsesAdapter
 from tests.providers.golden_support import Replay, encoded_response, pipeline_provider, replay_through_pipeline
@@ -112,6 +113,8 @@ def openai_family_adapter(
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime = ProviderRuntime(
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
+        execution_identity=None,
+        codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     return build_provider(ModelConfig(**config), runtime)
@@ -149,7 +152,14 @@ def responses_adapter(root: Path, model_id: str = "gpt-6-astra", **extra_kwargs:
         api="responses",
         extra_kwargs={"api_key": "test-key", **extra_kwargs},
     )
-    adapter = build_provider(config, ProviderRuntime(runtime_paths=paths))
+    adapter = build_provider(
+        config,
+        ProviderRuntime(
+            runtime_paths=paths,
+            execution_identity=None,
+            codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
+        ),
+    )
     assert isinstance(adapter, ResponsesAdapter)
     return adapter
 

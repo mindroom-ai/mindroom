@@ -76,12 +76,12 @@ _PORTABLE_KEY = "mindroom_portable_replay"
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResponsesWire:
-    """How one Responses route shapes requests: its storage setting and prompt-cache behavior."""
+    """How one Responses route shapes requests: its storage setting, prompt-cache behavior, and Codex instructions."""
 
     route: Literal["openai", "codex"]
     store: bool | None
     explicit_breakpoint: bool
-    default_instructions: str | None = None
+    default_instructions: str
 
 
 def request_store(wire: ResponsesWire, request: ModelRequest) -> bool | None:

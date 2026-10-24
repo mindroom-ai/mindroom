@@ -19,6 +19,7 @@ from mindroom.history.summary_call import (
 from mindroom.llm.errors import TRANSPORT_TIMEOUT, ProviderError, ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
+from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from tests.providers.golden_support import pipeline_provider
 
@@ -53,6 +54,8 @@ def _model(
             storage_path=root / "data",
             process_env={},
         ),
+        execution_identity=None,
+        codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     return pipeline_provider(build_provider(config, runtime))
@@ -231,6 +234,8 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
             storage_path=tmp_path / "data",
             process_env={},
         ),
+        execution_identity=None,
+        codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     model = pipeline_provider(build_provider(config, runtime))

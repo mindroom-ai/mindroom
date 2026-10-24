@@ -39,6 +39,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.native_compaction import native_compaction_route
+from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
@@ -1551,7 +1552,11 @@ def test_unknown_extra_kwargs_are_rejected_with_the_valid_keys(tmp_path: Path) -
 
 def _runtime(tmp_path: Path, **env: str) -> ProviderRuntime:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env=env)
-    return ProviderRuntime(runtime_paths=paths)
+    return ProviderRuntime(
+        runtime_paths=paths,
+        execution_identity=None,
+        codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
+    )
 
 
 @pytest.mark.parametrize(

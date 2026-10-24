@@ -26,7 +26,6 @@ from mindroom.model_defaults import (
     OPENROUTER_BASE_URL_DEFAULT,
     ZAI_BASE_URL_DEFAULT,
 )
-from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.errors import CliLoginError, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -174,13 +173,14 @@ _NO_SHARED_KEY = frozenset({"llama_cpp", "kimi"})
 class ProviderRuntime:
     """What building a provider needs beyond its config.
 
-    ``execution_identity`` scopes the derived prompt-cache keys; ``http_client`` is the pooled client SDK
-    clients send through.
+    ``execution_identity`` scopes the derived prompt-cache keys; ``codex_default_instructions`` is the configured
+    prompt a Codex request sends as its instructions unless the model sets its own; ``http_client`` is the pooled
+    client SDK clients send through.
     """
 
     runtime_paths: RuntimePaths
-    execution_identity: ToolExecutionIdentity | None = None
-    codex_default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS
+    execution_identity: ToolExecutionIdentity | None
+    codex_default_instructions: str
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
 
 

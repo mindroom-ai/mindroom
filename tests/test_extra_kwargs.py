@@ -20,6 +20,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
+from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider as build_claude_provider
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
@@ -832,7 +833,14 @@ def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path
     model_config = ModelConfig(provider="zai", id="glm-5.3", extra_kwargs={"temprature": 0.2})
 
     with pytest.raises(ValueError, match=r"Unsupported extra_kwargs for provider 'zai': temprature\. Accepted keys: "):
-        build_openai_provider(model_config, ProviderRuntime(runtime_paths=_runtime_paths(tmp_path)))
+        build_openai_provider(
+            model_config,
+            ProviderRuntime(
+                runtime_paths=_runtime_paths(tmp_path),
+                execution_identity=None,
+                codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
+            ),
+        )
 
 
 # --- Retired Agno fields --------------------------------------------------------------------------------------
