@@ -29,7 +29,7 @@ _APPROVAL_RECEIPT_HEADER = (
 
 
 def _receipt_call_label(call: ApprovalCall) -> str:
-    """Name the call by its tool and its id, which stays the same across every approval in the run."""
+    """Name the call by its tool and its id, which stays the same across every approval in the response."""
     name = f"`{call.tool_name}`" if _SAFE_TOOL_NAME.fullmatch(call.tool_name) else "invalid tool name"
     call_id = (
         f"tool call id `{call.tool_call_id}`"
@@ -40,7 +40,7 @@ def _receipt_call_label(call: ApprovalCall) -> str:
 
 
 def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
-    """Render trusted model context for the decided ``calls`` of every approval in the run so far, in pause order."""
+    """Render trusted model context for the decided ``calls`` of the response's approvals so far, in pause order."""
     lines = [_APPROVAL_RECEIPT_HEADER]
     for call in calls:
         if call.decision is None:

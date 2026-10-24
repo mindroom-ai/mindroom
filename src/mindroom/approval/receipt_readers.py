@@ -32,13 +32,14 @@ _context: ContextVar[_ApprovalReceiptContext | None] = ContextVar(
 
 @contextmanager
 def approval_receipt_context(receipt_text: str, *, run_id: str) -> Generator[None, None, None]:
-    """Bind one approval's trusted receipt around its continuation, for the paused run ``run_id`` it resumes.
+    """Bind an approval continuation's trusted receipt around it, for the paused run ``run_id`` it resumes.
 
-    That run reads the receipt, and so does every run that ``add_approval_receipt_reader`` names: one whose own
-    paused calls the approval decided, one that continues with the result of a delegation call whose card or
-    child's calls the approval decided, or a recovered CLI call's follow-up. Each reads it once, in its first request
-    as a reader. No other run reads it, such as a run the continuation starts, a run of a background job it starts,
-    or a member it continues with the result of a delegation the approval did not decide.
+    The receipt covers every approval in the response so far. That run reads it, and so does every run that
+    ``add_approval_receipt_reader`` names: one whose own paused calls the latest approval decided, one that continues
+    with the result of a delegation call whose card or child's calls it decided, or a recovered CLI call's follow-up.
+    Each reads it once, in its first request as a reader. No other run reads it, such as a run the continuation
+    starts, a run of a background job it starts, or a member it continues with the result of a delegation the latest
+    approval did not decide.
     """
     token = _context.set(_ApprovalReceiptContext(receipt_text=receipt_text, readers={run_id}))
     try:

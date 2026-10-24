@@ -113,7 +113,7 @@ class ApprovalDecision(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ApprovalCall:
-    """One exact tool call in the current paused generation."""
+    """One exact tool call of one paused generation."""
 
     tool_call_id: str
     tool_name: str
@@ -189,7 +189,7 @@ class ApprovalContinuation:
     sources: ResponseSources
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
-    # The calls of every earlier generation, each decided before the run advanced past it, in the order they paused.
+    # Every earlier generation's calls, each decided before the continuation advanced past it, in pause order.
     earlier_calls: tuple[ApprovalCall, ...] = ()
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     show_tool_calls: bool = True
