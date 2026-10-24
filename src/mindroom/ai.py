@@ -876,7 +876,7 @@ async def _continue_turn_run(
 
 
 @timed("model_request_to_completion")
-async def _run_cached_agent_attempt(
+async def _run_blocking_agent_attempt(
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
     *,
@@ -910,7 +910,7 @@ async def _run_non_streaming_agent_attempts(
     terminal = TerminalRecord(RunRecord)
     try:
         with bind_llm_request_log_context(**_attempt_request_log_context(run_context)):
-            record = await _run_cached_agent_attempt(
+            record = await _run_blocking_agent_attempt(
                 run_context,
                 attempt,
                 storage=storage,
