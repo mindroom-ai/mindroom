@@ -612,7 +612,7 @@ async def _generate_summary(
         instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),
         schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
         # TODO(simplify): The Ollama adapter ignores this override and keeps the sampling its model's options author,
-        # as Agno's Ollama model did. Send thread_summary_temperature as options.temperature on Ollama too.
+        # kept as main behaves. Send thread_summary_temperature as options.temperature on Ollama too.
         # Users would notice different Ollama summaries (#3075).
         overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
     )
