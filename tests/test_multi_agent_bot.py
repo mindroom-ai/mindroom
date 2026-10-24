@@ -1597,7 +1597,6 @@ class TestAgentBot(AgentBotTestBase):
         # Mock orchestrator with agent_bots
         mock_orchestrator = MagicMock()
         mock_agent_bot = MagicMock()
-        mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
         mock_orchestrator.current_config = config
         mock_orchestrator.config = config  # This is what teams.py uses

@@ -332,7 +332,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         # Mock orchestrator
         mock_orchestrator = MagicMock()
         mock_agent_bot = MagicMock()
-        mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
         mock_orchestrator.current_config = mock_config
         mock_orchestrator.config = mock_config
