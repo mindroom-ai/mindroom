@@ -130,24 +130,39 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str:
 
     Stored native-compaction checkpoints and the media limits learned from provider errors are keyed by it.
 
-    Unset Vertex values fall back to the process environment the SDK reads, so the identity matches the
-    client the SDK would build.
+    It reads the route's values with ``client_params`` over them, as the client does, and unset Vertex values
+    fall back to the process environment the SDK reads, so the identity matches the client the SDK would build.
     """
     client_params = settings.client_params or {}
     if route == "anthropic":
         base_url = client_params.get("base_url") or os.environ.get("ANTHROPIC_BASE_URL") or ANTHROPIC_BASE_URL_DEFAULT
         return str(base_url).rstrip("/")
     if route == "vertexai_claude":
-        region = settings.region or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])
-        project = settings.project_id or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"])
+        params = {**_route_client_kwargs(route, settings), **client_params}
+        region = params["region"] or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])
+        project = params["project_id"] or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"])
         base_url = (
-            settings.base_url
-            or client_params.get("base_url")
+            params["base_url"]
             or os.environ.get(ENDPOINT_VARIABLES["vertexai_claude"])
             or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
         )
         return f"{str(base_url).rstrip('/')}|{project}|{region}"
     return ""
+
+
+def _route_client_kwargs(route: ClaudeRouteKind, settings: ClaudeSettings) -> dict[str, Any]:
+    """Return the credentials and endpoint of one route, before ``client_params`` and the HTTP client."""
+    if route == "anthropic":
+        return {"api_key": settings.api_key, "auth_token": settings.auth_token}
+    if route == "vertexai_claude":
+        # Unset values stay unset so the SDK reads CLOUD_ML_REGION, ANTHROPIC_VERTEX_PROJECT_ID, and
+        # ANTHROPIC_VERTEX_BASE_URL itself.
+        return {
+            "region": NOT_GIVEN if settings.region is None else settings.region,
+            "project_id": NOT_GIVEN if settings.project_id is None else settings.project_id,
+            "base_url": settings.base_url,
+        }
+    return _bedrock_credentials(settings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,7 +447,7 @@ class ClaudeProvider:
         the request itself turns the SDK's retries off over everything the model authored.
         """
         settings = self.settings
-        kwargs = self._route_client_kwargs()
+        kwargs = _route_client_kwargs(self.route, settings)
         if settings.timeout is not None:
             kwargs["timeout"] = settings.timeout
         kwargs.update(settings.client_params or {})
@@ -448,21 +463,6 @@ class ClaudeProvider:
         from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
 
         return AsyncAnthropicBedrockMantle(**kwargs)
-
-    def _route_client_kwargs(self) -> dict[str, Any]:
-        """Return the credentials and endpoint of this route, before ``client_params`` and the HTTP client."""
-        settings = self.settings
-        if self.route == "anthropic":
-            return {"api_key": settings.api_key, "auth_token": settings.auth_token}
-        if self.route == "vertexai_claude":
-            # Unset values stay unset so the SDK reads CLOUD_ML_REGION, ANTHROPIC_VERTEX_PROJECT_ID, and
-            # ANTHROPIC_VERTEX_BASE_URL itself.
-            return {
-                "region": NOT_GIVEN if settings.region is None else settings.region,
-                "project_id": NOT_GIVEN if settings.project_id is None else settings.project_id,
-                "base_url": settings.base_url,
-            }
-        return _bedrock_credentials(settings)
 
     def _vertex_client(self, kwargs: dict[str, Any]) -> AsyncAnthropicVertex:
         """Build a Vertex client; without configured credentials it shares the adapter's ambient ones.

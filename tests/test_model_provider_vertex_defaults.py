@@ -108,3 +108,26 @@ def test_vertex_generated_environment_keeps_override_precedence(
         config.models["default"].extra_kwargs = {"region": model_region}
 
     assert _vertex_adapter(config, runtime_paths).settings.region == expected_region
+
+
+def test_client_params_name_the_vertex_route_the_client_reaches(tmp_path: Path) -> None:
+    """Native-compaction checkpoints follow the project, region, and endpoint ``client_params`` send requests to, as on main."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    model = {
+        "provider": "vertexai_claude",
+        "id": "claude-sonnet-5-5",
+        "extra_kwargs": {
+            "project_id": "authored-project",
+            "region": "us",
+            "base_url": "https://authored.example/v1",
+            "client_params": {
+                "project_id": "override-project",
+                "region": "eu",
+                "base_url": "https://proxy.example/v1/",
+            },
+        },
+    }
+
+    adapter = _vertex_adapter(Config(models={"default": model}), runtime_paths)
+
+    assert adapter.identity.endpoint == "https://proxy.example/v1|override-project|eu"
