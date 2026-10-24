@@ -33,6 +33,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.llm.usage import MessageMetrics
 from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
@@ -1183,7 +1184,11 @@ async def test_a_safeguard_refusal_answers_once_with_the_refusal_message(
     stream: bool,
 ) -> None:
     """A refusal is final: the requester is told to change model or prompt, and the request is not sent again."""
-    team = _team(tmp_path, monkeypatch, leader=[_raises(ModelSafeguardRefusal(provider="Synthetic"))])
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[_raises(ModelSafeguardRefusal(provider="Synthetic", usage=MessageMetrics()))],
+    )
 
     text = await team.reply(stream=stream)
 

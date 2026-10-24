@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
-from mindroom.llm.usage import MessageMetrics
+if TYPE_CHECKING:
+    from mindroom.llm.usage import MessageMetrics
 
 # The ``ProviderError.code`` for a tool call the provider could not parse from the model's output, such as
 # Gemini's MALFORMED_FUNCTION_CALL; the request pipeline answers it with one guidance retry, and the media fallback
@@ -88,9 +89,9 @@ class ModelSafeguardRefusal(ProviderError):  # noqa: N818
     ``usage`` is the refused response's usage, for a caller that reads only the finished turn, such as ``complete``.
     """
 
-    def __init__(self, *, provider: str, usage: MessageMetrics | None = None) -> None:
+    def __init__(self, *, provider: str, usage: MessageMetrics) -> None:
         super().__init__(MODEL_SAFEGUARD_REFUSAL_MESSAGE, provider=provider, code=SAFEGUARD_REFUSAL)
-        self.usage = usage if usage is not None else MessageMetrics()
+        self.usage = usage
 
 
 __all__ = [

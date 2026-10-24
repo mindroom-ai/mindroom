@@ -27,6 +27,7 @@ from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.messages import Message
+from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
@@ -461,7 +462,7 @@ async def test_summary_retry_sizing_allows_loop_progress(
     summary = "Greeting received."
     responses: list[object] = [summary]
     if retry == "fallback":
-        responses.insert(0, ModelSafeguardRefusal(provider="fake"))
+        responses.insert(0, ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()))
     elif retry == "shrink":
         responses.insert(0, CompactionSummaryOutputLimitError("Output limit reached"))
     generate = AsyncMock(side_effect=responses)

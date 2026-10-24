@@ -59,6 +59,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
@@ -1160,7 +1161,11 @@ async def test_a_safeguard_refusal_is_stored_and_reported_as_an_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A refused response fails the run with the refusal text the runtime recognizes."""
-    reply = _reply(tmp_path, monkeypatch, [[_raising(ModelSafeguardRefusal(provider="anthropic"))]])
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [[_raising(ModelSafeguardRefusal(provider="anthropic", usage=MessageMetrics()))]],
+    )
 
     chunks = await _stream(reply)
 
