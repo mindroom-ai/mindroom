@@ -99,6 +99,8 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
                 [ResolvedVisibleMessage.synthetic(sender="@person:localhost", body="Help", event_id="$message")],
                 config,
                 paths,
+                model_name="default",
+                tag_vocabulary=None,
                 trusted_sender_ids=frozenset(),
             )
 

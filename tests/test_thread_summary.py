@@ -79,8 +79,9 @@ from tests.test_thread_export_projected_history import admit_live, prompt_reader
 from tests.test_thread_export_projected_history import raw as _projection_raw
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
+    from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.matrix.conversation_reads import ConversationReader
 
@@ -424,6 +425,25 @@ def _mock_runtime_paths() -> MagicMock:
     rp = MagicMock()
     rp.storage_root = Path("/var/empty/test_storage")
     return rp
+
+
+async def _summarize(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    model_name: str = "default",
+    tag_vocabulary: str | None = None,
+) -> str | _ThreadEnrichment | None:
+    """Generate one summary as the automatic pass does, which names the model and the trusted senders."""
+    return await _generate_summary(
+        thread_history,
+        config,
+        runtime_paths,
+        model_name=model_name,
+        tag_vocabulary=tag_vocabulary,
+        trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
+    )
 
 
 class TestResolveThreadSummaryModelName:
@@ -2350,7 +2370,7 @@ class TestGenerateSummary:
         rp = _mock_runtime_paths()
 
         with _summarizer(_ThreadSummary(summary="🧵 ISSUE-133 prompt preserved")) as model:
-            result = await _generate_summary(history, config, rp)
+            result = await _summarize(history, config, rp)
 
         assert result == "🧵 ISSUE-133 prompt preserved"
         [request] = model.requests
@@ -2398,7 +2418,7 @@ class TestGenerateSummary:
         enrichment = _ThreadEnrichment(summary="🧵 Login parser hardening", tags=["Bug Fix", "bug-fix", "resolved!"])
 
         with _summarizer(enrichment) as model:
-            result = await _generate_summary(
+            result = await _summarize(
                 history,
                 config,
                 rp,
@@ -2420,7 +2440,7 @@ class TestGenerateSummary:
     async def test_initial_enrichment_rejects_summary_only_output(self) -> None:
         """The initial call must not persist a summary without its requested tags."""
         with _summarizer(_ThreadSummary(summary="🧵 Missing tags")):
-            result = await _generate_summary(
+            result = await _summarize(
                 _make_thread_history(3),
                 _mock_config(),
                 _mock_runtime_paths(),
@@ -2436,7 +2456,7 @@ class TestGenerateSummary:
     ) -> None:
         """Invalid or automatic-excluded tags should not discard the valid refreshed summary."""
         with _summarizer(_ThreadEnrichment(summary="🧵 Invalid tags", tags=generated_tags)):
-            result = await _generate_summary(
+            result = await _summarize(
                 _make_thread_history(3),
                 _mock_config(),
                 _mock_runtime_paths(),
@@ -2448,7 +2468,7 @@ class TestGenerateSummary:
     async def test_later_summary_ignores_tags_the_model_adds(self) -> None:
         """A later summary call keeps only the summary, so it never revives automatic tagging."""
         with _summarizer(_ThreadEnrichment(summary="🧵 Unexpected retag", tags=["bug"])) as model:
-            result = await _generate_summary(
+            result = await _summarize(
                 _make_thread_history(3),
                 _mock_config(),
                 _mock_runtime_paths(),
@@ -2461,7 +2481,7 @@ class TestGenerateSummary:
     async def test_generate_summary_uses_configured_summary_temperature(self) -> None:
         """Summary generation should use the configured summary temperature override."""
         with _summarizer(_ThreadSummary(summary="🧪 ISSUE-148 matrix cache invalidate-and-refetch live test")) as model:
-            result = await _generate_summary(
+            result = await _summarize(
                 _make_thread_history(3),
                 _mock_config(summary_temperature=0.1),
                 _mock_runtime_paths(),
@@ -2478,7 +2498,7 @@ class TestGenerateSummary:
 
         with _summarizer(_ThreadSummary(summary="🧵 Room-specific summary model")) as model:
             build = cast("MagicMock", provider_registry.build_model_provider)
-            result = await _generate_summary(_make_thread_history(3), config, rp, model_name="qwen")
+            result = await _summarize(_make_thread_history(3), config, rp, model_name="qwen")
 
         assert result == "🧵 Room-specific summary model"
         build.assert_called_once_with(config, rp, "qwen")
@@ -2575,7 +2595,7 @@ class TestGenerateSummary:
         )
 
         with pytest.raises(ProviderError):
-            await _generate_summary(_make_thread_history(3), config, runtime_paths, model_name="summary")
+            await _summarize(_make_thread_history(3), config, runtime_paths, model_name="summary")
 
         [body] = wire.bodies
         expected = summary_temperature if sends_temperature else None
@@ -2608,7 +2628,7 @@ class TestGenerateSummary:
         )
 
         with pytest.raises(ProviderError):
-            await _generate_summary(_make_thread_history(3), config, runtime_paths, model_name="summary")
+            await _summarize(_make_thread_history(3), config, runtime_paths, model_name="summary")
 
         [body] = wire.bodies
         assert body.get("options") == options
@@ -2626,21 +2646,21 @@ class TestGenerateSummary:
     async def test_summary_returned(self) -> None:
         """A valid summary is returned directly."""
         with _summarizer(_ThreadSummary(summary="\U0001f527 Auth deployment discussed and approved")):
-            result = await _generate_summary(_make_thread_history(5), _mock_config(), _mock_runtime_paths())
+            result = await _summarize(_make_thread_history(5), _mock_config(), _mock_runtime_paths())
 
         assert result == "\U0001f527 Auth deployment discussed and approved"
 
     async def test_empty_answer_returns_none(self) -> None:
         """When the model answers with no text, _generate_summary returns None."""
         with _summarizer(""):
-            result = await _generate_summary(_make_thread_history(5), _mock_config(), _mock_runtime_paths())
+            result = await _summarize(_make_thread_history(5), _mock_config(), _mock_runtime_paths())
 
         assert result is None
 
     async def test_unexpected_structured_content_returns_none(self) -> None:
         """An answer that does not match the schema must not be stringified into a visible summary."""
         with _summarizer('{"title": "unvalidated"}'):
-            result = await _generate_summary(_make_thread_history(5), _mock_config(), _mock_runtime_paths())
+            result = await _summarize(_make_thread_history(5), _mock_config(), _mock_runtime_paths())
 
         assert result is None
 

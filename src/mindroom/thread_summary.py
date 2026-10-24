@@ -581,16 +581,12 @@ async def _generate_summary(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    model_name: str | None = None,
-    tag_vocabulary: str | None = None,
-    trusted_sender_ids: Collection[str] | None = None,
+    model_name: str,
+    tag_vocabulary: str | None,
+    trusted_sender_ids: Collection[str],
 ) -> str | _ThreadEnrichment | None:
-    """Generate a summary and optional one-shot tags via one LLM run."""
-    resolved_model_name = model_name or config.defaults.thread_summary_model or "default"
-    provider = _summary_provider(config, runtime_paths, resolved_model_name)
-
-    if trusted_sender_ids is None:
-        trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
+    """Generate a summary with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given, via one LLM run."""
+    provider = _summary_provider(config, runtime_paths, model_name)
     conversation = escape(
         _build_conversation_text(
             thread_history,
