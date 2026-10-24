@@ -105,9 +105,9 @@ def assembled_job_tools(
 ) -> dict[str, JobTool]:
     """Describe each function a MindRoom-assembled toolkit offers the actor, by name.
 
-    ``sources`` holds each such function with its authored toolkit and the concrete toolkit built for the actor; a
-    function the framework generated has none. ``snapshot`` is the actor's execution scope and file access, empty
-    for a team.
+    ``sources`` holds, for each such function, its authored toolkit name, the concrete toolkit built for the actor,
+    and the function itself; a function the framework generated is not among them. ``snapshot`` is the actor's
+    execution scope and file access, empty for a team.
     """
     return {
         function.name: JobTool(
@@ -135,20 +135,26 @@ def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
     )
 
 
-def _is_background_job_excluded(tool: JobTool) -> bool:
+def _is_background_job_excluded(tool: JobTool, context: ToolRuntimeContext) -> bool:
     """Share exact tool exclusions between definition projection and execution."""
     construction = get_toolkit_construction(tool.toolkit)
-    context = get_tool_runtime_context()
-    return (
-        construction is not None
-        and context is not None
-        and toolkit_is_background_excluded(construction.name, context.config, context.runtime_paths)
+    return construction is not None and toolkit_is_background_excluded(
+        construction.name,
+        context.config,
+        context.runtime_paths,
     )
 
 
-def wait_mode(tool: JobTool, *, depth: int) -> ToolWaitMode:
-    """Classify one call from current policy: run it unchanged, run it here, or let it become a managed job."""
-    if isinstance(tool.toolkit, JobTools) or _is_background_job_excluded(tool) or connects_per_run(tool.toolkit):
+def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> ToolWaitMode:
+    """Classify one call from current policy: run it unchanged, run it here, or let it become a managed job.
+
+    ``context`` is the turn's tool context, whose configuration decides whether the call's toolkit is excluded.
+    """
+    if (
+        isinstance(tool.toolkit, JobTools)
+        or _is_background_job_excluded(tool, context)
+        or connects_per_run(tool.toolkit)
+    ):
         return "native"
     # A call a CLI command makes returns to that command, whose own result is what the reply saves.
     if job_owns_execution() or depth > 0 or tool.function.stop_after_call or cli_dispatch_active():
@@ -204,8 +210,13 @@ def job_definitions_hook(actor: JobActor) -> BeforeRequestHook:
     """Return the pre-request hook that offers the wait budget of the actor's managed calls while they can be jobs."""
 
     async def project(state: LoopState) -> SendRequest:
-        if _job_scope() is not None:
-            managed = [name for name, tool in actor.tools.items() if wait_mode(tool, depth=actor.depth) == "managed"]
+        scope = _job_scope()
+        if scope is not None:
+            managed = [
+                name
+                for name, tool in actor.tools.items()
+                if wait_mode(tool, depth=actor.depth, context=scope.context) == "managed"
+            ]
             state.tools = project_definitions(state.tools, managed)
         return SendRequest()
 
@@ -248,8 +259,8 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
             raise ValueError(_UNASKABLE)
         job_checkpoint()
         check_current_execution_authority()
-        return await _run_here(job_call, call_next, call.arguments)
-    mode = wait_mode(job_call.tool, depth=actor.depth)
+        return await _run_here(call_next, call.arguments, generated=job_call is None)
+    mode = wait_mode(job_call.tool, depth=actor.depth, context=scope.context)
     if job_approval and mode != "managed":
         raise ValueError(_UNASKABLE)
     background_after = _wait_budget(call, mode=mode, depth=actor.depth)
@@ -264,7 +275,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
         if mode != "managed" or call.function.external_execution:
             # A native call keeps its arguments, so a stray wait budget fails instead of running silently.
             arguments = call.arguments if mode == "native" else application_arguments(call.arguments)
-            return await _run_here(job_call, call_next, arguments)
+            return await _run_here(call_next, arguments, generated=False)
     return await _run_managed_call(
         inner,
         call.function,
@@ -294,14 +305,14 @@ def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int) -> float | N
     return background_after
 
 
-async def _run_here(call: JobCall | None, call_next: ToolNext, arguments: dict[str, Any]) -> object:
+async def _run_here(call_next: ToolNext, arguments: dict[str, Any], *, generated: bool) -> object:
     """Run a call in this task; inside a managed job, the job owns its synchronous leaf.
 
-    A function the framework generated, which has no ``call``, runs there under its enclosing call's grant.
+    ``generated`` says the framework generated the function, which then runs there under its enclosing call's grant.
     """
     if not job_owns_execution():
         return await call_next(arguments)
-    with enclosing_grant() if call is None else nullcontext():
+    with enclosing_grant() if generated else nullcontext():
         return await _owned_by_job(lambda: call_next(arguments))
 
 
