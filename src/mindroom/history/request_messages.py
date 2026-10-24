@@ -209,10 +209,7 @@ def _with_scope_summary(messages: list[Message], summary: ScopeSummary | None) -
     text = summary.text.strip() if summary is not None else ""
     if not text or any(is_scope_summary(message) for message in messages):
         return messages
-    index = next(
-        (index for index, message in enumerate(messages) if message.role not in PROMPT_MESSAGE_ROLES),
-        len(messages),
-    )
+    index = next((i for i, message in enumerate(messages) if message.role not in PROMPT_MESSAGE_ROLES), len(messages))
     if index < len(messages) and summary_follows(messages[index]):
         index += 1
     return [*messages[:index], Message(**compaction_summary_fields(text, run_local=False)), *messages[index:]]

@@ -28,7 +28,7 @@ def run_in_scope(run: AnyRunRecord, scope: HistoryScope) -> bool:
 
 
 def replays_in_scope(run: AnyRunRecord, scope: HistoryScope) -> bool:
-    """Return whether a stored run replays as ``scope``'s model history: a finished top-level run of the scope."""
+    """Return whether a stored run replays as ``scope``'s model history: a visible top-level run of the scope."""
     return is_model_history_visible_run(run) and run_in_scope(run, scope)
 
 
