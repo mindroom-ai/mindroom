@@ -131,7 +131,7 @@ def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
             messages=messages_with_approval_receipt(
                 state.messages,
                 receipt_text,
-                after_response_id=capabilities.approval_receipt_after_response_id,
+                after_response_id=capabilities.continues_stored_responses,
             ),
         )
 
