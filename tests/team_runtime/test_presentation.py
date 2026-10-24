@@ -7,7 +7,6 @@ The finished runs are the records a team run hands over, in the order a blocking
 from __future__ import annotations
 
 import pytest
-from agno.utils.string import url_safe_string
 
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
@@ -33,12 +32,19 @@ def _presentation(*, show_tool_calls: bool = False) -> TeamStreamPresentation:
 
 
 @pytest.mark.parametrize(
-    "config_name",
-    ["ledger_agent", "CamelCase", "Two Words", "dots.kept", "trailing__under", "mixed-Case_name 2"],
+    ("config_name", "member_id"),
+    [
+        ("ledger_agent", "ledger-agent"),
+        ("CamelCase", "camel-case"),
+        ("Two Words", "two-words"),
+        ("dots.kept", "dots.kept"),
+        ("trailing__under", "trailing-under"),
+        ("mixed-Case_name 2", "mixed-case-name-2"),
+    ],
 )
-def test_member_ids_are_agno_s_url_safe_strings(config_name: str) -> None:
-    """Stored reply snapshots keyed members by Agno's ``url_safe_string``; the copy must produce the same ids."""
-    assert url_safe_member_id(config_name) == url_safe_string(config_name)
+def test_member_ids_keep_the_keys_of_stored_reply_snapshots(config_name: str, member_id: str) -> None:
+    """Stored reply snapshots key members by these ids, so a configured name keeps the id main gave it."""
+    assert url_safe_member_id(config_name) == member_id
 
 
 def test_member_and_leader_events_land_in_their_slots() -> None:

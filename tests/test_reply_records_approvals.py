@@ -10,8 +10,6 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.requirement import RunRequirement
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval.manager import initialize_approval_store
@@ -20,6 +18,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
+from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.reply_presentation import (

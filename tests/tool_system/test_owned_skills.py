@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.exceptions import PathSecurityError
-from agno.utils.path_safety import safe_join_relative_path
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -244,40 +242,36 @@ async def test_configured_skill_files_linked_outside_their_directory_are_refused
 
 
 @pytest.mark.parametrize(
-    "subpath",
+    ("subpath", "expected"),
     [
-        "guide.md",
-        "nested/guide.md",
-        "./nested/../guide.md",
-        "nested\\guide.md",
-        "guide.md. ",
+        ("guide.md", "guide.md"),
+        ("nested/guide.md", "nested/guide.md"),
+        ("./nested/../guide.md", "guide.md"),
+        ("nested\\guide.md", "nested/guide.md"),
+        ("guide.md. ", "guide.md"),
         # Fullwidth letters that NFKC folds to "guide.md".
-        "\uff47\uff55\uff49\uff44\uff45.md",
-        "../outside.md",
-        "nested/../../outside.md",
-        "..",
-        "/etc/passwd",
-        "C:/guide.md",
-        "C:guide.md",
-        "\\\\server\\share",
-        "nested/CON",
-        "nul.txt",
-        "guide\x00.md",
-        "line\nbreak.md",
-        "   ",
-        "...",
+        ("\uff47\uff55\uff49\uff44\uff45.md", "guide.md"),
+        ("../outside.md", None),
+        ("nested/../../outside.md", None),
+        ("..", None),
+        ("/etc/passwd", None),
+        ("C:/guide.md", None),
+        ("C:guide.md", None),
+        ("\\\\server\\share", None),
+        ("nested/CON", None),
+        ("nul.txt", None),
+        ("guide\x00.md", None),
+        ("line\nbreak.md", None),
+        ("   ", None),
+        ("...", None),
     ],
 )
-def test_configured_skill_paths_join_as_agno_joined_them(tmp_path: Path, subpath: str) -> None:
-    """A configured skill accepts and resolves exactly the file paths Agno's skills loader accepted."""
+def test_configured_skill_paths_resolve_inside_the_skill(tmp_path: Path, subpath: str, expected: str | None) -> None:
+    """A configured skill accepts and resolves exactly the file paths main's skills loader accepted."""
     directory = tmp_path / "skill" / "references"
     (directory / "nested").mkdir(parents=True)
-    try:
-        expected = safe_join_relative_path(directory, subpath)
-    except PathSecurityError:
-        expected = None
 
-    assert _configured_skill_file(directory, subpath) == expected
+    assert _configured_skill_file(directory, subpath) == (None if expected is None else directory.resolve() / expected)
 
 
 @pytest.mark.asyncio

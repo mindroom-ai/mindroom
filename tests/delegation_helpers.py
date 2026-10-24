@@ -1,8 +1,7 @@
 """Shared scripted models, requester contexts, and approval drivers for delegation integration tests.
 
-``DelegationModel`` is the Agno model double the suites that still drive Agno agents use; the owned path's tests
-script one ``ScriptedModel`` per agent through ``ScriptedAgents``, run agent replies through ``respond`` and team
-replies through ``respond_team``, and continue their pauses through ``resume`` and ``resume_team``.
+Tests script one ``ScriptedModel`` per agent through ``ScriptedAgents``, run agent replies through ``respond`` and
+team replies through ``respond_team``, and continue their pauses through ``resume`` and ``resume_team``.
 ``pause_parent`` stops a parent at its stored pause, for tests that drive the delegation driver themselves.
 """
 
@@ -12,7 +11,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 from agno.tools import Toolkit
@@ -46,16 +45,13 @@ from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, make_turn_context
-from tests.history_helpers import RecordingModel
 from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
     import pytest
-    from agno.models.message import Message
-    from agno.models.response import ModelResponse
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -113,22 +109,6 @@ def _delegate_runtime_context(
         correlation_id=correlation_id,
     )
     return context if hook_registry is None else replace(context, hook_registry=hook_registry)
-
-
-@dataclass
-class DelegationModel(RecordingModel):
-    """Deterministic Agno model for the suites that still run real Agno agents."""
-
-    responses: list[ModelResponse] = field(default_factory=list)
-
-    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        """Consume one planned provider response."""
-        self.seen_messages = list(cast("list[Message]", kwargs.get("messages", [])))
-        return self.responses.pop(0)
-
-    async def ainvoke_stream(self, *_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        """Use planned responses through Agno's real streaming machinery."""
-        yield await self.ainvoke(*_args, **kwargs)
 
 
 @dataclass

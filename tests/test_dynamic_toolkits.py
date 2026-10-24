@@ -6,11 +6,6 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from agno.agent import Agent
-from agno.agent._tools import parse_tools
-from agno.models.openai import OpenAIChat
-from agno.run import RunContext
-from agno.session import AgentSession
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
@@ -33,8 +28,9 @@ from mindroom.desktop.credentials import (
 )
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     defer_toolkit,
@@ -93,21 +89,6 @@ def _validated_config(tmp_path: Path, raw: dict[str, object], **env: str) -> Con
 
 def _tool_payload(result: str) -> dict[str, object]:
     return json.loads(result)
-
-
-def _render_system_prompt(agent: Agent) -> str:
-    model = agent.model
-    assert model is not None
-    assert not isinstance(model, str)
-    parse_tools(agent, agent.tools or [], model)
-    message = agent.get_system_message(
-        session=AgentSession(session_id="session", agent_id=agent.id),
-        run_context=RunContext(run_id="run", session_id="session", session_state={}),
-        tools=None,
-        add_session_state_to_context=False,
-    )
-    assert message is not None
-    return str(message.content)
 
 
 def _build_prompt(build: AgentBuild) -> str:
@@ -1013,19 +994,18 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
     def deferred_tool() -> str:
         return "deferred"
 
-    instruction_marker = "DEFERRED_FUNCTION_INSTRUCTIONS"
     function = Function(
         name="deferred_tool",
         entrypoint=deferred_tool,
-        instructions=instruction_marker,
+        instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
         add_instructions=True,
     )
     toolkit = Toolkit(name="deferred", tools=[function])
     defer_toolkit("deferred", "", toolkit)
-    agent = Agent(id="deferred-agent", model=OpenAIChat(id="test"), tools=[toolkit], instructions=["BASE"])
 
     assert toolkit.functions["deferred_tool"].add_instructions is False
-    assert instruction_marker not in _render_system_prompt(agent)
+    # Adapting refuses a function that still asks for prompt instructions; the deferred toolkit adds none.
+    assert adapt_toolkit(toolkit).instructions is None
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -1038,45 +1018,32 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         return "deferred"
 
     active_toolkit_marker = "ACTIVE_TOOLKIT_INSTRUCTIONS"
-    active_function_marker = "ACTIVE_FUNCTION_INSTRUCTIONS"
-    deferred_toolkit_marker = "DEFERRED_TOOLKIT_INSTRUCTIONS"
-    deferred_function_marker = "DEFERRED_FUNCTION_INSTRUCTIONS"
-    active_function = Function(
-        name="shared_tool",
-        entrypoint=active_tool,
-        instructions=active_function_marker,
+    active_toolkit = Toolkit(
+        name="active",
+        tools=[Function(name="shared_tool", entrypoint=active_tool)],
+        instructions=active_toolkit_marker,
         add_instructions=True,
     )
     deferred_function = Function(
         name="shared_tool",
         entrypoint=deferred_tool,
-        instructions=deferred_function_marker,
-        add_instructions=True,
-    )
-    active_toolkit = Toolkit(
-        name="active",
-        tools=[active_function],
-        instructions=active_toolkit_marker,
+        instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
         add_instructions=True,
     )
     deferred_toolkit = Toolkit(
         name="deferred",
         tools=[deferred_function],
-        instructions=deferred_toolkit_marker,
+        instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
         add_instructions=True,
     )
     defer_toolkit("deferred", "", deferred_toolkit)
-    agent = Agent(id="collision-agent", model=OpenAIChat(id="test"), tools=[active_toolkit, deferred_toolkit])
 
     assert active_toolkit.add_instructions is True
     assert active_toolkit.functions["shared_tool"].add_instructions is True
     assert deferred_toolkit.add_instructions is False
     assert deferred_toolkit.functions["shared_tool"].add_instructions is False
-    system_prompt = _render_system_prompt(agent)
-    assert active_toolkit_marker in system_prompt
-    assert active_function_marker in system_prompt
-    assert deferred_toolkit_marker not in system_prompt
-    assert deferred_function_marker not in system_prompt
+    assert adapt_toolkit(active_toolkit).instructions == active_toolkit_marker
+    assert adapt_toolkit(deferred_toolkit).instructions is None
 
 
 def test_native_tool_search_keeps_initial_toolkit_instructions(
@@ -1630,16 +1597,11 @@ def test_call_tool_schema_accepts_arbitrary_argument_values() -> None:
 
 def test_call_tool_schema_converts_to_a_plain_gemini_object() -> None:
     """Gemini conversion must not invent placeholder argument keys."""
-    convert_schema = pytest.importorskip("agno.utils.gemini").convert_schema
-    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
-    function.process_entrypoint(strict=False)
-
-    converted = convert_schema(function.parameters)
+    converted = gemini_wire.convert_schema(adapt_function(_search_toolkit().functions["call_tool"]).parameters)
 
     assert converted is not None
     assert "example_key" not in str(converted)
-    assert converted.properties is not None
-    assert "JSON object" in (converted.properties["arguments"].description or "")
+    assert "JSON object" in converted["properties"]["arguments"]["description"]
 
 
 class _DualTools(Toolkit):

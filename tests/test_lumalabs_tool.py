@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING, cast
 import agno.tools.lumalab as agno_lumalab
 import httpx
 import pytest
-from agno.agent import Agent
 
 import mindroom.tools  # noqa: F401
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
+from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.metadata import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -82,14 +82,14 @@ def _tool(tmp_path: Path, **overrides: object) -> agno_lumalab.LumaLabTools:
 def _invoke(tool: agno_lumalab.LumaLabTools, method: str) -> ToolResult:
     if method == "generate_video":
         return tool.generate_video(
-            agent=Agent(),
+            agent=ToolCallActor(session_state={}),
             prompt="A calm lake.",
             loop=True,
             aspect_ratio="9:16",
             keyframes=_KEYFRAMES,
         )
     return tool.image_to_video(
-        agent=Agent(),
+        agent=ToolCallActor(session_state={}),
         prompt="A calm lake.",
         start_image_url=_KEYFRAMES["frame0"]["url"],
         end_image_url=_KEYFRAMES["frame1"]["url"],
