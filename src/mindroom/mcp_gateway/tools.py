@@ -313,6 +313,8 @@ def _guard_dispatch(function: ToolFunction, require_current_config: Callable[[],
         await run_gateway_sync(require_current_config)
         return await entrypoint(*args, **kwargs)
 
+    # An async generator function is not a coroutine function, so ``guarded_sync`` guards it: the check runs on the
+    # tool thread, which returns the unstarted stream for ``run_tool_call`` to drain on the event loop.
     return replace(function, entrypoint=guarded_async if inspect.iscoroutinefunction(entrypoint) else guarded_sync)
 
 

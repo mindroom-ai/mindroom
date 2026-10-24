@@ -1271,7 +1271,7 @@ async def test_mcp_selected_catalog_preserves_filters_and_never_initializes_othe
             arguments={},
             manager=manager,
         )
-        assert "hello" in json.dumps(result)
+        assert result == {"result": "hello"}
     finally:
         await manager.shutdown()
 
