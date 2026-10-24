@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.ai import stream_agent_response
@@ -225,6 +225,8 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
                 [Message(role="user", content="Go")],
                 ctx=context(),
                 hooks=LoopHooks(before_request=(hook,)),
+                persist=None,
+                request_template=EMPTY_REQUEST,
             ),
         )
         _, second = await collect(
@@ -233,6 +235,8 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
                 [Message(role="user", content="Again")],
                 ctx=context(run_id="run-2"),
                 hooks=LoopHooks(before_request=(hook,)),
+                persist=None,
+                request_template=EMPTY_REQUEST,
             ),
         )
 
@@ -493,6 +497,8 @@ async def test_a_background_job_an_approval_continuation_starts_never_reads_its_
                 [Message(role="user", content="Go")],
                 ctx=context(run_id="job-run"),
                 hooks=LoopHooks(before_request=(approval_receipt_hook(Capabilities()),)),
+                persist=None,
+                request_template=EMPTY_REQUEST,
             ),
         )
         return BackgroundOutcome("completed", str(record.content))
@@ -528,6 +534,8 @@ async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> No
             [Message(role="user", content="Go")],
             ctx=context(),
             hooks=LoopHooks(before_request=(hook,)),
+            persist=None,
+            request_template=EMPTY_REQUEST,
         ),
     )
 
@@ -537,7 +545,7 @@ async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> No
 
 
 def _state_stub() -> object:
-    from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState  # noqa: PLC0415 - test-only state shape
+    from mindroom.agent_loop.model_loop import LoopState  # noqa: PLC0415 - test-only state shape
     from mindroom.llm.runs import RunRecord  # noqa: PLC0415
 
     return LoopState(

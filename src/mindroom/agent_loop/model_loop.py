@@ -158,9 +158,9 @@ async def run_model_loop(
     *,
     record: AnyRunRecord,
     run: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    max_tool_calls_per_turn: int | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    hooks: LoopHooks,
+    max_tool_calls_per_turn: int | None,
+    request_template: ModelRequest,
     resumed: Sequence[RunRequirement] | None = None,
 ) -> AsyncIterator[LoopEvent]:
     """Request, run the requested tools, and repeat until the run completes or pauses; ``LoopEnded`` comes last.

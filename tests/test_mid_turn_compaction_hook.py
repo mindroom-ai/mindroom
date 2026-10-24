@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history import mid_turn_compaction
@@ -93,6 +93,7 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
             ctx=context(),
             hooks=LoopHooks(before_request=(hook,)),
             request_template=ModelRequest(messages=(), native_compaction=_NATIVE),
+            persist=None,
         ),
     )
 
@@ -157,6 +158,7 @@ async def test_a_later_loop_of_the_run_sizes_and_falls_back_by_its_own_request_s
                 ctx=context(),
                 hooks=LoopHooks(before_request=(hook,)),
                 request_template=ModelRequest(messages=(), native_compaction=_NATIVE),
+                persist=None,
             ),
         )
 
@@ -239,6 +241,8 @@ async def test_a_responses_route_sizes_each_request_as_its_replay_sends_it(
             [Message(role="user", content="Do the task")],
             ctx=context(),
             hooks=LoopHooks(before_request=(_run_local_hook(config, runtime_paths, model),)),
+            persist=None,
+            request_template=EMPTY_REQUEST,
         ),
     )
 

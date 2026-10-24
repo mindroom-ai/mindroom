@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom import ai
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.approval import manager as approval_manager
@@ -575,6 +576,8 @@ async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_aut
             spec(model, toolkit(write_report, name="file", requires_confirmation=True)),
             [Message(role="user", content="Report")],
             ctx=RunContext(run_id=child.run_id, session_id=child.session_id),
+            persist=None,
+            request_template=EMPTY_REQUEST,
         ),
     )
     finish = asyncio.Event()

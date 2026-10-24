@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.ai import run_delegated_child_response
@@ -154,6 +154,7 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
             [Message(role="user", content="run the tool")],
             ctx=RunContext(run_id="real-child-run", session_id=ctx.session_id or ""),
             persist=persist,
+            request_template=EMPTY_REQUEST,
         )
         try:
             async for event in events:
@@ -255,6 +256,8 @@ async def _deny_through_the_loop(tools: DelegateTools) -> None:
                 user_id=_identity().requester_id,
             ),
             hooks=LoopHooks(tool_middleware=(_deny_call,)),
+            persist=None,
+            request_template=EMPTY_REQUEST,
         ),
     )
     assert record.status is RunStatus.completed

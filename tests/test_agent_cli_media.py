@@ -24,7 +24,7 @@ from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation,
 from mindroom.agent_cli.session import CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.ai import _process_stream_events, _StreamingAttemptState, collect_streamed_response_content
@@ -110,6 +110,8 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
                 [Message(role="user", content="generate")],
                 ctx=catalog.run,
                 hooks=LoopHooks(before_dispatch=owner.checkpoint.capture),
+                persist=None,
+                request_template=EMPTY_REQUEST,
             )
             async for event in run:
                 if isinstance(event, ToolCompleted):

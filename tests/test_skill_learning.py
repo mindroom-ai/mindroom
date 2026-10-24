@@ -1543,6 +1543,7 @@ async def _answer(
             ctx=context(run_id=run_id, session_id="session"),
             hooks=hooks,
             request_template=settings,
+            persist=None,
         ),
     )
 
@@ -1708,6 +1709,7 @@ async def test_the_capture_keeps_only_its_attempts_final_request_as_sent() -> No
             ctx=context(),
             hooks=hooks,
             request_template=ModelRequest(messages=(), deferred_tools=DeferredTools(names=frozenset({"search"}))),
+            persist=None,
         ),
     )
     record.messages[-1].content = "rewritten after the loop"

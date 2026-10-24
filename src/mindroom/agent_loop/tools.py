@@ -175,7 +175,7 @@ async def dispatch_tool_calls(
     calls: Sequence[PlannedCall],
     *,
     run: RunContext,
-    middleware: Sequence[ToolMiddleware] = (),
+    middleware: Sequence[ToolMiddleware],
 ) -> list[Message]:
     """Run the batch's unpaused calls concurrently and return their result messages in call order.
 

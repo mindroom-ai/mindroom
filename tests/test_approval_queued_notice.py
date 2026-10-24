@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.ai_runtime import (
     queued_message_signal_context,
@@ -91,7 +91,14 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
 
     with queued_message_signal_context(state):
         _events, paused = await collect(
-            run_agent(agent, [Message(role="user", content="Read both items.")], ctx=context(), hooks=_hooks()),
+            run_agent(
+                agent,
+                [Message(role="user", content="Read both items.")],
+                ctx=context(),
+                hooks=_hooks(),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
         )
         assert paused.status is RunStatus.paused
         assert len(paused.requirements or []) == 2
@@ -103,8 +110,12 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
                     paused,
                     build_resume_request(paused=paused.messages, summary=None, history=[]),
                     approved=approved,
+                    denied={},
+                    external_results={},
                     ctx=context(),
                     hooks=_hooks(),
+                    persist=None,
+                    request_template=EMPTY_REQUEST,
                 ),
             )
 

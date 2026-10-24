@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import (
+    EMPTY_REQUEST,
     NO_HOOKS,
     EndRun,
     LoopEnded,
@@ -58,13 +59,10 @@ async def _run(
     *,
     hooks: LoopHooks = NO_HOOKS,
     record: RunRecord | None = None,
-    request_template: ModelRequest | None = None,
+    request_template: ModelRequest = EMPTY_REQUEST,
     resumed: Sequence[RunRequirement] | None = None,
 ) -> tuple[list[LoopEvent], RunRecord]:
     record = record or _record()
-    kwargs: dict[str, Any] = {} if request_template is None else {"request_template": request_template}
-    if resumed is not None:
-        kwargs["resumed"] = resumed
     events = [
         event
         async for event in run_model_loop(
@@ -75,7 +73,8 @@ async def _run(
             run=context(),
             hooks=hooks,
             max_tool_calls_per_turn=agent.max_tool_calls_per_turn,
-            **kwargs,
+            request_template=request_template,
+            resumed=resumed,
         )
     ]
     return events, record

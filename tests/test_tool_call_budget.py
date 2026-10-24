@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.llm.runs import RunStatus
 from tests.agent_loop.helpers import collect, context, spec, toolkit
@@ -47,7 +48,13 @@ async def _run(
 ) -> tuple[ScriptedModel, list[Message], RunStatus]:
     model = ScriptedModel(turns)
     _, record = await collect(
-        run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET), [], ctx=context(run_id=run_id)),
+        run_agent(
+            spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET),
+            [],
+            ctx=context(run_id=run_id),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
     )
     return model, record.messages, record.status
 
@@ -70,7 +77,13 @@ async def test_model_that_keeps_requesting_tools_ends_its_run(shape: str) -> Non
 
     with capture_logs() as logs:
         _, record = await collect(
-            run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET), [], ctx=context()),
+            run_agent(
+                spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET),
+                [],
+                ctx=context(),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
         )
 
     assert len(model.requests) == _CAP
@@ -94,7 +107,13 @@ async def test_model_that_answers_after_the_first_refused_batch_keeps_its_closin
 
     with capture_logs() as logs:
         _, record = await collect(
-            run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET), [], ctx=context()),
+            run_agent(
+                spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET),
+                [],
+                ctx=context(),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
         )
 
     assert len(model.requests) == _CAP
@@ -113,7 +132,13 @@ async def test_tool_calls_within_the_budget_are_untouched() -> None:
 
     with capture_logs() as logs:
         _, record = await collect(
-            run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET), [], ctx=context()),
+            run_agent(
+                spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET),
+                [],
+                ctx=context(),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
         )
 
     assert len(model.requests) == _BUDGET + 1
@@ -130,8 +155,8 @@ async def test_each_run_starts_a_fresh_count() -> None:
     agent = spec(model, toolkit(probe), max_tool_calls_per_turn=_BUDGET)
 
     with capture_logs() as logs:
-        await collect(run_agent(agent, [], ctx=context(run_id="run-1")))
-        await collect(run_agent(agent, [], ctx=context(run_id="run-2")))
+        await collect(run_agent(agent, [], ctx=context(run_id="run-1"), persist=None, request_template=EMPTY_REQUEST))
+        await collect(run_agent(agent, [], ctx=context(run_id="run-2"), persist=None, request_template=EMPTY_REQUEST))
 
     assert len(model.requests) == 2 * _CAP
     assert executed == ["probe"] * (2 * _BUDGET)

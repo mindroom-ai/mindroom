@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 
-from mindroom.agent_loop.model_loop import NO_HOOKS, LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
 from mindroom.agent_loop.run import paused_content, resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.custom_tools.calculator import CalculatorTools
@@ -67,7 +67,9 @@ async def test_a_completed_run_is_stored_once_before_it_is_announced() -> None:
         [calls(tool_call("add", "c1", a=2, b=3), metrics=usage(10, 2)), answer("Five.", usage(20, 4))],
     )
 
-    events, record = await collect(run_agent(spec(model, toolkit(add)), _prompt(), ctx=context(), persist=store))
+    events, record = await collect(
+        run_agent(spec(model, toolkit(add)), _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST),
+    )
 
     assert isinstance(events[-1], RunFinished)
     assert len(store.saved) == 1
@@ -99,7 +101,15 @@ async def test_stored_messages_leave_out_history_copies_and_transient_context() 
     history = Message(role="user", content="earlier", from_history=True)
     transient = Message(role="user", content="context", add_to_agent_memory=False)
 
-    _, record = await collect(run_agent(spec(model), [history, *_prompt(), transient], ctx=context()))
+    _, record = await collect(
+        run_agent(
+            spec(model),
+            [history, *_prompt(), transient],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
 
     assert [message.content for message in record.messages] == ["You are Code.", "hi", "ok"]
     assert model.requests[0].messages[1] is history
@@ -111,7 +121,9 @@ async def test_a_paused_run_is_stored_paused_with_agno_text_when_the_model_said_
     store = _Store()
     model = ScriptedModel([calls(tool_call("add", "c1", a=6, b=7), metrics=usage(1, 1))])
 
-    _, record = await collect(run_agent(spec(model, gated(add)), _prompt(), ctx=context(), persist=store))
+    _, record = await collect(
+        run_agent(spec(model, gated(add)), _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST),
+    )
 
     assert record.status is RunStatus.paused
     assert record.content == "I have tools to execute, but I need confirmation."
@@ -127,7 +139,9 @@ async def test_a_paused_run_keeps_the_text_the_model_streamed() -> None:
         [calls(tool_call("add", "c1", a=6, b=7), content="I need approval first.", metrics=usage(1, 1))],
     )
 
-    _, record = await collect(run_agent(spec(model, gated(add)), _prompt(), ctx=context()))
+    _, record = await collect(
+        run_agent(spec(model, gated(add)), _prompt(), ctx=context(), persist=None, request_template=EMPTY_REQUEST),
+    )
 
     assert record.content == "I need approval first."
 
@@ -136,7 +150,9 @@ async def test_a_paused_run_keeps_the_text_the_model_streamed() -> None:
 async def test_a_silent_external_pause_has_empty_content() -> None:
     model = ScriptedModel([calls(tool_call("echo", "c1", text="task"), metrics=usage(1, 1))])
 
-    _, record = await collect(run_agent(spec(model, external(echo)), _prompt(), ctx=context()))
+    _, record = await collect(
+        run_agent(spec(model, external(echo)), _prompt(), ctx=context(), persist=None, request_template=EMPTY_REQUEST),
+    )
 
     assert (record.status, record.content) == (RunStatus.paused, "")
 
@@ -166,7 +182,7 @@ async def test_a_provider_error_stores_an_error_record_with_the_error_text_and_r
     model = ScriptedModel([[UsageReported(usage(5, 0), final=False), Await(throttle)]])
 
     with pytest.raises(RateLimited, match="Rate limited"):
-        async for _ in run_agent(spec(model), _prompt(), ctx=context(), persist=store):
+        async for _ in run_agent(spec(model), _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST):
             pass
 
     [stored] = store.saved
@@ -190,7 +206,13 @@ async def test_an_error_after_text_keeps_the_text_as_content() -> None:
     )
 
     with pytest.raises(RateLimited):
-        async for _ in run_agent(spec(model, toolkit(echo)), _prompt(), ctx=context(), persist=store):
+        async for _ in run_agent(
+            spec(model, toolkit(echo)),
+            _prompt(),
+            ctx=context(),
+            persist=store,
+            request_template=EMPTY_REQUEST,
+        ):
             pass
 
     assert (store.saved[0]["status"], store.saved[0]["content"]) == ("ERROR", "Working.")
@@ -222,7 +244,13 @@ async def test_cancellation_mid_stream_stores_a_cancelled_record_once_before_the
 
     async def consume() -> None:
         try:
-            async for _ in run_agent(spec(model, toolkit(add)), _prompt(), ctx=context(), persist=persist):
+            async for _ in run_agent(
+                spec(model, toolkit(add)),
+                _prompt(),
+                ctx=context(),
+                persist=persist,
+                request_template=EMPTY_REQUEST,
+            ):
                 pass
         except asyncio.CancelledError:
             writes.append("caller")  # MindRoom's interrupted-turn record for the same run goes here.
@@ -253,7 +281,7 @@ async def test_closing_the_run_while_handling_an_event_stores_a_cancelled_record
     model = ScriptedModel([[UsageReported(usage(50, 2), final=False), TextDelta("Par"), Await(asyncio.Event().wait)]])
     store = _Store()
 
-    stream = run_agent(spec(model), _prompt(), ctx=context(), persist=store)
+    stream = run_agent(spec(model), _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST)
     async for _ in stream:
         break  # A stop that lands while the consumer handles an event closes the run instead of cancelling it.
     assert store.saved == []
@@ -284,7 +312,13 @@ async def test_a_stop_while_the_paused_record_is_being_saved_leaves_a_cancelled_
             await asyncio.sleep(0)
 
     async def consume() -> None:
-        async for _ in run_agent(spec(model, gated(add)), _prompt(), ctx=context(), persist=persist):
+        async for _ in run_agent(
+            spec(model, gated(add)),
+            _prompt(),
+            ctx=context(),
+            persist=persist,
+            request_template=EMPTY_REQUEST,
+        ):
             pass
 
     task = asyncio.create_task(consume())
@@ -307,14 +341,28 @@ async def test_a_failing_store_fails_a_completed_run_but_not_an_interrupted_one(
         raise OSError(msg)
 
     with pytest.raises(OSError, match="disk full"):
-        await collect(run_agent(spec(ScriptedModel([answer("ok")])), _prompt(), ctx=context(), persist=broken))
+        await collect(
+            run_agent(
+                spec(ScriptedModel([answer("ok")])),
+                _prompt(),
+                ctx=context(),
+                persist=broken,
+                request_template=EMPTY_REQUEST,
+            ),
+        )
 
     async def fail() -> None:
         msg = "boom"
         raise RateLimited(msg, provider="Synthetic")
 
     with pytest.raises(RateLimited):
-        async for _ in run_agent(spec(ScriptedModel([[Await(fail)]])), _prompt(), ctx=context(), persist=broken):
+        async for _ in run_agent(
+            spec(ScriptedModel([[Await(fail)]])),
+            _prompt(),
+            ctx=context(),
+            persist=broken,
+            request_template=EMPTY_REQUEST,
+        ):
             pass
 
 
@@ -323,7 +371,7 @@ async def test_a_run_without_a_system_message_sends_only_its_input() -> None:
     model = ScriptedModel([answer("ok")])
     agent = replace(spec(model), system_message=None)
 
-    _, record = await collect(run_agent(agent, _prompt(), ctx=context()))
+    _, record = await collect(run_agent(agent, _prompt(), ctx=context(), persist=None, request_template=EMPTY_REQUEST))
 
     assert [message.role for message in model.requests[0].messages] == ["user"]
     assert [message.role for message in record.messages] == ["user", "assistant"]
@@ -466,6 +514,7 @@ async def _resume(
             ctx=context(run_id=paused.run_id, session_id=paused.session_id or "session"),
             hooks=hooks,
             persist=store,
+            request_template=EMPTY_REQUEST,
         ),
     )
     return events, record, store
@@ -510,7 +559,11 @@ async def test_a_resume_streams_its_requests_even_when_its_template_does_not(str
             paused,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             approved=[_approval("call-multiply", "multiply", {"a": 6, "b": 7})],
+            denied={},
+            external_results={},
             ctx=context(run_id=paused.run_id, session_id=paused.session_id or "session"),
+            hooks=NO_HOOKS,
+            persist=None,
             request_template=ModelRequest(messages=(), stream=stream),
         ),
     )
@@ -609,7 +662,15 @@ async def test_an_approved_call_resumes_with_the_string_arguments_it_paused_with
     sent = {"text": "None", "scope": "none", "title": "null", "pinned": "true"}
     stored = {"text": "None", "scope": "none", "title": None, "pinned": True}
     paused_model = ScriptedModel([calls(tool_call("note", "c1", **sent), metrics=usage(1, 1))])
-    _, paused = await collect(run_agent(spec(paused_model, gated(note)), _prompt(), ctx=context()))
+    _, paused = await collect(
+        run_agent(
+            spec(paused_model, gated(note)),
+            _prompt(),
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
     assert paused.status is RunStatus.paused
     assert paused.tools is not None
     assert paused.tools[0].tool_args == stored
@@ -648,7 +709,15 @@ async def test_a_second_resume_answers_only_the_calls_it_decided(second_decision
         ],
     )
     agent = spec(model, gated(add))
-    _, first = await collect(run_agent(agent, [Message(role="user", content="go")], ctx=context()))
+    _, first = await collect(
+        run_agent(
+            agent,
+            [Message(role="user", content="go")],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
     _, second, _ = await _resume(agent, first, approved=[_approval("c1", "add", {"a": 1, "b": 2})])
     assert second.status is RunStatus.paused
     assert [(r.tool_execution.tool_call_id, r.confirmation) for r in second.requirements or ()] == [
@@ -909,7 +978,7 @@ async def test_a_run_connects_its_toolkits_first_and_closes_what_it_connected_af
     )
 
     reported: list[str] = []
-    async for event in run_agent(agent, _prompt(), ctx=context()):
+    async for event in run_agent(agent, _prompt(), ctx=context(), persist=None, request_template=EMPTY_REQUEST):
         if isinstance(event, RunFinished):
             reported = list(log)
 
@@ -937,7 +1006,7 @@ async def test_a_run_reports_its_end_before_a_slow_close_finishes_and_the_close_
 
     store = _Store()
     agent = spec(ScriptedModel([answer("Done.")]), replace(toolkit(add, name="database"), connect=connect))
-    stream = run_agent(agent, _prompt(), ctx=context(), persist=store)
+    stream = run_agent(agent, _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST)
 
     async def consume() -> None:
         async with closing_async_stream(stream):
@@ -980,7 +1049,9 @@ async def test_a_run_that_fails_or_is_cancelled_closes_what_it_connected_after_s
 
     model = ScriptedModel([[Await(end)]])
     agent = spec(model, _connecting(log, toolkit(add, name="database")))
-    task = asyncio.create_task(collect(run_agent(agent, _prompt(), ctx=context(), persist=persist)))
+    task = asyncio.create_task(
+        collect(run_agent(agent, _prompt(), ctx=context(), persist=persist, request_template=EMPTY_REQUEST)),
+    )
     if ending == "cancel":
         await asyncio.wait_for(waiting.wait(), timeout=5)
         task.cancel()

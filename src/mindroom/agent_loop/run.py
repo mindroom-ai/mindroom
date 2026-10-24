@@ -18,7 +18,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
+from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.llm.events import RunFinished
@@ -68,9 +68,9 @@ def run_agent(
     run_input: Sequence[Message],
     *,
     ctx: RunContext,
+    persist: Persist[RunRecord] | None,
+    request_template: ModelRequest,
     hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[RunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
 ) -> AsyncIterator[RunEvent]:
     """Run one agent turn: the spec's system message, then ``run_input`` as the history subsystem built it.
 
@@ -110,13 +110,13 @@ def resume_agent(
     paused: RunRecord,
     messages: list[Message],
     *,
-    approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str | None] = {},
-    external_results: Mapping[str, str] = {},
+    approved: Sequence[ApprovedCall],
+    denied: Mapping[str, str | None],
+    external_results: Mapping[str, str],
     ctx: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[RunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    hooks: LoopHooks,
+    persist: Persist[RunRecord] | None,
+    request_template: ModelRequest,
 ) -> AsyncIterator[RunEvent]:
     """Resume a paused run with the decisions on exactly the calls it waits for, then continue its loop.
 
@@ -152,9 +152,9 @@ def plan_resume(
     spec: AgentSpec,
     paused: RunRecord,
     *,
-    approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str | None] = {},
-    external_results: Mapping[str, str] = {},
+    approved: Sequence[ApprovedCall],
+    denied: Mapping[str, str | None],
+    external_results: Mapping[str, str],
 ) -> ResumePlan:
     """Check and record the decisions for a resume of ``paused`` without running anything; see ``resume_agent``.
 
@@ -172,9 +172,9 @@ def resume_planned(
     messages: list[Message],
     *,
     ctx: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[RunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    hooks: LoopHooks,
+    persist: Persist[RunRecord] | None,
+    request_template: ModelRequest,
 ) -> AsyncIterator[RunEvent]:
     """Run a planned resume: answer the decided calls, then continue the loop over ``messages``.
 

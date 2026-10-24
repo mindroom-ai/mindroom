@@ -13,7 +13,7 @@ from agno.tools.function import ToolResult
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.ai_runtime import (
     queued_message_signal_context,
@@ -107,9 +107,13 @@ async def _resume_turn(
             spec(model, *toolkits),
             paused,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
+            approved=(),
+            denied={},
             external_results=external_results,
             ctx=context(run_id=paused.run_id),
             hooks=_NOTICE_HOOKS,
+            persist=None,
+            request_template=EMPTY_REQUEST,
         ),
     )
     return record
