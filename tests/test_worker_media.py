@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,7 @@ from agno.tools.function import ToolResult
 from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.llm.messages import Message
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part
 from mindroom.tool_system import media_transport
@@ -29,6 +31,14 @@ def _openai_audio_format(result: ToolResult) -> str:
     part = chat_audio_part(tool_value(result).audios[0])
     assert part is not None
     return part["input_audio"]["format"]
+
+
+def _gemini_mime_type(result: ToolResult) -> str:
+    """Return the MIME type the Gemini wire sends for the first audio or video of a tool result."""
+    value = tool_value(result)
+    message = Message(role="user", audio=value.audios, videos=value.videos)
+    contents, _ = asyncio.run(gemini_wire.format_contents([message], gemini_wire.MediaRoute(provider="gemini")))
+    return contents[0]["parts"][0]["inline_data"]["mime_type"]
 
 
 @pytest.mark.asyncio
@@ -180,10 +190,10 @@ def test_media_source_type_survives_inlining(
     if kind in {"mp3", "wav"}:
         assert isinstance(item, Audio)
         assert _openai_audio_format(decoded) == kind
-        assert gemini_wire._media_mime_type(tool_value(decoded).audios[0], "audio/mpeg") == f"audio/{kind}"
+        assert _gemini_mime_type(decoded) == f"audio/{kind}"
     elif kind == "webm":
         assert item.format == "webm"
-        assert gemini_wire._media_mime_type(tool_value(decoded).videos[0], "video/mp4") == "video/webm"
+        assert _gemini_mime_type(decoded) == "video/webm"
     else:
         assert item.format is None
         assert item.mime_type == ("image/jpeg" if kind == "jpg" else "image/avif")
@@ -201,7 +211,7 @@ def test_explicit_media_format_precedes_resource_name(tmp_path: Path) -> None:
     assert decoded.audios
     assert decoded.audios[0].mime_type is None
     assert _openai_audio_format(decoded) == "mp3"
-    assert gemini_wire._media_mime_type(tool_value(decoded).audios[0], "audio/wav") == "audio/mp3"
+    assert _gemini_mime_type(decoded) == "audio/mp3"
 
 
 def test_unknown_file_type_remains_unset(monkeypatch: pytest.MonkeyPatch) -> None:
