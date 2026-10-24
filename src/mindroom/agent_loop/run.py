@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.spec import AgentSpec, RunContext
-    from mindroom.agent_loop.tools import PreparedTools
     from mindroom.llm.events import RunEvent
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
@@ -99,7 +98,6 @@ def run_agent(
         spec,
         record,
         messages,
-        prepare_run_tools(spec),
         ctx=ctx,
         hooks=hooks,
         persist=persist,
@@ -144,11 +142,10 @@ def resume_agent(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResumePlan:
-    """A resume whose decisions were checked and recorded: the record to continue, what it answers, what it offers."""
+    """A resume whose decisions were checked and recorded: the record to continue and the calls it answers."""
 
     record: RunRecord
     decided: tuple[RunRequirement, ...]
-    prepared: PreparedTools
 
 
 def plan_resume(
@@ -165,7 +162,8 @@ def plan_resume(
     """
     record = resumed_record(paused)
     decided = decide_requirements(record, approved=approved, denied=denied, external_results=external_results)
-    return ResumePlan(record=record, decided=tuple(decided), prepared=prepare_resume_tools(spec, approved))
+    check_approved_tools_offered(spec, approved)
+    return ResumePlan(record=record, decided=tuple(decided))
 
 
 def resume_planned(
@@ -186,7 +184,6 @@ def resume_planned(
         spec,
         plan.record,
         messages,
-        plan.prepared,
         ctx=ctx,
         hooks=hooks,
         persist=persist,
@@ -207,14 +204,13 @@ def resume_request_template(template: ModelRequest) -> ModelRequest:
     return replace(template, stream=True)
 
 
-def prepare_resume_tools(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> PreparedTools:
-    """Prepare the tools a resume offers, refusing an approved call whose tool the spec no longer offers."""
-    prepared = prepare_run_tools(spec)
+def check_approved_tools_offered(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> None:
+    """Refuse a resume with an approved call whose tool the spec no longer offers."""
+    offered = {function.name for toolkit in spec.toolkits for function in toolkit.functions}
     for call in approved:
-        if call.tool_name not in prepared.functions:
+        if call.tool_name not in offered:
             msg = f"Approved tool {call.tool_name!r} is no longer offered to agent {spec.id!r}"
             raise ValueError(msg)
-    return prepared
 
 
 def resumed_record[R: AnyRunRecord](paused: R) -> R:
@@ -304,7 +300,6 @@ async def drive_run[R: AnyRunRecord](
     spec: AgentSpec,
     record: R,
     messages: list[Message],
-    prepared: PreparedTools,
     *,
     ctx: RunContext,
     hooks: LoopHooks,
@@ -316,10 +311,10 @@ async def drive_run[R: AnyRunRecord](
 ) -> AsyncIterator[RunEvent]:
     """Run ``entry`` and then the loop over ``messages``, ending the record exactly once however the run ends.
 
-    ``spec`` supplies the model and the tool-call limit; ``record`` is the agent or team run the loop fills;
-    ``entry`` is work the run does before the loop (a team resume's paused members), and ``resumed`` holds a
-    resume's decided requirements, which the loop answers before its first request. A run
-    that ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
+    ``spec`` supplies the model, the tools (``prepare_run_tools``), and the tool-call limit; ``record`` is the agent
+    or team run the loop fills; ``entry`` is work the run does before the loop (a team resume's paused members), and
+    ``resumed`` holds a resume's decided requirements, which the loop answers before its first request. A run that
+    ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
     hold a connection for one run are connected before ``entry`` and closed after the run reports its end, once the
     consumer reads past ``RunFinished`` or closes the stream; a run that fails or is cancelled closes them once its
     record is stored.
@@ -334,7 +329,7 @@ async def drive_run[R: AnyRunRecord](
         loop = run_model_loop(
             spec.model,
             messages,
-            prepared,
+            prepare_run_tools(spec),
             record=record,
             run=ctx,
             hooks=hooks,
@@ -447,13 +442,13 @@ __all__ = [
     "ApprovedCall",
     "Persist",
     "ResumePlan",
+    "check_approved_tools_offered",
     "decide_requirements",
     "drive_run",
     "own_answers",
     "own_model_messages",
     "paused_content",
     "plan_resume",
-    "prepare_resume_tools",
     "resume_agent",
     "resume_planned",
     "resume_request_template",

@@ -19,10 +19,10 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
 from mindroom.agent_loop.run import (
     Persist,
     ResumePlan,
+    check_approved_tools_offered,
     decide_requirements,
     drive_run,
     plan_resume,
-    prepare_resume_tools,
     resume_planned,
     resume_request_template,
     resumed_record,
@@ -143,7 +143,7 @@ def continue_team(
         denied=leader.denied,
         external_results=leader.external_results,
     )
-    prepare_resume_tools(_base_leader_spec(spec), leader.approved)
+    check_approved_tools_offered(_base_leader_spec(spec), leader.approved)
     decisions.require_consumed()
 
     async def entry(members: _MemberRuns) -> None:
@@ -479,7 +479,6 @@ async def _drive_team(
             leader,
             record,
             messages,
-            prepare_run_tools(leader),
             ctx=ctx,
             hooks=hooks,
             persist=persist,
