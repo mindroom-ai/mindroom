@@ -18,6 +18,7 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.dynamic_workflow_context import dynamic_workflow_store_and_owner
 from mindroom.custom_tools.report_publishing import ReportPublishingTools
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
+from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.message_target import MessageTarget
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -32,6 +33,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.test_dynamic_workflows import file_work_waiting_for_the_loop
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -157,6 +159,62 @@ def test_each_offered_function_runs_the_toolkit_method_of_its_name(
     assert {name: function.entrypoint for name, function in toolkit.async_functions.items()} == {
         name: getattr(toolkit, name) for name in toolkit.async_functions
     }
+
+
+@pytest.mark.asyncio
+async def test_tool_file_work_leaves_the_event_loop_free(tmp_path: Path) -> None:
+    """While a tool's file work, a static-site copy included, is under way, other coroutines on the loop keep running."""
+    dynamic_workflow_tool = DynamicWorkflowTools()
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path, agent_memory_backend="file")
+    site_dir = context.runtime_paths.storage_root / "agents" / "general" / "workspace" / "public-demo"
+    site_dir.mkdir(parents=True)
+    (site_dir / "index.html").write_text("<!doctype html><h1>Demo</h1>", encoding="utf-8")
+    store_methods: dict[type, tuple[str, ...]] = {
+        DynamicWorkflowStore: (
+            "create_workflow",
+            "update_workflow",
+            "list_workflows",
+            "list_workflow_revisions",
+            "start_workflow_run",
+            "load_workflow_revision",
+            "complete_workflow_run",
+            "get_workflow_run",
+        ),
+        ReportPublishingStore: ("publish_report", "get_public_report", "revoke_public_report"),
+    }
+    workflow_id = "competitor-research-report"
+
+    with file_work_waiting_for_the_loop(store_methods) as freedom, tool_runtime_context(context):
+        created = _tool_payload(await dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
+        updated = _tool_payload(
+            await dynamic_workflow_tool.update_workflow(workflow_id, {"description": "Updated."}, "Clarify"),
+        )
+        listed = _tool_payload(await dynamic_workflow_tool.list_workflows())
+        revisions = _tool_payload(await dynamic_workflow_tool.list_workflow_revisions(workflow_id))
+        run = _tool_payload(await dynamic_workflow_tool.run_workflow(workflow_id, {"topic": "pricing"}))
+        loaded_run = _tool_payload(await dynamic_workflow_tool.get_workflow_run(workflow_id, run["run_id"]))
+        run_report = _tool_payload(
+            await report_tool.publish_report(
+                source_type="dynamic_workflow_run",
+                source={"workflow_id": workflow_id, "run_id": run["run_id"]},
+                confirm_public=True,
+            ),
+        )
+        site = _tool_payload(
+            await report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "public-demo", "title": "Public Demo"},
+                confirm_public=True,
+            ),
+        )
+        revoked = _tool_payload(await report_tool.revoke_public_report(site["slug"]))
+
+    assert freedom.blocked == []
+    assert set(freedom.called) == {name for names in store_methods.values() for name in names}
+    assert [created["status"], updated["status"], listed["status"], revisions["status"]] == ["ok"] * 4
+    assert [run["status"], loaded_run["status"]] == ["completed"] * 2
+    assert [run_report["status"], site["status"], revoked["status"]] == ["ok"] * 3
 
 
 def test_report_publishing_store_creates_revocable_public_link(tmp_path: Path) -> None:

@@ -115,7 +115,12 @@ visibility = [
 
 [[modules]]
 path = "mindroom.dynamic_workflows"
-depends_on = ["mindroom.durable_write", "mindroom.file_locks", "mindroom.failure_text"]
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.failure_text",
+]
 
 [[modules]]
 path = "mindroom.private_storage.private_instance_identity"
@@ -1590,6 +1595,7 @@ depends_on = [
     "mindroom.agent_loop.build",
     "mindroom.agents",
     "mindroom.authorization",
+    "mindroom.background_tasks",
     "mindroom.credentials.manager",
     "mindroom.custom_tools.dynamic_workflow_context",
     "mindroom.custom_tools.tool_payloads",

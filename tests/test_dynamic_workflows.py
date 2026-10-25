@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -31,7 +33,7 @@ from mindroom.dynamic_workflows.runner import (
     execute_workflow_spec,
 )
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.store import DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.llm.errors import ProviderError
@@ -55,6 +57,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mindroom.dynamic_workflows.runner import ParticipantExecutor
@@ -72,6 +75,43 @@ def _room_agent_model(monkeypatch: pytest.MonkeyPatch, *turns: list[ScriptStep])
 
     monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load)
     return model, loaded
+
+
+@dataclass
+class LoopFreedom:
+    """The wrapped file operations that ran, and the first one another coroutine could not run beside."""
+
+    called: list[str] = field(default_factory=list)
+    blocked: list[str] = field(default_factory=list)
+
+
+@contextmanager
+def file_work_waiting_for_the_loop(methods: dict[type, tuple[str, ...]]) -> Iterator[LoopFreedom]:
+    """Make each named method wait, before its file work, until another coroutine has run on the event loop.
+
+    Another coroutine runs only while the loop is free, so a method called on the loop thread records itself as
+    blocked; the methods after it skip the wait, which would only time out again.
+    """
+    loop = asyncio.get_running_loop()
+    freedom = LoopFreedom()
+
+    def waiting(method: Callable[..., object], name: str) -> Callable[..., object]:
+        def call(*args: object, **kwargs: object) -> object:
+            freedom.called.append(name)
+            if not freedom.blocked:
+                try:
+                    asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=5)
+                except TimeoutError:
+                    freedom.blocked.append(name)
+            return method(*args, **kwargs)
+
+        return call
+
+    with ExitStack() as stack:
+        for owner, names in methods.items():
+            for name in names:
+                stack.enter_context(patch.object(owner, name, waiting(getattr(owner, name), name)))
+        yield freedom
 
 
 def _answering(content: object) -> ParticipantExecutor:
@@ -1378,6 +1418,121 @@ async def test_service_run_persists_cancelled_status(tmp_path: Path) -> None:
     run_data = json.loads(run_files[0].read_text(encoding="utf-8"))
     assert run_data["status"] == "failed"
     assert run_data["error"] == "Workflow run was cancelled."
+
+
+@pytest.mark.parametrize("ending", ["timeout", "cancelled", "failure"])
+@pytest.mark.asyncio
+async def test_service_records_how_a_run_ended_while_the_loop_stays_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """However a run ends, its records are written while other coroutines keep running on the event loop."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(spec=_workflow_spec(), scope="agent", owner_id="general", created_by="general")
+
+    async def executor(**_kwargs: object) -> ParticipantOutput:
+        if ending == "cancelled":
+            raise asyncio.CancelledError
+        await asyncio.sleep(1)
+        return ParticipantOutput("late")
+
+    async def fail(*_arguments: object, **_options: object) -> None:
+        msg = "runner broke"
+        raise RuntimeError(msg)
+
+    if ending == "timeout":
+        monkeypatch.setattr(service_module, "workflow_runtime_seconds", lambda _spec: 0.01)
+    if ending == "failure":
+        monkeypatch.setattr(service_module, "execute_workflow_spec", fail)
+    service = DynamicWorkflowService(store, participant_executor=executor)
+
+    with file_work_waiting_for_the_loop(
+        {DynamicWorkflowStore: ("start_workflow_run", "load_workflow_revision", "fail_workflow_run")},
+    ) as freedom:
+        running = service.run_workflow(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            input_data={"topic": "pricing"},
+            requested_by="general",
+        )
+        if ending == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        else:
+            await running
+
+    [run_file] = (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob(
+        "*.json",
+    )
+    run_data = json.loads(run_file.read_text(encoding="utf-8"))
+    assert freedom.blocked == []
+    assert freedom.called == ["start_workflow_run", "load_workflow_revision", "fail_workflow_run"]
+    assert run_data["status"] == "failed"
+    assert (
+        run_data["error"]
+        == {
+            "timeout": "Workflow run exceeded permissions.max_runtime_seconds (0.01).",
+            "cancelled": "Workflow run was cancelled.",
+            "failure": "runner broke",
+        }[ending]
+    )
+
+
+@pytest.mark.asyncio
+async def test_service_records_a_cancellation_only_after_the_write_under_way(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run cancelled while it records its timeout records the cancellation after that write, never beside it."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(spec=_workflow_spec(), scope="agent", owner_id="general", created_by="general")
+    monkeypatch.setattr(service_module, "workflow_runtime_seconds", lambda _spec: 0.01)
+    loop = asyncio.get_running_loop()
+    timeout_write_started = asyncio.Event()
+    release_timeout_write = threading.Event()
+    writes: list[str] = []
+    fail_workflow_run = DynamicWorkflowStore.fail_workflow_run
+
+    def recorded_fail(owner: DynamicWorkflowStore, run: DynamicWorkflowRun, *, error: str) -> DynamicWorkflowRun:
+        kind = "cancelled" if error == "Workflow run was cancelled." else "timeout"
+        writes.append(f"{kind} started")
+        if kind == "timeout":
+            loop.call_soon_threadsafe(timeout_write_started.set)
+            release_timeout_write.wait(timeout=5)
+        failed = fail_workflow_run(owner, run, error=error)
+        writes.append(f"{kind} written")
+        return failed
+
+    async def slow(**_kwargs: object) -> ParticipantOutput:
+        await asyncio.sleep(1)
+        return ParticipantOutput("late")
+
+    service = DynamicWorkflowService(store, participant_executor=slow)
+    with patch.object(DynamicWorkflowStore, "fail_workflow_run", recorded_fail):
+        running = asyncio.create_task(
+            service.run_workflow(
+                workflow_id="competitor-research-report",
+                scope="agent",
+                owner_id="general",
+                input_data={"topic": "pricing"},
+                requested_by="general",
+            ),
+        )
+        await timeout_write_started.wait()
+        running.cancel()
+        # A cancellation handled before the timeout write finished would write the cancellation meanwhile.
+        await asyncio.wait({running}, timeout=0.5)
+        release_timeout_write.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    [run_file] = (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob(
+        "*.json",
+    )
+    assert writes == ["timeout started", "timeout written", "cancelled started", "cancelled written"]
+    assert json.loads(run_file.read_text(encoding="utf-8"))["error"] == "Workflow run was cancelled."
 
 
 def test_validate_workflow_spec_rejects_missing_step_id(tmp_path: Path) -> None:

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 from urllib.parse import urlsplit
 
 from agno.tools import Toolkit
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -106,11 +108,14 @@ class ReportPublishingTools(Toolkit):
                 message="Set confirm_public to true to publish this report as a public link.",
             )
         try:
-            publishable = _resolve_publishable_source(context, source_type, source)
-            report = ReportPublishingStore(context.runtime_paths.storage_root).publish_report(
-                source=publishable,
-                published_by=context.requester_id,
-                base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+            publishable = await run_blocking_until_complete(_resolve_publishable_source, context, source_type, source)
+            report = await run_blocking_until_complete(
+                partial(
+                    ReportPublishingStore(context.runtime_paths.storage_root).publish_report,
+                    source=publishable,
+                    published_by=context.requester_id,
+                    base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+                ),
             )
         except (DynamicWorkflowError, ReportPublishingError) as exc:
             return self._payload("error", source_type=source_type, message=str(exc))
@@ -131,9 +136,11 @@ class ReportPublishingTools(Toolkit):
             return self._context_error()
         try:
             store = ReportPublishingStore(context.runtime_paths.storage_root)
-            report = store.get_public_report(slug, include_revoked=True)
+            report = await run_blocking_until_complete(partial(store.get_public_report, slug, include_revoked=True))
             _authorize_public_report_for_context(context, report)
-            revoked = store.revoke_public_report(slug, revoked_by=context.requester_id)
+            revoked = await run_blocking_until_complete(
+                partial(store.revoke_public_report, slug, revoked_by=context.requester_id),
+            )
         except ReportPublishingError as exc:
             return self._payload("error", slug=slug, message=str(exc))
         return self._payload(
