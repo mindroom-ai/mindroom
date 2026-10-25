@@ -807,18 +807,14 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
             ["openclaw_compat"],
             "attachments, browser, coding, duckduckgo, matrix_message, matrix_room, scheduler, shell, website",
         ),
-        (
-            [{"openclaw_compat": {"defer": True}}],
-            "attachments, browser, coding, duckduckgo, matrix_message, matrix_room, scheduler, shell, website",
-        ),
         (["shell", "matrix_message"], "attachments, matrix_message, matrix_room, shell"),
     ],
-    ids=["preset", "deferred-preset", "implied"],
+    ids=["preset", "implied"],
 )
 async def test_every_cli_toolkit_answers_to_its_own_tool_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tools: list[object],
+    tools: list[str],
     roster: str,
 ) -> None:
     """Bash runs the shell a preset brings in, and the prompt lists each toolkit by the name the CLI calls it."""

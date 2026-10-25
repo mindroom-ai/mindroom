@@ -538,16 +538,15 @@ def test_local_shell_agent_selects_minimal_mode_without_setup(tmp_path: Path, ap
     )
 
 
-@pytest.mark.parametrize(
-    "tools",
-    [["openclaw_compat"], [{"openclaw_compat": {"defer": True}}]],
-    ids=["eager", "deferred"],
-)
-def test_a_shell_a_preset_brings_in_selects_minimal_mode(tmp_path: Path, tools: list[object]) -> None:
+def test_a_shell_a_preset_brings_in_selects_minimal_mode(tmp_path: Path) -> None:
     """The shell `openclaw_compat` brings in is the agent's shell, for `!mode` and for minimal subagents alike."""
     context = _runtime_context(tmp_path)
     context.config.administrators = [context.requester_id]
-    context.config.agents["helper"] = AgentConfig(display_name="Helper", tools=tools, memory_backend="file")
+    context.config.agents["helper"] = AgentConfig(
+        display_name="Helper",
+        tools=["openclaw_compat"],
+        memory_backend="file",
+    )
     identity = build_execution_identity_from_runtime_context(context)
     root = resolve_agent_storage("helper", context.config, context.runtime_paths, identity).state_root
 

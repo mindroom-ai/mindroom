@@ -140,9 +140,9 @@ def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None, registered: str |
     ``toolkit``; None for a toolkit generated for the agent, and for a caller that names the toolkit beside each
     function, as the MCP gateway's search does. ``registered`` is the registered tool they come from, which each
     one carries as its ``registered_toolkit``; it is ``key`` unless an implied or preset tool brings the toolkit in.
-    A function's prompt instructions are handed over as
-    ``function_instructions``, and a function that sets any other field MindRoom refuses is adapted without it and
-    named in ``refused``, so whoever offers the toolkit refuses it only for a function it still offers.
+    A function's prompt instructions are handed over as ``function_instructions``, and a function that sets any
+    other field MindRoom refuses is adapted without it and named in ``refused``, so whoever offers the toolkit
+    refuses it only for a function it still offers.
     """
     functions = toolkit.get_async_functions().values()
     actor_state: dict[str, Any] = {}
