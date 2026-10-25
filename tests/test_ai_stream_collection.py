@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.ai import ai_response, collect_streamed_response_content
+from mindroom.ai import (
+    _materialize_paused_agent_tool_events,
+    _process_stream_events,
+    _StreamingAttemptState,
+    ai_response,
+    collect_streamed_response_content,
+)
 from mindroom.config.main import Config
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
@@ -183,6 +189,24 @@ async def test_collect_streamed_response_ignores_repeated_start_for_restored_cal
     assert body == "🔧 `inspect` [1]"
     assert len(trace) == 1
     assert trace[0].type == "tool_call_completed"
+
+
+@pytest.mark.asyncio
+async def test_a_paused_call_the_stream_already_announced_is_not_announced_again() -> None:
+    """A paused run's calls are announced once: those its stream started already are skipped, and each counts once."""
+    announced = ToolExecution(tool_call_id="call-announced", tool_name="save_file", tool_args={"file": "a.py"})
+    unannounced = ToolExecution(tool_call_id="call-unannounced", tool_name="send_message", tool_args={"text": "hi"})
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield ToolStarted(call=announced.call)
+
+    state = _StreamingAttemptState()
+    _ = [chunk async for chunk in _process_stream_events(stream(), state=state, show_tool_calls=True, agent_name="a")]
+    events = _materialize_paused_agent_tool_events(state, [announced, unannounced])
+
+    assert [event.call.tool_call_id for event in events] == ["call-unannounced"]
+    assert state.observed_tool_calls == 2
+    assert [pending.tool_call_id for pending in state.pending_tools] == ["call-announced", "call-unannounced"]
 
 
 @pytest.mark.asyncio
