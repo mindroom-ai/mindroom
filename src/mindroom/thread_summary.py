@@ -131,7 +131,8 @@ def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: s
     """Return the summary model's provider without the temperature its config authors.
 
     Summaries send ``defaults.thread_summary_temperature`` instead, and no temperature at all when that is None or
-    the route keeps its provider's sampling default. Ollama sends it as ``options.temperature``.
+    the route keeps its provider's sampling default. Ollama authors sampling in ``options`` instead: it sends the
+    value as ``options.temperature``, and keeps an authored ``options.temperature`` when the value is None.
     """
     model_config = config.models.get(model_name)
     if model_config is not None and model_config.extra_kwargs and "temperature" in model_config.extra_kwargs:
