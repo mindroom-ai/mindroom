@@ -1096,6 +1096,34 @@ async def test_router_reprovisioning_never_supersedes_a_queued_reload(
 
 
 @pytest.mark.asyncio
+async def test_router_provisions_one_users_agent_one_call_at_a_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live join and a reconciliation pass for the same user must not both register that user's account."""
+    router, _, _, _ = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"))
+    running = 0
+    overlapped = False
+
+    async def provision(*_args: object, **_kwargs: object) -> tuple[str, bool]:
+        nonlocal running, overlapped
+        running += 1
+        overlapped = overlapped or running > 1
+        await asyncio.sleep(0.05)
+        running -= 1
+        return "mind_alice", True
+
+    monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
+
+    await asyncio.gather(
+        router._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost"),
+        router._provision_personal_agent("mind", "@alice:localhost", "@bridge_alice:localhost", "!other:localhost"),
+    )
+
+    assert overlapped is False
+
+
+@pytest.mark.asyncio
 async def test_router_join_creates_room_without_hooks_or_target_lobby_membership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -501,6 +501,7 @@ class AgentBot:
                 ),
             )
 
+        self._personal_agent_provisioning_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self.personal_rooms = PersonalRoomService(
             self.agent_name,
             self._runtime_view,
@@ -2794,16 +2795,21 @@ class AgentBot:
         """Create one user's agent from a template and reload the config so the runtime starts it."""
         client = self.client
         assert client is not None
-        profile = await client.get_displayname(user_id)
-        _, changed = await provision_personal_agent(
-            self.config,
-            self.runtime_paths,
-            template=template,
-            user_id=user_id,
-            user_display_name=profile.displayname if isinstance(profile, nio.ProfileGetDisplayNameResponse) else None,
-            source_user_id=source_user_id,
-            source_room_id=source_room_id,
-        )
+        # A live join and a reconciliation pass can both reach one user; only one may register the account.
+        lock = self._personal_agent_provisioning_locks.setdefault((template, user_id), asyncio.Lock())
+        async with lock:
+            profile = await client.get_displayname(user_id)
+            _, changed = await provision_personal_agent(
+                self.config,
+                self.runtime_paths,
+                template=template,
+                user_id=user_id,
+                user_display_name=profile.displayname
+                if isinstance(profile, nio.ProfileGetDisplayNameResponse)
+                else None,
+                source_user_id=source_user_id,
+                source_room_id=source_room_id,
+            )
         # This runs only while the live config lacks the agent, so an existing entry still needs a reload,
         # but re-requesting a queued one would restart its debounce and response drain on every retry.
         orchestrator = self.orchestrator
