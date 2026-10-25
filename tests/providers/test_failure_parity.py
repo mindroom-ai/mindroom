@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
+from mindroom.agent_loop.run import run_agent
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
@@ -34,6 +38,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ReportedUsage, TextDelta, complete
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.retry import STREAM_STALLED
+from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.providers.anthropic_family_support import ROUTE_CONFIGS, claude_message, provider_for
 from tests.providers.gemini_ollama_support import build_adapter
 from tests.providers.golden_support import (
@@ -1317,7 +1322,7 @@ async def test_a_failed_request_is_retried_and_reported_as_the_parity_table_says
 # --- A response the provider ended incomplete --------------------------------------------------------------------
 
 
-# A call the output limit cut off mid-arguments, as the response lists it and as the turn keeps it.
+# A call the output limit cut off mid-arguments, as the response lists it.
 _CUT_OFF_CALL_ITEM = {
     "id": "fc_1",
     "type": "function_call",
@@ -1325,12 +1330,6 @@ _CUT_OFF_CALL_ITEM = {
     "name": "get_weather",
     "arguments": '{"city": "Par',
     "status": "incomplete",
-}
-_CUT_OFF_CALL = {
-    "id": "fc_1",
-    "call_id": "call_1",
-    "type": "function",
-    "function": {"name": "get_weather", "arguments": '{"city": "Par'},
 }
 
 
@@ -1380,16 +1379,11 @@ def _incomplete(reason: str, *, stream: bool, cut_off_call: bool) -> Reply:
 
 # A response that ended incomplete ends the turn with its stop reason after one request, streamed or blocking, as a
 # blocking one did on the Agno-backed runtime; that runtime failed a streamed one as an incomplete stream instead.
-# The turn keeps a call the response ended in the middle of, as a blocking response and a Chat reply did there.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("reason", "stop_reason", "cut_off_call"),
-    [
-        ("max_output_tokens", "output_limit", False),
-        ("content_filter", "content_filter", False),
-        ("max_output_tokens", "output_limit", True),
-    ],
-    ids=["output_limit", "content_filter", "output_limit-cut_off_call"],
+    ("reason", "stop_reason"),
+    [("max_output_tokens", "output_limit"), ("content_filter", "content_filter")],
+    ids=["output_limit", "content_filter"],
 )
 @pytest.mark.parametrize(
     ("route", "stream"),
@@ -1400,7 +1394,6 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
     stream: bool,
     reason: str,
     stop_reason: str,
-    cut_off_call: bool,
     tmp_path: Path,
 ) -> None:
     """The output limit and the content filter end a streamed and a blocking reply the same way, without a retry."""
@@ -1408,16 +1401,121 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
 
     def respond(request: httpx.Request) -> httpx.Response:
         sent.append(request)
-        answer = _incomplete(reason, stream=stream, cut_off_call=cut_off_call)()
+        answer = _incomplete(reason, stream=stream, cut_off_call=False)()
         assert isinstance(answer, httpx.Response)
         return answer
 
     provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
 
-    turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
+    with capture_logs() as logs:
+        turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
 
     assert (turn.content, turn.stop_reason, turn.usage.tokens.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
-    assert turn.tool_calls == ([_CUT_OFF_CALL] if cut_off_call else [])
+    assert [entry.get("stop_reason") for entry in logs if entry["event"] == "LLM usage"][-1] == stop_reason
+
+
+def get_weather(city: str) -> str:
+    """Return the weather in a city.
+
+    Args:
+        city: The city.
+
+    """
+    return f"Sunny in {city}."
+
+
+def _chat_end(finish_reason: str) -> dict[str, Any]:
+    chunk = _chat_chunk({})
+    chunk["choices"][0]["finish_reason"] = finish_reason
+    return chunk
+
+
+def _chat_cut_off(*, stream: bool) -> Reply:
+    """A Chat reply the output limit cut off inside the arguments of its tool call."""
+    call = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Par'}}
+    if not stream:
+        message = {"role": "assistant", "content": _PARTIAL, "tool_calls": [call]}
+        return _json(
+            200,
+            {**_CHAT_COMPLETION, "choices": [{"index": 0, "message": message, "finish_reason": "length"}]},
+        )
+    call_chunk = _chat_chunk({"tool_calls": [{"index": 0, **call}]})
+    return _chat_stream(_chat_chunk({"content": _PARTIAL}), call_chunk, _chat_end("length"), "[DONE]")
+
+
+def _tool_results(route: str, body: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return the tool results a request body sends, as call id and output."""
+    if route == "openai_chat":
+        return [
+            (message["tool_call_id"], message["content"]) for message in body["messages"] if message["role"] == "tool"
+        ]
+    return [(item["call_id"], item["output"]) for item in body["input"] if item.get("type") == "function_call_output"]
+
+
+# The output-limit policy every run's hooks carry answers a call the output limit cut off as not run on every route,
+# so the model reads why and splits the work; it answered only Claude's before, and elsewhere such a call ran when its
+# partial arguments parsed. A stored response still anchors the next request, which answers the cut-off call it lists.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "stream"),
+    [
+        ("openai_responses", True),
+        ("openai_responses", False),
+        ("codex", True),
+        ("openai_chat", True),
+        ("openai_chat", False),
+    ],
+)
+async def test_a_call_the_output_limit_cut_off_is_answered_without_running_on_every_route(
+    route: str,
+    stream: bool,
+    tmp_path: Path,
+) -> None:
+    """The cut-off call never runs; the next request tells the model it hit the output limit."""
+    chat = route == "openai_chat"
+    cut_off = (
+        _chat_cut_off(stream=stream) if chat else _incomplete("max_output_tokens", stream=stream, cut_off_call=True)
+    )
+    if chat:
+        finished = (
+            _chat_stream(_chat_chunk({"content": "ok"}), _chat_end("stop"), "[DONE]")
+            if stream
+            else _json(200, _CHAT_COMPLETION)
+        )
+    else:
+        finished = (
+            _responses_stream(_response_text("ok"), _RESPONSE_COMPLETED)
+            if stream
+            else _json(200, _RESPONSE_COMPLETED["response"])
+        )
+    replies = iter([cut_off, finished])
+    bodies: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        answer = next(replies)()
+        assert isinstance(answer, httpx.Response)
+        return answer
+
+    agent = spec(pipeline_provider(_adapter(route, tmp_path, respond)), toolkit(get_weather))
+
+    with capture_logs() as logs:
+        _, record = await collect(
+            run_agent(
+                agent,
+                [Message(role="user", content="Weather in Paris?")],
+                ctx=context(),
+                persist=None,
+                request_template=ModelRequest(messages=(), stream=stream),
+                hooks=LoopHooks(answer_tool_calls=output_limit_policy()),
+            ),
+        )
+
+    assert (record.content, len(bodies)) == (f"{_PARTIAL}ok", 2)
+    assert _tool_results(route, bodies[1]) == [("call_1", CUT_OFF_TOOL_CALL_RESULT)]
+    if route == "openai_responses":
+        assert bodies[1]["previous_response_id"] == "resp_1"
+    assert [entry.get("stop_reason") for entry in logs if entry["event"] == "LLM usage"] == ["output_limit", "end"]
 
 
 # Each route's answer to a request its server failed, which the SDK and the stream retry would both reissue.

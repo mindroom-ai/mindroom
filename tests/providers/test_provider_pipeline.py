@@ -953,6 +953,7 @@ async def test_usage_telemetry_is_logged_without_the_request_log(
             "model_id": "scripted",
             "provider": provider,
             "usage_available": True,
+            "stop_reason": "end",
             "correlation_id": "corr-1",
             "input_tokens": 1_000,
             "context_input_tokens": context_tokens,

@@ -1042,7 +1042,6 @@ async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED.removesuffix("test.\n")}),
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
     )
-    model.capabilities = Capabilities(claude_family=True)
     model.cut_off_requests = frozenset({1})
     progress = ReviewProgress()
     install_model_providers(monkeypatch, {"default": model})
