@@ -44,7 +44,7 @@ async def request_compaction_before_next_reply(
     request is also recorded in it, in place.
     """
     # An agent scope's id is its agent; an ad-hoc team has no authored settings of its own.
-    entity_name = scope.scope_id if scope.kind == "agent" or scope.scope_id in config.teams else None
+    entity_name = scope.scope_id if scope.kind == "agent" else config.configured_team_name(scope.scope_id)
     runtime_model = config.resolve_runtime_model(
         entity_name=entity_name,
         active_model_name=active_model_name,
