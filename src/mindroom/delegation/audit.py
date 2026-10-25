@@ -59,7 +59,7 @@ async def start_child_record(
     config: Config,
     runtime_paths: RuntimePaths,
     caller_execution_identity: ToolExecutionIdentity | None,
-    parent_delegation_id: str | None = None,
+    parent_delegation_id: str | None,
 ) -> DelegationRecordLocator:
     """Start an audit projection and return its locator to the lifecycle owner."""
     child_identity = child_execution_identity(child)
@@ -154,8 +154,8 @@ async def record_child_response(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    decisions: Mapping[str, bool] | None = None,
-    denial_reasons: Mapping[str, str | None] | None = None,
+    decisions: Mapping[str, bool] | None,
+    denial_reasons: Mapping[str, str | None] | None,
 ) -> dict[str, object] | None:
     """Record one snapshot of the child's run, which its lifecycle owner checked, and return its usage."""
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)

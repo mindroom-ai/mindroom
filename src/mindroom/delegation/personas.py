@@ -338,7 +338,7 @@ def missing_persona_tool(
 def validate_persona_tools(
     tools: tuple[str, ...] | None,
     available_toolkits: Sequence[str],
-    cap: tuple[str, ...] | None = None,
+    cap: tuple[str, ...] | None,
 ) -> None:
     """Require every entry to name one of the caller's toolkits, or a known function of one, within ``cap``."""
     entry = missing_persona_tool(tools, available_toolkits, cap)
@@ -424,7 +424,7 @@ def resolve_persona_request(  # noqa: PLR0911
     available_toolkits: Callable[[], Sequence[str]],
     available_skills: Callable[[], Sequence[str]],
     available_knowledge: Callable[[], Sequence[str]],
-    cap: SubagentPersona | None = None,
+    cap: SubagentPersona | None,
 ) -> PersonaRequest | str:
     """Resolve ``run_subagent`` authoring arguments, returning a user-facing refusal when they are invalid.
 

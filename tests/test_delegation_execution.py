@@ -684,6 +684,9 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
         "config": config,
         "runtime_paths": paths,
         "execution_identity": identity,
+        "delegation_depth": 0,
+        "refresh_scheduler": None,
+        "approval_calls": (),
         "on_event": events.append,
     }
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
@@ -694,7 +697,14 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
             decisions=None,
             denial_reasons=None,
         )
-        asked = await execution.advance_delegation_call(requirement, state=state, previous_state=previous, **options)
+        asked = await execution.advance_delegation_call(
+            requirement,
+            state=state,
+            previous_state=previous,
+            decisions=None,
+            denial_reasons=None,
+            **options,
+        )
         assert asked is None
         assert state.pending_agent_name == "code"
         assert state.pending_tools[0]["tool_call_id"] == "code:call"

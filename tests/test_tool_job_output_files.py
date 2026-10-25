@@ -167,6 +167,10 @@ async def test_native_delegation_job_wait_redirects_saved_result(output_agent: _
         runtime_paths=case.paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     async def completed() -> BackgroundOutcome:

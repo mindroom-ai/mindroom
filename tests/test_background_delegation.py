@@ -719,6 +719,10 @@ async def test_early_child_failure_retains_liveness_through_settlement(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     settling, release = asyncio.Event(), asyncio.Event()
     original_interrupt = delegation_execution.interrupt_child
@@ -757,6 +761,7 @@ async def test_early_child_failure_retains_liveness_through_settlement(
                 config=config,
                 runtime_paths=paths,
                 refresh_scheduler=None,
+                output_request=None,
             ),
         )
         try:
@@ -1101,6 +1106,10 @@ async def test_child_failure_remains_primary_when_native_interruption_fails(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
@@ -1129,6 +1138,7 @@ async def test_child_failure_remains_primary_when_native_interruption_fails(
             config=config,
             runtime_paths=paths,
             refresh_scheduler=None,
+            output_request=None,
         )
 
     assert outcome.status == "failed"
@@ -1160,6 +1170,10 @@ async def test_child_failure_remains_primary_when_terminal_receipt_fails(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
@@ -1186,6 +1200,7 @@ async def test_child_failure_remains_primary_when_terminal_receipt_fails(
             config=config,
             runtime_paths=paths,
             refresh_scheduler=None,
+            output_request=None,
         )
 
     assert outcome.status == "failed"
@@ -1220,6 +1235,10 @@ async def test_native_job_source_survives_restart(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     runtime = await tool_job_runtime(tmp_path)
 

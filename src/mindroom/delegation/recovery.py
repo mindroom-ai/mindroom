@@ -177,7 +177,7 @@ async def _cancel_delegations(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    reason: str = "Delegation cancelled.",
+    reason: str,
 ) -> None:
     """Cancel retained descendants without running any of their pending tools."""
     state = DelegationState.from_metadata(response.metadata)

@@ -105,6 +105,8 @@ async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: 
         RunRecord(run_id=child.run_id, session_id=child.session_id, status=status, content="retained outcome"),
         config=config,
         runtime_paths=paths,
+        decisions=None,
+        denial_reasons=None,
     )
     assert asdict(child) == before_child
     assert handle_path.read_bytes() == before_handle
@@ -168,6 +170,7 @@ async def test_start_child_record_refuses_an_identity_of_another_child(
             config=_config(),
             runtime_paths=runtime_paths,
             caller_execution_identity=_identity("leader", "parent-session"),
+            parent_delegation_id=None,
         )
 
 

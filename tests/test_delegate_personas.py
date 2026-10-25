@@ -551,6 +551,9 @@ async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> Non
         depth=0,
         budget_monitor=None,
         persona=SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",)),
+        model=None,
+        agent_mode="standard",
+        previous=None,
     )
     await reserve_subagent_turn(child, owner=identity, runtime_paths=paths)
     child.status = "completed"

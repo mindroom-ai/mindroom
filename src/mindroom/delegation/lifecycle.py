@@ -434,12 +434,12 @@ def prepare_child_turn(
     runtime_paths: RuntimePaths,
     depth: int,
     budget_monitor: BudgetMonitor | None,
-    model: str | None = None,
-    agent_mode: AgentMode = "standard",
-    previous: DelegationChild | None = None,
+    model: str | None,
+    agent_mode: AgentMode,
+    previous: DelegationChild | None,
+    persona: SubagentPersona | None,
     parent_tool_call_id: str = "",
     parent_requirement_id: str = "",
-    persona: SubagentPersona | None = None,
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 

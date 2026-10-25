@@ -185,6 +185,10 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
@@ -240,6 +244,10 @@ async def test_a_child_with_an_authored_persona_is_judged_by_its_grant(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     child.persona = SubagentPersona(source_kind=source_kind, source_name="analyst", system_prompt="Analyze.")
 

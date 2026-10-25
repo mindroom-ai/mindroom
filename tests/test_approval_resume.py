@@ -166,6 +166,7 @@ async def _setup(
             config=config,
             runtime_paths=paths,
             caller_execution_identity=identity,
+            parent_delegation_id=None,
         )
     helper = helper or scripted("helper-model")
     ScriptedAgents({"code": code, "helper": helper}).install(monkeypatch)
