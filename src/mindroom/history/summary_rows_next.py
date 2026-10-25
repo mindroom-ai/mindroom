@@ -342,8 +342,12 @@ def _cut(
     log, the cut starts at that row instead. Every deleted run and the running run of every deleted fold row count as
     removed, which also fences a running run whose row is gone.
     """
+    runs = connection.execute(
+        f"SELECT run_id, seq FROM {tables.runs} WHERE session_id = ? AND parent_run_id IS NULL AND scope_key = ?",  # noqa: S608
+        (session_id, scope_key),
+    ).fetchall()
     while True:
-        top_level = _top_level_from(connection, tables, session_id, scope_key, cut)
+        top_level = {run_id for run_id, seq in runs if (seq, 0) >= cut}
         deleted_rows = [row for row in rows if row.summary is not None and row.key >= cut]
         owners = top_level | {row.fold_run_id for row in deleted_rows if row.fold_run_id is not None}
         earlier = [row.key for row in rows if row.fold_run_id in owners and row.key < cut]
@@ -356,27 +360,6 @@ def _cut(
         f"DELETE FROM {tables.summaries} WHERE id IN (SELECT value FROM json_each(?))",  # noqa: S608
         (json.dumps([row.id for row in deleted_rows]),),
     )
-
-
-def _top_level_from(
-    connection: sqlite3.Connection,
-    tables: _Tables,
-    session_id: str,
-    scope_key: str,
-    cut: _Key,
-) -> set[str]:
-    """Return the scope's top-level runs whose key is at or after ``cut``."""
-    through, row_id = cut
-    # A run sorts before a row at its own ``seq``, so a cut at a row starts after that ``seq``.
-    first_seq = through if row_id == 0 else through + 1
-    return {
-        run_id
-        for (run_id,) in connection.execute(
-            f"SELECT run_id FROM {tables.runs} WHERE session_id = ? AND parent_run_id IS NULL "  # noqa: S608
-            "AND scope_key = ? AND seq >= ?",
-            (session_id, scope_key, first_seq),
-        )
-    }
 
 
 def _record_removed(connection: sqlite3.Connection, tables: _Tables, session_id: str, run_ids: Collection[str]) -> None:
