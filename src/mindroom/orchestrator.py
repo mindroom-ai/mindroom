@@ -3187,7 +3187,6 @@ async def _run_runtime(  # noqa: PLR0915
     """Run the multi-agent bot system until it stops."""
     await migrate_private_storage(runtime_paths)
     await migrate_state_root_records(runtime_paths)
-    await migrate_conversation_storage(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
     storage_path = runtime_paths.storage_root
     orchestrator: _MultiAgentOrchestrator | None = None
@@ -3214,6 +3213,8 @@ async def _run_runtime(  # noqa: PLR0915
         # ordered unit off-loop while retaining exception propagation to startup.
         await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
         await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
+        # After the retirement, so no old worker mounting whole state roots can swap a sessions directory as it converts.
+        await migrate_conversation_storage(runtime_paths)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
