@@ -68,6 +68,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     FakeOutbox,
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -108,6 +109,11 @@ pytestmark = pytest.mark.asyncio
 _ROOM_ID = "!room:localhost"
 _AGENT_USER_ID = "@agent:localhost"
 _SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
+# The drain timer the orderly shutdown tests set, not a hang bound: it sets both the wait for the response to finish
+# and the cleanup window after the cancel. The terminal publication's journal writes and the recovery proof can take
+# over 0.4 s on a loaded host. The drain returns as soon as that work finishes, except in the repeated-cancel test,
+# whose publication waits for the cancel sent after the first window and so spends that whole window on every run.
+_SHUTDOWN_DRAIN_WINDOW_SECONDS = 2.0
 
 
 def _failed_delivery() -> MatrixDeliveryFailure:
@@ -2150,9 +2156,11 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
     ordinary_reads = tuple(asyncio.create_task(backend.read(block_ordinary_read)) for _ in range(ordinary_capacity))
     proof: asyncio.Task[bool] | None = None
     try:
-        assert await asyncio.to_thread(ordinary_started.wait, 10), "ordinary journal reads did not saturate"
+        assert await asyncio.to_thread(ordinary_started.wait, SETTLE_TIMEOUT_SECONDS), (
+            "ordinary journal reads did not saturate"
+        )
         proof = asyncio.create_task(bot._response_recovery_ready(turn))
-        ready = await asyncio.wait_for(asyncio.shield(proof), timeout=1)
+        ready = await asyncio.wait_for(asyncio.shield(proof), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         release_ordinary.set()
         await asyncio.gather(*ordinary_reads)
@@ -3013,7 +3021,7 @@ class TestTurnDeliverySerialization:
 
         assert (
             await runner.drain_inbox_responses(
-                cancel_after_seconds=0.1,
+                cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
             is True
@@ -3116,8 +3124,8 @@ class TestTurnDeliverySerialization:
             await publication_started.wait()
             assert (
                 await runner.drain_inbox_responses(
-                    # Exercise repeated cancellation without imposing a 50 ms database deadline.
-                    cancel_after_seconds=0.5,
+                    # Exercise repeated cancellation without imposing a database deadline.
+                    cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                 )
                 is True
@@ -3207,7 +3215,7 @@ class TestTurnDeliverySerialization:
 
         assert (
             await runner.drain_inbox_responses(
-                cancel_after_seconds=0.1,
+                cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
             is True
@@ -3356,7 +3364,7 @@ class TestTurnDeliverySerialization:
             )
             await enqueue_committed.wait()
             request_task_cancel(final, cancel_source="user_stop")
-            await asyncio.wait_for(first_cancellation_observed.wait(), timeout=5)
+            await asyncio.wait_for(first_cancellation_observed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             request_task_cancel(final, process_shutdown=True)
             return_from_enqueue.set()
 
@@ -3670,7 +3678,7 @@ class TestTurnDeliverySerialization:
         try:
             delivered = await asyncio.wait_for(
                 outer_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL),
-                timeout=0.5,
+                timeout=SETTLE_TIMEOUT_SECONDS,
             )
         except TimeoutError:
             pytest.fail("terminal callback deadlocked on the turn's visible-delivery lock")

@@ -30,6 +30,7 @@ from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.script_runtime import (
+    _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ScriptRuntimeLifecycle,
     _LiveScriptRuntimeResolver,
     _release_worker_leases_before_deadline,
@@ -842,7 +843,7 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
 
         runtime.bind_api("http://primary.test/api/script-gateway/")
         assert runtime._startup_task is not None
-        await asyncio.wait_for(runtime._startup_task, timeout=1)
+        await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
         assert bound_managers == [manager]
         assert manager.gateway_url == "http://primary.test/api/script-gateway"
 
@@ -1540,7 +1541,7 @@ async def test_startup_revokes_inherited_authority_before_blocked_backend_acquis
 
     def acquire_worker_backend(_locator: str | None) -> None:
         acquisition_started.set()
-        assert release_acquisition.wait(timeout=5)
+        assert release_acquisition.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
@@ -1558,7 +1559,7 @@ async def test_startup_revokes_inherited_authority_before_blocked_backend_acquis
     startup = asyncio.create_task(runtime.start())
 
     try:
-        assert await asyncio.to_thread(acquisition_started.wait, 5)
+        assert await asyncio.to_thread(acquisition_started.wait, SETTLE_TIMEOUT_SECONDS)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(
                 "/api/script-gateway/calls",
@@ -1579,7 +1580,7 @@ async def test_startup_revokes_inherited_authority_before_blocked_backend_acquis
         assert store.get_run(inherited.run_id).cancel_requested_at is not None
     finally:
         release_acquisition.set()
-        await asyncio.wait_for(startup, timeout=1)
+        await asyncio.wait_for(startup, timeout=SETTLE_TIMEOUT_SECONDS)
         await runtime.shutdown()
 
 
@@ -2455,8 +2456,9 @@ async def test_hung_broker_cleanup_cannot_delay_process_exit_recording(
     update = asyncio.create_task(runtime.apply_update_plan(_plan(old_config, new_config)))
 
     try:
-        await asyncio.wait_for(resolver.entered.wait(), timeout=1)
-        assert await asyncio.to_thread(exit_recorded.wait, 1)
+        await asyncio.wait_for(resolver.entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        # Below the update's pass timeout, which would end the hung broker obligation on its own.
+        assert await asyncio.to_thread(exit_recorded.wait, runtime.pass_timeout_seconds / 2)
         durable = store.get_run(run.run_id)
         assert durable.state is ScriptRunState.RUNNING
         assert durable.finished_at is not None
@@ -2466,7 +2468,7 @@ async def test_hung_broker_cleanup_cannot_delay_process_exit_recording(
         assert update.done() is False
     finally:
         resolver.release.set()
-        await asyncio.wait_for(update, timeout=1)
+        await asyncio.wait_for(update, timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -2700,7 +2702,7 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
     await _reconcile_once(runtime)
 
     admitted_launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    await asyncio.wait_for(client.launch_entered.wait(), timeout=1)
+    await asyncio.wait_for(client.launch_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     replacement = asyncio.create_task(runtime.apply_update_plan(_plan(old_config, new_config)))
     await asyncio.sleep(0)
 
@@ -2786,12 +2788,12 @@ async def test_script_tool_removal_drains_a_launch_admitted_before_durable_creat
 
     def blocked_create(run: ScriptRunRecord) -> None:
         create_started.set()
-        assert release_create.wait(timeout=5)
+        assert release_create.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         original_create(run)
 
     monkeypatch.setattr(store, "create_run", blocked_create)
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(create_started.wait, 1)
+    assert await asyncio.to_thread(create_started.wait, SETTLE_TIMEOUT_SECONDS)
     update = asyncio.create_task(runtime.apply_update_plan(_plan(old_config, new_config)))
     await asyncio.sleep(0.05)
     update_finished_before_launch = update.done()
@@ -2821,7 +2823,7 @@ async def test_cancelled_completion_reopens_admission_before_a_blocked_lease_rel
 
     def blocking_release() -> None:
         release_started.set()
-        assert allow_release.wait(timeout=5)
+        assert allow_release.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         lease.released = True
         release_finished.set()
 
@@ -2847,7 +2849,7 @@ async def test_cancelled_completion_reopens_admission_before_a_blocked_lease_rel
 
     completion = asyncio.create_task(runtime.complete_worker_replacement())
     try:
-        assert await asyncio.to_thread(release_started.wait, 1)
+        assert await asyncio.to_thread(release_started.wait, SETTLE_TIMEOUT_SECONDS)
         completion.cancel()
         with pytest.raises(asyncio.CancelledError):
             await completion
@@ -2878,7 +2880,7 @@ async def test_cancelled_completion_reopens_admission_before_a_blocked_lease_rel
     finally:
         allow_release.set()
 
-    assert await asyncio.to_thread(release_finished.wait, 1)
+    assert await asyncio.to_thread(release_finished.wait, SETTLE_TIMEOUT_SECONDS)
     assert lease.released is True
 
 
@@ -2929,7 +2931,7 @@ async def test_cancelled_completion_finishes_post_publication_handoff(
     runtime._worker_replacement_phase = "preparing"
 
     completion = asyncio.create_task(runtime.complete_worker_replacement())
-    await asyncio.wait_for(fence_ended.wait(), timeout=1)
+    await asyncio.wait_for(fence_ended.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     completion.cancel()
     finish_end_call.set()
     with pytest.raises(asyncio.CancelledError):
@@ -2940,7 +2942,7 @@ async def test_cancelled_completion_finishes_post_publication_handoff(
     assert runtime._reload_launch_fence_started is False
     assert manager._startup_reconciliation_owners == 0
     broker.open_call_admission.assert_called_once_with()
-    assert await asyncio.to_thread(old_lease.release_event.wait, 1)
+    assert await asyncio.to_thread(old_lease.release_event.wait, SETTLE_TIMEOUT_SECONDS)
     assert old_lease.released is True
 
 
@@ -3066,7 +3068,7 @@ async def test_replacement_handoff_serializes_a_second_config_preparation(
             return old_lease
         if provider_calls == 2:
             first_acquire_started.set()
-            assert allow_first_acquire.wait(timeout=5)
+            assert allow_first_acquire.wait(timeout=SETTLE_TIMEOUT_SECONDS)
             return first_lease
         return second_lease
 
@@ -3097,7 +3099,7 @@ async def test_replacement_handoff_serializes_a_second_config_preparation(
     committed_config = first_config
 
     first_completion = asyncio.create_task(runtime.complete_worker_replacement())
-    assert await asyncio.to_thread(first_acquire_started.wait, 1)
+    assert await asyncio.to_thread(first_acquire_started.wait, SETTLE_TIMEOUT_SECONDS)
     second_preparation = asyncio.create_task(runtime.apply_update_plan(_plan(first_config, second_config)))
     await asyncio.sleep(0)
     assert second_preparation.done() is False
@@ -3139,7 +3141,7 @@ async def test_maintenance_retries_the_same_timed_out_replacement_acquisition(
         nonlocal provider_calls
         provider_calls += 1
         acquire_started.set()
-        assert allow_acquire.wait(timeout=5)
+        assert allow_acquire.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return replacement_lease
 
     monkeypatch.setattr(
@@ -3175,7 +3177,7 @@ async def test_maintenance_retries_the_same_timed_out_replacement_acquisition(
     allow_acquire.set()
     pending = runtime._pending_worker_lease
     assert pending is not None
-    await asyncio.wait_for(asyncio.shield(pending.task), timeout=1)
+    await asyncio.wait_for(asyncio.shield(pending.task), timeout=SETTLE_TIMEOUT_SECONDS)
     await _reconcile_once(runtime)
     assert runtime._worker_replacement_phase == "idle"
     assert runtime._worker_config_epoch == 1
@@ -3293,8 +3295,8 @@ async def test_maintenance_cannot_commit_a_new_preparation_queued_ahead_of_it(
     await asyncio.sleep(0)
     runtime._worker_refresh_lock.release()
     try:
-        await asyncio.wait_for(apply_pass_started.wait(), timeout=1)
-        await asyncio.wait_for(maintenance_task, timeout=1)
+        await asyncio.wait_for(apply_pass_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        await asyncio.wait_for(maintenance_task, timeout=SETTLE_TIMEOUT_SECONDS)
 
         assert provider_configs == []
         assert runtime._worker_replacement_phase == "preparing"
@@ -3367,7 +3369,7 @@ async def test_plugin_preparation_suspends_an_older_committed_replacement(
     runtime._worker_config_epoch = 4
 
     apply_task = asyncio.create_task(runtime.apply_update_plan(_plan(config, config), plugins_changed=True))
-    await asyncio.wait_for(apply_pass_started.wait(), timeout=1)
+    await asyncio.wait_for(apply_pass_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     try:
         await runtime._reconcile_pass()
 
@@ -3611,7 +3613,7 @@ async def test_blocking_backend_provider_cannot_stall_the_event_loop_past_pass_d
     await _reconcile_once(runtime)
 
     assert asyncio.get_running_loop().time() - started < 0.1
-    await asyncio.wait_for(heartbeat.wait(), timeout=0.05)
+    await asyncio.wait_for(heartbeat.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     await heartbeat_task
 
 
@@ -3626,7 +3628,7 @@ async def test_timed_out_backend_acquisition_is_reused_instead_of_leaking_its_le
     def slow_provider(_locator: str | None) -> _Lease:
         nonlocal calls
         calls += 1
-        assert release_provider.wait(timeout=5)
+        assert release_provider.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return lease
 
     runtime = ScriptRuntimeLifecycle(
@@ -3673,7 +3675,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
 
     def build_manager(*_args: object, **_kwargs: object) -> WorkerBackend:
         loop.call_soon_threadsafe(build_started.set)
-        assert release_build.wait(timeout=5)
+        assert release_build.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return cast("WorkerBackend", late_manager)
 
     monkeypatch.setattr(
@@ -3783,7 +3785,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
             storage_root=runtime_paths.storage_root,
         )
         loop.call_soon_threadsafe(lease_published.set)
-        assert release_provider.wait(timeout=5)
+        assert release_provider.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return lease
 
     manager = SimpleNamespace(
@@ -3858,7 +3860,9 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
 
     def blocking_release() -> None:
         release_started.set()
-        assert release_lease.wait(timeout=1.0)
+        # No bound: the finally below always releases it, and a release timeout would end the blocked release and
+        # let a shutdown that wrongly waits for it finish.
+        release_lease.wait()
         lease.released = True
         lease_released.set()
 
@@ -3892,14 +3896,15 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
     monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", blocking_shutdown_pass)
     shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.05))
     try:
-        await asyncio.wait_for(reconciliation_started.wait(), timeout=1.0)
-        await asyncio.wait_for(shutdown, timeout=1.0)
-        assert await asyncio.to_thread(release_started.wait, 1.0)
+        await asyncio.wait_for(reconciliation_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        # Below shutdown's default budget, so a shutdown that drops its explicit budget fails.
+        await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
+        assert await asyncio.to_thread(release_started.wait, SETTLE_TIMEOUT_SECONDS)
         assert lease_released.is_set() is False
     finally:
         release_lease.set()
 
-    assert await asyncio.to_thread(lease_released.wait, 1.0)
+    assert await asyncio.to_thread(lease_released.wait, SETTLE_TIMEOUT_SECONDS)
     assert lease.released is True
 
 
@@ -3957,7 +3962,7 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         if run_id == runs[0].run_id:
             first_revocation_started.set()
-            assert release_revocations.wait(timeout=1.0)
+            assert release_revocations.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return store.request_cancel(run_id, reason=reason)
 
     def observe_release() -> None:
@@ -3993,15 +3998,15 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
 
     shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.1))
     try:
-        assert await asyncio.to_thread(first_revocation_started.wait, 1.0)
+        assert await asyncio.to_thread(first_revocation_started.wait, SETTLE_TIMEOUT_SECONDS)
         assert await asyncio.to_thread(lease_released.wait, 0.2) is False
         release_revocations.set()
-        await asyncio.wait_for(shutdown, timeout=1.0)
-        assert await asyncio.to_thread(lease_released.wait, 1.0)
+        await asyncio.wait_for(shutdown, timeout=SETTLE_TIMEOUT_SECONDS)
+        assert await asyncio.to_thread(lease_released.wait, SETTLE_TIMEOUT_SECONDS)
     finally:
         release_revocations.set()
         if not shutdown.done():
-            await asyncio.wait_for(shutdown, timeout=1.0)
+            await asyncio.wait_for(shutdown, timeout=SETTLE_TIMEOUT_SECONDS)
 
     expected_run_ids = {run.run_id for run in runs}
     assert release_observations == [expected_run_ids]
@@ -4020,7 +4025,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_then_releases_l
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         if run_id == runs[0].run_id:
             first_revocation_started.set()
-            assert release_revocations.wait(timeout=1.0)
+            assert release_revocations.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return store.request_cancel(run_id, reason=reason)
 
     lease = _Lease(_Backend([_worker(run) for run in runs]))
@@ -4051,7 +4056,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_then_releases_l
 
     shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.1))
     try:
-        assert await asyncio.to_thread(first_revocation_started.wait, 1.0)
+        assert await asyncio.to_thread(first_revocation_started.wait, SETTLE_TIMEOUT_SECONDS)
         shutdown.cancel()
         done, _pending = await asyncio.wait({shutdown}, timeout=0.1)
         assert done == set()
@@ -4062,7 +4067,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_then_releases_l
         release_revocations.set()
 
     assert all(store.get_run(run.run_id).cancel_requested_at is not None for run in runs)
-    assert await asyncio.to_thread(lease.release_event.wait, 1.0)
+    assert await asyncio.to_thread(lease.release_event.wait, SETTLE_TIMEOUT_SECONDS)
     assert lease.released is True
     assert runtime._current_worker_lease is None
     assert manager.worker_backend is None
@@ -4255,14 +4260,16 @@ async def test_shutdown_deadline_leaves_revoked_run_nonterminal(tmp_path: Path) 
     runtime._activated_once = True
     runtime._current_worker_lease = lease
 
-    await runtime.shutdown(timeout_seconds=1.0)
+    # The status call never returns, so shutdown runs to its deadline; this bound sits below shutdown's default
+    # budget, so a shutdown that drops its explicit budget fails.
+    await asyncio.wait_for(runtime.shutdown(timeout_seconds=1.0), timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
 
     assert status_started.is_set()
     durable = store.get_run(run.run_id)
     assert durable.cancel_requested_at is not None
     assert durable.state is ScriptRunState.RUNNING
 
-    assert await asyncio.to_thread(lease.release_event.wait, 1)
+    assert await asyncio.to_thread(lease.release_event.wait, SETTLE_TIMEOUT_SECONDS)
     assert lease.released is True
 
 
@@ -4303,21 +4310,28 @@ async def test_expired_shutdown_deadline_retains_lease_release_owner() -> None:
 
     def blocking_release() -> None:
         release_started.set()
-        assert release_lease.wait(timeout=1.0)
+        # No bound: the finally below always releases it, and a release timeout would end the blocked release and
+        # let a release helper that wrongly waits for it return.
+        release_lease.wait()
         lease.released = True
         lease_released.set()
 
     lease.release = blocking_release  # type: ignore[method-assign]
-    await _release_worker_leases_before_deadline(
-        [lease],
-        deadline=asyncio.get_running_loop().time(),
-        timeout_seconds=0.05,
-    )
-    assert await asyncio.to_thread(release_started.wait, 1.0)
-    assert lease_released.is_set() is False
+    try:
+        await asyncio.wait_for(
+            _release_worker_leases_before_deadline(
+                [lease],
+                deadline=asyncio.get_running_loop().time(),
+                timeout_seconds=0.05,
+            ),
+            timeout=SETTLE_TIMEOUT_SECONDS,
+        )
+        assert await asyncio.to_thread(release_started.wait, SETTLE_TIMEOUT_SECONDS)
+        assert lease_released.is_set() is False
+    finally:
+        release_lease.set()
 
-    release_lease.set()
-    assert await asyncio.to_thread(lease_released.wait, 1.0)
+    assert await asyncio.to_thread(lease_released.wait, SETTLE_TIMEOUT_SECONDS)
     assert lease.released is True
 
 
@@ -4626,13 +4640,14 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
         reconcile_interval_seconds=0.01,
-        pass_timeout_seconds=0.05,
+        # Well above a pass on a loaded host: a pass that times out never reaches the reconcile this test counts.
+        pass_timeout_seconds=5.0,
     )
     runtime.bind_api("http://primary.test/api/script-gateway")
 
     await runtime.start()
     _stored_run(store, runtime_paths)
-    await asyncio.wait_for(recovered.wait(), timeout=1.0)
+    await asyncio.wait_for(recovered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
     await runtime.shutdown()
 
@@ -4680,7 +4695,7 @@ async def test_started_lifecycle_periodically_enforces_run_limits(
 
     await runtime.start()
     _stored_run(store, runtime_paths)
-    await asyncio.wait_for(reconciled_twice.wait(), timeout=1.0)
+    await asyncio.wait_for(reconciled_twice.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
     await runtime.shutdown()
 
@@ -4894,7 +4909,7 @@ async def test_cancelled_reload_drain_restores_broker_and_launch_admission(
         reload_task = asyncio.create_task(
             runtime.apply_update_plan(_plan(_config(), _config()), plugins_changed=True),
         )
-        await asyncio.wait_for(drain_started.wait(), timeout=1)
+        await asyncio.wait_for(drain_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         reload_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await reload_task
