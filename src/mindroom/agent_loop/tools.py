@@ -261,6 +261,11 @@ def media_follow_up(results: Sequence[Message]) -> Message | None:
     )
 
 
+def is_media_follow_up(message: Message) -> bool:
+    """Return whether a stored message is a media follow-up the loop wrote, which no person said."""
+    return message.role == "user" and message.content == MEDIA_FOLLOW_UP_TEXT
+
+
 __all__ = [
     "MEDIA_FOLLOW_UP_TEXT",
     "PlannedCall",
@@ -268,6 +273,7 @@ __all__ = [
     "ToolBatch",
     "dispatch_tool_calls",
     "failed_answer",
+    "is_media_follow_up",
     "media_follow_up",
     "offered_toolkits",
     "plan_tool_batch",

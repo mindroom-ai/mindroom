@@ -7895,6 +7895,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.conversation_text"
 depends_on = [
+    "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
