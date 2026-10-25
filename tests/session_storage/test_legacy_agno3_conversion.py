@@ -160,12 +160,13 @@ def _insert_summary(
     segment: dict[str, Any] | None = None,
     event_ids: tuple[str, ...] = (),
     session_id: str = _SESSION,
+    created_at: int = 200,
 ) -> None:
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             'INSERT INTO "code_sessions_summaries" (id, session_id, scope_key, after_run_index, summary, summary_model, '
             "event_ids, seen_event_ids, legacy, created_at, segment_run_id, segment) "
-            "VALUES (?, ?, 'agent:code', ?, ?, 'model', ?, ?, ?, 200, ?, ?)",
+            "VALUES (?, ?, 'agent:code', ?, ?, 'model', ?, ?, ?, ?, ?, ?)",
             (
                 row_id,
                 session_id,
@@ -174,6 +175,7 @@ def _insert_summary(
                 json.dumps(event_ids),
                 json.dumps(event_ids),
                 legacy,
+                created_at,
                 segment_run_id,
                 None if segment is None else json.dumps(segment),
             ),
@@ -399,6 +401,42 @@ def test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary(tmp_
     ]
     assert folded_tool_call_ids(store, session_id="session", run_id="orphan") == {"orphan.c0"}
     assert _loaded_ids(store, "session") == ["orphan", "orphan-member", "r0"]
+
+
+def test_a_fold_run_without_a_row_takes_its_latest_folds_place_and_keeps_its_members_rows(tmp_path: Path) -> None:
+    """Of several folds of a run without a row, the latest gives its row's metadata, time, and place; members keep theirs."""
+    database = _agno_database(tmp_path)
+    member = _run("member", parent_run_id="gone", content="as the member stored it")
+    _insert_run(database, member, run_index=0, created_at=50)
+    _insert_run(database, _run("r0"), run_index=0)
+    _insert_run(database, _run("r1"), run_index=1)
+    copy = _run("member", parent_run_id="gone", content="as the fold saw it")
+    first = {constants.MATRIX_EVENT_ID_METADATA_KEY: "$gone"}
+    latest = {**first, constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$read-later"]}
+    _insert_summary(database, 1, -1, segment_run_id="gone", segment=_segment(metadata=first, members=(copy,)))
+    _insert_summary(database, 2, 0, segment_run_id="gone", segment=_segment(metadata=latest), created_at=300)
+
+    store = _converted(database)
+
+    gone = store.get_run("gone")
+    assert gone is not None
+    assert (gone.metadata, gone.created_at) == (latest, 300)
+    assert sorted(_seqs(database), key=_seqs(database).get) == ["member", "r0", "gone", "r1"]
+    stored_member = store.get_run("member")
+    assert stored_member is not None
+    assert stored_member.content == "as the member stored it"
+    assert _query(database, "SELECT folded_by FROM \"code_sessions_log_runs\" WHERE run_id = 'member'") == [(1,)]
+
+
+def test_a_run_whose_metadata_is_not_an_object_converts(tmp_path: Path) -> None:
+    """Metadata worker code stored as something other than an object neither stops the conversion nor changes."""
+    database = _agno_database(tmp_path)
+    run = _run("odd").to_dict() | {"metadata": ["not", "an", "object"]}
+    _insert_run(database, run, run_index=0)
+
+    store = _converted(database)
+
+    assert store.get_run("odd").metadata == ["not", "an", "object"]  # type: ignore[union-attr]
 
 
 def test_workflow_rows_and_rows_that_do_not_decode_are_left_out(tmp_path: Path) -> None:
@@ -703,13 +741,14 @@ def test_every_input_converts_once_and_the_same_way_twice(tmp_path: Path, name: 
     dumps = []
     for copy in ("first", "second"):
         database, names = _restore(_DUMPS[name], tmp_path / copy)
+        original = database.read_bytes()
+        backup = database.with_name(f"{database.name}{BACKUP_SUFFIX}")
         with deterministic():
             migrate_conversation_database(database, names)
             converted = _dump(database)
-            backup = database.with_name(f"{database.name}{BACKUP_SUFFIX}").read_bytes()
             migrate_conversation_database(database, names)
         assert _dump(database) == converted
-        assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").read_bytes() == backup
+        assert backup.read_bytes() == original
         dumps.append(converted)
     assert dumps[0] == dumps[1]
 
@@ -950,7 +989,8 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     converted = [
         _store_at(root / relative) for relative in ("agents/code", "private_instances/scope/code", "teams/code")
     ]
-    outside = _store_at(tmp_path / "outside/code")
+    # Linked in under the name of the database it holds, so following the link would reach it.
+    outside = _store_at(tmp_path / "outside/alias")
     (root / "agents/alias").symlink_to(outside.parent.parent, target_is_directory=True)
     linked = root / "agents/linked/sessions/linked.db"
     linked.parent.mkdir(parents=True)

@@ -2,7 +2,7 @@
 
 Every difference is one of the named masks below, each a deliberate rule of the conversion (spec v4 4.5) or of the
 v2 store. A mask asserts the new behavior where it shows, then presents the recorded and the observed side as one
-store would, and ``_PINS`` keeps which inputs use which masks, so a change of where the two parts shows as a failure.
+store would, and ``_PINS`` keeps which inputs use which masks, so a change in where the two stores part fails.
 PLAN-3095 task 10f adds the recorded end states of the generated and named sequences.
 """
 

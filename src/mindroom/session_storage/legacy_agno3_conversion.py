@@ -401,7 +401,7 @@ def _write_run(
     path: Path,
 ) -> None:
     data = run.record.to_dict()
-    if (metadata := data.get("metadata")) is not None:
+    if isinstance(metadata := data.get("metadata"), dict):
         data["metadata"] = _current_delegation_snapshot(path, run.record.run_id, metadata)
     kind = run_type(run.record)
     upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=run.created_at, updated_at=run.updated_at)
