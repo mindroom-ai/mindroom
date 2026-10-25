@@ -139,8 +139,8 @@ def member_result_text(child: RunRecord, *, stream: bool) -> str:
     The rules read the content the run hands over (``handover_content``), so a failed member gives the reason its
     run recorded, credentials redacted.
     """
-    # TODO(simplify): The rules differ by stream mode: without streaming, a run with tools but no content reads
-    # ``null`` and a blank run without tools reads empty. Use the streamed rules in both modes. Models would notice.
+    # TODO(simplify): The rules differ by stream mode: without streaming, a run whose text is blank and that ran no
+    # tools reads empty. Use the streamed rules in both modes. Models would notice.
     return _streamed_result(child) if stream else _blocking_result(child)
 
 
@@ -157,13 +157,12 @@ def _streamed_result(child: RunRecord) -> str:
 def _blocking_result(child: RunRecord) -> str:
     """Return the blocking result: the no-response notice only for a run with neither content nor tools.
 
-    A run whose text is blank gives its tool results, which without tools leaves nothing; a run with tools but no
-    content reads ``null``.
+    A run without text gives its tool results, which for a blank run without tools leaves nothing.
     """
     content = child.handover_content
-    if content is None:
-        return "null" if child.tools else NO_MEMBER_RESPONSE
-    return content if content.strip() else _tool_results(child)
+    if content is None and not child.tools:
+        return NO_MEMBER_RESPONSE
+    return content if content is not None and content.strip() else _tool_results(child)
 
 
 def _tool_results(child: RunRecord) -> str:

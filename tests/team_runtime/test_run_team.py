@@ -26,7 +26,8 @@ from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import add, echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
-from tests.providers.golden_support import hide_provider_environment
+from tests.providers.golden_support import Wire, hide_provider_environment, streamed_reply
+from tests.providers.openai_family_support import openai_family_adapter
 from tests.team_runtime.squad import (
     PANEL,
     SQUAD,
@@ -59,6 +60,7 @@ def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetric
 
 
 _OLLAMA_MEMBER = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
+_LLAMA_CPP_MEMBER = {"provider": "llama_cpp", "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"}
 
 
 async def _overloaded() -> None:
@@ -491,8 +493,8 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
         pytest.param(
             [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="")), _blank()],
             [calls(tool_call("echo", "call-c", text="c")), _silent()],
-            # The broadcast keeps an empty tool result, which a coordinate delegation drops.
-            "Agent Writer: a,Agent Checker: null",
+            # Blank text keeps an empty tool result in the broadcast; no text drops it, as a coordinate delegation does.
+            "Agent Writer: a,Agent Checker: c",
             id="tool-only",
         ),
         pytest.param(
@@ -647,10 +649,10 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
         pytest.param(True, [answer("")], NO_MEMBER_RESPONSE, id="streamed-empty"),
         pytest.param(False, [_blank()], "", id="blocking-empty"),
         pytest.param(True, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="streamed-tool-only"),
-        pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "null", id="blocking-tool-only"),
+        pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="blocking-tool-only"),
     ],
 )
-async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_delegation_gave_it_on_each_path(
+async def test_a_coordinate_member_without_text_reaches_the_leader_by_each_path_s_rule(
     stream: bool,
     writer_turns: list[list[Any]],
     expected: str,
@@ -675,6 +677,63 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_del
     assert record.tools is not None
     assert record.tools[0].result == expected
     assert leader.requests[1].messages[-1].content == expected
+
+
+def _chat_completion(message: dict[str, Any], finish_reason: str) -> dict[str, Any]:
+    """A finished llama.cpp Chat completion with ``message``, which ``streamed_reply`` streams as the server does."""
+    return {
+        "id": "chatcmpl-member",
+        "object": "chat.completion",
+        "created": 1,
+        "model": _LLAMA_CPP_MEMBER["id"],
+        "choices": [{"index": 0, "message": {"role": "assistant", **message}, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+    }
+
+
+@pytest.mark.parametrize(
+    ("stop_after_call", "replies"),
+    [
+        pytest.param(True, 1, id="stopped-by-its-tool"),
+        pytest.param(False, 2, id="silent-after-its-tool"),
+    ],
+)
+async def test_a_blocking_turn_hands_the_leader_a_chat_member_s_tool_results_when_it_writes_no_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stop_after_call: bool,
+    replies: int,
+) -> None:
+    # The server sends ``content: ""`` beside the tool call and in a reply after it, which the turn reads as no text.
+    hide_provider_environment(monkeypatch)
+    call = {"id": "call-x", "type": "function", "function": {"name": "echo", "arguments": '{"text": "x"}'}}
+    wire = Wire(
+        streamed_reply(_chat_completion({"content": "", "tool_calls": [call]}, "tool_calls")),
+        streamed_reply(_chat_completion({"content": ""}, "stop")),
+    )
+    leader = scripted("leader-model", _delegate("call-w", "writer", "Echo x.", metrics=usage(10, 2)), answer("x."))
+    writer = openai_family_adapter(_LLAMA_CPP_MEMBER, tmp_path, wire.respond)
+    team = squad(
+        leader,
+        writer,
+        scripted("checker-model"),
+        writer_toolkits=(toolkit(echo, stop_after_call=stop_after_call),),
+    )
+
+    _, record = await collect(
+        start_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            stream=False,
+        ),
+    )
+
+    assert len(wire.requests) == replies
+    assert record.tools is not None
+    assert record.tools[0].result == "x"
+    assert leader.requests[1].messages[-1].content == "x"
 
 
 async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_without_its_thinking(

@@ -19,7 +19,7 @@ from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
-from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
+from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
@@ -185,7 +185,7 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
 
 async def test_a_resumed_leader_reads_a_new_delegation_by_the_streamed_result_rules() -> None:
     # The result rules still depend on the stream mode (``member_result_text``), and a resume uses the streamed ones,
-    # so a member with tools but no text hands over its tool results rather than ``null``.
+    # so a member whose text is blank and that ran no tools hands over the no-response notice rather than nothing.
     paused = _paused_team_approved()
     leader = scripted(
         "leader-model",
@@ -194,8 +194,7 @@ async def test_a_resumed_leader_reads_a_new_delegation_by_the_streamed_result_ru
     )
     writer = scripted(
         "writer-model",
-        calls(tool_call("echo", "call-x", text="x")),
-        [TurnCompleted(message=Message(role="assistant", content=None), stop_reason="end")],
+        [TurnCompleted(message=Message(role="assistant", content=" "), stop_reason="end")],
     )
     checker = scripted("checker-model", answer("42", usage(1, 1)))
 
@@ -213,7 +212,7 @@ async def test_a_resumed_leader_reads_a_new_delegation_by_the_streamed_result_ru
 
     assert record.status is RunStatus.completed
     delegated = leader.requests[1].messages[-1]
-    assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-w2", "x")
+    assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-w2", NO_MEMBER_RESPONSE)
 
 
 async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_results_as_agno_did() -> None:

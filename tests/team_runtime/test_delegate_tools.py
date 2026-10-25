@@ -1,4 +1,4 @@
-"""What the leader reads for a finished member run follows Agno's result rules, with and without streaming."""
+"""What the leader reads for a finished member run, with and without streaming: Agno's rules, but never ``null``."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -33,12 +33,12 @@ def test_member_result_text_follows_agno_for_text_tool_results_and_silence() -> 
     assert member_result_text(RunRecord(run_id="r", content=" ", tools=[]), stream=True) == NO_MEMBER_RESPONSE
 
 
-def test_blocking_member_result_text_follows_agno_s_non_stream_delegation() -> None:
+def test_blocking_member_result_text_differs_only_for_a_blank_run_without_tools() -> None:
     assert member_result_text(RunRecord(run_id="r", content="42"), stream=False) == "42"
     assert member_result_text(RunRecord(run_id="r", content="", tools=_TOOLS), stream=False) == "first,second"
-    # Only blank text selects the tool results; a run with tools and no text at all reads ``null``.
-    assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS), stream=False) == "null"
+    assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS), stream=False) == "first,second"
     assert member_result_text(RunRecord(run_id="r", content=None), stream=False) == NO_MEMBER_RESPONSE
+    # A blank run without tools reads empty, where the streamed rules give the no-response notice.
     assert member_result_text(RunRecord(run_id="r", content=" ", tools=[]), stream=False) == ""
 
 
