@@ -14,7 +14,7 @@ from mindroom.logging_config import get_logger
 from mindroom.memory._mem0_usage import install_mem0_usage_capture
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.timing import timed
-from mindroom.tool_system.dependencies import optional_dependency_environment
+from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -260,6 +260,9 @@ async def create_memory_instance(
         Configured AsyncMemory instance
 
     """
+    # Mem0 and its Chroma store install on first use, off the event loop.
+    await asyncio.to_thread(ensure_optional_deps, ["mem0ai"], "mem0", runtime_paths)
+    await asyncio.to_thread(ensure_optional_deps, ["chromadb"], "chromadb", runtime_paths)
     from mem0 import AsyncMemory  # noqa: PLC0415
 
     config_dict = _get_memory_config(storage_path, config, runtime_paths)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from collections import deque
 from dataclasses import dataclass
 from functools import cache
@@ -72,6 +71,12 @@ from mindroom.config.models import (
     RouterConfig,
     ToolConfigEntry,
 )
+from mindroom.config.personal_agents import (
+    PersonalAgentInstance,
+    PersonalAgentTemplateConfig,
+    expand_personal_agents,
+    read_personal_agent_roster,
+)
 from mindroom.config.personal_rooms import PersonalRoomsConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.runtime_overlays import (
@@ -88,8 +93,10 @@ from mindroom.config.yaml_includes import (
     source_files_fingerprint,
 )
 from mindroom.constants import (
+    AGENT_NAME_PATTERN,
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
+    RESERVED_ENTITY_NAMES,
     ROUTER_AGENT_NAME,
     RuntimePaths,
     config_relative_path,
@@ -124,10 +131,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
-# Keep synchronized with todo_poke._SAFE_ASSIGNEE_PATTERN without importing runtime tools into config.
-_AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
-# "_shared" is the requester-store directory part for `user` scope in CredentialsManager.for_primary_runtime_scope.
-_RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
     {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config", "skill_manage"},
 )
@@ -204,7 +207,17 @@ def config_validation_issues(
 ) -> list[tuple[tuple[str | int, ...], str]]:
     """Return the user-facing messages of one config validation exception, each with its config location."""
     if isinstance(exc, ValidationError):
-        return [(tuple(error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
+        return [
+            (
+                tuple(error["loc"]),
+                (
+                    f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
+                    if error["type"] == "extra_forbidden"
+                    else error["msg"]
+                ),
+            )
+            for error in exc.errors(include_context=False)
+        ]
     if isinstance(exc, (ConfigRuntimeValidationError, ConfigIncludeError)):
         return [(("config",), str(exc))]
     if isinstance(exc, yaml.YAMLError):
@@ -411,6 +424,9 @@ class Config(BaseModel):
     _runtime_approved_egress_inherited_default_tools: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
+    _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
+    _personal_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _personal_agents_added_agents_section: bool = PrivateAttr(default=False)
 
     egress_broker: EgressBrokerConfig = Field(
         default_factory=EgressBrokerConfig,
@@ -477,6 +493,10 @@ class Config(BaseModel):
         description="Tool-approval rules for agent-initiated tool calls",
     )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
+    personal_agents: dict[str, PersonalAgentTemplateConfig] = Field(
+        default_factory=dict,
+        description="Templates that give every onboarded user their own agent",
+    )
     personal_rooms: PersonalRoomsConfig | None = Field(default=None, description="Optional native personal agent rooms")
     budgets: BudgetsConfig | None = Field(default=None, description="Optional per-user monthly spending budgets")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
@@ -577,12 +597,27 @@ class Config(BaseModel):
     def validate_personal_rooms(self) -> Config:
         """Require a real target and onboarding rooms observed by the router."""
         if self.personal_rooms is not None:
-            if self.personal_rooms.agent not in self.agents:
-                msg = "personal_rooms.agent must name a configured agent"
+            if self.personal_rooms.agent not in self.agents and self.personal_rooms.agent not in self.personal_agents:
+                msg = "personal_rooms.agent must name a configured agent or personal_agents template"
                 raise ValueError(msg)
             if set(self.personal_rooms.onboarding_rooms) - self.get_all_configured_rooms():
                 msg = "personal_rooms.onboarding_rooms must name configured rooms"
                 raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_personal_agent_templates(self) -> Config:
+        """Keep template keys valid agent names apart from agents and teams, whose names generated agents share."""
+        invalid = sorted(
+            key for key in self.personal_agents if not AGENT_NAME_PATTERN.fullmatch(key) or key in RESERVED_ENTITY_NAMES
+        )
+        if invalid:
+            msg = f"personal_agents keys must be alphanumeric/underscore and not reserved, got: {', '.join(invalid)}"
+            raise ValueError(msg)
+        reused = sorted(set(self.personal_agents) & (set(self.agents) | set(self.teams)))
+        if reused:
+            msg = f"personal_agents keys must not equal an agent or team key: {', '.join(reused)}"
+            raise ValueError(msg)
         return self
 
     @model_validator(mode="before")
@@ -679,9 +714,9 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:
         """Ensure agent and team names contain only alphanumeric characters and underscores."""
-        invalid_agents = [name for name in self.agents if not _AGENT_NAME_PATTERN.fullmatch(name)]
-        invalid_teams = [name for name in self.teams if not _AGENT_NAME_PATTERN.fullmatch(name)]
-        invalid_mcp_servers = [name for name in self.mcp_servers if not _AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_agents = [name for name in self.agents if not AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_teams = [name for name in self.teams if not AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_mcp_servers = [name for name in self.mcp_servers if not AGENT_NAME_PATTERN.fullmatch(name)]
         invalid = sorted(invalid_agents + invalid_teams + invalid_mcp_servers)
         if invalid:
             msg = f"Agent, team, and MCP server names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
@@ -690,7 +725,7 @@ class Config(BaseModel):
         if overlapping_names:
             msg = f"Agent and team names must be distinct, overlapping keys: {', '.join(overlapping_names)}"
             raise ValueError(msg)
-        reserved_entity_names = sorted((set(self.agents) | set(self.teams)) & _RESERVED_ENTITY_NAMES)
+        reserved_entity_names = sorted((set(self.agents) | set(self.teams)) & RESERVED_ENTITY_NAMES)
         if reserved_entity_names:
             msg = (
                 f"Agent and team names must not use reserved internal entity names: {', '.join(reserved_entity_names)}"
@@ -1151,13 +1186,61 @@ class Config(BaseModel):
         *,
         tolerate_plugin_load_errors: bool = False,
     ) -> Config:
-        """Validate config data against one explicit runtime context."""
+        """Validate config data against one explicit runtime context, adding the agents of the personal agent roster."""
+        try:
+            expansion = expand_personal_agents(data, read_personal_agent_roster(runtime_paths))
+        except ValueError as exc:
+            raise ConfigRuntimeValidationError(str(exc)) from exc
+        config = cls._validate_runtime_data(
+            expansion.data,
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        if expansion.probe_data is not None:
+            # A template or override nobody uses yet must fail now, not at a later reload that onboards someone.
+            try:
+                cls._validate_runtime_data(
+                    expansion.probe_data,
+                    runtime_paths,
+                    tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                )
+            except (ValidationError, ConfigRuntimeValidationError) as exc:
+                msg = f"personal_agents would generate an invalid agent for a new user: {exc}"
+                raise ConfigRuntimeValidationError(msg) from exc
+        settings = config.personal_rooms
+        instance = expansion.instances.get(settings.agent) if settings is not None else None
+        if settings is not None and instance is not None:
+            # A generated agent serves personal rooms only through its template.
+            msg = (
+                f"personal_rooms.agent names {settings.agent}, which personal_agents.{instance.template} generates; "
+                f"name the template {instance.template} instead"
+            )
+            raise ConfigRuntimeValidationError(msg)
+        config._personal_agent_instances = expansion.instances
+        # An edited generated agent stays in the authored dump, so saving the edit fails as a collision.
+        config._personal_agent_dumps = {
+            agent_name: config.agents[agent_name].model_dump(exclude_unset=True) for agent_name in expansion.instances
+        }
+        config._personal_agents_added_agents_section = (
+            bool(expansion.instances) and isinstance(data, dict) and "agents" not in data
+        )
+        return config
+
+    @classmethod
+    def _validate_runtime_data(
+        cls,
+        data: object,
+        runtime_paths: RuntimePaths,
+        *,
+        tolerate_plugin_load_errors: bool,
+    ) -> Config:
         normalized_data = normalized_config_data(data)
         approved_egress_overlay = apply_runtime_approved_egress_overlay(normalized_data, runtime_paths)
         config = cls.model_validate(approved_egress_overlay.data, context={"runtime_paths": runtime_paths})
         from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
 
         validate_call_agent_room_ownership(config, runtime_paths)
+        config._validate_model_extra_kwargs(runtime_paths)
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
         config._runtime_approved_egress_inherited_default_tools = approved_egress_overlay.inherited_default_tools
         config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
@@ -1177,7 +1260,19 @@ class Config(BaseModel):
         return config
 
     def authored_model_dump(self) -> dict[str, Any]:
-        """Serialize authored config."""
+        """Serialize authored config, without the unedited agents generated from personal_agents templates."""
+        payload = self.runtime_model_dump()
+        agents = payload.get("agents")
+        if isinstance(agents, dict):
+            for agent_name, generated in self._personal_agent_dumps.items():
+                if agents.get(agent_name) == generated:
+                    del agents[agent_name]
+            if not agents and self._personal_agents_added_agents_section:
+                payload.pop("agents")
+        return payload
+
+    def runtime_model_dump(self) -> dict[str, Any]:
+        """Serialize authored config plus the agents generated from personal_agents templates."""
         payload = cast("dict[str, Any]", self.model_dump(exclude_unset=True))
         knowledge_bases = payload.get("knowledge_bases")
         if isinstance(knowledge_bases, dict):
@@ -1219,6 +1314,21 @@ class Config(BaseModel):
     def runtime_knowledge_base_overlay(self, base_id: str) -> KnowledgeBaseConfig | None:
         """Return one runtime-only knowledge base overlay, when present."""
         return self._runtime_knowledge_base_overlays.get(base_id)
+
+    def personal_agent_instance(self, agent_name: str) -> PersonalAgentInstance | None:
+        """Return the template and owner of one generated agent, or None for an authored agent."""
+        return self._personal_agent_instances.get(agent_name)
+
+    def personal_agent_name(self, template: str, user_id: str) -> str | None:
+        """Return the agent generated from one template for one user, or None before that user is onboarded."""
+        return next(
+            (
+                agent_name
+                for agent_name, instance in self._personal_agent_instances.items()
+                if instance.template == template and instance.user_id == user_id
+            ),
+            None,
+        )
 
     def get_agent(self, agent_name: str) -> AgentConfig:
         """Get an agent configuration by name.
@@ -1518,6 +1628,18 @@ class Config(BaseModel):
             chunk_overlap=private_knowledge.chunk_overlap,
             git=private_knowledge.git,
         )
+
+    def _validate_model_extra_kwargs(self, runtime_paths: RuntimePaths) -> None:
+        """Reject an ``extra_kwargs`` key the route serving its model does not accept, naming the model."""
+        # why-lazy: the provider registry imports every provider family's route tables, which config import must not load.
+        from mindroom.providers.registry import check_extra_kwargs  # noqa: PLC0415
+
+        for model_name, model_config in self.models.items():
+            try:
+                check_extra_kwargs(model_config, runtime_paths)
+            except ValueError as exc:
+                msg = f"models.{model_name}: {exc}"
+                raise ConfigRuntimeValidationError(msg) from exc
 
     def _validate_authored_tool_entry(
         self,

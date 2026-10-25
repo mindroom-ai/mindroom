@@ -2802,6 +2802,57 @@ async def test_agent_state_write_error_names_the_router_grant() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_level", "agent_writes"),
+    [(100, True), (0, False), (None, False)],
+    ids=["agent-may-write", "agent-under-powered", "agent-not-joined"],
+)
+async def test_restored_task_state_refused_to_the_router_lands_through_a_bot_the_room_lets_write_it(
+    agent_level: int | None,
+    agent_writes: bool,
+) -> None:
+    """A restored runner's router cannot write state in a room only its creating agent administers."""
+    router_client = make_matrix_client_mock(user_id="@mindroom_router:server")
+    router_client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    router_room = _matrix_room("!test:server")
+    router_room.power_levels.defaults.state_default = 50
+    router_client.rooms["!test:server"] = router_room
+    agent_client = make_matrix_client_mock(user_id="@mindroom_general:server")
+    agent_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!test:server",
+    )
+    agent_client.rooms = {}
+    if agent_level is not None:
+        agent_room = _matrix_room("!test:server")
+        agent_room.power_levels.defaults.state_default = 50
+        agent_room.power_levels.users[agent_client.user_id] = agent_level
+        agent_client.rooms["!test:server"] = agent_room
+    scheduling.register_scheduled_task_state_writer(router_client)
+    scheduling.register_scheduled_task_state_writer(agent_client)
+    router_admin = _RecordingScheduleStateAdmin({}, should_succeed=False)
+    record = _record("taskdone", _pending_once_workflow())
+
+    async def save() -> None:
+        await scheduling._save_one_time_task_status(
+            client=router_client,
+            task=record,
+            status="completed",
+            timezone="UTC",
+            matrix_admin=router_admin,
+        )
+
+    if agent_writes:
+        await save()
+        assert agent_client.room_put_state.await_args.kwargs["state_key"] == "taskdone"
+        assert agent_client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
+    else:
+        with pytest.raises(ValueError, match="privileged fallback failed"):
+            await save()
+        agent_client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_persist_scheduled_task_state_includes_cron_description() -> None:
     """Matrix state should expose the backend-owned recurring schedule description."""
     client = AsyncMock()

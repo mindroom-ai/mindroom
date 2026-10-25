@@ -406,6 +406,7 @@ class TestScheduledTaskRestoration:
         scheduling.set_scheduled_task_runner_owner(
             scheduling.ScheduledTaskRunnerOwner(router_bot.client, router_bot._conversation_reader),
         )
+        scheduling.register_scheduled_task_state_writer(router_bot.client)
 
         async def wait_for_background_tasks_side_effect(**kwargs: float) -> None:
             assert "timeout" in kwargs
@@ -428,6 +429,7 @@ class TestScheduledTaskRestoration:
 
         assert drain_task.cancelled()
         assert scheduling._runner_owner is None
+        assert scheduling._state_writers == {}
         mock_clear.assert_called_once_with()
         mock_cancel.assert_awaited_once()
         router_bot.client.close.assert_awaited_once()
@@ -463,11 +465,14 @@ class TestScheduledTaskRestoration:
             agent_bot._conversation_reader,
         )
         scheduling.set_scheduled_task_runner_owner(router_owner)
+        scheduling.register_scheduled_task_state_writer(router_owner.client)
+        scheduling.register_scheduled_task_state_writer(agent_bot.client)
 
         with patch("mindroom.bot.cancel_all_running_scheduled_tasks", new_callable=AsyncMock) as mock_cancel:
             await agent_bot.stop()
 
         assert scheduling._runner_owner is router_owner
+        assert scheduling._state_writers == {router_owner.client.user_id: router_owner.client}
         mock_cancel.assert_not_awaited()
 
     @pytest.mark.asyncio

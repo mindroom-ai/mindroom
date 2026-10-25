@@ -52,7 +52,7 @@ class ToolFunction:
     ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, tool
     jobs, and the agent CLI's eager bindings name it by; for an implied or preset tool that is the tool that brings it
     in. The agent CLI binds a deferred toolkit's functions under that toolkit's registered tool name instead, which
-    differs for an implied tool. None for a
+    differs for an implied tool, and still approves their calls under this one. None for a
     function generated for the agent, such as the knowledge search, the skill readers, and a team's delegation, and
     for one adapted by a caller that names its toolkit beside it: the MCP gateway and the script broker adapt the
     function a call names alone (``adapt_function``), and the gateway's search adapts a selected toolkit whole.

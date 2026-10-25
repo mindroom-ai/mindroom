@@ -424,7 +424,7 @@ async def test_dedup_and_sequence_survive_a_restart_without_the_workspace_record
 
 @pytest.mark.asyncio
 async def test_a_record_started_before_primary_state_is_left_as_it_was(tmp_path: Path) -> None:
-    """A record with only workspace files settles without touching them; a record found nowhere stays missing."""
+    """A record with only workspace files is left as it was by every operation; a record found nowhere stays missing."""
     module = _records_module()
     owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
     handle = await _start(module, owner, delegation_id="before-upgrade")
@@ -440,6 +440,7 @@ async def test_a_record_started_before_primary_state_is_left_as_it_was(tmp_path:
     )
     await owner.finish(reopened, status="completed", output="Done")
 
+    assert await owner.highest_event_index(reopened, "stream-") == 0
     assert {path: path.read_bytes() for path in _record_dir(handle).rglob("*") if path.is_file()} == exported
     assert _receipt_path(handle).read_bytes() == receipt
     assert not handle.state_dir.exists()

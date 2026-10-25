@@ -35,13 +35,14 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
-from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
-from mindroom.providers.ollama_errors import provider_error
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.ollama.errors import provider_error
+from mindroom.providers.ollama.settings import OllamaSettings
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 
     from ollama import ChatResponse
 
@@ -56,19 +57,6 @@ logger = get_logger(__name__)
 _PROVIDER = "Ollama"
 # Remote images are downloaded up to this size; a larger one is left to the media fallback's note.
 _IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class OllamaSettings:
-    """The ``extra_kwargs`` an Ollama model accepts."""
-
-    api_key: str | None = field(default=None, metadata=SECRET)
-    timeout: float | None = None
-    client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
-    format: str | Mapping[str, Any] | None = None
-    options: Mapping[str, Any] | None = None
-    keep_alive: float | str | None = None
-    request_params: Mapping[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -312,4 +300,4 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
     )
 
 
-__all__ = ["OllamaProvider", "OllamaSettings", "build_provider"]
+__all__ = ["OllamaProvider", "build_provider"]

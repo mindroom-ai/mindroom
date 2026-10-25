@@ -5,7 +5,7 @@ The capture used this same setup: one agent of a config shaped like `mindroom co
 for tools that need settings, offline replacements for SDK clients that contact their service while constructing, and
 a hidden host environment that refuses network connections.
 The parity tests compare what they build with the goldens through `golden_entry` and `argument_outcome`, and
-`tests.agno_parity.regenerate_tool_goldens` rewrites the goldens through the same two functions.
+`tests.agno_parity.regenerate_goldens` rewrites the goldens through the same two functions.
 """
 
 from __future__ import annotations
@@ -53,6 +53,9 @@ SCHEMAS_PATH = FIXTURE_DIR / "schemas.json"
 ALL_ENABLED_SCHEMAS_PATH = FIXTURE_DIR / "schemas_all_enabled.json"
 ARGUMENTS_PATH = FIXTURE_DIR / "arguments.json"
 
+# Registered tools no offline build can produce: their functions come from the Apify Actor builds and the Composio
+# action catalog, which only those services return.
+UNBUILDABLE = frozenset({"apify", "composio"})
 AGENT_NAME = "golden"
 # Tools are built for one agent of a config shaped like `mindroom config init` output: file memory gives the agent a
 # workspace, so output-file wrapping applies; delegation and the knowledge graph enable the tools that need them.
@@ -275,16 +278,15 @@ def normalize_error_text(text: str) -> str:
     return _PYDANTIC_ERROR_URL.sub(_PYDANTIC_ERROR_URL_PLACEHOLDER, text)
 
 
-def golden_entry(toolkit: Toolkit, adapted: AdaptedToolkit) -> dict[str, object]:
-    """Return the golden entry of one built toolkit: Agno's toolkit settings, then each function as the adapter reports it.
+def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
+    """Return the golden entry of one adapted toolkit: its texts for the model, then each function the adapter made.
 
-    The functions are in Agno's async-run order, which the adapter keeps. ``show_result`` comes from Agno's function
-    because the owned loop never reads it: it never echoes a tool result, so a function that sets it asks for nothing.
+    ``instructions`` is what the system prompt shows, and ``guidance`` what the agent CLI and minimal mode show; the
+    functions are in Agno's async-run order, which the adapter keeps.
     """
-    agno_functions = toolkit.get_async_functions().values()
     entry = {
-        "instructions": toolkit.instructions,
-        "add_instructions": toolkit.add_instructions,
+        "instructions": adapted.instructions,
+        "guidance": adapted.guidance,
         "functions": [
             {
                 "name": function.name,
@@ -295,9 +297,8 @@ def golden_entry(toolkit: Toolkit, adapted: AdaptedToolkit) -> dict[str, object]
                 "external_execution": function.external_execution,
                 "approval_type": function.approval_type,
                 "stop_after_tool_call": function.stop_after_call,
-                "show_result": agno_function.show_result,
             }
-            for function, agno_function in zip(adapted.functions, agno_functions, strict=True)
+            for function in adapted.functions
         ],
     }
     normalized = normalize_version(entry)

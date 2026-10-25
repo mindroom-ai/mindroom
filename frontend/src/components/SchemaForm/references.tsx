@@ -35,11 +35,16 @@ export function useReferenceOptions(): ReferenceOptions {
         "agent",
         agents.map((agent) => agent.id),
       ),
+      // A personal room is answered by an agent or by each user's own agent from a template.
+      personal_room_agent: merge("personal_room_agent", [
+        ...agents.map((agent) => agent.id),
+        ...Object.keys(config?.personal_agents ?? {}),
+      ]),
       room: merge(
         "room",
         rooms.map((room) => room.id),
       ),
       tool: merge("tool", []),
     };
-  }, [models, agents, rooms, extra]);
+  }, [models, config?.personal_agents, agents, rooms, extra]);
 }

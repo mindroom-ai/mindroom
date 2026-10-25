@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
@@ -53,6 +55,11 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.turn_store import TurnStore
+
+# Every bot syncs on its own, so this bot can deliver a newcomer's first message just before the router's
+# sync applies their join. The first gate re-decides on each membership publication for this long; a
+# decision still unresolved then fails into the journal's retry, which also re-reads this bot's roster.
+_ROUTER_CATCH_UP_SECONDS = 1.0
 
 
 class _SenderReplyPolicy(Protocol):
@@ -360,11 +367,32 @@ class IngressValidator:
 
         # The first gate is where a newcomer's first message meets a router that has not seen the join yet.
         access_requester = self.acting_requester_for_event(event) or requester_user_id
-        if not self.deps.turn_policy.can_reply_to_sender_in_room(access_requester, room.room_id, observed_room=room):
+        if not await self._can_reply_once_router_catches_up(access_requester, room):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         return requester_user_id
+
+    async def _can_reply_once_router_catches_up(self, sender_id: str, room: nio.MatrixRoom) -> bool:
+        """Decide reply access, deciding again on each router membership publication while it stays unresolved.
+
+        Only the router's published membership grants. The message itself proves only that its sender was joined
+        when sending it, not that they still are, so waiting changes when the decision settles, never what it allows.
+        """
+        memberships = self.deps.runtime.agent_reply_memberships
+        try:
+            async with asyncio.timeout(_ROUTER_CATCH_UP_SECONDS):
+                while True:
+                    try:
+                        return self.deps.turn_policy.can_reply_to_sender_in_room(
+                            sender_id,
+                            room.room_id,
+                            observed_room=room,
+                        )
+                    except ReplyMembershipPendingError:
+                        await memberships.wait_for_publication()
+        except TimeoutError:
+            raise ReplyMembershipPendingError from None
 
     def command_control_input(self, event: PreparedIngress, *, source_kind: str) -> Command | None:
         """Return the parsed command when one text event is a control input, not conversation."""

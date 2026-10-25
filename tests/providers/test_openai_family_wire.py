@@ -839,14 +839,13 @@ _MESSAGE_ITEM = {
 
 @pytest.mark.asyncio
 async def test_a_non_streamed_response_keeps_its_reasoning_summary(tmp_path: Path) -> None:
-    """A helper call on the Responses route reads the reasoning summary; a stored response needs no reasoning copy."""
+    """A helper call on the Responses route reads the reasoning summary."""
     built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(_response(output=[_REASONING_ITEM, _MESSAGE_ITEM])))
 
     turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
 
     assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
     assert turn.message.provider_data["response_id"] == "resp_1"
-    assert "reasoning_output" not in turn.message.provider_data
 
 
 @pytest.mark.asyncio
@@ -1597,19 +1596,27 @@ async def test_client_params_override_the_configured_client_options(
 
 
 @pytest.mark.asyncio
-async def test_client_params_base_url_is_the_groq_host(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("client_base_url", "host"),
+    [("http://client.test", "http://client.test"), (None, "http://groq.test"), ("", "http://groq.test")],
+)
+async def test_client_params_base_url_is_the_groq_host_when_set(
+    tmp_path: Path,
+    client_base_url: str | None,
+    host: str,
+) -> None:
     config = {
         "provider": "groq",
         "id": "openai/gpt-oss-120b",
         "api_key": "k",
-        "extra_kwargs": {"base_url": "http://groq.test", "client_params": {"base_url": "http://client.test"}},
+        "extra_kwargs": {"base_url": "http://groq.test", "client_params": {"base_url": client_base_url}},
     }
     built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
 
     await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert str(built.requests[0].url) == "http://client.test/openai/v1/chat/completions"
-    assert built.provider.identity.endpoint == "http://client.test/openai/v1"
+    assert str(built.requests[0].url) == f"{host}/openai/v1/chat/completions"
+    assert built.provider.identity.endpoint == f"{host}/openai/v1"
 
 
 @pytest.mark.asyncio
@@ -1743,11 +1750,7 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
         runtime,
     ).capabilities
 
-    assert (gpt6.native_tool_search, gpt6.native_compaction, gpt6.continues_stored_responses) == (
-        True,
-        True,
-        True,
-    )
+    assert (gpt6.native_tool_search, gpt6.native_compaction) == (True, True)
     assert (gpt5.native_tool_search, gpt5.native_compaction) == (False, False)
     assert stored.native_compaction is False
     assert (proxied.native_tool_search, proxied.native_compaction) == (False, False)
