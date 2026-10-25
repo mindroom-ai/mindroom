@@ -521,6 +521,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
     "mindroom.reply_lifecycle",
+    "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
 ]
 visibility = [
@@ -759,6 +760,7 @@ depends_on = [
     "mindroom.approval.resume",
     "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
+    "mindroom.delegation.state",
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
@@ -7752,7 +7754,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delegation.state"
-depends_on = []
+depends_on = ["mindroom.tool_system.worker_routing"]
 
 [[modules]]
 path = "mindroom.delegation.hooks"

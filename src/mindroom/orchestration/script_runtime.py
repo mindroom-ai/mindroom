@@ -234,12 +234,10 @@ class _LiveScriptRuntimeResolver:
         """Rebuild a context only from the exact durable Matrix execution identity."""
         identity = parse_tool_execution_identity_payload(
             run.execution_identity,
-            strict=True,
             error_prefix="Background script execution_identity",
         )
         if (
-            identity is None
-            or identity.channel != "matrix"
+            identity.channel != "matrix"
             or identity.agent_name != run.agent_name
             or identity.requester_id != run.owner_user_id
             or identity.room_id != run.room_id
@@ -295,7 +293,6 @@ class _LiveScriptRuntimeResolver:
             is_private=agent_config.private is not None,
             execution_identity=parse_tool_execution_identity_payload(
                 run.execution_identity,
-                strict=True,
                 error_prefix="Background script execution_identity",
             ),
             runtime_paths=context.runtime_paths,

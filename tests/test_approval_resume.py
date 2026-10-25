@@ -22,8 +22,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.delegation import records
 from mindroom.delegation.audit import start_child_record
-from mindroom.delegation.lifecycle import child_execution_identity
-from mindroom.delegation.state import DelegationState
+from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.event_journal import ApprovalDecision, approval_arguments_digest
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response

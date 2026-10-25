@@ -19,6 +19,7 @@ from mindroom.delegation.audit import (
     finish_child_record,
     observe_child_event,
     record_child_response,
+    start_child_record,
 )
 from mindroom.delegation.lifecycle import settle_child_response, start_child_turn
 from mindroom.delegation.records import DelegationRecordLimitError, DelegationRecordLocator, DelegationRecordOwner
@@ -144,6 +145,30 @@ async def test_start_child_record_persists_restart_locator_and_source_scope(tmp_
     assert run["source_room_id"] == "!room:localhost"
     assert run["source_thread_id"] == "$thread"
     assert run["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "identity",
+    [_identity("leader", "child-session"), _identity("child", "parent-session")],
+    ids=["other-agent", "other-session"],
+)
+async def test_start_child_record_refuses_an_identity_of_another_child(
+    tmp_path: Path,
+    identity: ToolExecutionIdentity,
+) -> None:
+    """An audit record starts only for a child whose retained identity names its own agent and session."""
+    child = replace(_child(), execution_identity=serialize_tool_execution_identity(identity))
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    with pytest.raises(RuntimeError, match=r"^Delegation child execution identity does not match its retained wait$"):
+        await start_child_record(
+            child,
+            parent_run_id="parent-run",
+            config=_config(),
+            runtime_paths=runtime_paths,
+            caller_execution_identity=_identity("leader", "parent-session"),
+        )
 
 
 @pytest.mark.asyncio

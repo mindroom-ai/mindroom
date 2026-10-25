@@ -158,9 +158,7 @@ from mindroom.tool_system.runtime_context import (
     runtime_context_from_dispatch_context,
 )
 from mindroom.tool_system.worker_routing import (
-    parse_tool_execution_identity_payload,
     run_with_tool_execution_identity,
-    serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_origin import SenderKind, TurnIntent
@@ -879,18 +877,6 @@ def _paused_answer() -> PausedAnswer:
         return PausedAnswer()
     # The resume completes these entries in place; the span's base keeps what the pause showed.
     return PausedAnswer(text=segment.text, tool_trace=deepcopy(segment.tool_trace), team_state=segment.team_state)
-
-
-def _continuation_execution_identity(continuation: ApprovalContinuation) -> ToolExecutionIdentity:
-    """Return the execution identity an approval continuation recorded when its run paused."""
-    identity = parse_tool_execution_identity_payload(
-        continuation.execution_identity,
-        error_prefix="Approval continuation execution_identity",
-    )
-    if identity is None:
-        msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
-        raise RuntimeError(msg)
-    return identity
 
 
 def _paused_presentation(handle: SpanHandle, paused: PausedAttempt, *, waiting_text: str | None) -> Presentation:
@@ -1681,7 +1667,7 @@ class ResponseRunner:
                 state=continuation_state,
                 delegation_storage_bindings=paused.delegation_storage_bindings,
                 show_tool_calls=show_tool_calls,
-                execution_identity=serialize_tool_execution_identity(execution_identity),
+                execution_identity=execution_identity,
                 runtime_model_name=paused.runtime_model_name,
                 continuation_count=paused.continuation_count,
                 team_member_names=team_member_names,
@@ -2536,7 +2522,7 @@ class ResponseRunner:
             agent_name = list(continuation.team_member_names)
         else:
             return None
-        execution_identity = _continuation_execution_identity(continuation)
+        execution_identity = continuation.execution_identity
         return self._memory_persistence(
             agent_name=agent_name,
             session_id=continuation.session_id,
@@ -2596,7 +2582,7 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
     ) -> Callable[[str, str], Awaitable[None]] | None:
         """Return the normal run-to-Matrix event linkage for a resumed response."""
-        execution_identity = _continuation_execution_identity(continuation)
+        execution_identity = continuation.execution_identity
         history_scope = continuation.history_scope
         if history_scope is None:
             if continuation.entity_kind == "team":
@@ -2618,7 +2604,7 @@ class ResponseRunner:
         progress: ProgressPublisher | None,
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
-        execution_identity = _continuation_execution_identity(continuation)
+        execution_identity = continuation.execution_identity
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             target,
             user_id=continuation.requester_id,

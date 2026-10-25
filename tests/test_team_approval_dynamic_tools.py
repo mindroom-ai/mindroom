@@ -18,7 +18,7 @@ from mindroom.response_turn import CompletedApprovalRun
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import ToolDispatchContext
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.conftest import (
     bind_runtime_paths,
@@ -83,7 +83,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         thread_id=target.resolved_thread_id,
         requester_id=identity.requester_id,
         calls=calls,
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
         runtime_model_name="default",
         team_member_names=("alpha", "beta"),
         team_mode="coordinate",

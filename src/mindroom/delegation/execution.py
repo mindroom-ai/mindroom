@@ -25,7 +25,6 @@ from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
-    child_execution_identity,
     child_run_context,
     child_tool_runtime_context,
     finish_child_turn,
@@ -59,6 +58,7 @@ from mindroom.delegation.state import (
     DelegationState,
     child_call_id,
     child_card_id,
+    child_execution_identity,
     delegation_card_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage

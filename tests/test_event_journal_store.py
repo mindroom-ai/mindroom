@@ -6978,6 +6978,39 @@ class TestApprovalContinuations:
         stored = json.loads(str(row["context_json"]))
         assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
 
+    async def test_continuation_loads_the_execution_identity_its_run_paused_under(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A restored continuation carries its typed identity, and an unreadable stored identity fails its load."""
+        await self.admit_sources(alice)
+        continuation = self.continuation()
+        await paused_for_approval(alice, continuation)
+        restored = await alice.approval_continuation("approval-1")
+        assert restored is not None
+        assert restored.execution_identity == continuation.execution_identity
+
+        row = await alice._backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            ),
+        )
+        assert row is not None
+        stored = json.loads(str(row["context_json"]))
+        stored["execution_identity"]["agent_name"] = ""
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(stored), "approval-1"),
+            ),
+        )
+        with pytest.raises(
+            TypeError,
+            match=r"^Approval continuation execution_identity\.agent_name must be a non-empty string$",
+        ):
+            await alice.approval_continuation("approval-1")
+
     async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
         """Only one response lifecycle may continue the exact persisted run."""
         await self.admit_sources(alice)

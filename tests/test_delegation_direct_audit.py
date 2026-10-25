@@ -16,11 +16,11 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import (
-    child_execution_identity,
     observe_child_event,
     observe_child_record,
     prepare_child_turn,
 )
+from mindroom.delegation.state import child_execution_identity
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.messages import Message

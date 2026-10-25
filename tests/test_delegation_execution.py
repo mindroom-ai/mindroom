@@ -28,7 +28,7 @@ from mindroom.delegation import execution
 from mindroom.delegation.lifecycle import authorize_delegation
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import cancel_approval_delegations
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.history.storage import new_scope_session
 from mindroom.llm.errors import ModelOutputLimitError, ProviderError
 from mindroom.llm.events import ToolCompleted
@@ -249,7 +249,11 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
                     requester_id=REQUESTER,
                     response_event_id="$response",
                     state="failing",
-                    execution_identity=child.execution_identity | {"agent_name": "leader", "session_id": "parent"},
+                    execution_identity=replace(
+                        child_execution_identity(child),
+                        agent_name="leader",
+                        session_id="parent",
+                    ),
                     delegation_storage_bindings=paused.delegation_storage_bindings,
                 ),
                 config=config,

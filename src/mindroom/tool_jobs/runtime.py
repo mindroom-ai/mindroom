@@ -131,7 +131,7 @@ def _parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
     msg = f"Invalid tool job snapshot {saved.job_id!r}."
     try:
         payload = json.loads(saved.job_json)
-        payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
+        payload["owner"] = parse_tool_execution_identity_payload(payload["owner"])
         job = BackgroundJob(**payload)
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(msg) from error

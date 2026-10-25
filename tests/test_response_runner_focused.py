@@ -164,7 +164,7 @@ from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
 from tests.approval_continuation_helpers import (
     approval_continuation,
@@ -2342,15 +2342,15 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
                 expires_at_ns=9_000_000_000_000_000_000,
             ),
         ),
-        execution_identity={
-            "channel": "matrix",
-            "agent_name": "general",
-            "requester_id": "@user:localhost",
-            "room_id": "!room:localhost",
-            "thread_id": "$thread",
-            "resolved_thread_id": "$thread",
-            "session_id": "session-1",
-        },
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        ),
         sources=ResponseSources(
             (request.response_envelope.source_event_id,),
             (request.response_envelope.source_event_id,),
@@ -2814,7 +2814,6 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
 
     continuation = approval_continuation(
         approval_id="approval-live-config",
-        execution_identity={},
         state="claimed",
     )
     identity = ToolExecutionIdentity(
@@ -3690,11 +3689,9 @@ async def _resumed_streamable_approval(
         runtime_model_name="default",
         team_member_names=("general",) if entity_kind == "team" else (),
         team_mode="coordinate" if entity_kind == "team" else None,
-        execution_identity=serialize_tool_execution_identity(
-            runner.deps.tool_runtime.build_execution_identity(
-                target=_target(thread_id="$thread", reply_to_event_id="$source"),
-                user_id="@user:localhost",
-            ),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            user_id="@user:localhost",
         ),
     )
     assert await paused_for_approval(store, continuation) is not None
@@ -4292,7 +4289,6 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
                 decision=ApprovalDecision.APPROVED,
             ),
         ),
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -4342,7 +4338,6 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-semantic",
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -4400,7 +4395,6 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-failure-final",
-        execution_identity={},
         state="failing",
         failure_reason="Tool approval continuation failed safely.",
     )
@@ -4437,7 +4431,6 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-oversized-final",
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -4493,7 +4486,6 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-cancelled-return",
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) is not None
 
@@ -4539,7 +4531,6 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-late-cancel",
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) is not None
     await bot._reply_runtime.start()
@@ -4591,7 +4582,6 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
                 decision=ApprovalDecision.APPROVED,
             ),
         ),
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -4629,29 +4619,6 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_continuation_rejects_missing_persisted_execution_identity(tmp_path: Path) -> None:
-    """Malformed durable identity must fail explicitly even when Python assertions are disabled."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    continuation = approval_continuation(
-        approval_id="approval-missing-identity",
-        execution_identity={},
-        state="claimed",
-    )
-
-    with (
-        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=None),
-        pytest.raises(RuntimeError, match=r"approval-missing-identity.*execution identity"),
-    ):
-        await runner._continue_entity_call(
-            continuation,
-            request=_plain_request(_target()),
-            target=_target(),
-            tool_trace_collector=[],
-            progress=None,
-        )
-
-
-@pytest.mark.asyncio
 async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Path) -> None:
     """A resumed team must rebuild members from the turn's pinned aliases."""
     bot = _bot(tmp_path)
@@ -4673,7 +4640,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         entity_kind="team",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
-        execution_identity={},
+        execution_identity=identity,
         runtime_model_name="large",
         team_member_names=("general",),
         team_member_model_names=(("general", "large"),),
@@ -4686,7 +4653,6 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
     )
 
     with (
-        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
         patch.object(
             runner.deps.tool_runtime,
             "build_dispatch_context",
@@ -4778,7 +4744,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
                 human_approval_required=True,
             ),
         ),
-        execution_identity={},
+        execution_identity=identity,
         correlation_id="correlation-original",
     )
     assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
@@ -4814,7 +4780,6 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with (
-        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
         patch.object(runner.deps.tool_runtime, "build_dispatch_context", side_effect=build_dispatch_context),
         patch(
             "mindroom.approval.execution.AgentApprovalExecution.continue_run",
@@ -8292,7 +8257,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         thread_id=target.resolved_thread_id,
         requester_id=request.user_id,
         sources=request.sources,
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
         cli_call={"kind": "agent_cli"},
         show_tool_calls=False,
     )
@@ -8475,7 +8440,6 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     continuation = approval_continuation(
         approval_id="approval-context",
         thread_id="$root",
-        execution_identity={},
         sources=ResponseSources(("$resume",), ("$resume",)),
     )
     target = _target(thread_id="$root", reply_to_event_id="$resume")
@@ -8841,7 +8805,7 @@ def test_a_finished_approval_continuation_tells_automations_its_source_events(tm
         response_event_id="$response",
         sources=ResponseSources(("$prompt",), ("$prompt",)),
         state="running",
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
     )
 
     deps = coordinator._approval_post_response_deps(continuation)
@@ -8876,7 +8840,7 @@ async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_r
     continuation = approval_continuation(
         entity_kind=entity_kind,
         history_scope=scope,
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
     )
     storage = coordinator.deps.state_writer.create_storage(identity, scope=scope)
     session = new_scope_session(session_id="session-1", scope_id=scope.scope_id, is_team=is_team)

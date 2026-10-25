@@ -22,14 +22,14 @@ from mindroom.delegation.audit import observe_child_event as record_child_event
 from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
 from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, child_execution_identity
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_progress, report_tool_progress
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
-from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -93,15 +93,6 @@ def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, st
         edges.append((child.caller_agent_name, child.child_agent_name, delegation_grant(child)))
         observation = observation.parent
     return tuple(reversed(edges))
-
-
-def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
-    """Validate the retained session and agent before resolving any child resource."""
-    identity = parse_tool_execution_identity_payload(child.execution_identity, strict=True)
-    if identity is None or identity.agent_name != child.child_agent_name or identity.session_id != child.session_id:
-        msg = "Delegation child execution identity does not match its retained wait"
-        raise RuntimeError(msg)
-    return identity
 
 
 def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChild) -> ToolRuntimeContext:

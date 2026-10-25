@@ -918,12 +918,8 @@ def _validate_resolved_authority(
 ) -> ToolExecutionIdentity:
     durable_identity = parse_tool_execution_identity_payload(
         run.execution_identity,
-        strict=True,
         error_prefix="Background script execution_identity",
     )
-    if durable_identity is None:
-        msg = "Background script execution identity is unavailable."
-        raise ValueError(msg)
     live_identity = build_execution_identity_from_runtime_context(context)
     live_config = context.current_config
     expected_process_worker_target = build_agent_toolkit_worker_target(

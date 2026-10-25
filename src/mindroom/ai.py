@@ -25,13 +25,13 @@ from mindroom.budgets.pricing import model_prices
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
-    child_execution_identity,
     child_tool_runtime_context,
     delegation_grant,
     note_child_run_id,
     observe_child_event,
     observe_child_record,
 )
+from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import persist_interrupted_replay, split_interrupted_tool_trace

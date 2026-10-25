@@ -28,8 +28,7 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.delegation.lifecycle import child_execution_identity
-from mindroom.delegation.state import DelegationState
+from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
