@@ -2402,6 +2402,37 @@ async def test_mention_in_an_agents_finished_reply_wakes_the_mentioned_agent_onc
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_placeholder_the_mentioned_agent_cannot_answer_does_not_swallow_the_finished_reply(
+    tmp_path: Path,
+) -> None:
+    """A placeholder carries no requester, so its refusal must not mark the turn its finished reply needs."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _joined_room(config, "general", "research")
+    placeholder_id = "$placeholder:localhost"
+    _admit_placeholder(harness, placeholder_id)
+    placeholder = _entity_reply_event(
+        config,
+        sender=_entity_user_id(config, "research"),
+        acting_requester=_OWNER,
+        mention=None,
+        event_id=placeholder_id,
+    )
+    content = placeholder.source["content"]
+    del content[constants.ACTING_REQUESTER_KEY]
+    content["body"] = "Thinking..."
+    content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_PENDING
+    content["m.relates_to"] = {"rel_type": "m.thread", "event_id": _THREAD_ROOT}
+
+    await harness.deliver(room, placeholder)
+    await harness.deliver(room, _final_reply_edit(config, placeholder_id=placeholder_id, event_id="$final:localhost"))
+
+    assert len(harness.runner.requests) == 1
+    assert harness.runner.requests[0].user_id == _OWNER
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("status", [constants.STREAM_STATUS_CANCELLED, constants.STREAM_STATUS_ERROR])
 async def test_cancelled_or_failed_agent_reply_never_wakes_the_agent_it_mentions(tmp_path: Path, status: str) -> None:
     """Only a completed reply hands off; a stopped or failed one stays an agent's edit, which changes nothing."""
