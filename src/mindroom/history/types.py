@@ -16,10 +16,10 @@ COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
-_CompactionMode = Literal["auto", "manual"]
+CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
-_CompactionLifecycleStatus = Literal["failed", "timeout"]
+CompactionLifecycleStatus = Literal["failed", "timeout"]
 CompactionAvailabilityReason = Literal[
     "no_context_window",
     "non_positive_summary_input_budget",
@@ -137,7 +137,7 @@ class HistoryScopeState:
     force_compact_before_next_run: bool = False
 
     @property
-    def compaction_mode(self) -> _CompactionMode:
+    def compaction_mode(self) -> CompactionMode:
         """Return how a compaction of this scope is reported: manual when requested, else automatic."""
         return "manual" if self.force_compact_before_next_run else "auto"
 
@@ -190,7 +190,7 @@ class CompactionDecision:
 class CompactionLifecycleStart:
     """Visible lifecycle notice payload emitted before foreground compaction."""
 
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
@@ -204,7 +204,7 @@ class CompactionLifecycleStart:
 class CompactionLifecycleProgress:
     """Visible lifecycle progress payload emitted after persisted compaction chunks."""
 
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
@@ -259,11 +259,11 @@ class CompactionLifecycleFailure:
     """Visible lifecycle notice payload emitted after failed foreground compaction."""
 
     notice_event_id: str | None
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
-    status: _CompactionLifecycleStatus
+    status: CompactionLifecycleStatus
     duration_ms: int
     failure_reason: str
     history_budget_tokens: int | None
@@ -289,7 +289,7 @@ class CompactionLifecycle(Protocol):
 class CompactionOutcome:
     """Completed compaction result used for lifecycle notices and tests."""
 
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary: str

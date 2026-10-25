@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
@@ -51,6 +51,8 @@ from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
     CompactionLifecycleStart,
+    CompactionLifecycleStatus,
+    CompactionMode,
     CompactionReplyOutcome,
     HistoryScope,
     HistoryScopeState,
@@ -399,7 +401,7 @@ type _ScopeCompactor = Callable[
 
 async def _run_scope_compaction_with_lifecycle(
     *,
-    mode: Literal["auto", "manual"],
+    mode: CompactionMode,
     session_id: str,
     scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,
@@ -431,7 +433,7 @@ async def _run_scope_compaction_with_lifecycle(
     # instead of the configured primary.
     serving_summary_model = execution_plan.compaction_model_name
 
-    async def _fail(status: Literal["failed", "timeout"], failure_reason: str) -> None:
+    async def _fail(status: CompactionLifecycleStatus, failure_reason: str) -> None:
         failure = CompactionLifecycleFailure(
             notice_event_id=notice_event_id,
             mode=mode,
