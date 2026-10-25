@@ -358,10 +358,7 @@ class AgentReplyMembershipIndex:
                 self._refresh_transitions = None
             if self._desired_signature != signature or self._epoch != expected_epoch:
                 return
-            for transition in transitions:
-                applied = _snapshot_after_transition(candidate, config, transition)
-                if applied is not None:
-                    candidate = applied[0]
+            candidate = _replay_refresh_transitions(candidate, self._snapshot, config, transitions)
             self._snapshot = candidate
             for room in candidate.rooms:
                 if room.ready and room.room_key is not None:
@@ -387,9 +384,8 @@ class AgentReplyMembershipIndex:
             return False
         transition = _LiveTransition(room_id=room_id, event=event, control_user_id=control_user_id)
         if self._refresh_transitions is not None:
-            # Matrix may have answered the refresh in flight before or after
-            # this transition, and replaying it onto those answers is correct
-            # either way, so room setup's own joins cannot void that refresh.
+            # The refresh in flight replays this onto its answers instead of
+            # being voided by it, so room setup's own joins cannot discard it.
             self._refresh_transitions.append(transition)
 
         snapshot = self._snapshot
@@ -465,6 +461,43 @@ def _snapshot_after_transition(
         possible_joined_room_ids=possible_joined_room_ids,
     )
     return updated_snapshot, changed_room_keys
+
+
+def _replay_refresh_transitions(
+    candidate: _AgentReplyMembershipSnapshot,
+    published: _AgentReplyMembershipSnapshot,
+    config: Config,
+    transitions: list[_LiveTransition],
+) -> _AgentReplyMembershipSnapshot:
+    """Return a refreshed candidate after the live transitions recorded while it queried Matrix."""
+    answered = {(room.room_key, room.room_id): room.raw_joined_user_ids for room in candidate.rooms}
+    for transition in transitions:
+        applied = _snapshot_after_transition(candidate, config, transition)
+        if applied is not None:
+            candidate = applied[0]
+    # Nothing orders a recorded transition against Matrix's answer for its
+    # room. A departure only denies, so it always applies. A join of someone
+    # the answer lacks may predate a kick the answer already holds and the
+    # router has not seen yet, so it must not grant on its own: that room
+    # keeps its published row instead. A ready published row is the router's
+    # own view, which every ready room relies on between refreshes and which
+    # already holds every recorded transition; without one the room stays
+    # unready until the next refresh answers it.
+    published_ready_rooms = {(room.room_key, room.room_id): room for room in published.rooms if room.ready}
+    rooms: list[_GrantRoomMembership] = []
+    for room in candidate.rooms:
+        key = (room.room_key, room.room_id)
+        if not room.ready or room.raw_joined_user_ids <= answered[key]:
+            rooms.append(room)
+        elif key in published_ready_rooms:
+            rooms.append(published_ready_rooms[key])
+        else:
+            rooms.append(_unready_room(room.room_key, room.room_id, reason="live_join_unconfirmed"))
+    return replace(
+        candidate,
+        rooms=tuple(rooms),
+        refresh_required=candidate.refresh_required or any(not room.ready for room in rooms),
+    )
 
 
 def _apply_transition_to_room(
