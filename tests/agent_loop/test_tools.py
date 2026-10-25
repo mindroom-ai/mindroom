@@ -124,15 +124,17 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
     )
 
     assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
-    assert [(m.tool_call_id, m.content, m.tool_call_error, m.tool_args) for m in batch.refused] == [
+    assert [(m.tool_call_id, m.tool_name, m.content, m.tool_call_error, m.tool_args) for m in batch.refused] == [
         (
             "c2",
+            "echo",
             "Tool call limit reached. Tool call echo not executed. Don't try to execute it again.",
             True,
             {"text": "x"},
         ),
         (
             "c3",
+            "add",
             "Tool call limit reached. Tool call add not executed. Don't try to execute it again.",
             True,
             {"a": 3, "b": 4},
