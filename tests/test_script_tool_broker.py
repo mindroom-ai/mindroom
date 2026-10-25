@@ -1516,9 +1516,15 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         worker_lease_provider=lambda: None,
     )
     lifecycle._activated_once = True
-    monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
     loop = asyncio.get_running_loop()
     shutdown_budget_seconds = 0.05
+    # The interrupt phase before the drain spends half the budget, so a drain given the whole budget shows.
+    interrupt_seconds = shutdown_budget_seconds / 2
+
+    async def interrupt_and_prune(_lifecycle: ScriptRuntimeLifecycle, _runs: object) -> None:
+        await asyncio.sleep(interrupt_seconds)
+
+    monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", interrupt_and_prune)
     drain_started = asyncio.Event()
     # For each drain shutdown runs: its timeout, a lower bound on the shutdown budget left then, and its result.
     shutdown_drains: list[tuple[float, float, bool]] = []
@@ -1553,7 +1559,7 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
 
     [(drain_timeout_seconds, budget_left_seconds, drained_before_shutdown_returned)] = shutdown_drains
     # Shutdown gives its cleanup drain what is left of its own budget, and the drain gives up at that deadline.
-    assert budget_left_seconds <= drain_timeout_seconds <= shutdown_budget_seconds
+    assert budget_left_seconds <= drain_timeout_seconds <= shutdown_budget_seconds - interrupt_seconds
     assert drained_before_shutdown_returned is False
     assert close_started_before_body_returned is False
     assert cleanup_owned_after_shutdown is True
