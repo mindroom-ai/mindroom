@@ -774,13 +774,13 @@ async def prepare_bound_scope_history(
     history_settings: ResolvedHistorySettings,
     static_prompt_tokens: int,
     non_prompt_tokens: int,
-    scope_context: ScopeSessionContext | None = None,
-    team_name: str | None = None,
-    active_model_name: str | None = None,
-    active_context_window: int | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-    allow_native_compaction: bool = True,
+    scope_context: ScopeSessionContext | None,
+    team_name: str | None,
+    active_model_name: str | None,
+    active_context_window: int | None,
+    compaction_lifecycle: CompactionLifecycle | None,
+    pipeline_timing: DispatchPipelineTiming | None,
+    allow_native_compaction: bool,
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run.
 

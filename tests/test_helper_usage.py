@@ -280,6 +280,9 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     prior_presentation_state=paused.response_presentation_state,
                     prior_tool_trace=paused.tool_trace,
                     progress=None,
+                    member_model_names=None,
+                    show_tool_calls=True,
+                    tool_trace_collector=None,
                 )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
         execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)

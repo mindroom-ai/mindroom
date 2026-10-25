@@ -354,6 +354,8 @@ def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedEx
         config=config,
         runtime_paths=runtime_paths_for(config),
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     assert members.failed_agent_names == []
     return members

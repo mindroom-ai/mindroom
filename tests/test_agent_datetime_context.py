@@ -158,6 +158,8 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=None,
+            refresh_scheduler=None,
+            active_model_names=None,
         )
         team = build_team_spec(
             members=members,

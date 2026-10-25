@@ -282,4 +282,10 @@ async def _exercise_team_member_assembly(
                 ),
             ),
             progress=None,
+            member_model_names=None,
+            history_scope=None,
+            prior_tool_trace=(),
+            prior_presentation_state=None,
+            show_tool_calls=True,
+            tool_trace_collector=None,
         )

@@ -540,6 +540,10 @@ async def resume_team(
             prior_tool_trace=paused.tool_trace,
             prior_presentation_state=paused.response_presentation_state,
             progress=None,
+            member_model_names=None,
+            history_scope=None,
+            show_tool_calls=True,
+            tool_trace_collector=None,
         )
 
 

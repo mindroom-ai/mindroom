@@ -302,6 +302,7 @@ class TeamTurn:
         kwargs.setdefault("model_name", paused.runtime_model_name or "default")
         kwargs.setdefault("member_model_names", dict(paused.team_member_model_names) or None)
         kwargs.setdefault("show_tool_calls", False)
+        kwargs.setdefault("tool_trace_collector", None)
         kwargs.setdefault("progress", None)
         with tool_runtime_context(self.runtime):
             return await continue_paused_team_run(

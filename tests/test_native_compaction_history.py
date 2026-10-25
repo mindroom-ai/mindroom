@@ -627,6 +627,9 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         active_context_window=200000,
         static_prompt_tokens=100,
         non_prompt_tokens=0,
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
 
     assert prepared.native_history is not None

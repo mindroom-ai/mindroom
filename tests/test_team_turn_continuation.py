@@ -361,6 +361,8 @@ def test_members_built_without_a_resumable_driver_leave_out_their_approval_gated
             config=team.config,
             runtime_paths=team.runtime_paths,
             execution_identity=team.identity,
+            refresh_scheduler=None,
+            active_model_names=None,
             **kwargs,
         )
         return set(members.builds[0].tool_owners)

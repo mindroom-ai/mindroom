@@ -90,6 +90,8 @@ def _build_pair(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     assert members.failed_agent_names == []
     return build_team_spec(
@@ -153,6 +155,12 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
             static_prompt_tokens=estimator.estimate("Current prompt"),
             non_prompt_tokens=estimator.non_prompt_tokens(),
             scope_context=scope_context,
+            team_name=None,
+            active_model_name=None,
+            active_context_window=None,
+            compaction_lifecycle=None,
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
         prepared = finalize_history_preparation(
             prepared_scope_history=prepared_scope_history,
@@ -408,6 +416,12 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
             scope_context=scope_context,
             static_prompt_tokens=5,
             non_prompt_tokens=2,
+            team_name=None,
+            active_model_name=None,
+            active_context_window=None,
+            compaction_lifecycle=None,
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
 
     assert mock_prepare.await_count == 1

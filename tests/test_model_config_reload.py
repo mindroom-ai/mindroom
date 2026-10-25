@@ -114,6 +114,8 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         config=config,
         runtime_paths=runtime.runtime_paths,
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     team = build_team_spec(
         members=members,
