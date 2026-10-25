@@ -117,6 +117,12 @@ class EntityNames:
         called = (entity.name for entity in entities if wanted in {alias.casefold() for alias in entity.aliases})
         return next(named, None) or next(called, name)
 
+    def aliases_of(self, name: str) -> tuple[str, ...]:
+        """Return the other names of the entry or agent named ``name`` in any letter case, or none."""
+        wanted = name.casefold()
+        entities = (*self.entries.values(), *self.agents.values())
+        return next((entity.aliases for entity in entities if entity.name.casefold() == wanted), ())
+
 
 def _entry(name: str, aliases: list[str]) -> KnownEntity:
     """Return an entry, a person when it lists a Matrix user ID, which has a server part, also called its localpart."""

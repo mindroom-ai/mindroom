@@ -173,7 +173,7 @@ Entities that share a name are listed once, and an alias that another listed ent
 `custom_extraction_instructions` reach only Graphiti's node and edge extraction prompts, which is where names are chosen.
 They are joined as the built-in rules, then the operator's `knowledge_graph.extraction_instructions`, then the episode's names, so the operator's text reads as a continuation of the rules and everything before the names is the same for every episode.
 The built-in rule that keeps an assistant's own activity out named the old `agent <name>` label; it now points at the speakers the list marks as agents, a wording change made after that rule's measurements and not measured again.
-`graph_entity` tries the name as asked when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay.
+`graph_entity` tries the name as asked and the entity's other configured names when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay, and an agent with `knowledge_graph_edits` sees them listed under the one name and can merge them.
 
 Rejected: matching entries against display names.
 An earlier attempt matched an entry on every name a speaker went by, so an entry fixing a first-name duplicate could list the first name, which was also the speaker's display name.

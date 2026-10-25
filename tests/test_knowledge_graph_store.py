@@ -360,6 +360,7 @@ async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: Gra
     The entity named exactly as asked is listed with its id, so a duplicate extracted under the alias can be merged.
     """
     stray = await _seed_entity(store, ALPHA, "Robin", summary="A stray duplicate.")
+    by_id = await _seed_entity(store, ALPHA, "@robin:example.test", summary="Extracted under the Matrix ID.")
     await _seed_entity(store, ALPHA, "Robin Vale", summary="A person.", facts=2)
     await _seed_entity(store, ALPHA, "Mind", summary="The agent.")
 
@@ -368,9 +369,13 @@ async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: Gra
         assert entity is not None
         assert entity.name == "Robin Vale"
         assert entity.exact
-    alias = await store.entity(ALPHA, "robin")
-    assert alias is not None
-    assert alias.others == [_EntityRef(name="Robin", uuid=stray)]
+    # The one name lists the entities under each of its configured names, which are its duplicates.
+    full_name = await store.entity(ALPHA, "Robin Vale")
+    assert full_name is not None
+    assert full_name.others == [
+        _EntityRef(name="@robin:example.test", uuid=by_id),
+        _EntityRef(name="Robin", uuid=stray),
+    ]
     matrix_id = await store.entity(ALPHA, "@robin:example.test")
     assert matrix_id is not None
     assert matrix_id.name == "Robin Vale"
@@ -381,14 +386,17 @@ async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: Gra
 
 @pytest.mark.asyncio
 async def test_entity_falls_back_to_the_name_asked_for(store: GraphitiStore) -> None:
-    """A graph extracted before an alias entry existed can hold only the alias, which is then found as asked."""
+    """A graph extracted before an alias entry existed can hold only the alias, which is then found as asked.
+
+    The one name finds it too, ahead of a closer search hit, because the alias is one of its configured names.
+    """
     await _seed_entity(store, ALPHA, "Robin Vale Consulting", summary="A company.")
     await _seed_entity(store, ALPHA, "Robin", summary="A person.", name_embedding=[1.0] * 32)
 
-    entity = await store.entity(ALPHA, "Robin")
-
-    assert entity is not None
-    assert entity.summary == "A person."
+    for name in ("Robin", "Robin Vale"):
+        entity = await store.entity(ALPHA, name)
+        assert entity is not None
+        assert entity.summary == "A person."
 
 
 async def _seed_edge(

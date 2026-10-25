@@ -47,7 +47,8 @@ _DOTENV_DISABLED = "PYTHON_DOTENV_DISABLED"
 _CONTROL_CHARACTERS = str.maketrans(dict.fromkeys([*range(0x20), *range(0x7F, 0xA0)], " "))
 # Facts listed for one entity, current ones first.
 _MAX_ENTITY_FACTS = 30
-# Entities a fuzzy lookup considers: the best hit is the answer and the rest are named as other close matches.
+# Entities a lookup takes per name it tries: the best is the answer, and the rest are named as other close matches
+# after a fuzzy match, or as the other entities under that name after an exact one.
 _ENTITY_CANDIDATES = 5
 # An entity's id, or its name: FalkorDB's Cypher has no case-insensitive regex, so names are compared lowercased. Among
 # several exact matches the one with the most facts wins, because a duplicate extracted once has few; the oldest, then
@@ -463,12 +464,14 @@ class GraphitiStore:
         # graph extracted before that name was settled can still hold only the name asked for.
         config = self._config_provider()
         agent_keys = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self._runtime_paths)
-        canonical = entity_names(config, agent_keys).canonical(name)
+        names = entity_names(config, agent_keys)
+        canonical = names.canonical(name)
         # Hybrid search ranks an entity whose summary or longer name mentions the text above one named exactly that
         # (a bare first name), so an exact name is looked up first. The entity under the one name comes first, and the
-        # others named either way are duplicates, such as one extracted under an alias, that only their ids reach.
+        # others, named as asked or by another of its configured names, are duplicates, such as one extracted under an
+        # alias or Matrix ID, that only their ids reach.
         records: dict[str, str] = {}
-        for exact in dict.fromkeys([canonical, name]):
+        for exact in dict.fromkeys([canonical, name, *names.aliases_of(canonical)]):
             found, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=exact, limit=_ENTITY_CANDIDATES)
             records.update((record["uuid"], record["name"]) for record in found)
         if records:
