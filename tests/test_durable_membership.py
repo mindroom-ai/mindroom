@@ -18,11 +18,10 @@ if TYPE_CHECKING:
 ROOM = "!room:localhost"
 
 
-def _session(*, ready: bool) -> Mock:
+def _session() -> Mock:
     session = create_autospec(DurableSync, instance=True)
     session.next_batch.return_value = None
     session.change_membership.return_value = True
-    session.wait_for_room_ready.return_value = ready
     return session
 
 
@@ -46,7 +45,8 @@ async def _change(
 @pytest.mark.asyncio
 async def test_a_join_whose_membership_ends_before_nio_accepts_sends_fails() -> None:
     """A room the bot leaves again before nio can send to it is not joined."""
-    session = _session(ready=False)
+    session = _session()
+    session.wait_for_room_ready.return_value = False
 
     assert await _change(session, "join", RoomMembershipPosition("join", 0), AsyncMock()) is False
     session.wait_for_room_ready.assert_awaited_once_with(ROOM)
@@ -68,7 +68,7 @@ async def test_each_wait_for_a_sync_follows_a_subscription_of_the_rooms_nio_awai
     expected: list[str],
 ) -> None:
     """The previous command's observation and a join's room state both need a sync that reports the room."""
-    session = _session(ready=True)
+    session = _session()
     steps: list[str] = []
 
     async def subscribe() -> None:

@@ -1155,6 +1155,12 @@ async def test_sliding_join_of_an_unconfigured_room_keeps_it_subscribed_until_ni
             release.set()
             assert await asyncio.wait_for(join, timeout=SETTLE_TIMEOUT_SECONDS) is True
             await asyncio.wait_for(refresh, timeout=SETTLE_TIMEOUT_SECONDS)
+            # Once nio can send to the joined room, room setup's refresh no longer subscribes it.
+            await bot.ensure_rooms()
+            session = bot._ingestion_session
+            assert session is not None
+            assert session._sliding is not None
+            assert set(session._sliding.config.room_subscriptions) == {configured}
         finally:
             join.cancel()
             await asyncio.gather(join, return_exceptions=True)
