@@ -7,12 +7,6 @@ from importlib.metadata import PackageNotFoundError
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from agno.agent import Agent
-from agno.agent._tools import parse_tools
-from agno.models.openai import OpenAIChat
-from agno.run import RunContext
-from agno.session import AgentSession
-
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.update_awareness import (
     _RELEASE_CACHE_TTL_SECONDS,
@@ -22,6 +16,7 @@ from mindroom.custom_tools.update_awareness import (
     _MindRoomReleaseStatus,
     _ReleaseLookupError,
 )
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -135,7 +130,7 @@ def test_failed_refresh_is_cached_and_preserves_last_known_release(tmp_path: Pat
 
 
 def test_tool_adds_release_awareness_to_system_prompt(tmp_path: Path) -> None:
-    """The toolkit should render cached release status into Agno's system prompt."""
+    """The toolkit should render cached release status into the instructions the system prompt carries."""
     status = _MindRoomReleaseStatus(
         current_version="1.0.0",
         latest_version="2.0.0",
@@ -145,20 +140,12 @@ def test_tool_adds_release_awareness_to_system_prompt(tmp_path: Path) -> None:
     with patch("mindroom.custom_tools.update_awareness._mindroom_release_status", return_value=status):
         toolkit = UpdateAwarenessTools(runtime_paths=_runtime_paths(tmp_path))
 
-    model = OpenAIChat(id="test")
-    agent = Agent(id="assistant", model=model, tools=[toolkit], instructions=["Help the user."])
-    parse_tools(agent, [toolkit], model)
-    message = agent.get_system_message(
-        session=AgentSession(session_id="session", agent_id="assistant"),
-        run_context=RunContext(run_id="run", session_id="session", session_state={}),
-        tools=None,
-        add_session_state_to_context=False,
-    )
+    instructions = adapt_toolkit(toolkit).instructions
 
-    assert message is not None
-    assert "This runtime is running MindRoom 1.0.0." in str(message.content)
-    assert "The latest published MindRoom release on PyPI is 2.0.0." in str(message.content)
-    assert "A newer MindRoom release is available." in str(message.content)
+    assert instructions is not None
+    assert "This runtime is running MindRoom 1.0.0." in instructions
+    assert "The latest published MindRoom release on PyPI is 2.0.0." in instructions
+    assert "A newer MindRoom release is available." in instructions
     assert json.loads(toolkit.get_mindroom_update_status()) == {
         "current_version": "1.0.0",
         "latest_version": "2.0.0",

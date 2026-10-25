@@ -1,0 +1,310 @@
+{
+  "family": "gemini_vertexai",
+  "input": {
+    "deferred_tool_search": {
+      "mode": "portable",
+      "tool_names": [
+        "lookup_order",
+        "send_invoice"
+      ]
+    },
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Where is order A-1001?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "location": "us-central1",
+        "project_id": "parity-project",
+        "vertexai": true
+      },
+      "id": "gemini-3.8-flash",
+      "provider": "google"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
+        "external_execution": false,
+        "name": "tool_search",
+        "parameters": {
+          "properties": {
+            "max_results": {
+              "description": "Maximum number of function definitions to return, at most 20.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+        "external_execution": false,
+        "name": "call_tool",
+        "parameters": {
+          "properties": {
+            "arguments": {
+              "description": "The function's arguments as a JSON object.",
+              "type": "object"
+            },
+            "name": {
+              "description": "Exact function name from tool_search.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Look up one order by id.",
+        "external_execution": false,
+        "name": "lookup_order",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Email the invoice for one order.",
+        "external_execution": false,
+        "name": "send_invoice",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gemini-3.8-flash",
+          "provider": "Google"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"arguments\": {\"order_id\": \"A-1001\"}, \"name\": \"lookup_order\"}",
+            "name": "call_tool"
+          },
+          "id": "parity_order",
+          "thought_signature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Where is order A-1001?"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+          }
+        ],
+        "role": "user"
+      },
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+              "name": "call_tool",
+              "parameters": {
+                "properties": {
+                  "arguments": {
+                    "description": "The function's arguments as a JSON object.",
+                    "type": "OBJECT"
+                  },
+                  "name": {
+                    "description": "Exact function name from tool_search.",
+                    "type": "STRING"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "OBJECT"
+              }
+            },
+            {
+              "description": "Return the forecast for one city.",
+              "name": "get_weather",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "description": "City name.",
+                    "type": "STRING"
+                  },
+                  "unit": {
+                    "description": "Temperature unit.",
+                    "enum": [
+                      "celsius",
+                      "fahrenheit"
+                    ],
+                    "type": "STRING"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "OBJECT"
+              }
+            },
+            {
+              "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
+              "name": "tool_search",
+              "parameters": {
+                "properties": {
+                  "max_results": {
+                    "description": "Maximum number of function definitions to return, at most 20.",
+                    "type": "INTEGER"
+                  },
+                  "query": {
+                    "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
+                    "type": "STRING"
+                  }
+                },
+                "required": [],
+                "type": "OBJECT"
+              }
+            }
+          ]
+        }
+      ],
+      "generationConfig": {}
+    },
+    "headers": {
+      "accept": "*/*",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/us-central1/publishers/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "functionCall": {
+                      "args": {
+                        "arguments": {
+                          "order_id": "A-1001"
+                        },
+                        "name": "lookup_order"
+                      },
+                      "id": "parity_order",
+                      "name": "call_tool"
+                    },
+                    "thoughtSignature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
+                  }
+                ],
+                "role": "model"
+              },
+              "finishReason": "STOP",
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 12,
+            "promptTokenCount": 42,
+            "totalTokenCount": 54
+          }
+        }
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "deferred_tool_search"
+}

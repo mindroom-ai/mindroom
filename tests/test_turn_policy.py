@@ -26,7 +26,8 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.teams import TeamIntent, TeamMode, TeamOutcome
+from mindroom.teams.formation import TeamIntent, TeamOutcome
+from mindroom.teams.spec import TeamMode
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_responder_access

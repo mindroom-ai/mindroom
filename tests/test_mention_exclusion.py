@@ -12,7 +12,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.teams import TeamResolution
+from mindroom.teams.formation import TeamResolution
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,

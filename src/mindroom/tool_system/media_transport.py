@@ -9,9 +9,9 @@ import math
 from dataclasses import dataclass
 from typing import Any, cast
 
-from agno.media import Audio, File, Image, Video
-from agno.tools.function import ToolResult
 from pydantic import ValidationError
+
+from mindroom.tool_system.agno_toolkits import AgnoAudio, AgnoFile, AgnoImage, AgnoVideo, ToolResult
 
 MAX_MEDIA_COUNT = 8
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
@@ -21,10 +21,10 @@ _MAX_METADATA_CHARS = 64 * 1024
 _MAX_ENCODED_BYTES = 4 * ((MAX_MEDIA_BYTES + 2) // 3)
 _MAX_MEDIA_ID_CHARS = 256
 _KEY = "mindroom_tool_result"
-_MEDIA_MODELS = {"images": Image, "audios": Audio, "videos": Video, "files": File}
+_MEDIA_MODELS = {"images": AgnoImage, "audios": AgnoAudio, "videos": AgnoVideo, "files": AgnoFile}
 _RESOURCE_FIELDS = {"content", "url", "filepath", "media_reference", "external"}
-type _Media = Image | Audio | Video | File
-MEDIA_MIME_FAMILIES: dict[type[_Media], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
+type _Media = AgnoImage | AgnoAudio | AgnoVideo | AgnoFile
+MEDIA_MIME_FAMILIES: dict[type[_Media], str] = {AgnoImage: "image/", AgnoAudio: "audio/", AgnoVideo: "video/"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +72,7 @@ def _encode_media(media: _Media) -> dict[str, Any]:
         or media.url is not None
         or media.filepath is not None
         or media.media_reference is not None
-        or (isinstance(media, File) and media.external is not None)
+        or (isinstance(media, AgnoFile) and media.external is not None)
         or not media.content
         or len(media.content) > MAX_MEDIA_BYTES
     ):

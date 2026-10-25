@@ -51,8 +51,6 @@ const AGENT_EDITOR_FIELDS = [
   "instructions",
   "rooms",
   "markdown",
-  "learning",
-  "learning_mode",
   "model",
   "memory_backend",
   "compaction",
@@ -62,7 +60,6 @@ const AGENT_EDITOR_FIELDS = [
   "thread_mode",
   "num_history_runs",
   "num_history_messages",
-  "compress_tool_results",
   "max_tool_calls_from_history",
   "show_tool_calls",
   "worker_tools",
@@ -112,12 +109,8 @@ export function AgentEditor() {
 
   const [activeToolName, setActiveToolName] = useState<string | null>(null);
   const selectedAgent = agents.find((a) => a.id === selectedAgentId);
-  const defaultLearning = config?.defaults?.learning ?? true;
-  const defaultLearningMode = config?.defaults?.learning_mode ?? "always";
   const defaultShowToolCalls = config?.defaults?.show_tool_calls ?? true;
   const defaultMarkdown = config?.defaults?.markdown ?? true;
-  const defaultCompressToolResults =
-    config?.defaults?.compress_tool_results ?? false;
   const globalMemoryBackend = config?.memory?.backend ?? "mem0";
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
@@ -164,13 +157,9 @@ export function AgentEditor() {
       context_files: [],
       private: undefined,
       compaction: undefined,
-      learning: defaultLearning,
-      learning_mode: defaultLearningMode,
       memory_backend: undefined,
     },
   });
-  const learningEnabled = useWatch({ name: "learning", control });
-  const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
   const agentTools = useWatch({ name: "tools", control });
   const includeDefaultTools = useWatch({
     name: "include_default_tools",
@@ -363,11 +352,9 @@ export function AgentEditor() {
         context_files: selectedAgent.context_files ?? [],
         private: selectedAgent.private ?? undefined,
         compaction: selectedAgent.compaction ?? undefined,
-        learning: selectedAgent.learning ?? defaultLearning,
-        learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
       });
     }
-  }, [defaultLearning, defaultLearningMode, selectedAgent, reset]);
+  }, [selectedAgent, reset]);
 
   useEffect(() => {
     const selectedToolNames = agentTools ?? [];
@@ -1595,66 +1582,6 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* Learning */}
-      <FieldGroup
-        label="Learning"
-        helperText="Enable Agno Learning so this agent can learn from conversations"
-        htmlFor="learning"
-      >
-        <Controller
-          name="learning"
-          control={control}
-          render={({ field }) => (
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="learning"
-                checked={field.value ?? defaultLearning}
-                onCheckedChange={(checked) => {
-                  const value = checked === true;
-                  field.onChange(value);
-                  handleFieldChange("learning", value);
-                }}
-              />
-              <label
-                htmlFor="learning"
-                className="text-sm font-medium cursor-pointer select-none"
-              >
-                Enable learning
-              </label>
-            </div>
-          )}
-        />
-      </FieldGroup>
-
-      <FieldGroup
-        label="Learning Mode"
-        helperText="Always: automatic extraction. Agentic: agent decides via tools."
-        htmlFor="learning_mode"
-      >
-        <Controller
-          name="learning_mode"
-          control={control}
-          render={({ field }) => (
-            <Select
-              value={field.value ?? defaultLearningMode}
-              onValueChange={(value) => {
-                field.onChange(value);
-                handleFieldChange("learning_mode", value);
-              }}
-              disabled={effectiveLearningEnabled === false}
-            >
-              <SelectTrigger id="learning_mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="always">Always (automatic)</SelectItem>
-                <SelectItem value="agentic">Agentic (tool-driven)</SelectItem>
-              </SelectContent>
-            </Select>
-          )}
-        />
-      </FieldGroup>
-
       {/* Show Tool Calls */}
       <FieldGroup
         label="Show Tool Calls"
@@ -1824,14 +1751,6 @@ export function AgentEditor() {
         numHistoryMessagesError={numHistoryMessagesError}
         maxToolCallsFromHistoryError={maxToolCallsFromHistoryError}
         compactionError={compactionError}
-        compressToolResults={{
-          defaultValue: defaultCompressToolResults,
-          helperText: `Compress tool results in history to save context (global default: ${
-            defaultCompressToolResults ? "on" : "off"
-          }). On Anthropic/Vertex Claude, enabling this can invalidate prompt-cache prefixes.`,
-          onChange: (value) =>
-            handleFieldChange("compress_tool_results", value),
-        }}
       />
 
       <SchemaSection

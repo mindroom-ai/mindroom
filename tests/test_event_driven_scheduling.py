@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,6 +11,8 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from tests.conftest import install_model_providers
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -59,20 +60,13 @@ def mock_config(runtime_paths: RuntimePaths) -> Config:
 class TestEventDrivenScheduling:
     """Test event-driven scheduling conversions."""
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_email_urgent_event(
         self,
-        mock_agent_class: MagicMock,
-        mock_get_model: MagicMock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting 'if email urgent' to polling schedule."""
-        # Setup
-        mock_agent = AsyncMock()
-        mock_agent_class.return_value = mock_agent
-
         # Create expected workflow response
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
@@ -82,9 +76,8 @@ class TestEventDrivenScheduling:
             description="Monitor for urgent emails and alert",
         )
 
-        mock_response = MagicMock()
-        mock_response.content = expected_workflow
-        mock_agent.arun.return_value = mock_response
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -98,27 +91,20 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-        # Verify AI agent was called with proper prompt
-        mock_agent.arun.assert_called_once()
-        call_args = mock_agent.arun.call_args[0][0]
+        # Verify the parser model was asked once, with the event guidance in its prompt
+        [request] = model.requests
+        call_args = request.messages[-1].get_content_string()
         assert "event-based" in call_args.lower()
         assert "if" in call_args.lower()
         assert "polling" in call_args.lower()
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_bitcoin_price_event(
         self,
-        mock_agent_class: MagicMock,
-        mock_get_model: MagicMock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting Bitcoin price condition to polling schedule."""
-        # Setup
-        mock_agent = AsyncMock()
-        mock_agent_class.return_value = mock_agent
-
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
             is_conditional=True,
@@ -127,9 +113,8 @@ class TestEventDrivenScheduling:
             description="Monitor Bitcoin price threshold",
         )
 
-        mock_response = MagicMock()
-        mock_response.content = expected_workflow
-        mock_agent.arun.return_value = mock_response
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -143,20 +128,13 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_server_monitoring_event(
         self,
-        mock_agent_class: MagicMock,
-        mock_get_model: MagicMock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting server monitoring condition to polling schedule."""
-        # Setup
-        mock_agent = AsyncMock()
-        mock_agent_class.return_value = mock_agent
-
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
             is_conditional=True,
@@ -165,9 +143,8 @@ class TestEventDrivenScheduling:
             description="Monitor CPU and auto-scale",
         )
 
-        mock_response = MagicMock()
-        mock_response.content = expected_workflow
-        mock_agent.arun.return_value = mock_response
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -181,20 +158,13 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_build_failure_event(
         self,
-        mock_agent_class: MagicMock,
-        mock_get_model: MagicMock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting build failure event to polling schedule."""
-        # Setup
-        mock_agent = AsyncMock()
-        mock_agent_class.return_value = mock_agent
-
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
             is_conditional=True,
@@ -203,9 +173,8 @@ class TestEventDrivenScheduling:
             description="Monitor builds and create failure tickets",
         )
 
-        mock_response = MagicMock()
-        mock_response.content = expected_workflow
-        mock_agent.arun.return_value = mock_response
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -219,20 +188,13 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_reddit_mention_event(
         self,
-        mock_agent_class: MagicMock,
-        mock_get_model: MagicMock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting Reddit mention event to polling schedule."""
-        # Setup
-        mock_agent = AsyncMock()
-        mock_agent_class.return_value = mock_agent
-
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
             is_conditional=True,
@@ -241,9 +203,8 @@ class TestEventDrivenScheduling:
             description="Monitor Reddit mentions and analyze",
         )
 
-        mock_response = MagicMock()
-        mock_response.content = expected_workflow
-        mock_agent.arun.return_value = mock_response
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -257,20 +218,13 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_boss_email_immediate_event(
         self,
-        mock_agent_class: MagicMock,
-        mock_get_model: MagicMock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting boss email event with immediate urgency."""
-        # Setup
-        mock_agent = AsyncMock()
-        mock_agent_class.return_value = mock_agent
-
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
             is_conditional=True,
@@ -279,9 +233,8 @@ class TestEventDrivenScheduling:
             description="Monitor for boss emails",
         )
 
-        mock_response = MagicMock()
-        mock_response.content = expected_workflow
-        mock_agent.arun.return_value = mock_response
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -295,20 +248,13 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_prompt_includes_event_examples(
         self,
-        mock_agent_class: MagicMock,
-        mock_get_model: MagicMock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test that the prompt includes event-driven examples."""
-        # Setup
-        mock_agent = AsyncMock()
-        mock_agent_class.return_value = mock_agent
-
         # We'll return a simple workflow just to complete the call
         simple_workflow = ScheduledWorkflow(
             schedule_type="once",
@@ -317,9 +263,8 @@ class TestEventDrivenScheduling:
             description="Test",
         )
 
-        mock_response = MagicMock()
-        mock_response.content = simple_workflow
-        mock_agent.arun.return_value = mock_response
+        model = ScriptedModel([answer(simple_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         await _parse_workflow_schedule(
@@ -330,7 +275,8 @@ class TestEventDrivenScheduling:
         )
 
         # Verify the prompt contains generic event-driven guidance
-        call_args = mock_agent.arun.call_args[0][0]
+        [request] = model.requests
+        call_args = request.messages[-1].get_content_string()
 
         # Check for schema-driven event guidance rather than trigger words
         assert "is_conditional=true" in call_args

@@ -27,7 +27,7 @@ from mindroom.config.main import (
     format_invalid_config_message,
     load_config_or_user_error,
 )
-from mindroom.config.models import AgentLearningMode, ToolConfigEntry
+from mindroom.config.models import ToolConfigEntry
 from mindroom.config.schema_hints import redaction_marker_location
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
@@ -765,8 +765,6 @@ class ConfigManagerTools(Toolkit):
         knowledge_bases: list[str] | None = None,
         include_default_tools: bool | None = None,
         markdown: bool | None = None,
-        learning: bool | None = None,
-        learning_mode: AgentLearningMode | None = None,
     ) -> str:
         """Manage agent configurations - create, update, or validate agents.
 
@@ -782,8 +780,6 @@ class ConfigManagerTools(Toolkit):
             knowledge_bases: List of knowledge base IDs to assign to this agent
             include_default_tools: Whether this agent should include defaults.tools
             markdown: Whether to use markdown formatting
-            learning: Whether to enable Agno Learning for this agent
-            learning_mode: Learning mode for Agno Learning ("always" or "agentic")
 
         Returns:
             Success message or error details
@@ -825,8 +821,6 @@ class ConfigManagerTools(Toolkit):
                 knowledge_bases=knowledge_bases,
                 include_default_tools=include_default_tools,
                 markdown=markdown,
-                learning=learning,
-                learning_mode=learning_mode,
                 config=config,
                 tool_metadata=tool_metadata,
             )
@@ -843,8 +837,6 @@ class ConfigManagerTools(Toolkit):
             knowledge_bases=knowledge_bases or [],
             include_default_tools=include_default_tools,
             markdown=markdown,
-            learning=learning,
-            learning_mode=learning_mode,
             config=config,
             tool_metadata=tool_metadata,
         )
@@ -1204,8 +1196,6 @@ class ConfigManagerTools(Toolkit):
         knowledge_bases: list[str],
         include_default_tools: bool | None,
         markdown: bool | None,
-        learning: bool | None,
-        learning_mode: AgentLearningMode | None,
         config: Config,
         tool_metadata: dict[str, ToolMetadata],
     ) -> str:
@@ -1237,8 +1227,6 @@ class ConfigManagerTools(Toolkit):
                 knowledge_bases=knowledge_bases,
                 include_default_tools=True if include_default_tools is None else include_default_tools,
                 markdown=markdown,
-                learning=learning,
-                learning_mode=learning_mode,
             )
 
             # Add to config
@@ -1279,7 +1267,7 @@ class ConfigManagerTools(Toolkit):
             logger.exception("Failed to create agent")
             return f"Error creating agent: {e}"
 
-    def _update_agent_config(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    def _update_agent_config(  # noqa: C901, PLR0911, PLR0912
         self,
         agent_name: str,
         display_name: str | None,
@@ -1291,8 +1279,6 @@ class ConfigManagerTools(Toolkit):
         knowledge_bases: list[str] | None,
         include_default_tools: bool | None,
         markdown: bool | None,
-        learning: bool | None,
-        learning_mode: AgentLearningMode | None,
         config: Config,
         tool_metadata: dict[str, ToolMetadata],
     ) -> str:
@@ -1355,14 +1341,6 @@ class ConfigManagerTools(Toolkit):
             if markdown is not None and markdown != agent.markdown:
                 agent.markdown = markdown
                 changes.append(f"Markdown -> {markdown}")
-
-            if learning is not None and learning != agent.learning:
-                agent.learning = learning
-                changes.append(f"Learning -> {learning}")
-
-            if learning_mode is not None and learning_mode != agent.learning_mode:
-                agent.learning_mode = learning_mode
-                changes.append(f"Learning Mode -> {learning_mode}")
 
             if not changes:
                 return "No changes made. All provided values are the same as current configuration."

@@ -15,6 +15,7 @@ from mindroom.memory._shared import FILE_MEMORY_DEFAULT_DIRNAME
 from mindroom.memory.config import _get_memory_config
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.preflight import session_storage_preflight
+from mindroom.session_storage.schema import TableNames
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,10 +31,11 @@ def test_primary_state_written_beside_a_private_workspace_is_reserved(tmp_path: 
         knowledge_bases={"notes": KnowledgeBaseConfig(path=str(tmp_path / "notes"), mode="files")},
     )
 
-    with session_storage_preflight(state_root, storage_name="mind", session_table="sessions", timeout_seconds=1):
+    with session_storage_preflight(state_root, TableNames("mind"), timeout_seconds=1):
         pass
-    create_state_storage("mind", state_root, subdir="sessions", session_table="sessions")
-    create_state_storage("mind", state_root, subdir="learning", session_table="learning")
+    create_state_storage("mind", state_root)
+    # Retired Agno Learning left its databases here, and a worker must never mount them.
+    (state_root / "learning").mkdir()
     _get_memory_config(state_root, config, runtime_paths)
     KnowledgeManager("notes", config=config, runtime_paths=runtime_paths, storage_path=state_root)
     browser = BrowserTools(runtime_paths, agent_state_root=state_root)

@@ -205,7 +205,10 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     bridge._room = MagicMock()
     bridge._room.disconnect = AsyncMock()
 
-    await bridge.start_agent(VoiceAgentOptions(instructions="Be concise.", model="gpt-realtime-2.1", api_key="sk"))
+    close_tools = AsyncMock()
+    await bridge.start_agent(
+        VoiceAgentOptions(instructions="Be concise.", model="gpt-realtime-2.1", api_key="sk", close_tools=close_tools),
+    )
 
     assert fake_session.input.audio is fake_audio_input
     assert fake_session.room_options.audio_input is False
@@ -216,6 +219,8 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     await bridge.aclose()
 
     fake_model.aclose.assert_awaited_once()
+    # What the call's tools connected closes with the session.
+    close_tools.assert_awaited_once()
 
 
 def _llm_usage(inputs: int, outputs: int = 10, **counters: int) -> LLMModelUsage:
@@ -300,7 +305,13 @@ async def test_realtime_session_records_each_responses_token_usage(monkeypatch: 
     latest = recorded[-1]
     assert latest.model == "gpt-realtime-2.1"
     assert [
-        (r.input_tokens, r.output_tokens, r.cache_read_tokens, r.audio_input_tokens, r.audio_output_tokens)
+        (
+            r.tokens.input_tokens,
+            r.tokens.output_tokens,
+            r.tokens.cache_read_tokens,
+            r.tokens.audio_input_tokens,
+            r.tokens.audio_output_tokens,
+        )
         for r in latest.responses
     ] == [(900, 300, 400, 800, 250), (1100, 400, 800, 1000, 350)]
 
@@ -317,7 +328,7 @@ async def test_realtime_usage_reported_while_the_call_closes_is_saved(monkeypatc
     report(_llm_usage(900))
     await bridge.aclose()
 
-    assert [response.input_tokens for response in recorded[-1].responses] == [900, 1100]
+    assert [response.tokens.input_tokens for response in recorded[-1].responses] == [900, 1100]
 
 
 @pytest.mark.asyncio

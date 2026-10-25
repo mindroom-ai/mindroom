@@ -1,0 +1,439 @@
+{
+  "family": "anthropic",
+  "input": {
+    "deferred_tool_search": {
+      "mode": "native",
+      "tool_names": [
+        "lookup_order",
+        "send_invoice"
+      ]
+    },
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Where is order A-1001?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "id": "claude-sonnet-5-5",
+      "provider": "anthropic"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Look up one order by id.",
+        "external_execution": false,
+        "name": "lookup_order",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Email the invoice for one order.",
+        "external_execution": false,
+        "name": "send_invoice",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "citations": {
+        "documents": [],
+        "raw": [],
+        "urls": []
+      },
+      "from_history": false,
+      "provider_data": {
+        "content_blocks": [
+          {
+            "id": "srvtoolu_parity",
+            "input": {
+              "pattern": "order"
+            },
+            "name": "tool_search_tool_regex",
+            "type": "server_tool_use"
+          },
+          {
+            "content": {
+              "tool_references": [
+                {
+                  "tool_name": "lookup_order",
+                  "type": "tool_reference"
+                }
+              ],
+              "type": "tool_search_tool_search_result"
+            },
+            "tool_use_id": "srvtoolu_parity",
+            "type": "tool_search_tool_result"
+          },
+          {
+            "id": "toolu_parity_order",
+            "input": {
+              "order_id": "A-1001"
+            },
+            "name": "lookup_order",
+            "type": "tool_use"
+          }
+        ],
+        "mindroom_model": {
+          "id": "claude-sonnet-5-5",
+          "provider": "Anthropic"
+        },
+        "mindroom_native_compaction": null,
+        "server_tool_blocks": [
+          {
+            "caller": null,
+            "id": "srvtoolu_parity",
+            "input": {
+              "pattern": "order"
+            },
+            "name": "tool_search_tool_regex",
+            "type": "server_tool_use"
+          },
+          {
+            "content": {
+              "tool_references": [
+                {
+                  "tool_name": "lookup_order",
+                  "type": "tool_reference"
+                }
+              ],
+              "type": "tool_search_tool_search_result"
+            },
+            "tool_use_id": "srvtoolu_parity",
+            "type": "tool_search_tool_result"
+          }
+        ],
+        "stop_reason": "tool_use"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"order_id\": \"A-1001\"}",
+            "name": "lookup_order"
+          },
+          "id": "toolu_parity_order",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "context_usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 42
+        }
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": "tool_use"
+  },
+  "request": {
+    "body": {
+      "max_tokens": 8192,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Where is order A-1001?",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
+            }
+          ]
+        }
+      ],
+      "model": "claude-sonnet-5-5",
+      "system": [
+        {
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool_search_tool_regex_20251119",
+          "name": "tool_search_tool_regex"
+        },
+        {
+          "name": "get_weather",
+          "description": "Return the forecast for one city.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "description": "City name.",
+                "type": "string"
+              },
+              "unit": {
+                "description": "Temperature unit.",
+                "enum": [
+                  "celsius",
+                  "fahrenheit"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "additionalProperties": false
+          },
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        },
+        {
+          "name": "lookup_order",
+          "description": "Look up one order by id.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "order_id": {
+                "type": "string",
+                "description": ""
+              }
+            },
+            "required": [
+              "order_id"
+            ],
+            "additionalProperties": false
+          },
+          "defer_loading": true
+        },
+        {
+          "name": "send_invoice",
+          "description": "Email the invoice for one order.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "order_id": {
+                "type": "string",
+                "description": ""
+              }
+            },
+            "required": [
+              "order_id"
+            ],
+            "additionalProperties": false
+          },
+          "defer_loading": true
+        }
+      ],
+      "stream": true
+    },
+    "headers": {
+      "accept": "application/json",
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.anthropic.com/v1/messages"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "id": "srvtoolu_parity",
+            "input": {},
+            "name": "tool_search_tool_regex",
+            "type": "server_tool_use"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "partial_json": "{\"pattern\": \"order\"}",
+            "type": "input_json_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "content_block": {
+            "content": {
+              "tool_references": [
+                {
+                  "tool_name": "lookup_order",
+                  "type": "tool_reference"
+                }
+              ],
+              "type": "tool_search_tool_search_result"
+            },
+            "tool_use_id": "srvtoolu_parity",
+            "type": "tool_search_tool_result"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "content_block": {
+            "id": "toolu_parity_order",
+            "input": {},
+            "name": "lookup_order",
+            "type": "tool_use"
+          },
+          "index": 2,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "partial_json": "{\"order_id\": \"A-1001\"}",
+            "type": "input_json_delta"
+          },
+          "index": 2,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 2,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "claude_server_tool_blocks"
+}

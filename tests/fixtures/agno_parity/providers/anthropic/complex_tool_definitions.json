@@ -1,0 +1,716 @@
+{
+  "family": "anthropic",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional.",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "id": "claude-sonnet-5-5",
+      "provider": "anthropic"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Plan a multi-stop trip.",
+        "external_execution": false,
+        "name": "plan_trip",
+        "parameters": {
+          "properties": {
+            "budget": {
+              "anyOf": [
+                {
+                  "description": "Total budget for the trip.",
+                  "properties": {
+                    "amount": {
+                      "title": "Amount",
+                      "type": "number"
+                    },
+                    "currency": {
+                      "default": "EUR",
+                      "enum": [
+                        "EUR",
+                        "USD"
+                      ],
+                      "title": "Currency",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "amount"
+                  ],
+                  "title": "TripBudget",
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional total budget."
+            },
+            "days": {
+              "description": "Total trip length in days.",
+              "type": "integer"
+            },
+            "destination": {
+              "description": "Country or region to visit.",
+              "type": "string"
+            },
+            "pace": {
+              "description": "How full each day should be.",
+              "enum": [
+                "relaxed",
+                "packed"
+              ],
+              "type": "string"
+            },
+            "stops": {
+              "description": "Ordered stops with nights per stop.",
+              "items": {
+                "description": "One stop on the trip.",
+                "properties": {
+                  "city": {
+                    "description": "City name.",
+                    "title": "City",
+                    "type": "string"
+                  },
+                  "nights": {
+                    "default": 1,
+                    "description": "Nights to stay.",
+                    "minimum": 1,
+                    "title": "Nights",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "title": "TripStop",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "travelers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Traveler names and roles."
+            }
+          },
+          "required": [
+            "destination",
+            "stops"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Create a calendar event and invite attendees.",
+        "name": "calendar_create_event",
+        "parameters": {
+          "$defs": {
+            "Attendee": {
+              "properties": {
+                "contact": {
+                  "$ref": "#/$defs/Contact"
+                },
+                "optional": {
+                  "default": false,
+                  "title": "Optional",
+                  "type": "boolean"
+                },
+                "role": {
+                  "default": "guest",
+                  "enum": [
+                    "guest",
+                    "organizer"
+                  ],
+                  "title": "Role",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "contact"
+              ],
+              "title": "Attendee",
+              "type": "object"
+            },
+            "Contact": {
+              "properties": {
+                "email": {
+                  "format": "email",
+                  "title": "Email",
+                  "type": "string"
+                },
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Name"
+                }
+              },
+              "required": [
+                "email"
+              ],
+              "title": "Contact",
+              "type": "object"
+            },
+            "Location": {
+              "properties": {
+                "address": {
+                  "title": "Address",
+                  "type": "string"
+                },
+                "room": {
+                  "description": "Room inside the venue.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "address"
+              ],
+              "title": "Location",
+              "type": "object"
+            }
+          },
+          "properties": {
+            "attendees": {
+              "description": "People to invite.",
+              "items": {
+                "$ref": "#/$defs/Attendee"
+              },
+              "maxItems": 50,
+              "title": "Attendees",
+              "type": "array"
+            },
+            "labels": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Free-form labels.",
+              "title": "Labels",
+              "type": "object"
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Location"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "reminder_minutes": {
+              "default": 10,
+              "maximum": 1440,
+              "minimum": 0,
+              "title": "Reminder Minutes",
+              "type": "integer"
+            },
+            "starts_at": {
+              "format": "date-time",
+              "title": "Starts At",
+              "type": "string"
+            },
+            "title": {
+              "description": "Event title.",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "starts_at",
+            "attendees"
+          ],
+          "title": "create_eventArguments",
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "citations": {
+        "documents": [],
+        "raw": [],
+        "urls": []
+      },
+      "from_history": false,
+      "provider_data": {
+        "content_blocks": [
+          {
+            "id": "toolu_parity_event",
+            "input": {
+              "attendees": [
+                {
+                  "contact": {
+                    "email": "ana@example.com",
+                    "name": "Ana"
+                  },
+                  "role": "organizer"
+                },
+                {
+                  "contact": {
+                    "email": "ben@example.com"
+                  },
+                  "optional": true
+                }
+              ],
+              "labels": {
+                "trip": "paris"
+              },
+              "location": {
+                "address": "Gare du Nord, Paris",
+                "room": null
+              },
+              "starts_at": "2026-10-21T08:30:00+02:00",
+              "title": "Paris train"
+            },
+            "name": "calendar_create_event",
+            "type": "tool_use"
+          }
+        ],
+        "mindroom_model": {
+          "id": "claude-sonnet-5-5",
+          "provider": "Anthropic"
+        },
+        "mindroom_native_compaction": null,
+        "stop_reason": "tool_use"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"attendees\": [{\"contact\": {\"email\": \"ana@example.com\", \"name\": \"Ana\"}, \"role\": \"organizer\"}, {\"contact\": {\"email\": \"ben@example.com\"}, \"optional\": true}], \"labels\": {\"trip\": \"paris\"}, \"location\": {\"address\": \"Gare du Nord, Paris\", \"room\": null}, \"starts_at\": \"2026-10-21T08:30:00+02:00\", \"title\": \"Paris train\"}",
+            "name": "calendar_create_event"
+          },
+          "id": "toolu_parity_event",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "context_usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 42
+        }
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": "tool_use"
+  },
+  "request": {
+    "body": {
+      "max_tokens": 8192,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional.",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
+            }
+          ]
+        }
+      ],
+      "model": "claude-sonnet-5-5",
+      "system": [
+        {
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        }
+      ],
+      "tools": [
+        {
+          "name": "calendar_create_event",
+          "description": "Create a calendar event and invite attendees.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "attendees": {
+                "description": "People to invite.",
+                "items": {
+                  "$ref": "#/$defs/Attendee"
+                },
+                "maxItems": 50,
+                "title": "Attendees",
+                "type": "array"
+              },
+              "labels": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Free-form labels.",
+                "title": "Labels",
+                "type": "object"
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Location"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": ""
+              },
+              "reminder_minutes": {
+                "default": 10,
+                "maximum": 1440,
+                "minimum": 0,
+                "title": "Reminder Minutes",
+                "type": "integer",
+                "description": ""
+              },
+              "starts_at": {
+                "format": "date-time",
+                "title": "Starts At",
+                "type": "string",
+                "description": ""
+              },
+              "title": {
+                "description": "Event title.",
+                "title": "Title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "starts_at",
+              "attendees"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "Attendee": {
+                "properties": {
+                  "contact": {
+                    "$ref": "#/$defs/Contact"
+                  },
+                  "optional": {
+                    "default": false,
+                    "title": "Optional",
+                    "type": "boolean"
+                  },
+                  "role": {
+                    "default": "guest",
+                    "enum": [
+                      "guest",
+                      "organizer"
+                    ],
+                    "title": "Role",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "contact"
+                ],
+                "title": "Attendee",
+                "type": "object"
+              },
+              "Contact": {
+                "properties": {
+                  "email": {
+                    "format": "email",
+                    "title": "Email",
+                    "type": "string"
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Name"
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "title": "Contact",
+                "type": "object"
+              },
+              "Location": {
+                "properties": {
+                  "address": {
+                    "title": "Address",
+                    "type": "string"
+                  },
+                  "room": {
+                    "description": "Room inside the venue.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "address"
+                ],
+                "title": "Location",
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "plan_trip",
+          "description": "Plan a multi-stop trip.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "budget": {
+                "anyOf": [
+                  {
+                    "description": "Total budget for the trip.",
+                    "properties": {
+                      "amount": {
+                        "title": "Amount",
+                        "type": "number"
+                      },
+                      "currency": {
+                        "default": "EUR",
+                        "enum": [
+                          "EUR",
+                          "USD"
+                        ],
+                        "title": "Currency",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "amount"
+                    ],
+                    "title": "TripBudget",
+                    "type": "object",
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional total budget."
+              },
+              "days": {
+                "description": "Total trip length in days.",
+                "type": "integer"
+              },
+              "destination": {
+                "description": "Country or region to visit.",
+                "type": "string"
+              },
+              "pace": {
+                "description": "How full each day should be.",
+                "enum": [
+                  "relaxed",
+                  "packed"
+                ],
+                "type": "string"
+              },
+              "stops": {
+                "description": "Ordered stops with nights per stop.",
+                "items": {
+                  "description": "One stop on the trip.",
+                  "properties": {
+                    "city": {
+                      "description": "City name.",
+                      "title": "City",
+                      "type": "string"
+                    },
+                    "nights": {
+                      "default": 1,
+                      "description": "Nights to stay.",
+                      "minimum": 1,
+                      "title": "Nights",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city"
+                  ],
+                  "title": "TripStop",
+                  "type": "object",
+                  "additionalProperties": false
+                },
+                "type": "array"
+              },
+              "travelers": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Traveler names and roles."
+              }
+            },
+            "required": [
+              "destination",
+              "stops"
+            ],
+            "additionalProperties": false
+          },
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        }
+      ],
+      "stream": true
+    },
+    "headers": {
+      "accept": "application/json",
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.anthropic.com/v1/messages"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "id": "toolu_parity_event",
+            "input": {},
+            "name": "calendar_create_event",
+            "type": "tool_use"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "partial_json": "{\"attendees\": [{\"contact\": {\"email\": \"ana@example.com\", \"name\": \"Ana\"}, \"role\": \"organizer\"}, {\"contact\": {\"email\": \"ben@example.com\"}, \"optional\": true}], \"labels\": {\"trip\": \"paris\"}, \"location\": {\"address\": \"Gare du Nord, Paris\", \"room\": null}, \"starts_at\": \"2026-10-21T08:30:00+02:00\", \"title\": \"Paris train\"}",
+            "type": "input_json_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "complex_tool_definitions"
+}

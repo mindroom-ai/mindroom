@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agno.models.message import Message
+from mindroom.llm.messages import Message
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -47,32 +47,23 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     assert stats.decode_error_count == 0
 
 
-def test_load_request_rows_skips_rows_with_corrupt_tool_call_arguments(tmp_path: Path) -> None:
-    """One logged row with invalid tool_call arguments must not kill the review."""
+def _claude_row(second: int, messages: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "timestamp": f"2026-04-11T11:00:0{second}-07:00",
+        "agent_name": "opus",
+        "model_id": "claude-opus-5",
+        "system_prompt": "S",
+        "messages": messages,
+        "message_count": len(messages),
+    }
+
+
+def test_load_request_rows_skips_rows_whose_messages_cannot_be_decoded(tmp_path: Path) -> None:
+    """One logged row whose messages cannot be rebuilt must not kill the review."""
     module = _load_prompt_cache_review_module()
     jsonl_path = tmp_path / "requests.jsonl"
-    corrupt_arguments = '{"args": "curl \\\\"https://example.test?x=1%5C" | head"}'
-    corrupt_row = {
-        "timestamp": "2026-04-11T11:00:00-07:00",
-        "agent_name": "opus",
-        "model_id": "claude-opus-5",
-        "system_prompt": "S",
-        "messages": [
-            {
-                "role": "assistant",
-                "tool_calls": [{"id": "t1", "function": {"name": "run_shell_command", "arguments": corrupt_arguments}}],
-            },
-        ],
-        "message_count": 1,
-    }
-    healthy_row = {
-        "timestamp": "2026-04-11T11:00:01-07:00",
-        "agent_name": "opus",
-        "model_id": "claude-opus-5",
-        "system_prompt": "S",
-        "messages": [{"role": "user", "content": "hello"}],
-        "message_count": 1,
-    }
+    corrupt_row = _claude_row(0, [{"content": "a message without a role"}])
+    healthy_row = _claude_row(1, [{"role": "user", "content": "hello"}])
     jsonl_path.write_text(
         json.dumps(corrupt_row) + "\n" + json.dumps(healthy_row) + "\n",
         encoding="utf-8",
@@ -85,7 +76,22 @@ def test_load_request_rows_skips_rows_with_corrupt_tool_call_arguments(tmp_path:
     assert stats.unparseable_row_count == 1
     assert stats.decode_error_count == 0
     assert len(stats.unparseable_row_errors) == 1
-    assert "JSONDecodeError" in stats.unparseable_row_errors[0]
+    assert "KeyError" in stats.unparseable_row_errors[0]
+
+
+def test_load_request_rows_keeps_rows_with_corrupt_tool_call_arguments(tmp_path: Path) -> None:
+    """A tool call whose stored arguments are not JSON replays as a call without arguments, as every wire sends it."""
+    module = _load_prompt_cache_review_module()
+    jsonl_path = tmp_path / "requests.jsonl"
+    corrupt_arguments = '{"args": "curl \\\\"https://example.test?x=1%5C" | head"}'
+    call = {"id": "t1", "function": {"name": "run_shell_command", "arguments": corrupt_arguments}}
+    row = _claude_row(0, [{"role": "user", "content": "hello"}, {"role": "assistant", "tool_calls": [call]}])
+    jsonl_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    rows, stats = module.load_request_rows(jsonl_path)
+
+    assert (len(rows), stats.unparseable_row_count) == (1, 0)
+    assert '"input":{}' in rows[0].message_blobs[-1].replace(" ", "")
 
 
 def test_build_session_reviews_detects_prefix_extension_with_two_appended_messages() -> None:

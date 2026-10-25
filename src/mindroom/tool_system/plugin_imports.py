@@ -295,23 +295,9 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         msg = f"{exc} ({path})"
         raise PluginValidationError(msg) from exc
 
-    tools_module = data.get("tools_module")
-    if tools_module is not None and not isinstance(tools_module, str):
-        msg = f"Plugin tools_module must be a string: {path}"
-        logger.error("Plugin tools_module must be a string", path=str(path))
-        raise PluginValidationError(msg)
-
-    hooks_module = data.get("hooks_module")
-    if hooks_module is not None and not isinstance(hooks_module, str):
-        msg = f"Plugin hooks_module must be a string: {path}"
-        logger.error("Plugin hooks_module must be a string", path=str(path))
-        raise PluginValidationError(msg)
-
-    oauth_module = data.get("oauth_module")
-    if oauth_module is not None and not isinstance(oauth_module, str):
-        msg = f"Plugin oauth_module must be a string: {path}"
-        logger.error("Plugin oauth_module must be a string", path=str(path))
-        raise PluginValidationError(msg)
+    tools_module = _manifest_module(data, "tools_module", path)
+    hooks_module = _manifest_module(data, "hooks_module", path)
+    oauth_module = _manifest_module(data, "oauth_module", path)
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
@@ -328,6 +314,17 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         oauth_module=oauth_module,
         skills=raw_skills,
     )
+
+
+def _manifest_module(data: dict[str, Any], field: str, path: Path) -> str | None:
+    """Return the manifest's optional module path ``field``, refusing one that is not a string."""
+    module = data.get(field)
+    if module is not None and not isinstance(module, str):
+        event = f"Plugin {field} must be a string"
+        logger.error(event, path=str(path))
+        msg = f"{event}: {path}"
+        raise PluginValidationError(msg)
+    return module
 
 
 def _resolve_module_path(root: Path, module_path: str | None, *, kind: str) -> Path | None:

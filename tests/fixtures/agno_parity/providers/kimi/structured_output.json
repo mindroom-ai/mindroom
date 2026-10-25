@@ -1,0 +1,160 @@
+{
+  "family": "kimi",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "Route the message to the best agent.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "kimi_home": "<kimi_home>"
+      },
+      "id": "k3",
+      "provider": "kimi"
+    },
+    "portable_replay": null,
+    "response_format": {
+      "json_schema": {
+        "description": "Structured output for routing decisions.",
+        "properties": {
+          "entity_name": {
+            "description": "The name of the agent or team that should respond",
+            "title": "Entity Name",
+            "type": "string"
+          },
+          "reasoning": {
+            "description": "Brief explanation of why this agent or team was chosen",
+            "title": "Reasoning",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_name",
+          "reasoning"
+        ],
+        "title": "_RoutingSuggestion",
+        "type": "object"
+      },
+      "model": "mindroom.routing:_RoutingSuggestion",
+      "type": "pydantic"
+    },
+    "stream": false,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+      "from_history": false,
+      "provider_data": {
+        "finish_reason": "stop",
+        "id": "chatcmpl-parity",
+        "mindroom_model": {
+          "id": "k3",
+          "provider": "Kimi Chat"
+        },
+        "system_fingerprint": "fp_parity"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": "stop"
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "Route the message to the best agent."
+        },
+        {
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
+        }
+      ],
+      "model": "k3",
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "_RoutingSuggestion",
+          "schema": {
+            "description": "Structured output for routing decisions.",
+            "properties": {
+              "entity_name": {
+                "description": "The name of the agent or team that should respond",
+                "title": "Entity Name",
+                "type": "string"
+              },
+              "reasoning": {
+                "description": "Brief explanation of why this agent or team was chosen",
+                "title": "Reasoning",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entity_name",
+              "reasoning"
+            ],
+            "title": "_RoutingSuggestion",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "strict": true
+        }
+      }
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.kimi.com/coding/v1/chat/completions"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1792540800,
+      "id": "chatcmpl-parity",
+      "model": "k3",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_parity",
+      "usage": {
+        "completion_tokens": 12,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 42,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 54
+      }
+    },
+    "status": 200
+  },
+  "scenario": "structured_output"
+}

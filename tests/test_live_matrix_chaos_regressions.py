@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, Mock, patch
 import nio
 import pytest
 import structlog
-from agno.run.base import RunStatus
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.cli import main as cli_main
@@ -30,6 +29,7 @@ from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread, has_
 from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.llm.runs import RunStatus
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.message_builder import build_matrix_edit_content

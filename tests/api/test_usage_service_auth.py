@@ -175,7 +175,7 @@ def _seed_usage_database(storage_root: Path) -> None:
             ),
         )
 
-    migrate_usage_database(database, "test_agent_sessions")
+    migrate_usage_database(database)
 
 
 def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str | None:

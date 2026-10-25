@@ -3,9 +3,8 @@
 
 from __future__ import annotations
 
-from agno.metrics import MessageMetrics
-from agno.models.message import Message
-
+from mindroom.llm.messages import Message
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.model_usage import response_context_tokens, uncached_input_tokens_from_counts
 
 
@@ -14,8 +13,10 @@ def _assistant(metrics: MessageMetrics) -> Message:
 
 
 def test_response_context_tokens_adds_cache_tokens_only_where_reported_outside_input() -> None:
-    anthropic = _assistant(MessageMetrics(input_tokens=10, cache_read_tokens=90, cache_write_tokens=5))
-    openai = _assistant(MessageMetrics(input_tokens=100, cache_read_tokens=90))
+    anthropic = _assistant(
+        MessageMetrics(tokens=TokenCounts(input_tokens=10, cache_read_tokens=90, cache_write_tokens=5)),
+    )
+    openai = _assistant(MessageMetrics(tokens=TokenCounts(input_tokens=100, cache_read_tokens=90)))
 
     assert (
         response_context_tokens(anthropic, provider="Anthropic", configured_provider="anthropic", model_id="m") == 105
@@ -26,8 +27,7 @@ def test_response_context_tokens_adds_cache_tokens_only_where_reported_outside_i
 def test_native_final_iteration_context_wins_over_billed_counters() -> None:
     message = _assistant(
         MessageMetrics(
-            input_tokens=900,
-            cache_read_tokens=0,
+            tokens=TokenCounts(input_tokens=900, cache_read_tokens=0),
             provider_metrics={"context_usage": {"input_tokens": 40, "cache_read_tokens": 60, "cache_write_tokens": 0}},
         ),
     )

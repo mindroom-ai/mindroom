@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import threading
 import time
 from dataclasses import dataclass, field
@@ -11,12 +12,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-from agno.db.base import SessionType
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -30,8 +25,12 @@ from mindroom.knowledge_graph.store import (
     knowledge_graph_failure,
     record_knowledge_graph_failure,
 )
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
+from mindroom.usage.storage import quote_identifier
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
@@ -117,8 +116,8 @@ def _run(
     agent: str = "mind",
     *,
     matrix: bool = True,
-) -> RunOutput:
-    return RunOutput(
+) -> RunRecord:
+    return RunRecord(
         run_id=run_id,
         session_id=session_id,
         agent_id=agent,
@@ -161,39 +160,33 @@ def _seed(
 ) -> None:
     """Store a conversation whose runs start at ``at``, ``spacing`` seconds apart, last updated after its last run."""
     storage = create_session_storage(agent, config, paths, execution_identity=None)
-    try:
-        runs = [
-            _run(
-                run_id,
-                session_id,
-                at + index * spacing,
-                RunStatus.paused if run_id in paused else RunStatus.completed,
-                agent,
-                matrix=matrix,
-            )
-            for index, run_id in enumerate(run_ids)
-        ]
-        seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
-        with storage.db_engine.begin() as connection:
-            connection.exec_driver_sql(
-                f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (updated_at if updated_at is not None else at + (len(run_ids) - 1) * spacing + 1, session_id),
-            )
-    finally:
-        storage.close()
+    runs = [
+        _run(
+            run_id,
+            session_id,
+            at + index * spacing,
+            RunStatus.paused if run_id in paused else RunStatus.completed,
+            agent,
+            matrix=matrix,
+        )
+        for index, run_id in enumerate(run_ids)
+    ]
+    seed_session(storage, ConversationSession(session_id=session_id, kind="agent", owner_id=agent, runs=runs))
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            f"UPDATE {quote_identifier(storage.names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+            (updated_at if updated_at is not None else at + (len(run_ids) - 1) * spacing + 1, session_id),
+        )
 
 
-def _edit_runs(config: Config, paths: RuntimePaths, session_id: str, edit: Callable[[list[RunOutput]], None]) -> None:
+def _edit_runs(config: Config, paths: RuntimePaths, session_id: str, edit: Callable[[list[RunRecord]], None]) -> None:
     """Change a seeded conversation's stored runs in place."""
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        session = storage.get_session(session_id, SessionType.AGENT)
-        assert isinstance(session, AgentSession)
-        edit(session.runs)
-        for run in session.runs:
-            storage.upsert_run(run=run, session_id=session_id, user_id=None)
-    finally:
-        storage.close()
+    session = storage.load_session(session_id, "agent")
+    assert session is not None
+    runs = copy.deepcopy(session.runs)
+    edit(runs)
+    storage.save_runs(session, runs)
 
 
 async def _no_redactions(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
@@ -492,7 +485,7 @@ async def test_a_later_pass_names_a_person_as_their_earlier_turns_did(tmp_path: 
     """A turn stored without a display name, such as a stopped one, names its sender as the conversation did before."""
     config, paths, store = _config(), _paths(tmp_path), _FakeStore()
 
-    def tagged(runs: list[RunOutput]) -> None:
+    def tagged(runs: list[RunRecord]) -> None:
         for run in runs:
             display_name = "Alice Example" if run.run_id == "r1" else None
             body = f"question {run.run_id}"
@@ -521,7 +514,7 @@ async def test_a_long_backlog_spreads_over_passes(tmp_path: Path) -> None:
     run_ids = [f"r{index:02d}" for index in range(30)]
     _seed(config, paths, "!room:x:$t1", run_ids)
 
-    def long_answers(runs: list[RunOutput]) -> None:
+    def long_answers(runs: list[RunRecord]) -> None:
         for run in runs:
             run.messages[1].content = "a" * 600
 
@@ -584,7 +577,7 @@ async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: P
     config, paths = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path)
     _seed(config, paths, "!room:x:$t1", ["r1"])
 
-    def eight_results(runs: list[RunOutput]) -> None:
+    def eight_results(runs: list[RunRecord]) -> None:
         runs[0].tools = [
             ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
             for index in range(8)
@@ -620,7 +613,7 @@ async def test_a_turn_waiting_on_a_recent_approval_still_holds_back(tmp_path: Pa
     config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
 
-    def asked_on_day_six(runs: list[RunOutput]) -> None:
+    def asked_on_day_six(runs: list[RunRecord]) -> None:
         runs[0].messages[-1].created_at = T0 + 6 * DAY
 
     _edit_runs(config, paths, "!room:x:$t1", asked_on_day_six)
@@ -638,7 +631,7 @@ async def test_an_unreadable_conversation_does_not_block_the_agents_others(tmp_p
     _seed(config, paths, "!room:x:$good", ["g1"])
     real = ingestion.session_runs
 
-    def runs(storage: object, session_id: str) -> list[RunOutput]:
+    def runs(storage: object, session_id: str) -> list[RunRecord]:
         if session_id == "!room:x:$bad":
             msg = "corrupt session row"
             raise ValueError(msg)
@@ -711,7 +704,7 @@ async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_
             raise RuntimeError(msg)
         return frozenset()
 
-    def runs(storage: object, session_id: str) -> list[RunOutput]:
+    def runs(storage: object, session_id: str) -> list[RunRecord]:
         if failure == "unreadable" and failing and session_id == "!room:x:$t1":
             msg = "corrupt session row"
             raise ValueError(msg)
@@ -1263,7 +1256,7 @@ async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_p
             raise RuntimeError(msg)
         return frozenset()
 
-    def runs(storage: object, session_id: str) -> list[RunOutput]:
+    def runs(storage: object, session_id: str) -> list[RunRecord]:
         if failure == "unreadable" and session_id == "!room:x:$bad":
             msg = "corrupt session row"
             raise ValueError(msg)

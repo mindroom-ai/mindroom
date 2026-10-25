@@ -7,15 +7,14 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Never
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
 
 from mindroom import ai
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.llm.runs import RunStatus
 from mindroom.prompts import BACKGROUND_JOBS_ENDED_NOTICE
+from mindroom.response_turn import TurnContinuationRunState
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -25,25 +24,33 @@ from mindroom.tool_jobs.notices import (
     _job_notice_text,
     _turn_start_job_note,
     append_turn_start_job_note,
-    install_job_notice_hook,
     job_notice_context,
 )
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobUnavailableError, register_background_runtime
+from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import make_turn_context
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import assembled_function, lookup, start_job, tool_job_runtime, wait_for_status
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.tool_job_helpers import (
+    job_actor,
+    job_tool,
+    lookup,
+    run_job_turn,
+    start_job,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
-
-    from agno.db.base import BaseDb
-    from agno.run.agent import RunOutput
 
     from mindroom.agent_modes import AgentMode
     from mindroom.hooks.types import EnrichmentItem
+    from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -101,15 +108,12 @@ async def _conversation(tmp_path: Path) -> _Conversation:
 
 async def _run(
     conversation: _Conversation,
-    responses: list[ModelResponse],
+    turns: Sequence[Sequence[ScriptStep]],
     *,
     notices: bool = True,
     entity_name: str = "leader",
-) -> RunOutput:
+) -> RunRecord:
     """Run one model of the reply, the leader's unless `entity_name` names a team member, whose tools can end jobs."""
-    model = DelegationModel(id="test", responses=responses)
-    install_tool_job_execution(model)
-    install_job_notice_hook(model, entity_name=entity_name)
 
     async def end_jobs(job_ids: list[str]) -> str:
         """End background jobs."""
@@ -119,16 +123,17 @@ async def _run(
         """Do nothing."""
         return "nothing"
 
-    agent = Agent(id="leader", model=model, tools=[end_jobs, noop])
+    generated = tuple(adapt_function(Function.from_callable(tool)) for tool in (end_jobs, noop))
+    model = ScriptedModel(list(turns))
     with tool_runtime_context(conversation.context):
         if not notices:
-            return await agent.arun("work", session_id=conversation.context.session_id)
+            return await run_job_turn(job_actor(name=entity_name), model, "work", generated=generated)
         with job_notice_context(JobNotices()):
-            return await agent.arun("work", session_id=conversation.context.session_id)
+            return await run_job_turn(job_actor(name=entity_name), model, "work", generated=generated)
 
 
-def _tool_results(response: RunOutput) -> list[str]:
-    return [str(message.content) for message in response.messages or [] if message.role == "tool"]
+def _tool_results(record: RunRecord) -> list[str]:
+    return [str(message.content) for message in record.messages or [] if message.role == "tool"]
 
 
 @pytest.mark.asyncio
@@ -141,9 +146,9 @@ async def test_jobs_that_end_between_steps_are_reported_once_together(tmp_path: 
         response = await _run(
             conversation,
             [
-                ModelResponse(tool_calls=[_call("end_jobs", "end", job_ids=["job_a", "job_b"])]),
-                ModelResponse(tool_calls=[_call("noop", "noop")]),
-                ModelResponse(content="done"),
+                calls(tool_call("end_jobs", "end", job_ids=["job_a", "job_b"])),
+                calls(tool_call("noop", "noop")),
+                answer("done"),
             ],
         )
         first, second = _tool_results(response)
@@ -160,6 +165,35 @@ def test_the_notice_asks_to_acknowledge_with_collect() -> None:
     """The notice asks for one collect call, even for jobs whose output is not needed."""
     assert 'job(action="collect")' in BACKGROUND_JOBS_ENDED_NOTICE
     assert "even" in BACKGROUND_JOBS_ENDED_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_that_ends_the_reply_leaves_its_ended_jobs_for_the_next_reply(tmp_path: Path) -> None:
+    """No request reads the result of a call that ends the reply, so a job cancelled meanwhile is told next time."""
+    conversation = await _conversation(tmp_path)
+
+    async def switch_away(job_id: str) -> str:
+        """Cancel a background job and end the reply.
+
+        Args:
+            job_id: The job to cancel.
+
+        """
+        await conversation.cancel(job_id)
+        return "switched"
+
+    stopping = replace(adapt_function(Function.from_callable(switch_away)), stop_after_call=True)
+    model = ScriptedModel([calls(tool_call("switch_away", "switch", job_id="job_a"))])
+    try:
+        await conversation.start("job_a")
+        with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
+            response = await run_job_turn(job_actor(), model, "work", generated=(stopping,))
+        assert _tool_results(response) == ["switched"]
+        assert not (await lookup(conversation.runtime, "job_a", owner=conversation.owner, depth=0)).consumed
+        with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
+            assert "`job_a` (tool_job_a) cancelled" in str(await _turn_start_job_note())
+    finally:
+        await conversation.runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -183,10 +217,7 @@ async def test_a_team_member_does_not_hear_the_teams_notices(tmp_path: Path) -> 
         await conversation.start("job_a")
         response = await _run(
             conversation,
-            [
-                ModelResponse(tool_calls=[_call("end_jobs", "end", job_ids=["job_a"])]),
-                ModelResponse(content="done"),
-            ],
+            [calls(tool_call("end_jobs", "end", job_ids=["job_a"])), answer("done")],
             entity_name="member",
         )
         assert _tool_results(response) == ["ended"]
@@ -214,7 +245,7 @@ async def test_a_reply_is_not_told_that_its_own_finished_call_ended(tmp_path: Pa
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
-    def storage_factory() -> BaseDb:
+    def storage_factory() -> ConversationStore:
         return create_session_storage("leader", config, paths, owner)
 
     async def fast_tool() -> str:
@@ -223,28 +254,16 @@ async def test_a_reply_is_not_told_that_its_own_finished_call_ended(tmp_path: Pa
     async def second_tool() -> str:
         return "second result"
 
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("fast_tool", "call-1")]),
-            ModelResponse(tool_calls=[_call("second_tool", "call-2")]),
-            ModelResponse(content="done"),
-        ],
+    model = ScriptedModel(
+        [calls(tool_call("fast_tool", "call-1")), calls(tool_call("second_tool", "call-2")), answer("done")],
     )
-    install_tool_job_execution(model)
-    install_job_notice_hook(model, entity_name="leader")
     storage = storage_factory()
-    agent = Agent(
-        id="leader",
-        model=model,
-        tools=[assembled_function(fast_tool), assembled_function(second_tool)],
-        db=storage,
-    )
+    actor = job_actor(job_tool(fast_tool), job_tool(second_tool))
 
     @owned_tool_execution()
-    async def reply() -> RunOutput:
+    async def reply() -> RunRecord:
         set_consumption_storage(storage_factory)
-        return await agent.arun("start", session_id=context.session_id, user_id=context.requester_id)
+        return await run_job_turn(actor, model, session_id=context.session_id, store=storage)
 
     try:
         with tool_runtime_context(context):
@@ -254,7 +273,6 @@ async def test_a_reply_is_not_told_that_its_own_finished_call_ended(tmp_path: Pa
         assert all(BACKGROUND_JOBS_ENDED_NOTICE not in result for result in results), results
     finally:
         await runtime.shutdown()
-        storage.close()
 
 
 @pytest.mark.asyncio
@@ -265,10 +283,7 @@ async def test_another_requesters_jobs_are_not_noticed(tmp_path: Path) -> None:
         await conversation.start("bobs_job", owner=replace(conversation.owner, requester_id="@bob:example.org"))
         response = await _run(
             conversation,
-            [
-                ModelResponse(tool_calls=[_call("end_jobs", "end", job_ids=["bobs_job"])]),
-                ModelResponse(content="done"),
-            ],
+            [calls(tool_call("end_jobs", "end", job_ids=["bobs_job"])), answer("done")],
         )
         assert _tool_results(response) == ["ended"]
     finally:
@@ -342,27 +357,60 @@ async def test_a_noticed_cancellation_needs_no_collect(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["wait", "acknowledge_wait"], ids=["claim", "save"])
 async def test_a_cancellation_whose_acknowledgement_fails_is_noticed_again(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failing: str,
 ) -> None:
-    """A failed save of a noticed cancellation neither breaks the reply nor keeps the job claimed."""
+    """A failed claim or save of a noticed cancellation neither breaks the reply nor keeps the job claimed."""
     conversation = await _conversation(tmp_path)
     try:
         await conversation.start("cancelled")
         await conversation.cancel("cancelled")
 
-        async def fail(*_args: object) -> None:
+        async def fail(*_args: object, **_kwargs: object) -> None:
             msg = "store unavailable"
             raise RuntimeError(msg)
 
         with monkeypatch.context() as patched:
-            patched.setattr(conversation.runtime, "acknowledge_wait", fail)
+            patched.setattr(conversation.runtime, failing, fail)
             with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
                 assert "`cancelled`" in str(await _turn_start_job_note())
         with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
             assert "`cancelled`" in str(await _turn_start_job_note())
         assert (await lookup(conversation.runtime, "cancelled", owner=conversation.owner, depth=0)).consumed
+    finally:
+        await conversation.runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_the_runtime_no_longer_serves_still_lets_the_reply_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A noticed cancellation that expired or lost its access before it could be acknowledged costs no reply.
+
+    The notice still reaches the model after the tool batch, and the cancellation stays unacknowledged.
+    """
+    conversation = await _conversation(tmp_path)
+    try:
+        await conversation.start("cancelled")
+        await conversation.cancel("cancelled")
+
+        async def gone(*_args: object, **_kwargs: object) -> Never:
+            msg = "Job is unavailable."
+            raise JobUnavailableError(msg)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(conversation.runtime, "wait", gone)
+            response = await _run(conversation, [calls(tool_call("noop", "noop")), answer("done")])
+        assert response.status is RunStatus.completed
+        assert response.content == "done"
+        (result,) = _tool_results(response)
+        assert result.startswith("nothing")
+        assert "`cancelled` (tool_cancelled) cancelled" in result
+        assert not (await lookup(conversation.runtime, "cancelled", owner=conversation.owner, depth=0)).consumed
     finally:
         await conversation.runtime.shutdown()
 
@@ -375,10 +423,7 @@ async def test_no_notice_without_a_running_turn_context(tmp_path: Path) -> None:
         await conversation.start("job_a")
         response = await _run(
             conversation,
-            [
-                ModelResponse(tool_calls=[_call("end_jobs", "end", job_ids=["job_a"])]),
-                ModelResponse(content="done"),
-            ],
+            [calls(tool_call("end_jobs", "end", job_ids=["job_a"])), answer("done")],
             notices=False,
         )
         assert _tool_results(response) == ["ended"]
@@ -448,7 +493,15 @@ async def test_only_a_standard_reply_opens_with_the_job_note(
         ):
             await ai._prepare_agent_run_context(
                 replace(make_turn_context("leader"), agent_mode=agent_mode),
-                prompt="hello",
+                TurnContinuationRunState.initial(
+                    prompt="hello",
+                    model_prompt=None,
+                    current_timestamp_ms=None,
+                    current_prompt_is_structured=False,
+                    current_event_id=None,
+                    run_id=None,
+                    continuation_model_prompt_tail="",
+                ),
                 session_id=conversation.context.session_id,
                 runtime_paths=conversation.context.runtime_paths,
                 config=conversation.context.config,
@@ -462,10 +515,6 @@ async def test_only_a_standard_reply_opens_with_the_job_note(
                 compaction_lifecycle=None,
                 delegation_depth=0,
                 refresh_scheduler=None,
-                model_prompt=None,
-                current_timestamp_ms=None,
-                current_event_id=None,
-                current_prompt_is_structured=False,
                 turn_recorder=None,
                 pipeline_timing=None,
             )

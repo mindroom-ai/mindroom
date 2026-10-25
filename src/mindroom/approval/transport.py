@@ -364,13 +364,10 @@ class ApprovalMatrixTransport:
         approval_event_id: str,
         thread_id: str | None,
         reason: str,
-        transaction_id: str | None = None,
     ) -> bool:
         """Send one approval notice through router transport."""
         bot = self.transport_bot(room_id)
         if bot is None or bot.client is None:
-            return False
-        if not can_send_to_encrypted_room(bot.client, room_id, operation="send_approval_notice"):
             return False
         content = build_message_content(
             reason,
@@ -378,12 +375,12 @@ class ApprovalMatrixTransport:
             reply_to_event_id=approval_event_id,
             extra_content={"msgtype": "m.notice"},
         )
+        # send_room_event_result refuses an encrypted room it cannot protect.
         response = await send_room_event_result(
             bot.client,
             room_id,
             "m.room.message",
             content,
-            transaction_id=transaction_id,
             operation="send_approval_notice",
         )
         return isinstance(response, nio.RoomSendResponse)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import ipaddress
 import json
 import os
@@ -85,6 +86,32 @@ DESKTOP_MEDIA = EncryptedDesktopMedia(
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
 )
+
+
+def _is_public_address(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _offline_test_browsers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail TCP dials to public addresses as an offline host would, so no test browser reaches the internet.
+
+    Chromium keeps making its own requests (account sign-in, device check-in, component updates) despite
+    Playwright's ``--disable-background-networking``, and the destination relay dials them for a browser without an
+    egress proxy. The pages these tests load come from local servers or through a local stand-in egress proxy.
+    """
+    connect = socket.socket.connect
+
+    def offline_connect(sock: socket.socket, address: tuple[Any, ...]) -> None:
+        inet = sock.type == socket.SOCK_STREAM and sock.family in {socket.AF_INET, socket.AF_INET6}
+        if inet and _is_public_address(address[0]):
+            raise OSError(errno.ENETUNREACH, f"network disabled in tests: {address[0]}")
+        connect(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", offline_connect)
 
 
 @pytest.mark.parametrize(

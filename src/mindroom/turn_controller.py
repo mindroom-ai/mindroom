@@ -96,7 +96,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.router_relay import execute_router_relay
-from mindroom.teams import TeamIntent, TeamMode, select_ad_hoc_team_mode
+from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
 from mindroom.text_ingress_dispatch import dispatch_text_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget, ResponseLifecycleKey
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
+    from mindroom.teams.spec import TeamMode
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -2043,8 +2044,7 @@ class TurnController:
                 assert action.form_team.mode is not None
                 registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
                 target_member_names = tuple(
-                    registry.current_entity_name_for_user_id(member.full_id) or member.username
-                    for member in action.form_team.eligible_members
+                    registry.entity_name_or_username(member) for member in action.form_team.eligible_members
                 )
 
             context_ready_monotonic = time.monotonic()

@@ -34,8 +34,8 @@ def tool_call_recorder() -> _ToolCallRecorder | None:
 
 
 @contextmanager
-def recording_tool_calls(recorder: _ToolCallRecorder) -> Iterator[None]:
-    """Record every tool call made in this context, child tasks included."""
+def recording_tool_calls(recorder: _ToolCallRecorder | None) -> Iterator[None]:
+    """Record every tool call made in this context, child tasks included; ``None`` records none of them."""
     token = _recorder.set(recorder)
     try:
         yield
@@ -57,13 +57,3 @@ async def record_call(tool_name: str, args: Mapping[str, object]) -> Callable[[o
             await recorder.finished(record_id, tool_name, args, result)
 
     return finished
-
-
-@contextmanager
-def without_tool_call_recording() -> Iterator[None]:
-    """Run tools outside the work that started them, as a background job does: the job keeps its own outcome."""
-    token = _recorder.set(None)
-    try:
-        yield
-    finally:
-        _recorder.reset(token)

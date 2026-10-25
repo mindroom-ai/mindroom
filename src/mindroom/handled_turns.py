@@ -218,7 +218,7 @@ class TurnRecordCodec:
 
     @staticmethod
     def to_run_metadata(record: TurnRecord) -> dict[str, object]:
-        """Project the record's sources, prompts, and revisions that history and request logs read from an Agno run."""
+        """Project the record's sources, prompts, and revisions into the run metadata history and request logs read."""
         if not record.source_event_ids:
             return {}
         metadata: dict[str, object] = {

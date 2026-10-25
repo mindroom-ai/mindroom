@@ -37,6 +37,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_thread_summary import _make_summary_notice_message, _make_thread_history
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -49,6 +50,19 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 def _clear_summary_state() -> None:
     _last_summary_counts.clear()
     _thread_locks.clear()
+
+
+def _config(
+    tmp_path: Path,
+    *,
+    rooms: Mapping[str, Mapping[str, object]] | None = None,
+    agent_rooms: Sequence[str] = (),
+    access: Mapping[str, object] | None = None,
+) -> Config:
+    """Build a membership config whose automatic summaries are due from a thread's first message, as shipped."""
+    config = membership_config(tmp_path, rooms=rooms, agent_rooms=agent_rooms, access=access)
+    config.defaults.thread_summary_first_threshold = 1
+    return config
 
 
 def _human_notice(
@@ -102,7 +116,7 @@ async def _run_automatic_summary(
 @pytest.mark.parametrize("sender", ["@owner:example.com", "@bridge-owner:example.com"])
 async def test_authorized_human_pin_survives_restart(tmp_path: Path, sender: str) -> None:
     """Recovered human pins stop generation without trusting forged counters."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.authorization.aliases = {"@owner:example.com": ["@bridge-owner:example.com"]}
     runtime_paths = runtime_paths_for(config)
     history = [*_make_thread_history(12), _human_notice(sender)]
@@ -145,7 +159,7 @@ async def test_human_pin_uses_responder_authority(
     configured_room: bool,
 ) -> None:
     """Source recheck honors allowed users and rejects spoofed unauthorized notices."""
-    config = membership_config(
+    config = _config(
         tmp_path,
         agent_rooms=["!room:x"] if configured_room else [],
         access={"users": ["@owner:example.com"]},
@@ -171,7 +185,7 @@ async def test_later_human_pin_overrides_unseen_future_release(
     edited_pin: bool,
 ) -> None:
     """A cold client's pin wins even when it missed an older future-dated release."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     release = _make_summary_notice_message(
         "$thread1",
         message_count=1,
@@ -202,7 +216,7 @@ async def test_later_human_pin_overrides_unseen_future_release(
 @pytest.mark.parametrize("edited_release", [False, True])
 async def test_later_agent_release_overrides_future_human_pin(tmp_path: Path, edited_release: bool) -> None:
     """The same event chronology lets an agent intentionally release a skewed human pin."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     future = datetime(2099, 1, 1, tzinfo=UTC)
     notice = _human_notice(generated_at=future.isoformat())
     notice.timestamp = 1000
@@ -227,7 +241,7 @@ async def test_later_agent_release_overrides_future_human_pin(tmp_path: Path, ed
 @pytest.mark.asyncio
 async def test_membership_grant_authorizes_human_pin(tmp_path: Path) -> None:
     """A proven responder membership grant authorizes the same pin as a static user grant."""
-    config = membership_config(
+    config = _config(
         tmp_path,
         rooms={"team": {}},
         agent_rooms=["team"],
@@ -258,7 +272,7 @@ async def test_membership_grant_authorizes_human_pin(tmp_path: Path) -> None:
 @pytest.mark.parametrize("authorized", [True, False])
 async def test_explicit_release_advances_past_authorized_future_pin(tmp_path: Path, authorized: bool) -> None:
     """Explicit tool writes beat skewed allowed predecessors, never outsider timestamps."""
-    config = membership_config(tmp_path, agent_rooms=["!room:x"], access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, agent_rooms=["!room:x"], access={"users": ["@owner:example.com"]})
     client = make_matrix_client_mock()
     client.room_send.return_value = nio.RoomSendResponse(event_id="$release", room_id="!room:x")
     reader = make_conversation_reader_mock()
@@ -288,7 +302,7 @@ async def test_explicit_release_advances_past_authorized_future_pin(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_pin_authorized_for_another_room_responder_stops_automatic_updates(tmp_path: Path) -> None:
     """Shared room titles honor an allowed editor even when another responder runs."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.agents["talent"].rooms = ["!room:x"]
     config.agents["other"] = AgentConfig(display_name="Other", rooms=["!room:x"], access={"users": []})
     runtime_paths = runtime_paths_for(config)
@@ -318,7 +332,7 @@ async def test_pin_authorized_for_another_room_responder_stops_automatic_updates
 @pytest.mark.parametrize("pin_source", ["history", "source"])
 async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path, pin_source: str) -> None:
     """Incomplete shared-responder discovery cannot turn an allowed pin into a denial."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.agents["talent"].rooms = ["!room:x"]
     config.agents["other"] = AgentConfig(display_name="Other", rooms=["!room:x"], access={"users": []})
     runtime_paths = runtime_paths_for(config)
@@ -377,7 +391,7 @@ async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path
 @pytest.mark.parametrize("pin_source", ["history", "source"])
 async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(tmp_path: Path, pin_source: str) -> None:
     """An unseen joined responder cannot turn a valid human pin into a denial."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.agents["other"] = AgentConfig(display_name="Other", access={"users": []})
     runtime_paths = runtime_paths_for(config)
     persist_entity_accounts(config, runtime_paths)
@@ -428,7 +442,7 @@ async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(tmp
 @pytest.mark.parametrize("configured_room", [False, True])
 async def test_partial_room_cache_preserves_proven_shared_pin_grant(tmp_path: Path, configured_room: bool) -> None:
     """A known allowed responder proves a pin despite other uncached members."""
-    config = membership_config(
+    config = _config(
         tmp_path,
         agent_rooms=["!room:x"] if configured_room else [],
         access={"users": ["@owner:example.com"]},
@@ -474,7 +488,7 @@ async def test_partial_room_cache_preserves_proven_shared_pin_grant(tmp_path: Pa
 )
 def test_malformed_human_pin_does_not_stop_summaries(tmp_path: Path, field: str, value: object) -> None:
     """Only the supported explicit manual-pin payload changes automatic behavior."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     runtime_paths = runtime_paths_for(config)
     notice = _human_notice()
     notice.content["io.mindroom.thread_summary"][field] = value
@@ -496,7 +510,7 @@ def test_malformed_human_pin_does_not_stop_summaries(tmp_path: Path, field: str,
 @pytest.mark.asyncio
 async def test_pending_membership_defers_generation_without_advancing_baseline(tmp_path: Path) -> None:
     """Cold authorization state must not overwrite a pin before membership recovers."""
-    config = membership_config(tmp_path, rooms={"team": {}}, agent_rooms=["team"])
+    config = _config(tmp_path, rooms={"team": {}}, agent_rooms=["team"])
     reader = make_conversation_reader_mock()
     serve_conversation_reader(reader, [*_make_thread_history(12), _human_notice()], thread_id="$thread1")
     with (
@@ -522,7 +536,7 @@ async def test_pending_membership_defers_generation_without_advancing_baseline(t
 @pytest.mark.parametrize("pending_membership", [False, True])
 async def test_manual_write_reports_unorderable_predecessor(tmp_path: Path, pending_membership: bool) -> None:
     """Unresolved authority and exhausted timestamps fail as controlled tool errors."""
-    config = membership_config(
+    config = _config(
         tmp_path,
         rooms={"team": {}},
         agent_rooms=["team"],
@@ -553,7 +567,7 @@ async def test_manual_write_reports_unorderable_predecessor(tmp_path: Path, pend
 @pytest.mark.parametrize("release_source", ["history", "source"])
 async def test_automatic_summary_advances_past_future_explicit_release(tmp_path: Path, release_source: str) -> None:
     """An explicit release restores visible automatic updates despite clock skew."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     runtime_paths = runtime_paths_for(config)
     trusted = current_internal_sender_ids(config, runtime_paths)
     future = datetime(2099, 1, 1, tzinfo=UTC)
@@ -575,7 +589,7 @@ async def test_automatic_summary_advances_past_future_explicit_release(tmp_path:
 @pytest.mark.parametrize("generated_at", ["9999-12-31T23:00:00-02:00", "0001-01-01T01:00:00+02:00"])
 def test_out_of_range_utc_human_timestamp_cannot_pin(tmp_path: Path, generated_at: str) -> None:
     """ISO offsets cannot smuggle unsupported UTC dates into persistent pin state."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     runtime_paths = runtime_paths_for(config)
     assert not _recover_pin_state(
         [_human_notice(generated_at=generated_at)],

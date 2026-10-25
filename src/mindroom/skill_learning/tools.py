@@ -14,7 +14,6 @@ import json
 import weakref
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, assert_never
 
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -29,19 +28,19 @@ from mindroom.skill_learning.library import (
     support_file_paths,
     write_skill_file,
 )
-from mindroom.tool_system.skills import SKILL_FILENAME, build_agent_skills, list_skill_listings, parse_skill_markdown
+from mindroom.tool_system.skills import SKILL_FILENAME, build_skills_toolkit, list_skill_listings, parse_skill_markdown
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from agno.skills import Skills
+    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.skills import SkillsToolkit
 
 # A plain alias: Agno does not unwrap PEP 695 type aliases when it builds the provider schema.
 SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
-# Agno runs the tool calls of one reply concurrently, and chat, a review, and archival may change one library at once,
+# The tool calls of one reply run concurrently, and chat, a review, and archival may change one library at once,
 # while each change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they
 # take turns.
 _LIBRARY_TURNS: weakref.WeakValueDictionary[Path, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -88,17 +87,17 @@ class _CatalogEntry:
 class SkillCatalog:
     """The agent's effective skills and every name a new skill must not shadow."""
 
-    skills: Skills | None
+    skills: SkillsToolkit | None
     entries: dict[str, _CatalogEntry]
     reserved_names: frozenset[str]
 
 
 def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, skills_root: Path) -> SkillCatalog:
     """Return the skills the agent loads now, with the strict ownership check that edits use."""
-    skills = build_agent_skills(agent_name, config, runtime_paths, workspace_root=skills_root.parent)
-    loaded = skills.get_all_skills() if skills is not None else []
+    skills = build_skills_toolkit(agent_name, config, runtime_paths, workspace_root=skills_root.parent)
+    loaded = skills.skills if skills is not None else ()
     workspace_directories = {
-        skill.name: Path(skill.source_path).name for skill in loaded if Path(skill.source_path).parent == skills_root
+        skill.name: skill.source_path.name for skill in loaded if skill.source_path.parent == skills_root
     }
     learned = learned_skill_directories(skills_root, workspace_directories.values())
     entries = {

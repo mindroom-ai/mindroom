@@ -3,22 +3,19 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from agno.agent import Agent
-from agno.agent._tools import parse_tools
-from agno.models.openai import OpenAIChat
-from agno.run import RunContext
-from agno.session import AgentSession
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom import agents as agents_module
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import (
     _context_hidden_toolkits,
     create_agent,
-    get_agent_toolkit_names,
 )
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
@@ -30,12 +27,11 @@ from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
 )
-from mindroom.history.prompt_tokens import agent_static_token_estimator
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
-from mindroom.providers.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
-from mindroom.providers.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
-from mindroom.providers.portable_tool_search import portable_deferred_tool_names
+from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     defer_toolkit,
@@ -43,10 +39,15 @@ from mindroom.tool_system.dynamic_toolkits import (
 )
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit
+from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 
 def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
@@ -92,19 +93,36 @@ def _tool_payload(result: str) -> dict[str, object]:
     return json.loads(result)
 
 
-def _render_system_prompt(agent: Agent) -> str:
-    model = agent.model
-    assert model is not None
-    assert not isinstance(model, str)
-    parse_tools(agent, agent.tools or [], model)
-    message = agent.get_system_message(
-        session=AgentSession(session_id="session", agent_id=agent.id),
-        run_context=RunContext(run_id="run", session_id="session", session_state={}),
-        tools=None,
-        add_session_state_to_context=False,
-    )
-    assert message is not None
-    return str(message.content)
+def _build_prompt(build: AgentBuild) -> str:
+    return str(prompt_for_turn(build).content)
+
+
+def _toolkit_names(build: AgentBuild) -> set[str]:
+    return {toolkit.name for toolkit in build.spec.toolkits}
+
+
+def _toolkit(build: AgentBuild, name: str) -> AdaptedToolkit:
+    return next(toolkit for toolkit in build.spec.toolkits if toolkit.name == name)
+
+
+def _function_names(build: AgentBuild) -> set[str]:
+    return {function.name for toolkit in build.spec.toolkits for function in toolkit.functions}
+
+
+def _native_deferred_names(build: AgentBuild) -> frozenset[str]:
+    """The functions native tool search sends marked deferred; portable search sends none of them."""
+    deferred = build.request_template.deferred_tools
+    return frozenset() if deferred.portable else deferred.names
+
+
+def _portable_deferred_names(build: AgentBuild) -> frozenset[str]:
+    """The functions portable tool search keeps off the request behind tool_search and call_tool."""
+    deferred = build.request_template.deferred_tools
+    return deferred.names if deferred.portable else frozenset()
+
+
+async def _search(build: AgentBuild, query: str) -> dict[str, object]:
+    return _tool_payload(cast("str", await call_entrypoint(offered_function(build, "tool_search"), query=query)))
 
 
 def _private_identity(requester_id: str) -> ToolExecutionIdentity:
@@ -334,15 +352,6 @@ def test_unrestricted_selection_attaches_every_deferred_tool(tmp_path: Path) -> 
     assert [entry.name for entry in searchable.runtime_tool_configs] == ["sleep", "shell", "dynamic_tools"]
 
 
-def test_get_agent_toolkit_names_lists_deferred_toolkits_without_the_search_toolkit(tmp_path: Path) -> None:
-    """The minimal-mode roster names every callable toolkit, deferred ones included, but no search toolkit."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
-    config = _validated_config(tmp_path, raw)
-
-    assert get_agent_toolkit_names("code", config) == ["shell"]
-
-
 def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_path: Path) -> None:
     """Concrete default tool overrides should own preset-expanded children."""
     raw = _base_config_data()
@@ -524,10 +533,10 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
         execution_identity=alice_identity,
     )
 
-    assert any(tool.name == "calculator" for tool in alice_agent.tools)
-    assert "desktop" in portable_deferred_tool_names(alice_agent.model)
-    alice_desktop = next(tool for tool in alice_agent.tools if tool.name == "desktop")
-    result = await alice_desktop.desktop("status")  # type: ignore[attr-defined]
+    assert "calculator" in _toolkit_names(alice_agent)
+    assert "desktop" in _portable_deferred_names(alice_agent)
+    alice_desktop = cast("Any", source_toolkit(offered_function(alice_agent, "desktop")))
+    result = await alice_desktop.desktop("status")
     assert _tool_payload(result.content)["status"] == "setup_required"
 
     save_desktop_credentials(
@@ -541,7 +550,7 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
         agent_name="code",
     )
 
-    paired = alice_desktop._current_configuration()  # type: ignore[attr-defined]
+    paired = alice_desktop._current_configuration()
     assert paired.target is not None
     assert paired.target.user_id == "@alice-desktop:example.org"
 
@@ -555,7 +564,7 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
         requester_id="@alice:example.org",
         agent_name="code",
     )
-    rotated = alice_desktop._current_configuration()  # type: ignore[attr-defined]
+    rotated = alice_desktop._current_configuration()
     assert rotated.target is not None
     assert rotated.target.user_id == "@alice-rotated:example.org"
 
@@ -564,7 +573,7 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
         requester_id="@alice:example.org",
         agent_name="code",
     )
-    assert alice_desktop._current_configuration().target is None  # type: ignore[attr-defined]
+    assert alice_desktop._current_configuration().target is None
 
 
 @pytest.mark.asyncio
@@ -589,10 +598,10 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         runtime_paths,
         execution_identity=identity,
     )
-    unpaired_desktop = next(tool for tool in unpaired.tools if tool.name == "desktop")
-    result = await unpaired_desktop.desktop("status")  # type: ignore[attr-defined]
+    unpaired_desktop = cast("Any", source_toolkit(offered_function(unpaired, "desktop")))
+    result = await unpaired_desktop.desktop("status")
     assert _tool_payload(result.content)["status"] == "setup_required"
-    assert "desktop" in vars(unpaired.model)[_DEFERRED_TOOL_NAMES_ATTR]
+    assert "desktop" in _native_deferred_names(unpaired)
 
     save_desktop_credentials(
         get_runtime_credentials_manager(runtime_paths),
@@ -610,19 +619,20 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         runtime_paths,
         execution_identity=identity,
     )
-    paired_desktop = next(tool for tool in paired.tools if tool.name == "desktop")
-    paired_configuration = paired_desktop._current_configuration()  # type: ignore[attr-defined]
+    paired_desktop = cast("Any", source_toolkit(offered_function(paired, "desktop")))
+    paired_configuration = paired_desktop._current_configuration()
     assert paired_configuration.target is not None
     assert paired_configuration.target.user_id == "@alice-desktop:example.org"
-    assert "desktop" in vars(paired.model)[_DEFERRED_TOOL_NAMES_ATTR]
+    assert "desktop" in _native_deferred_names(paired)
 
 
 def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
     return {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("broker_on", [False, True])
-def test_deferred_egress_credentials_is_discoverable_only_while_the_broker_is_on(
+async def test_deferred_egress_credentials_is_discoverable_only_while_the_broker_is_on(
     tmp_path: Path,
     *,
     broker_on: bool,
@@ -637,11 +647,10 @@ def test_deferred_egress_credentials_is_discoverable_only_while_the_broker_is_on
     config = _validated_config(tmp_path, raw, **env)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path, **env), execution_identity=None)
-    search = next(tool for tool in agent.tools if tool.name == "dynamic_tools")
 
-    searched = _tool_payload(search.tool_search("egress"))
+    searched = await _search(agent, "egress")
     assert ({match["toolkit"] for match in searched["matches"]} == {"egress_credentials"}) is broker_on
-    assert ("egress_credentials" in {toolkit.name for toolkit in agent.tools}) is broker_on
+    assert ("egress_credentials" in _toolkit_names(agent)) is broker_on
 
 
 def test_a_lone_deferred_egress_credentials_tool_gives_no_dynamic_tools_while_the_broker_is_off(
@@ -654,8 +663,8 @@ def test_a_lone_deferred_egress_credentials_tool_gives_no_dynamic_tools_while_th
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    assert "dynamic_tools" not in {toolkit.name for toolkit in agent.tools}
-    assert portable_deferred_tool_names(agent.model) == frozenset()
+    assert "dynamic_tools" not in _toolkit_names(agent)
+    assert _portable_deferred_names(agent) == frozenset()
 
 
 @pytest.mark.parametrize("native_tool_search", [False, True])
@@ -685,7 +694,7 @@ def test_deferred_prompt_names_egress_credentials_only_while_the_broker_is_on(
         execution_identity=None,
     )
 
-    prompt = _render_system_prompt(agent)
+    prompt = _build_prompt(agent)
     assert ("egress_credentials" in prompt) is broker_on
     assert "sleep" in prompt
 
@@ -709,7 +718,7 @@ def test_an_eager_egress_credentials_tool_is_attached_only_while_the_broker_is_o
         execution_identity=None,
     )
 
-    assert ("egress_credentials" in {toolkit.name for toolkit in agent.tools}) is broker_on
+    assert ("egress_credentials" in _toolkit_names(agent)) is broker_on
 
 
 def test_deferred_scope_validation_builds_authored_tools_once(
@@ -798,15 +807,13 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_portable_tool_s
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    function_names = {
-        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
+    function_names = _function_names(agent)
     assert "sleep" in function_names
     assert "add" in function_names
     # Only defer&&!initial tools go on the wire deferred; initial stays plain.
-    assert vars(agent.model)[_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"sleep"})
+    assert _native_deferred_names(agent) == frozenset({"sleep"})
     assert "tool_search" not in function_names
-    assert not any(block.startswith("## Deferred Tools\n") for block in agent.instructions)
+    assert not any(block.startswith("## Deferred Tools\n") for block in agent.prompt.instructions)
 
 
 @pytest.mark.parametrize(
@@ -833,18 +840,20 @@ def test_native_tool_search_prompt_lists_deferred_capability_domains(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    discovery_block = next(block for block in agent.instructions if block.startswith("## Deferred Tool Discovery"))
-    assert discovery_block in _render_system_prompt(agent)
+    discovery_block = next(
+        block for block in agent.prompt.instructions if block.startswith("## Deferred Tool Discovery")
+    )
+    assert discovery_block in _build_prompt(agent)
     assert "Deferred capability domains available through native tool search: sleep." in discovery_block
     assert "search the deferred tool catalog before concluding that the capability is unavailable" in discovery_block
     assert "calculator" not in discovery_block
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_id", "deferred_names_attr"),
+    ("provider", "model_id"),
     [
-        ("anthropic", "claude-opus-5", _DEFERRED_TOOL_NAMES_ATTR),
-        ("openai", "gpt-6-astra", _OPENAI_DEFERRED_TOOL_NAMES_ATTR),
+        ("anthropic", "claude-opus-5"),
+        ("openai", "gpt-6-astra"),
     ],
 )
 @pytest.mark.parametrize("collide_all", [False, True], ids=["partial-collision", "full-collision"])
@@ -853,7 +862,6 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
     monkeypatch: pytest.MonkeyPatch,
     provider: str,
     model_id: str,
-    deferred_names_attr: str,
     *,
     collide_all: bool,
 ) -> None:
@@ -903,13 +911,64 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
     agent = create_agent("code", config, runtime_paths, execution_identity=None)
 
     expected_deferred_names = frozenset() if collide_all else frozenset({"demo_call_tool", "demo_connection_status"})
-    assert vars(agent.model).get(deferred_names_attr, frozenset()) == expected_deferred_names
-    local = next(tool for tool in agent.tools if tool.name == "local")
-    assert "demo_list_tools" in local.functions
-    discovery_blocks = [block for block in agent.instructions if block.startswith("## Deferred Tool Discovery")]
+    assert _native_deferred_names(agent) == expected_deferred_names
+    assert "demo_list_tools" in {function.name for function in _toolkit(agent, "local").functions}
+    discovery_blocks = [block for block in agent.prompt.instructions if block.startswith("## Deferred Tool Discovery")]
     assert bool(discovery_blocks) is not collide_all
     if discovery_blocks:
         assert "mcp_demo" in discovery_blocks[0]
+
+
+@pytest.mark.asyncio
+async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deferred MCP function a local function's name hides leaves the run and the search, not the MCP toolkit."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["sleep", {"mcp_demo": {"defer": True}}]  # type: ignore[index]
+    raw["mcp_servers"] = {
+        "demo": {
+            "transport": "streamable-http",
+            "url": "https://mcp.example.test/mcp",
+            "auth": {
+                "type": "oauth",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        },
+    }
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+    built: dict[str, Toolkit] = {}
+    build_agent_toolkit = agents_module.build_agent_toolkit
+
+    def fake_build_agent_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
+        if tool_name == "mcp_demo":
+            built[tool_name] = MindRoomMCPToolkit(
+                server_id="demo",
+                manager=None,
+                catalog=None,
+                server_config=config.mcp_servers["demo"],
+                runtime_paths=runtime_paths,
+                credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            )
+            return built[tool_name]
+        if tool_name == "sleep":
+            local = Toolkit(name="local", auto_register=False)
+            local.functions["demo_list_tools"] = Function(name="demo_list_tools", entrypoint=lambda: "local")
+            return local
+        return build_agent_toolkit(tool_name, **kwargs)
+
+    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
+
+    agent = create_agent("code", config, runtime_paths, execution_identity=None)
+
+    assert _portable_deferred_names(agent) == frozenset({"demo_call_tool", "demo_connection_status"})
+    listed = (await _search(agent, ""))["functions"]
+    assert sorted(item["name"] for item in listed) == ["demo_call_tool", "demo_connection_status"]
+    assert "demo_list_tools" in built["mcp_demo"].async_functions
 
 
 def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
@@ -925,13 +984,10 @@ def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-    toolkit = next(tool for tool in agent.tools if tool.name == "update_awareness")
 
-    assert toolkit.instructions is not None
-    assert instruction_marker in toolkit.instructions
-    assert toolkit.add_instructions is False
-    assert instruction_marker not in _render_system_prompt(agent)
-    assert vars(agent.model)[_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"get_mindroom_update_status"})
+    assert _toolkit(agent, "update_awareness").instructions is None
+    assert instruction_marker not in _build_prompt(agent)
+    assert _native_deferred_names(agent) == frozenset({"get_mindroom_update_status"})
 
 
 def test_fully_deferred_toolkit_omits_function_instructions() -> None:
@@ -940,19 +996,19 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
     def deferred_tool() -> str:
         return "deferred"
 
-    instruction_marker = "DEFERRED_FUNCTION_INSTRUCTIONS"
     function = Function(
         name="deferred_tool",
         entrypoint=deferred_tool,
-        instructions=instruction_marker,
+        instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
         add_instructions=True,
     )
     toolkit = Toolkit(name="deferred", tools=[function])
-    defer_toolkit("deferred", "", toolkit)
-    agent = Agent(id="deferred-agent", model=OpenAIChat(id="test"), tools=[toolkit], instructions=["BASE"])
+    deferral = defer_toolkit("deferred", "", toolkit)
 
     assert toolkit.functions["deferred_tool"].add_instructions is False
-    assert instruction_marker not in _render_system_prompt(agent)
+    assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
+    # Adapting refuses a function that still asks for prompt instructions.
+    adapt_toolkit(toolkit)
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -965,45 +1021,38 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         return "deferred"
 
     active_toolkit_marker = "ACTIVE_TOOLKIT_INSTRUCTIONS"
-    active_function_marker = "ACTIVE_FUNCTION_INSTRUCTIONS"
-    deferred_toolkit_marker = "DEFERRED_TOOLKIT_INSTRUCTIONS"
-    deferred_function_marker = "DEFERRED_FUNCTION_INSTRUCTIONS"
-    active_function = Function(
-        name="shared_tool",
-        entrypoint=active_tool,
-        instructions=active_function_marker,
+    active_toolkit = Toolkit(
+        name="active",
+        tools=[Function(name="shared_tool", entrypoint=active_tool)],
+        instructions=active_toolkit_marker,
         add_instructions=True,
     )
     deferred_function = Function(
         name="shared_tool",
         entrypoint=deferred_tool,
-        instructions=deferred_function_marker,
-        add_instructions=True,
-    )
-    active_toolkit = Toolkit(
-        name="active",
-        tools=[active_function],
-        instructions=active_toolkit_marker,
+        instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
         add_instructions=True,
     )
     deferred_toolkit = Toolkit(
         name="deferred",
         tools=[deferred_function],
-        instructions=deferred_toolkit_marker,
+        instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
         add_instructions=True,
     )
     defer_toolkit("deferred", "", deferred_toolkit)
-    agent = Agent(id="collision-agent", model=OpenAIChat(id="test"), tools=[active_toolkit, deferred_toolkit])
 
     assert active_toolkit.add_instructions is True
     assert active_toolkit.functions["shared_tool"].add_instructions is True
     assert deferred_toolkit.add_instructions is False
     assert deferred_toolkit.functions["shared_tool"].add_instructions is False
-    system_prompt = _render_system_prompt(agent)
-    assert active_toolkit_marker in system_prompt
-    assert active_function_marker in system_prompt
-    assert deferred_toolkit_marker not in system_prompt
-    assert deferred_function_marker not in system_prompt
+    spec = AgentSpec(
+        id="code",
+        name="code",
+        model=ScriptedModel([]),
+        system_message=None,
+        toolkits=(adapt_toolkit(active_toolkit), adapt_toolkit(deferred_toolkit)),
+    )
+    assert prepare_run_tools(spec).instructions == (active_toolkit_marker,)
 
 
 def test_native_tool_search_keeps_initial_toolkit_instructions(
@@ -1021,11 +1070,12 @@ def test_native_tool_search_keeps_initial_toolkit_instructions(
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-    toolkit = next(tool for tool in agent.tools if tool.name == "update_awareness")
+    instructions = _toolkit(agent, "update_awareness").instructions
 
-    assert toolkit.add_instructions is True
-    assert instruction_marker in _render_system_prompt(agent)
-    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+    assert instructions is not None
+    assert instruction_marker in instructions
+    assert instruction_marker in _build_prompt(agent)
+    assert _native_deferred_names(agent) == frozenset()
 
 
 def test_native_tool_search_drops_toolkit_emptied_by_include_filter(
@@ -1044,12 +1094,13 @@ def test_native_tool_search_drops_toolkit_emptied_by_include_filter(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    assert not any(tool.name == "update_awareness" for tool in agent.tools)
-    assert instruction_marker not in _render_system_prompt(agent)
-    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+    assert "update_awareness" not in _toolkit_names(agent)
+    assert instruction_marker not in _build_prompt(agent)
+    assert _native_deferred_names(agent) == frozenset()
 
 
-def test_portable_tool_search_returns_rendered_toolkit_instructions(
+@pytest.mark.asyncio
+async def test_portable_tool_search_returns_rendered_toolkit_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1060,10 +1111,9 @@ def test_portable_tool_search_returns_rendered_toolkit_instructions(
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-    search = next(tool for tool in agent.tools if tool.name == "dynamic_tools")
 
-    assert instruction_marker not in _render_system_prompt(agent)
-    payload = _tool_payload(search.tool_search("update_awareness"))
+    assert instruction_marker not in _build_prompt(agent)
+    payload = await _search(agent, "update_awareness")
     assert instruction_marker in payload["instructions"]["update_awareness"]
 
 
@@ -1089,7 +1139,7 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-    prompt = _render_system_prompt(agent)
+    prompt = _build_prompt(agent)
 
     assert "chat_ui shows parts of MindRoom Chat to the user." in prompt
     for name in TOOL_METADATA["chat_ui"].function_names:
@@ -1118,7 +1168,7 @@ def test_chat_ui_names_the_canvas_library_source_only_for_an_agent_with_canvases
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-    prompt = _render_system_prompt(agent)
+    prompt = _build_prompt(agent)
 
     assert ("https://cdn.jsdelivr.net/npm/" in prompt) is named
 
@@ -1130,9 +1180,12 @@ def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path)
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-    toolkit = next(tool for tool in agent.tools if tool.name == "chat_ui")
 
-    assert sorted(toolkit.async_functions) == ["open_panel", "open_settings", "show_computer"]
+    assert sorted(function.name for function in _toolkit(agent, "chat_ui").functions) == [
+        "open_panel",
+        "open_settings",
+        "show_computer",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1153,14 +1206,15 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-    toolkit = next(tool for tool in agent.tools if tool.name == "chat_ui")
-    instructions = toolkit.instructions
-    description = toolkit.async_functions[available].entrypoint.__doc__
+    instructions = _toolkit(agent, "chat_ui").instructions
+    description = offered_function(agent, available).description
 
+    assert instructions is not None
+    assert description is not None
     for name in set(TOOL_METADATA["chat_ui"].function_names) - {available}:
         assert f"{name}(" not in instructions
         assert f"{name}(" not in description
-    assert f"- {available}(" in _render_system_prompt(agent)
+    assert f"- {available}(" in _build_prompt(agent)
 
 
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
@@ -1181,16 +1235,13 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_portable
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    function_names = {
-        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
+    function_names = _function_names(agent)
     assert "sleep" in function_names
     assert "add" in function_names
     # Only defer&&!initial tools go on the wire deferred; initial stays plain.
-    assert vars(agent.model)[_OPENAI_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"sleep"})
-    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+    assert _native_deferred_names(agent) == frozenset({"sleep"})
     assert "tool_search" not in function_names
-    assert not any(block.startswith("## Deferred Tools\n") for block in agent.instructions)
+    assert not any(block.startswith("## Deferred Tools\n") for block in agent.prompt.instructions)
 
 
 @pytest.mark.parametrize(
@@ -1216,8 +1267,7 @@ def test_explicit_openai_api_uses_portable_tool_search_when_native_is_unavailabl
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    assert portable_deferred_tool_names(agent.model) == frozenset({"sleep"})
-    assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+    assert _portable_deferred_names(agent) == frozenset({"sleep"})
 
 
 def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) -> None:
@@ -1230,12 +1280,10 @@ def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) 
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    function_names = {
-        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
+    function_names = _function_names(agent)
     assert "browser_control" in function_names
     assert "browser" not in function_names
-    assert vars(agent.model)[_OPENAI_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"browser_control"})
+    assert _native_deferred_names(agent) == frozenset({"browser_control"})
 
 
 def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path: Path) -> None:
@@ -1255,16 +1303,12 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
         eager_deferred_tools=True,
     )
 
-    function_names = {
-        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
+    function_names = _function_names(agent)
     assert "sleep" in function_names
     assert "add" in function_names
-    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
-    assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
-    assert portable_deferred_tool_names(agent.model) == frozenset()
+    assert agent.request_template.deferred_tools.names == frozenset()
     assert "tool_search" not in function_names
-    assert not any(block.startswith("## Deferred Tools\n") for block in agent.instructions)
+    assert not any(block.startswith("## Deferred Tools\n") for block in agent.prompt.instructions)
 
 
 def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path) -> None:
@@ -1282,12 +1326,10 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         tool_function_filter=lambda _function: False,
     )
 
-    function_names = {
-        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
+    function_names = _function_names(agent)
     assert "sleep" not in function_names
     assert "tool_search" not in function_names
-    assert not any(block.startswith("## Deferred Tools\n") for block in agent.instructions)
+    assert not any(block.startswith("## Deferred Tools\n") for block in agent.prompt.instructions)
 
 
 @pytest.mark.parametrize(
@@ -1316,23 +1358,20 @@ def test_unsupported_models_use_portable_tool_search(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    function_names = {
-        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
+    function_names = _function_names(agent)
     assert {"sleep", "add", "tool_search", "call_tool"} <= function_names
     assert "load_tool" not in function_names
     # initial tools stay ordinary eager tools, so only sleep is hidden behind call_tool.
-    assert portable_deferred_tool_names(agent.model) == frozenset({"sleep"})
-    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
-    assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
-    catalog = next(block for block in agent.instructions if block.startswith("## Deferred Tools\n"))
+    assert _portable_deferred_names(agent) == frozenset({"sleep"})
+    catalog = next(block for block in agent.prompt.instructions if block.startswith("## Deferred Tools\n"))
     assert f"sleep - {TOOL_METADATA['sleep'].description}" in catalog
     assert "calculator" not in catalog
     assert "call_tool(name, arguments)" in catalog
-    assert catalog in _render_system_prompt(agent)
+    assert catalog in _build_prompt(agent)
 
 
-def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Path) -> None:
     """The deferred catalog keeps the browser's pointer to the Computer panel when both tools are deferred."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
@@ -1342,12 +1381,11 @@ def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Path) ->
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-    search = next(tool for tool in agent.tools if tool.name == "dynamic_tools")
 
-    catalog = next(block for block in agent.instructions if block.startswith("## Deferred Tools\n"))
+    catalog = next(block for block in agent.prompt.instructions if block.startswith("## Deferred Tools\n"))
     assert "chat_ui.open_panel(panel='computer')" in catalog
     assert "Computer panel" in catalog
-    assert _tool_payload(search.tool_search("browser"))["matches"][0]["toolkit"] == "browser"
+    assert (await _search(agent, "browser"))["matches"][0]["toolkit"] == "browser"
 
 
 class _CrmTools(Toolkit):
@@ -1379,12 +1417,14 @@ class _WeatherTools(Toolkit):
         return city
 
 
-def _deferred(toolkit: Toolkit, description: str) -> DeferredToolkit:
-    return defer_toolkit(toolkit.name, description, toolkit)
+def _deferred(toolkit: Toolkit, description: str, domain_name: str | None = None) -> DeferredToolkit:
+    """Defer ``toolkit`` and adapt it, as agent construction does, offering every function of it."""
+    deferral = defer_toolkit(domain_name or toolkit.name, description, toolkit)
+    return DeferredToolkit(deferral, adapt_toolkit(toolkit).functions)
 
 
 def _search_toolkit(*deferred: DeferredToolkit) -> DynamicToolsToolkit:
-    return DynamicToolsToolkit(deferred_toolkits=deferred)
+    return DynamicToolsToolkit(deferred_toolkits=lambda: deferred)
 
 
 def test_tool_search_returns_definitions_and_toolkit_instructions() -> None:
@@ -1530,11 +1570,12 @@ def test_tool_search_without_matches_suggests_other_keywords() -> None:
     assert "tool_search() without a query" in payload["message"]
 
 
-def test_tool_search_skips_functions_removed_after_build() -> None:
-    """Functions hidden after the build, such as MCP collision losers, are not offered."""
-    crm = _CrmTools()
-    toolkit = _search_toolkit(_deferred(crm, "Customer records"))
-    del crm.functions["crm_lookup"]
+def test_tool_search_shows_the_deferred_functions_the_agent_offers_when_it_searches() -> None:
+    """Search reads the deferred toolkits when it runs, after the agent left out functions such as MCP collisions."""
+    full = _deferred(_CrmTools(), "Customer records")
+    offered = [full]
+    toolkit = DynamicToolsToolkit(deferred_toolkits=lambda: offered)
+    offered[0] = DeferredToolkit(full.deferral, tuple(f for f in full.functions if f.name != "crm_lookup"))
 
     payload = _tool_payload(toolkit.tool_search("crm"))
 
@@ -1565,16 +1606,11 @@ def test_call_tool_schema_accepts_arbitrary_argument_values() -> None:
 
 def test_call_tool_schema_converts_to_a_plain_gemini_object() -> None:
     """Gemini conversion must not invent placeholder argument keys."""
-    convert_schema = pytest.importorskip("agno.utils.gemini").convert_schema
-    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
-    function.process_entrypoint(strict=False)
-
-    converted = convert_schema(function.parameters)
+    converted = gemini_wire.convert_schema(adapt_function(_search_toolkit().functions["call_tool"]).parameters)
 
     assert converted is not None
     assert "example_key" not in str(converted)
-    assert converted.properties is not None
-    assert "JSON object" in (converted.properties["arguments"].description or "")
+    assert "JSON object" in converted["properties"]["arguments"]["description"]
 
 
 class _DualTools(Toolkit):
@@ -1659,7 +1695,8 @@ def test_tool_search_ranks_functions_matching_more_query_words_first() -> None:
     [("openai", "gpt-4o-mini"), ("anthropic", "claude-opus-5")],
 )
 @pytest.mark.parametrize("deferred_first", [False, True])
-def test_config_order_decides_which_same_named_function_is_registered(
+@pytest.mark.asyncio
+async def test_config_order_decides_which_same_named_function_is_registered(
     tmp_path: Path,
     provider: str,
     model_id: str,
@@ -1675,14 +1712,9 @@ def test_config_order_decides_which_same_named_function_is_registered(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    deferred_names = portable_deferred_tool_names(agent.model) | vars(agent.model).get(
-        _DEFERRED_TOOL_NAMES_ATTR,
-        frozenset(),
-    )
-    assert ("read_file" in deferred_names) is deferred_first
-    search = next((tool for tool in agent.tools if tool.name == "dynamic_tools"), None)
-    if search is not None:
-        matches = _tool_payload(search.tool_search("read_file"))["matches"]
+    assert ("read_file" in agent.request_template.deferred_tools.names) is deferred_first
+    if "tool_search" in _function_names(agent):
+        matches = (await _search(agent, "read_file"))["matches"]
         offered = [match["toolkit"] for match in matches if match["name"] == "read_file"]
         assert offered == (["coding"] if deferred_first else [])
 
@@ -1697,9 +1729,7 @@ def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewri
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    function_names = {
-        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
+    function_names = _function_names(agent)
     assert "call_tool" not in function_names
     assert "tool_search" not in function_names
 
@@ -1721,7 +1751,11 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
         raw["agents"]["code"]["tools"] = tools  # type: ignore[index]
         config = _validated_config(tmp_path, raw)
         agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
-        return agent_static_token_estimator(agent).non_prompt_tokens()
+        return build_static_token_estimator(
+            prompt_for_turn(agent),
+            prepare_run_tools(agent.spec).specs(),
+            agent.request_template.deferred_tools.names,
+        ).non_prompt_tokens()
 
     base = estimate(["sleep"])
     eager = estimate(["sleep", "github"])
@@ -1759,7 +1793,7 @@ def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
         instructions="Use beta.",
     )
     first.add_instructions = second.add_instructions = True
-    toolkit = _search_toolkit(defer_toolkit("shared", "Shared", first), defer_toolkit("shared", "Shared", second))
+    toolkit = _search_toolkit(_deferred(first, "Shared", "shared"), _deferred(second, "Shared", "shared"))
 
     payload = _tool_payload(toolkit.tool_search("shared"))
 
@@ -1792,8 +1826,8 @@ def test_search_toolkit_construction_failure_does_not_stop_the_agent(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    assert "sleep" in {toolkit.name for toolkit in agent.tools}
-    assert "dynamic_tools" not in {toolkit.name for toolkit in agent.tools}
+    assert "sleep" in _toolkit_names(agent)
+    assert "dynamic_tools" not in _toolkit_names(agent)
 
 
 def test_call_tool_wire_definition_has_a_description() -> None:
@@ -1802,21 +1836,6 @@ def test_call_tool_wire_definition_has_a_description() -> None:
     function.process_entrypoint(strict=False)
 
     assert function.to_dict().get("description")
-
-
-def test_cerebras_accepts_the_call_tool_definition() -> None:
-    """Agno's Cerebras adapter indexes the description directly, so the wrapper must carry one."""
-    pytest.importorskip("cerebras.cloud.sdk")
-    from mindroom.providers.cerebras_model import MindRoomCerebras  # noqa: PLC0415
-
-    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
-    function.process_entrypoint(strict=False)
-
-    params = MindRoomCerebras(id="llama-4.1", api_key="test").get_request_params(
-        tools=[{"type": "function", "function": function.to_dict()}],
-    )
-
-    assert params["tools"][0]["function"]["name"] == "call_tool"
 
 
 def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
@@ -1847,5 +1866,5 @@ def test_search_toolkit_results_are_never_redirected_to_output_files(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    assert "dynamic_tools" in {toolkit.name for toolkit in agent.tools}
+    assert "dynamic_tools" in _toolkit_names(agent)
     assert "dynamic_tools" not in wrapped

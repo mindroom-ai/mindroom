@@ -18,6 +18,7 @@ from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from tests.test_agent_tool_calls import _catalog
 
@@ -32,7 +33,7 @@ async def test_real_api_auth_precedes_validation_and_hides_wrong_owner(
     tmp_path: Path,
 ) -> None:
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="calculator", tools=[lambda: 1])])
+    catalog = await _catalog(tmp_path, [adapt_toolkit(Toolkit(name="calculator", tools=[lambda: 1]))])
 
     async def authorize(key: object, arguments: object) -> None:
         return None
@@ -147,7 +148,7 @@ async def test_live_retry_disconnect_conflict_and_restart_are_owner_scoped(tmp_p
         return None
 
     async def make_owner(name: str) -> tuple[LiveTurnTools, dict[str, str]]:
-        catalog = await _catalog(tmp_path / name, [Toolkit(name="state", tools=[change])])
+        catalog = await _catalog(tmp_path / name, [adapt_toolkit(Toolkit(name="state", tools=[change]))])
         owner = LiveTurnTools(
             CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
             catalog=catalog,

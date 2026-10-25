@@ -1,0 +1,40 @@
+{
+  "agent_code": {
+    "db_path": "agents/code/sessions/code.db",
+    "sessions": {
+      "!room:example.org:$conversation": "agent",
+      "!room:example.org:$delegation": "agent",
+      "!room:example.org:$native": "agent",
+      "!room:example.org:$compacted": "agent",
+      "!room:example.org:$approved": "agent",
+      "!room:example.org:$rejected": "agent",
+      "!room:example.org:$delegation-approved": "agent"
+    }
+  },
+  "agent_helper": {
+    "db_path": "agents/helper/sessions/helper.db",
+    "sessions": {
+      "delegate:code:helper:00000000000000000000000000000002": "agent",
+      "delegate:code:helper:00000000000000000000000000000004": "agent"
+    }
+  },
+  "team_squad": {
+    "db_path": "teams/team_squad_1f02af98668f/sessions/team_squad_1f02af98668f.db",
+    "sessions": {
+      "!room:example.org:$squad": "team",
+      "!room:example.org:$squad-approved": "team"
+    }
+  },
+  "team_panel": {
+    "db_path": "teams/team_panel_5d384bb40fa1/sessions/team_panel_5d384bb40fa1.db",
+    "sessions": {
+      "!room:example.org:$panel": "team"
+    }
+  },
+  "agno2_migrated": {
+    "db_path": "agno2/agents/code/sessions/code.db",
+    "sessions": {
+      "session-1": "agent"
+    }
+  }
+}

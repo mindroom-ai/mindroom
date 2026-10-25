@@ -11,20 +11,16 @@ from typing import TYPE_CHECKING
 from mindroom.history.run_visibility import is_queued_notice_message
 
 if TYPE_CHECKING:
-    from agno.models.message import Message
+    from mindroom.llm.messages import Message
 
 
 def strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
     """Strip stale Anthropic thinking replay fields from completed turns."""
-    last_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].role == "user" and not is_queued_notice_message(messages[i]):
-            last_user_idx = i
-            break
-    if last_user_idx < 0:
+    user_indexes = [i for i, msg in enumerate(messages) if msg.role == "user" and not is_queued_notice_message(msg)]
+    if not user_indexes:
         return 0
     modified = 0
-    for msg in messages[:last_user_idx]:
+    for msg in messages[: user_indexes[-1]]:
         if msg.role != "assistant":
             continue
         pd = msg.provider_data

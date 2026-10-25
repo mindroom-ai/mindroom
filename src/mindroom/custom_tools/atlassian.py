@@ -31,6 +31,7 @@ from mindroom.custom_tools.atlassian_client import (
     select_site,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.oauth.atlassian import (
     ATLASSIAN_PRODUCTS,
@@ -243,7 +244,7 @@ def _display_filename(content_disposition: str | None, fallback: str | None) -> 
 
 
 def _mime_type(content_type: str | None, filename: str) -> str:
-    mime_type = (content_type or "").split(";", 1)[0].strip().lower()
+    mime_type = canonical_mime_type(content_type) or ""
     if _MIME_TYPE_PATTERN.fullmatch(mime_type) and mime_type != "application/octet-stream":
         return mime_type
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"

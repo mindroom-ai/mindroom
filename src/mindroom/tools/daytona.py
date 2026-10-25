@@ -147,7 +147,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Whether to reuse the same sandbox within the current agent session",
+            description="Whether to reuse the same sandbox across calls within one reply",
         ),
         ConfigField(
             name="sandbox_public",

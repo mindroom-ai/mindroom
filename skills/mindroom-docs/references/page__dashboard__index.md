@@ -36,7 +36,6 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Display name**, **Role description**, **Model**, **Instructions**, and **Rooms**
 - **Memory backend** - inherit the global backend or override it per agent (`mem0`, `file`, or `none`)
 - **Tools** - configured tools (green badge) and tools that need no setup
-- **Learning** and **Learning mode** (`always` or `agentic`); see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/)
 - **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
 

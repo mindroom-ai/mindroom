@@ -30,7 +30,7 @@ from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTI
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.teams import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.access_schema_support import with_current_room_member_access

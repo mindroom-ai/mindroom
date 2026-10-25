@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from httpx._utils import get_environment_proxies
@@ -49,8 +49,8 @@ class _ModelHttpClient(httpx.AsyncClient):
 
     Given no client, the provider SDKs build one per model, and its garbage-collection finalizer closes it
     late, after its sockets' descriptors can belong to new connections, which then hang (#2976).
-    Models are built in worker threads, so the loop's pool is picked per request. SDK clients close the
-    client they were given, as MindRoom does for Claude after each turn, so closing this shared one is a no-op.
+    Models are built in worker threads, so the loop's pool is picked per request. An SDK client closes the
+    client it was given when it closes, so closing this shared one is a no-op.
     """
 
     async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:  # noqa: ANN401
@@ -59,22 +59,6 @@ class _ModelHttpClient(httpx.AsyncClient):
 
     async def aclose(self) -> None:
         """Keep the shared pools open when one model's SDK client closes."""
-
-
-# AGNO_COMPAT: Deep-copied models drop their HTTP client.
-# Reason: `Model.__deepcopy__` drops `http_client`, and Learning deep-copies the model every run (see #2976).
-# Upstream issue: None identified (searched October 19, 2026).
-# Upstream PR: https://github.com/agno-agi/agno/pull/9905 (open) keeps caller-supplied clients on deep copies.
-# Remove when: the pinned Agno's model deep copy keeps a caller-supplied `http_client`.
-# Coverage: tests/test_model_http_client.py::test_deep_copied_model_keeps_the_shared_http_client.
-class KeepHttpClient:
-    """Keep a model's HTTP client on its deep copies; mix in ahead of the Agno model class."""
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
-        """Copy the model as Agno does, then hand the copy the same HTTP client."""
-        copied = super().__deepcopy__(memo)  # ty: ignore[unresolved-attribute]  # Agno's Model.__deepcopy__
-        copied.http_client = self.http_client  # ty: ignore[unresolved-attribute]
-        return copied
 
 
 # Requests go through the loops' pooled clients, so this one needs no transport or proxy settings of its own.

@@ -4,37 +4,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agno.tools import Toolkit
-
 from mindroom.agent_policy import resolve_agent_policy_from_data
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
-from mindroom.tool_jobs.agno_compat_functions import function_actor
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origin
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
-    from agno.team import Team
-    from agno.tools.function import Function
+    from collections.abc import Mapping
 
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-def bind_actor_authority[Actor: Agent | Team](actor: Actor, snapshot: dict[str, Any]) -> Actor:
-    """Bind current construction evidence outside SDK-persisted session metadata."""
-    vars(actor)["mindroom_tool_authority"] = snapshot
-    return actor
-
-
-def bind_toolkit_authority(toolkit: Toolkit, *, authored_name: str) -> None:
-    """Attach the authored approval owner while retaining the concrete source toolkit."""
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = authored_name
-        function.source_toolkit = toolkit
 
 
 def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
@@ -47,12 +30,9 @@ def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
     return {"scope": policy.effective_execution_scope, "file_access": config.resolve_entity(agent_name).file_access}
 
 
-def function_authority(function: Function) -> dict[str, Any]:
-    """Read the construction snapshot retained by the actual executing actor."""
-    actor = function_actor(function)
-    snapshot = vars(actor).get("mindroom_tool_authority", {}) if actor is not None else {}
-    toolkit = function.source_toolkit
-    construction = get_toolkit_construction(toolkit) if isinstance(toolkit, Toolkit) else None
+def toolkit_authority(snapshot: Mapping[str, Any], toolkit: Toolkit) -> dict[str, Any]:
+    """Return the evidence a toolkit's calls are granted by: the actor's snapshot and the toolkit's construction."""
+    construction = get_toolkit_construction(toolkit)
     return {
         **snapshot,
         "construction": (

@@ -55,7 +55,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -289,7 +289,7 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
 
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 

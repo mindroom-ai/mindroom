@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 
-from mindroom.tool_system.tool_schema_cache import processed_function_definition
+from mindroom.tool_system.tool_access import tool_definition
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from mindroom.tool_system.dynamic_toolkits import DeferredToolkit
 
@@ -40,10 +40,14 @@ def _tokens(text: str) -> set[str]:
 
 
 class DynamicToolsToolkit(Toolkit):
-    """Return deferred function definitions on request; deferred calls arrive through ``call_tool``."""
+    """Return deferred function definitions on request; deferred calls arrive through ``call_tool``.
 
-    def __init__(self, *, deferred_toolkits: Sequence[DeferredToolkit]) -> None:
-        self._deferred_toolkits = tuple(deferred_toolkits)
+    ``deferred_toolkits`` returns the deferred toolkits as the agent's runs offer them, which the agent knows only once
+    all of its toolkits are assembled, after this one.
+    """
+
+    def __init__(self, *, deferred_toolkits: Callable[[], Sequence[DeferredToolkit]]) -> None:
+        self._deferred_toolkits = deferred_toolkits
         super().__init__(name="dynamic_tools", tools=[self.tool_search, self.call_tool])
         # Agno would render the argument values of a typed dict as empty objects, and Gemini conversion drops the
         # description of an optional object, so the wrapper declares the same shape as the MCP call_tool bridge.
@@ -73,7 +77,7 @@ class DynamicToolsToolkit(Toolkit):
         if not query_tokens:
             return self._listing()
         scored: list[tuple[int, int, DeferredToolkit, dict[str, Any]]] = []
-        for deferred in self._deferred_toolkits:
+        for deferred in self._deferred_toolkits():
             for definition in _function_definitions(deferred):
                 score = _search_score(deferred, definition, query_tokens, raw_query)
                 if score > 0:
@@ -107,10 +111,10 @@ class DynamicToolsToolkit(Toolkit):
         described = [
             {
                 "name": definition["name"],
-                "toolkit": deferred.domain_name,
+                "toolkit": deferred.deferral.domain_name,
                 "description": definition["description"][:_LISTED_DESCRIPTION_LENGTH],
             }
-            for deferred in self._deferred_toolkits
+            for deferred in self._deferred_toolkits()
             for definition in _function_definitions(deferred)
         ]
         listed = _within_listing_limit(described)
@@ -158,22 +162,20 @@ def _domain_instructions(matched: Iterable[DeferredToolkit]) -> dict[str, str]:
     # One authored entry can expand to several toolkits, so each domain joins its toolkits' instructions.
     texts: dict[str, dict[str, None]] = {}
     for deferred in matched:
-        if deferred.instructions:
-            texts.setdefault(deferred.domain_name, {})[deferred.instructions] = None
+        if instructions := deferred.deferral.instructions:
+            texts.setdefault(deferred.deferral.domain_name, {})[instructions] = None
     return {domain: "\n\n".join(domain_texts) for domain, domain_texts in texts.items()}
 
 
 def _match(deferred: DeferredToolkit, definition: dict[str, Any]) -> dict[str, Any]:
-    match = {**definition, "toolkit": deferred.domain_name}
-    if function_instructions := deferred.function_instructions.get(definition["name"]):
+    match = {**definition, "toolkit": deferred.deferral.domain_name}
+    if function_instructions := deferred.deferral.function_instructions.get(definition["name"]):
         match["instructions"] = function_instructions
     return match
 
 
 def _function_definitions(deferred: DeferredToolkit) -> list[dict[str, Any]]:
-    # Async runs execute the async implementation when a toolkit registers both, so describe that one.
-    functions = deferred.toolkit.get_async_functions()
-    return [processed_function_definition(functions[name]) for name in dict.fromkeys(deferred.wire_function_names)]
+    return [tool_definition(function) for function in deferred.functions]
 
 
 def _search_score(
@@ -190,8 +192,8 @@ def _search_score(
         detail_tokens |= _tokens(parameter_name)
     fields = (
         (8, _tokens(definition["name"])),
-        (4, _tokens(deferred.domain_name)),
+        (4, _tokens(deferred.deferral.domain_name)),
         (2, detail_tokens),
-        (1, _tokens(deferred.description)),
+        (1, _tokens(deferred.deferral.description)),
     )
     return sum(max((weight for weight, tokens in fields if token in tokens), default=0) for token in query_tokens)

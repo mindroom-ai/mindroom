@@ -245,8 +245,8 @@ def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig,
     return int(replay_window_tokens * 0.8)
 
 
-def _normalize_compaction_budget_tokens(tokens: int, context_window: int | None) -> int:
+def _normalize_compaction_budget_tokens(tokens: int, context_window: int) -> int:
     """Clamp one compaction knob against half of the available model window."""
-    if context_window is None or context_window <= 0:
+    if context_window <= 0:
         return tokens
     return min(tokens, context_window // 2)

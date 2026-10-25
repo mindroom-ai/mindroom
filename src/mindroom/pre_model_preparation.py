@@ -7,18 +7,13 @@ import contextvars
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
-from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agno.agent import Agent
-    from agno.db.base import BaseDb
-
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.config.main import ResolvedRuntimeModel
     from mindroom.memory import MemoryPromptParts
     from mindroom.timing import DispatchPipelineTiming
@@ -26,10 +21,13 @@ if TYPE_CHECKING:
 # Keep extraction behavior-neutral for per-logger routing and emitted logger fields.
 logger = get_logger("mindroom.ai")
 
+type _AgentBuilder = Callable[[], tuple[ResolvedRuntimeModel, AgentBuild]]
+type _BuiltAgent = tuple[ResolvedRuntimeModel, AgentBuild]
+
 # Agent construction is synchronous and must stay off the event loop, but the
 # default executor is shared with hundreds of unrelated offloads.  Keeping the
 # raw concurrent future lets shutdown atomically cancel a build that never
-# acquired a worker while still joining and closing one that already started.
+# acquired a worker while still joining one that already started.
 _AGENT_BUILD_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="mindroom_agent_build",
@@ -49,58 +47,22 @@ def _log_secondary_agent_error(agent_name: str, error: Exception) -> None:
     )
 
 
-def prewarm_agent_model_client(agent: Agent, shared_scope_storage: BaseDb | None) -> None:
-    """Prewarm one built agent or reclaim its runtime state on failure."""
-    try:
-        prewarm_anthropic_async_client(agent.model)
-    except Exception:
-        close_agent_runtime_state_dbs(agent, shared_scope_storage=shared_scope_storage)
-        raise
-
-
-async def close_unreturned_agent(
-    agent: Agent,
-    shared_scope_storage: BaseDb | None,
-    caller_owned_agent: Agent | None,
-) -> None:
-    """Close every resource owned by an agent that preparation cannot return."""
-    if agent is caller_owned_agent:
-        return
-
-    async def close_resources() -> None:
-        try:
-            await asyncio.to_thread(
-                close_agent_runtime_state_dbs,
-                agent,
-                shared_scope_storage=shared_scope_storage,
-            )
-        except Exception:
-            logger.exception("Failed to close unreturned agent runtime state", agent=agent.id)
-        try:
-            await aclose_anthropic_async_client(agent.model)
-        except Exception:
-            logger.exception("Failed to close unreturned agent model client", agent=agent.id)
-
-    await run_coroutine_until_complete(close_resources())
-
-
-def _run_agent_build_in_context(
-    context: contextvars.Context,
-    build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
-) -> tuple[ResolvedRuntimeModel, Agent]:
+def _run_agent_build_in_context(context: contextvars.Context, build_agent: _AgentBuilder) -> _BuiltAgent:
     """Run one synchronous agent build inside its captured dispatch context."""
     return context.run(build_agent)
 
 
 async def _drain_unreturned_agent_build(
-    build_future: asyncio.Future[tuple[ResolvedRuntimeModel, Agent]],
-    build_call: Future[tuple[ResolvedRuntimeModel, Agent]],
+    build_future: asyncio.Future[_BuiltAgent],
+    build_call: Future[_BuiltAgent],
     *,
     agent_name: str,
-    shared_scope_storage: BaseDb | None,
-    caller_owned_agent: Agent | None,
 ) -> None:
-    """Wait through repeated cancellation and clean an unreturned agent build."""
+    """Wait through repeated cancellation for a build that preparation cannot return.
+
+    A build holds no resource of its own once it returns, so the wait only keeps its thread from outliving the
+    response that started it.
+    """
     cancelled_before_start = build_call.cancel()
     logger.info(
         "pre_model_agent_build_cancelled",
@@ -118,66 +80,32 @@ async def _drain_unreturned_agent_build(
         except Exception:
             break
     try:
-        _, unreturned_agent = build_future.result()
+        build_future.result()
     except asyncio.CancelledError:
         return
     except Exception as error:
         _log_secondary_agent_error(agent_name, error)
-    else:
-        await close_unreturned_agent(unreturned_agent, shared_scope_storage, caller_owned_agent)
 
 
-async def _discard_unreturned_agent_result(
-    result: tuple[ResolvedRuntimeModel, Agent] | Exception,
-    *,
-    agent_name: str,
-    shared_scope_storage: BaseDb | None,
-    caller_owned_agent: Agent | None,
-) -> None:
-    """Log a failed build or close an agent that preparation cannot return."""
-    if isinstance(result, Exception):
-        _log_secondary_agent_error(agent_name, result)
-    else:
-        await close_unreturned_agent(result[1], shared_scope_storage, caller_owned_agent)
-
-
-async def build_agent_off_loop(
-    build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
-    *,
-    agent_name: str,
-    shared_scope_storage: BaseDb | None,
-    caller_owned_agent: Agent | None = None,
-) -> tuple[ResolvedRuntimeModel, Agent]:
-    """Build one agent off-loop and reclaim a completed result after cancellation."""
+async def build_agent_off_loop(build_agent: _AgentBuilder, *, agent_name: str) -> _BuiltAgent:
+    """Build one agent off-loop, letting a cancelled build finish before the cancellation propagates."""
     context = contextvars.copy_context()
-    build_call: Future[tuple[ResolvedRuntimeModel, Agent]] = _AGENT_BUILD_EXECUTOR.submit(
-        _run_agent_build_in_context,
-        context,
-        build_agent,
-    )
-    build_future: asyncio.Future[tuple[ResolvedRuntimeModel, Agent]] = asyncio.wrap_future(build_call)
+    build_call: Future[_BuiltAgent] = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, context, build_agent)
+    build_future: asyncio.Future[_BuiltAgent] = asyncio.wrap_future(build_call)
     try:
         return await asyncio.shield(build_future)
     except asyncio.CancelledError:
-        await _drain_unreturned_agent_build(
-            build_future,
-            build_call,
-            agent_name=agent_name,
-            shared_scope_storage=shared_scope_storage,
-            caller_owned_agent=caller_owned_agent,
-        )
+        await _drain_unreturned_agent_build(build_future, build_call, agent_name=agent_name)
         raise
 
 
 async def _prepare_prompt_branches(
     *,
     prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
-    build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
+    build_agent: _AgentBuilder,
     agent_name: str,
-    shared_scope_storage: BaseDb | None,
     pipeline_timing: DispatchPipelineTiming | None,
-    caller_owned_agent: Agent | None = None,
-) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, Agent]:
+) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, AgentBuild]:
     """Overlap memory preparation with agent construction and join both safely."""
 
     async def _memory_branch() -> MemoryPromptParts | Exception:
@@ -191,17 +119,13 @@ async def _prepare_prompt_branches(
 
     context = contextvars.copy_context()
     _mark_pipeline_timing(pipeline_timing, "agent_build_start")
-    build_call: Future[tuple[ResolvedRuntimeModel, Agent]] = _AGENT_BUILD_EXECUTOR.submit(
-        _run_agent_build_in_context,
-        context,
-        build_agent,
-    )
-    build_future: asyncio.Future[tuple[ResolvedRuntimeModel, Agent]] = asyncio.wrap_future(build_call)
+    build_call: Future[_BuiltAgent] = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, context, build_agent)
+    build_future: asyncio.Future[_BuiltAgent] = asyncio.wrap_future(build_call)
     build_future.add_done_callback(
         lambda _future: _mark_pipeline_timing(pipeline_timing, "agent_build_ready"),
     )
 
-    async def _agent_branch() -> tuple[ResolvedRuntimeModel, Agent] | Exception:
+    async def _agent_branch() -> _BuiltAgent | Exception:
         try:
             return await asyncio.shield(build_future)
         except Exception as error:
@@ -209,65 +133,36 @@ async def _prepare_prompt_branches(
 
     try:
         async with asyncio.TaskGroup() as task_group:
-            agent_task = task_group.create_task(
-                _agent_branch(),
-                name=f"agent_prepare:{agent_name}",
-            )
-            memory_task = task_group.create_task(
-                _memory_branch(),
-                name=f"memory_prepare:{agent_name}",
-            )
+            agent_task = task_group.create_task(_agent_branch(), name=f"agent_prepare:{agent_name}")
+            memory_task = task_group.create_task(_memory_branch(), name=f"memory_prepare:{agent_name}")
     except BaseException:
-        await _drain_unreturned_agent_build(
-            build_future,
-            build_call,
-            agent_name=agent_name,
-            shared_scope_storage=shared_scope_storage,
-            caller_owned_agent=caller_owned_agent,
-        )
+        await _drain_unreturned_agent_build(build_future, build_call, agent_name=agent_name)
         raise
 
     agent_result = agent_task.result()
-    try:
-        memory_result = memory_task.result()
-    except BaseException:
-        await _discard_unreturned_agent_result(
-            agent_result,
-            agent_name=agent_name,
-            shared_scope_storage=shared_scope_storage,
-            caller_owned_agent=caller_owned_agent,
-        )
-        raise
+    memory_result = memory_task.result()
     if isinstance(memory_result, Exception):
-        await _discard_unreturned_agent_result(
-            agent_result,
-            agent_name=agent_name,
-            shared_scope_storage=shared_scope_storage,
-            caller_owned_agent=caller_owned_agent,
-        )
+        if isinstance(agent_result, Exception):
+            _log_secondary_agent_error(agent_name, agent_result)
         raise memory_result
     if isinstance(agent_result, Exception):
         raise agent_result
-    runtime_model, agent = agent_result
-    return memory_result, runtime_model, agent
+    runtime_model, build = agent_result
+    return memory_result, runtime_model, build
 
 
 async def prepare_prompt_branches(
     *,
     prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
-    build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
+    build_agent: _AgentBuilder,
     agent_name: str,
-    shared_scope_storage: BaseDb | None,
     pipeline_timing: DispatchPipelineTiming | None,
-    caller_owned_agent: Agent | None = None,
-) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, Agent]:
+) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, AgentBuild]:
     """Overlap memory preparation with traced, cancellation-safe construction."""
     with response_shutdown_phase(ResponseShutdownPhase.AGENT_PREPARATION):
         return await _prepare_prompt_branches(
             prepare_memory=prepare_memory,
             build_agent=build_agent,
             agent_name=agent_name,
-            shared_scope_storage=shared_scope_storage,
             pipeline_timing=pipeline_timing,
-            caller_owned_agent=caller_owned_agent,
         )

@@ -29,9 +29,9 @@ from mindroom.worker_computer.browser_proxy import RELAY_ONLY_PROXY_BYPASS, Brow
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 
 if TYPE_CHECKING:
-    from agno.tools.function import ToolResult
     from mcp.types import CallToolResult
 
+    from mindroom.tool_system.agno_toolkits import ToolResult
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 

@@ -9,6 +9,15 @@ type ToolWaitMode = Literal["native", "inline", "managed"]
 
 # Seconds a managed call may hold its reply before it continues in the background.
 BACKGROUND_AFTER = "background_after"
+# The optional parameter each managed function's definition gains, so the model can choose that budget.
+BACKGROUND_AFTER_SCHEMA = {
+    "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
+    "description": (
+        "Seconds to wait for this call before it continues in the background, without cancelling it. "
+        "Omit or pass null to wait until completion or a newer message you answer; "
+        "zero continues in the background at once and returns a job handle."
+    ),
+}
 
 
 def validate_wait_seconds(value: object, *, argument: str) -> float | None:
@@ -30,8 +39,6 @@ def read_background_after(arguments: dict[str, Any] | None, *, owned_execution: 
     return value
 
 
-def application_arguments(arguments: dict[str, Any] | None) -> dict[str, Any] | None:
+def application_arguments(arguments: dict[str, Any] | None) -> dict[str, Any]:
     """Remove reserved metadata without mutating exact persisted call evidence."""
-    if arguments is None:
-        return None
-    return {key: value for key, value in arguments.items() if key != BACKGROUND_AFTER}
+    return {key: value for key, value in (arguments or {}).items() if key != BACKGROUND_AFTER}

@@ -1,0 +1,281 @@
+{
+  "store": "agent_code",
+  "session_id": "!room:example.org:$native",
+  "get_messages": {
+    "all": {
+      "params": {},
+      "messages": []
+    },
+    "last_run": {
+      "params": {
+        "last_n_runs": 1
+      },
+      "messages": []
+    },
+    "last_two_runs": {
+      "params": {
+        "last_n_runs": 2
+      },
+      "messages": []
+    },
+    "no_runs": {
+      "params": {
+        "last_n_runs": 0
+      },
+      "messages": []
+    },
+    "limit_1": {
+      "params": {
+        "limit": 1
+      },
+      "messages": []
+    },
+    "limit_3": {
+      "params": {
+        "limit": 3
+      },
+      "messages": []
+    },
+    "limit_4": {
+      "params": {
+        "limit": 4
+      },
+      "messages": []
+    },
+    "last_three_runs_limit_5": {
+      "params": {
+        "last_n_runs": 3,
+        "limit": 5
+      },
+      "messages": []
+    },
+    "skip_prompt_roles": {
+      "params": {
+        "skip_roles": [
+          "system",
+          "developer"
+        ]
+      },
+      "messages": []
+    },
+    "every_status_limit_6": {
+      "params": {
+        "skip_statuses": [],
+        "limit": 6
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000024",
+          "content": "This request fails.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000540
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000025",
+          "content": "Add 5 and 5, then stop.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000600
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000026",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-native-add",
+              "type": "function",
+              "function": {
+                "name": "add",
+                "arguments": "{\"a\": 5, \"b\": 5}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 140,
+            "output_tokens": 4,
+            "total_tokens": 144
+          },
+          "created_at": 1800000600
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000027",
+          "content": "{\"operation\": \"addition\", \"result\": 10.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-native-add",
+          "tool_name": "add",
+          "tool_args": {
+            "a": 5,
+            "b": 5
+          },
+          "tool_call_error": false,
+          "created_at": 1800000600
+        }
+      ]
+    },
+    "every_status": {
+      "params": {
+        "skip_statuses": []
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000024",
+          "content": "This request fails.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000540
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000025",
+          "content": "Add 5 and 5, then stop.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000600
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000026",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-native-add",
+              "type": "function",
+              "function": {
+                "name": "add",
+                "arguments": "{\"a\": 5, \"b\": 5}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 140,
+            "output_tokens": 4,
+            "total_tokens": 144
+          },
+          "created_at": 1800000600
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000027",
+          "content": "{\"operation\": \"addition\", \"result\": 10.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-native-add",
+          "tool_name": "add",
+          "tool_args": {
+            "a": 5,
+            "b": 5
+          },
+          "tool_call_error": false,
+          "created_at": 1800000600
+        }
+      ]
+    }
+  },
+  "filter_tool_calls": {
+    "all/max_tool_calls_0": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 0,
+      "messages": []
+    },
+    "all/max_tool_calls_1": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": []
+    },
+    "all/max_tool_calls_2": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 2,
+      "messages": []
+    },
+    "every_status/max_tool_calls_1": {
+      "selection": "every_status",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000024",
+          "content": "This request fails.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000540
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000025",
+          "content": "Add 5 and 5, then stop.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000600
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000026",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-native-add",
+              "type": "function",
+              "function": {
+                "name": "add",
+                "arguments": "{\"a\": 5, \"b\": 5}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 140,
+            "output_tokens": 4,
+            "total_tokens": 144
+          },
+          "created_at": 1800000600
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000027",
+          "content": "{\"operation\": \"addition\", \"result\": 10.0}",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-native-add",
+          "tool_name": "add",
+          "tool_args": {
+            "a": 5,
+            "b": 5
+          },
+          "tool_call_error": false,
+          "created_at": 1800000600
+        }
+      ]
+    }
+  }
+}

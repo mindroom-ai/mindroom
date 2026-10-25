@@ -64,7 +64,7 @@ class _ResolvedToolAvailabilityContext:
     """Runtime tool-availability context for one dashboard request."""
 
     execution_scope: WorkerScope | None
-    dashboard_configuration_supported: bool
+    # Whether credential status is authoritative for this scope, which is also when the dashboard can configure it.
     status_authoritative: bool
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
@@ -292,7 +292,6 @@ def _resolve_tool_availability_context(
     ensure_tool_registry_loaded(runtime_paths)
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
-        dashboard_configuration_supported=status_authoritative,
         status_authoritative=status_authoritative,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
@@ -463,7 +462,7 @@ async def get_registered_tools(
     )
     _annotate_dashboard_configuration_support(
         tools,
-        supported=context.dashboard_configuration_supported,
+        supported=context.status_authoritative,
     )
     await _update_tools_statuses(tools, context)
 

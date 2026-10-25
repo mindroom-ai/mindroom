@@ -13,10 +13,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from agno.tools.toolkit import Toolkit
-
     from mindroom.custom_tools.browser import BrowserTools
     from mindroom.custom_tools.browser_mcp import BrowserMCPTools
+    from mindroom.tool_system.agno_toolkits import Toolkit
 
 
 @dataclass(frozen=True)
@@ -96,7 +95,7 @@ def select_browser_provider(
             encode_media_result,
         )
     elif tool_name == "browser" and function_name == "browser_control":
-        from agno.tools.function import ToolResult  # noqa: PLC0415
+        from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
 
         def encode_action_browser_result(result: object) -> object:
             if isinstance(result, ToolResult):

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.models.message import Message
+    from mindroom.llm.messages import Message
 
 _LEGACY_SUMMARY_TAG = "<summary_of_previous_interactions>"
 _LEGACY_SUMMARY_BLOCK = re.compile(
@@ -25,15 +25,16 @@ _LEGACY_SUMMARY_BLOCK = re.compile(
 # Last legacy release: v2026.10.346; replacement: the next release renders the summary as a history message.
 # Handling: Resuming such a run inserts no summary message, so its request keeps the single summary it was paused
 # with and the paused tool call's signed reasoning stays valid against an unchanged prefix. A mid-turn compaction
-# of that resumed request folds the paused tool call anyway, so it also removes the block from the system message,
-# including the stored one behind an approval receipt's projected copy.
-# Coverage: tests/test_history_summary_message.py::test_resuming_a_pre_release_pause_keeps_its_single_summary;
+# of that resumed request folds the paused tool call anyway, so it also removes the block from the system message;
+# the approval receipt projects its copy after compaction, so the stored message is the one stripped.
+# Coverage: tests/test_history_request_messages.py::test_resuming_a_pause_whose_system_message_embeds_the_summary_adds_no_second_summary;
+# tests/test_history_summary_message.py::test_resuming_a_pre_release_team_pause_keeps_its_single_summary;
 # tests/test_mid_turn_compaction.py::test_legacy_resume_then_mid_turn_compaction_leaves_one_summary;
-# tests/test_approval_receipt.py::test_publishing_keeps_a_legacy_summary_strip_made_on_the_outbound_copy.
+# tests/test_agent_turn_runtime.py::test_the_hooks_of_a_reply_are_installed_in_their_documented_order.
 def system_message_embeds_summary(messages: Sequence[Message]) -> bool:
-    """Return whether a leading system or developer message already carries Agno's summary block."""
+    """Return whether a leading system message already carries Agno's summary block."""
     for message in messages:
-        if message.role not in {"system", "developer"}:
+        if message.role != "system":
             return False
         if isinstance(message.content, str) and _LEGACY_SUMMARY_TAG in message.content:
             return True
@@ -41,6 +42,6 @@ def system_message_embeds_summary(messages: Sequence[Message]) -> bool:
 
 
 def strip_embedded_summary(message: Message) -> None:
-    """Remove Agno's summary block from a system or developer message in place, keeping the message's identity."""
+    """Remove Agno's summary block from a system message in place, keeping the message's identity."""
     if isinstance(message.content, str) and _LEGACY_SUMMARY_TAG in message.content:
         message.content = _LEGACY_SUMMARY_BLOCK.sub("", message.content)

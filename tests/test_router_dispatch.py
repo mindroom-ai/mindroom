@@ -27,7 +27,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.router_relay import execute_router_relay
-from mindroom.teams import TeamResolution
+from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (

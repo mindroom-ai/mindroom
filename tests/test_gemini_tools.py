@@ -4,10 +4,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import agno.tools.models.gemini as agno_gemini
-from agno.agent import Agent
 from google.genai import types
 
 from mindroom.custom_tools.gemini_media import MindRoomGeminiTools
+from mindroom.tool_system.agno_toolkits import ToolCallActor
 
 
 def test_generate_image_uses_gemini_content_generation(monkeypatch) -> None:  # noqa: ANN001
@@ -31,7 +31,7 @@ def test_generate_image_uses_gemini_content_generation(monkeypatch) -> None:  # 
         enable_generate_video=False,
     )
 
-    result = toolkit.generate_image(Mock(spec=Agent), "A geometric Matrix room")
+    result = toolkit.generate_image(ToolCallActor(session_state={}), "A geometric Matrix room")
 
     assert result.images is not None
     assert len(result.images) == 1

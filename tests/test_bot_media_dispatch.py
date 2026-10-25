@@ -38,7 +38,7 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.ingress_validation import IngressValidator
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
-from mindroom.teams import TeamResolution
+from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _IngressAdmissionOutcome
 from mindroom.turn_policy import PreparedDispatch

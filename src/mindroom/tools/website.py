@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -21,18 +21,9 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     icon="FaGlobe",
     icon_color="text-blue-600",
-    config_fields=[
-        ConfigField(
-            name="knowledge",
-            label="Knowledge",
-            type="text",
-            required=False,
-            default=None,
-        ),
-    ],
     dependencies=["httpx", "beautifulsoup4"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/website",
-    function_names=("add_website_to_knowledge", "read_url"),
+    function_names=("read_url",),
 )
 def website_tools() -> type[WebsiteTools]:
     """Return website tools for web scraping and content extraction."""

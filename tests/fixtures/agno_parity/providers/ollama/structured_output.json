@@ -1,0 +1,143 @@
+{
+  "family": "ollama",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "Route the message to the best agent.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "host": "http://localhost:11434",
+      "id": "qwen3.8:27b",
+      "provider": "ollama"
+    },
+    "portable_replay": null,
+    "response_format": {
+      "json_schema": {
+        "description": "Structured output for routing decisions.",
+        "properties": {
+          "entity_name": {
+            "description": "The name of the agent or team that should respond",
+            "title": "Entity Name",
+            "type": "string"
+          },
+          "reasoning": {
+            "description": "Brief explanation of why this agent or team was chosen",
+            "title": "Reasoning",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_name",
+          "reasoning"
+        ],
+        "title": "_RoutingSuggestion",
+        "type": "object"
+      },
+      "model": "mindroom.routing:_RoutingSuggestion",
+      "type": "pydantic"
+    },
+    "stream": false,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "qwen3.8:27b",
+          "provider": "Ollama"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "model": "qwen3.8:27b",
+      "stream": false,
+      "format": {
+        "description": "Structured output for routing decisions.",
+        "properties": {
+          "entity_name": {
+            "description": "The name of the agent or team that should respond",
+            "title": "Entity Name",
+            "type": "string"
+          },
+          "reasoning": {
+            "description": "Brief explanation of why this agent or team was chosen",
+            "title": "Reasoning",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_name",
+          "reasoning"
+        ],
+        "title": "_RoutingSuggestion",
+        "type": "object"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Route the message to the best agent."
+        },
+        {
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
+        }
+      ],
+      "tools": []
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "http://localhost:11434/api/chat"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "created_at": "2026-10-20T00:00:00.000000Z",
+      "done": true,
+      "done_reason": "stop",
+      "eval_count": 12,
+      "eval_duration": 640000000,
+      "load_duration": 21000000,
+      "message": {
+        "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+        "role": "assistant"
+      },
+      "model": "qwen3.8:27b",
+      "prompt_eval_count": 42,
+      "prompt_eval_duration": 120000000,
+      "total_duration": 812000000
+    },
+    "status": 200
+  },
+  "scenario": "structured_output"
+}

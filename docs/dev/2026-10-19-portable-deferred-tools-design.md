@@ -15,12 +15,12 @@ A line naming the currently loaded tools at the end of the system prompt also ch
 On every model without native tool search, an agent with deferred tools sends one fixed tool list for the whole session: its eager tools plus `tool_search` and `call_tool`.
 `tool_search` returns the full definitions of matching functions, with the instructions they and their toolkits would render, as an ordinary tool result, so discovery only appends to the end of the conversation.
 The model calls a discovered function through `call_tool(name, arguments)`, the shape of MCP's `tools/call`.
-MindRoom rewrites that call to the real function before Agno resolves it, and presents every stored call to a deferred function as a `call_tool` call when it sends history to the provider.
+MindRoom rewrites that call to the real function before Agno resolves it (now before the agent loop does), and presents every stored call to a deferred function as a `call_tool` call when it sends history to the provider.
 Stored history, approvals, tool hooks, worker routing, background jobs, and the chat display therefore see only real function names, exactly as on the native path.
 Deferred toolkits are built when the agent is built, as the native path already does, so no per-session loaded-tool state exists.
-Agno registers only the first function of each name, so a deferred function whose name an earlier toolkit already provides is neither hidden nor offered by search.
+Agno registers only the first function of each name (now the tool system does), so a deferred function whose name an earlier toolkit already provides is neither hidden nor offered by search.
 
-The rewrite happens at the model boundary rather than inside a dispatching tool because approval, hooks, worker routing, and job execution attach to the real Agno function.
+The rewrite happens at the model boundary rather than inside a dispatching tool because approval, hooks, worker routing, and job execution attach to the real Agno function (now its `ToolFunction`).
 A dispatcher that invoked the real entrypoint from inside `call_tool` would bypass all of them.
 
 The model calls discovered functions through the wrapper instead of by their real names because those names are absent from the declared tool list.
@@ -47,9 +47,9 @@ Inference servers that constrain tool names to the declared list (vLLM and llama
 
 - Building every deferred toolkit when the agent is built is acceptable, because the native path has done so since #1417.
 - Providers accept a `call_tool` call whose `arguments` is a nested JSON object; weaker models sometimes send it as a JSON string, which the rewrite accepts.
-- Deferred function arguments lose provider-side `strict` schema enforcement; Agno's existing argument parsing and validation return errors to the model so it can retry.
+- Deferred function arguments lose provider-side `strict` schema enforcement; Agno's existing argument parsing and validation return errors to the model so it can retry (the parsing is now the tool system's).
 - Discovered definitions live in the conversation, so after compaction summarizes them away the model searches again.
-- The rewrite binds to Agno internals with no public extension point, so each binding carries an `AGNO_COMPAT` record.
+- The rewrite bound to Agno internals with no public extension point, so each binding carried an `AGNO_COMPAT` record, until the agent loop's `rewrite_tool_calls` hook and the provider pipeline replaced the bindings and their markers when MindRoom [stopped running Agno's agent loop](2026-10-20-replace-agno-design.md).
 - Minimal mode keeps calling deferred toolkits through `mindroom-agent`, which never changed the provider tool list.
 
 ## Evidence

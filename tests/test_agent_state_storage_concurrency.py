@@ -2,44 +2,37 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
+from contextlib import closing
 from typing import TYPE_CHECKING
-
-from sqlalchemy import text
 
 from mindroom.session_storage.agent_storage import create_state_storage
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.db.base import BaseDb
+    from mindroom.session_storage.store import ConversationStore
 
 
-def _storage(tmp_path: Path) -> BaseDb:
-    return create_state_storage(
-        "probe",
-        tmp_path,
-        subdir="sessions",
-        session_table="probe_sessions",
-    )
+def _storage(tmp_path: Path) -> ConversationStore:
+    return create_state_storage("probe", tmp_path)
 
 
 def test_a_state_database_keeps_rollback_journal_and_waits_for_locks(tmp_path: Path) -> None:
     """Network-compatible rollback journaling retains a long lock timeout."""
     storage = _storage(tmp_path)
 
-    with storage.db_engine.connect() as connection:
-        assert connection.execute(text("PRAGMA journal_mode")).scalar() == "delete"
-        assert connection.execute(text("PRAGMA busy_timeout")).scalar() == 30_000
-    storage.close()
+    with storage.transaction(write=False) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+        assert connection.execute("PRAGMA busy_timeout").fetchone() == (30_000,)
 
 
 def test_a_read_waits_for_a_writer_rather_than_failing(tmp_path: Path) -> None:
     """A statement that finds the database locked waits for it, up to the timeout."""
     storage = _storage(tmp_path)
-    with storage.db_engine.connect() as setup:
-        setup.execute(text("CREATE TABLE probe (value TEXT)"))
-        setup.commit()
+    with closing(sqlite3.connect(storage.path)) as setup, setup:
+        setup.execute("CREATE TABLE probe (value TEXT)")
 
     holding = threading.Event()
     release = threading.Event()
@@ -49,18 +42,19 @@ def test_a_read_waits_for_a_writer_rather_than_failing(tmp_path: Path) -> None:
     errors: list[Exception] = []
 
     def hold_write_lock() -> None:
-        with storage.db_engine.connect() as writer:
-            writer.execute(text("BEGIN EXCLUSIVE"))
-            writer.execute(text("INSERT INTO probe (value) VALUES ('held')"))
+        with closing(sqlite3.connect(storage.path, isolation_level=None)) as writer:
+            writer.execute("BEGIN EXCLUSIVE")
+            writer.execute("INSERT INTO probe (value) VALUES ('held')")
             holding.set()
             release.wait(timeout=5)
-            writer.execute(text("COMMIT"))
+            writer.execute("COMMIT")
 
     def read_after_lock() -> None:
         try:
             reading.set()
-            with storage.db_engine.connect() as reader:
-                result.append(reader.execute(text("SELECT count(*) FROM probe")).scalar_one())
+            with storage.transaction(write=False) as reader:
+                (count,) = reader.execute("SELECT count(*) FROM probe").fetchone()
+                result.append(count)
         except Exception as error:  # pragma: no cover - asserted below
             errors.append(error)
         finally:
@@ -83,4 +77,3 @@ def test_a_read_waits_for_a_writer_rather_than_failing(tmp_path: Path) -> None:
     assert not reader.is_alive()
     assert errors == []
     assert result == [1]
-    storage.close()

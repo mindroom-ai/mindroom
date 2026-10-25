@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
 
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
@@ -31,6 +30,7 @@ from mindroom.event_journal import (
     MatrixDelivery,
     StoredApprovalCard,
 )
+from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget

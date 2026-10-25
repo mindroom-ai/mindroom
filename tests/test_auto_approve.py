@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
 
 from mindroom.approval import auto_approve_windows
 from mindroom.approval.auto_approve_windows import (
@@ -29,6 +28,7 @@ from mindroom.commands.parsing import CommandType, command_parser, get_command_h
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalDecision, StoredApprovalCard, UnreadableApprovalCard
+from mindroom.llm.runs import ToolExecution
 from mindroom.message_target import MessageTarget
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import make_conversation_reader_mock, test_runtime_paths

@@ -13,11 +13,11 @@ from mindroom.tool_system import plugin_imports
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
+    from contextlib import AbstractContextManager
     from pathlib import Path
     from types import ModuleType
 
-    from agno.tools import Toolkit
-
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.declarations import ToolMetadata
 
 TOOL_METADATA: dict[str, ToolMetadata] = {}
@@ -68,35 +68,30 @@ def restore_plugin_tool_registrations(
 
 
 @contextmanager
+def _scoped_registration_setting(name: str, value: object) -> Iterator[None]:
+    """Set one attribute of this thread's plugin registration scope, restoring its previous state on exit."""
+    sentinel = object()
+    previous = getattr(PLUGIN_REGISTRATION_SCOPE, name, sentinel)
+    setattr(PLUGIN_REGISTRATION_SCOPE, name, value)
+    try:
+        yield
+    finally:
+        if previous is sentinel:
+            delattr(PLUGIN_REGISTRATION_SCOPE, name)
+        else:
+            setattr(PLUGIN_REGISTRATION_SCOPE, name, previous)
+
+
 def scoped_plugin_registration_store(
     registrations_by_module: dict[str, dict[str, ToolMetadata]],
-) -> Iterator[None]:
+) -> AbstractContextManager[None]:
     """Route plugin registration decorators into one temporary module->metadata store."""
-    sentinel = object()
-    previous = getattr(PLUGIN_REGISTRATION_SCOPE, "registrations_by_module", sentinel)
-    PLUGIN_REGISTRATION_SCOPE.registrations_by_module = registrations_by_module
-    try:
-        yield
-    finally:
-        if previous is sentinel:
-            delattr(PLUGIN_REGISTRATION_SCOPE, "registrations_by_module")
-        else:
-            PLUGIN_REGISTRATION_SCOPE.registrations_by_module = previous
+    return _scoped_registration_setting("registrations_by_module", registrations_by_module)
 
 
-@contextmanager
-def scoped_plugin_registration_owner(module_name: str) -> Iterator[None]:
+def scoped_plugin_registration_owner(module_name: str) -> AbstractContextManager[None]:
     """Attribute scoped validation registrations to one synthetic plugin module."""
-    sentinel = object()
-    previous = getattr(PLUGIN_REGISTRATION_SCOPE, "owner_module_name", sentinel)
-    PLUGIN_REGISTRATION_SCOPE.owner_module_name = module_name
-    try:
-        yield
-    finally:
-        if previous is sentinel:
-            delattr(PLUGIN_REGISTRATION_SCOPE, "owner_module_name")
-        else:
-            PLUGIN_REGISTRATION_SCOPE.owner_module_name = previous
+    return _scoped_registration_setting("owner_module_name", module_name)
 
 
 def _plugin_registration_store() -> dict[str, dict[str, ToolMetadata]]:
@@ -131,7 +126,7 @@ def resolved_tool_state(
                 raise ToolMetadataValidationError(msg)
             plugin_owner_by_tool_name[tool_name] = plugin_name
             desired_metadata[tool_name] = plugin_metadata
-            factory = cast("Callable[[], type[Toolkit]] | None", getattr(plugin_metadata, "factory", None))
+            factory = cast("Callable[[], type[Toolkit]] | None", plugin_metadata.factory)
             if factory is None:
                 desired_registry.pop(tool_name, None)
             else:
@@ -198,7 +193,7 @@ def _reject_plugin_builtin_tool_collision(tool_name: str) -> None:
 
 def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
     """Store one built-in tool or metadata-only built-in entry in the durable registry."""
-    factory = cast("Callable[[], type[Toolkit]] | None", getattr(metadata, "factory", None))
+    factory = cast("Callable[[], type[Toolkit]] | None", metadata.factory)
     BUILTIN_TOOL_METADATA[metadata.name] = metadata
     TOOL_METADATA[metadata.name] = metadata
     if factory is None:

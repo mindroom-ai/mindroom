@@ -11,17 +11,6 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig
 
 
-def _requester_scoped_team_scope_id(scope_id: str, requester_user_id: str) -> str:
-    """Return a requester-partitioned variant of one team history scope id."""
-    requester_digest = hashlib.sha256(requester_user_id.encode("utf-8")).hexdigest()[:12]
-    return f"{scope_id}_requester_{requester_digest}"
-
-
-def _ad_hoc_team_member_names(member_names: Iterable[str | None]) -> tuple[str, ...]:
-    """Return stable team-scope member names from candidate agent names."""
-    return tuple(sorted(name for name in member_names if name))
-
-
 def ad_hoc_team_has_private_member(
     member_names: Iterable[str],
     agent_configs: Mapping[str, AgentConfig],
@@ -38,10 +27,12 @@ def ad_hoc_team_scope_id(
     agent_configs: Mapping[str, AgentConfig],
     *,
     requester_user_id: str | None = None,
+    # TODO(simplify): Callers choose the missing-requester error text, so one failure reads "requester identity" or
+    # "requester_user_id" by path. Raise one message and drop the parameter. Operators reading errors would notice.
     missing_requester_message: str = "Private ad hoc team history scope requires requester identity",
 ) -> str | None:
-    """Return the stable history scope id for one exact ad hoc team."""
-    stable_member_names = _ad_hoc_team_member_names(member_names)
+    """Return the stable history scope id for one exact ad hoc team, partitioned by requester when a member is private."""
+    stable_member_names = tuple(sorted(name for name in member_names if name))
     if not stable_member_names:
         return None
 
@@ -50,4 +41,4 @@ def ad_hoc_team_scope_id(
         return scope_id
     if not requester_user_id:
         raise ValueError(missing_requester_message)
-    return _requester_scoped_team_scope_id(scope_id, requester_user_id)
+    return f"{scope_id}_requester_{hashlib.sha256(requester_user_id.encode('utf-8')).hexdigest()[:12]}"

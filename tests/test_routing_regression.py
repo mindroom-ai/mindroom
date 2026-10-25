@@ -8,6 +8,7 @@ These tests ensure that fixed bugs don't resurface, particularly:
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -36,7 +37,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.routing import ResponderSelection, suggest_responder_for_message
-from mindroom.teams import TeamOutcome, TeamResolution
+from mindroom.teams.formation import TeamOutcome, TeamResolution
 from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, _ResponderAvailability
@@ -47,9 +48,9 @@ from tests.authorization_helpers import (
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
-    FakeModel,
     bind_runtime_paths,
     drain_coalescing,
+    install_model_providers,
     install_runtime_journal_support,
     make_matrix_client_mock,
     make_pending_event,
@@ -58,6 +59,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_attempt_helpers import install_direct_response_admission
@@ -1746,23 +1748,18 @@ class TestRoutingRegression:
         ]
 
     @pytest.mark.asyncio
-    @patch("mindroom.teams.resolve_agent_knowledge_access")
-    @patch("mindroom.teams.create_agent")
-    @patch("mindroom.teams.Team.arun")
+    @patch("mindroom.teams.members.resolve_agent_knowledge_access")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.providers.model_loading.get_model_instance")
     @patch("mindroom.config.main.load_config")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_from_yaml: MagicMock,
-        mock_get_model_instance: MagicMock,
         mock_ai_response: AsyncMock,
-        mock_team_arun: AsyncMock,
-        mock_create_agent: MagicMock,
         mock_resolve_agent_knowledge_access: MagicMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Test that when multiple agents are mentioned, each responds exactly once."""
         # Create a mock config with proper models
@@ -1790,14 +1787,13 @@ class TestRoutingRegression:
         mock_research_agent.user_id = f"@mindroom_research:{domain}"
         mock_news_agent.user_id = f"@mindroom_news:{domain}"
 
-        # Mock get_model_instance to return a mock model
-        mock_model = FakeModel(id="test-model", provider="fake")
-        mock_get_model_instance.return_value = mock_model
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
-        fake_member = MagicMock()
-        fake_member.name = "MockAgent"
-        fake_member.instructions = []
-        mock_create_agent.return_value = fake_member
+        # Every model builds as one scripted model: it chooses the team mode, then answers as the team's leader on
+        # its own; the members are never asked.
+        team_model = ScriptedModel(
+            [answer(json.dumps({"mode": "collaborate", "reasoning": "Both weigh in"})), answer("Team response")],
+        )
+        install_model_providers(monkeypatch, {"default": team_model})
 
         test_room_id = "!research:localhost"
 
@@ -1814,16 +1810,15 @@ class TestRoutingRegression:
             "news": news_bot,
         }
         mock_orchestrator.current_config = mock_config
-        mock_orchestrator.config = mock_config  # This is what teams.py uses
+        mock_orchestrator.config = mock_config  # Team formation reads the live config from here
         mock_orchestrator.runtime_paths = runtime_paths_for(mock_config)
 
         # Set the orchestrator on both bots
         research_bot.orchestrator = mock_orchestrator
         news_bot.orchestrator = mock_orchestrator
 
-        # Mock AI responses and team response
+        # Mock AI responses; the team's leader is scripted above.
         mock_ai_response.side_effect = ["Research response!", "News response!"]
-        mock_team_arun.return_value = "Team response"
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -1864,7 +1859,8 @@ class TestRoutingRegression:
         # The other agent (research) does not respond individually
         assert research_bot.client.room_send.call_count == 0  # No individual response
         assert news_bot.client.room_send.call_count == 2  # Team response (thinking + final)
-        assert mock_team_arun.call_count == 1  # Team formed once
+        # The team mode was chosen once, then the team formed once.
+        assert [request.output_schema is not None for request in team_model.requests] == [True, False]
 
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")

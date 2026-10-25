@@ -10,11 +10,11 @@ from mindroom.tool_system.catalog import validate_authored_tool_entry_overrides
 from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_TOOL_NAMES
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
-
-    from agno.tools import Toolkit
+    from collections.abc import Iterable, Mapping
 
     from mindroom.config.main import Config
+    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 @dataclass(frozen=True)
@@ -25,20 +25,27 @@ class VisibleToolSurface:
 
 
 @dataclass(frozen=True)
-class DeferredToolkit:
-    """One authored deferred tool whose functions are registered but kept off the provider request."""
+class ToolDeferral:
+    """What tool search shows of one authored deferred tool beside its functions, captured before it is adapted."""
 
     domain_name: str
     description: str
     # Instructions the toolkit and its functions render when eager, captured before they are suppressed.
     instructions: str | None
     function_instructions: Mapping[str, str]
-    toolkit: Toolkit
+
+
+@dataclass(frozen=True)
+class DeferredToolkit:
+    """The functions a run offers of one authored deferred tool, which stay off the provider request until searched."""
+
+    deferral: ToolDeferral
+    functions: tuple[ToolFunction, ...]
 
     @property
     def wire_function_names(self) -> tuple[str, ...]:
-        """Return the owner's functions that survive final surface projection."""
-        return (*self.toolkit.get_functions(), *self.toolkit.get_async_functions())
+        """Return the names of the functions a run offers of the tool."""
+        return tuple(function.name for function in self.functions)
 
 
 def _deferred_tool_names(config: Config, agent_name: str) -> list[str]:
@@ -60,42 +67,12 @@ def _attachable_deferred_tools(config: Config, agent_name: str, requested_tools:
     ]
 
 
-def _normalize_effective_tool_config_overrides(
-    tool_name: str,
-    overrides: dict[str, object],
-) -> dict[str, object]:
-    return validate_authored_tool_entry_overrides(tool_name, overrides)
-
-
-def drop_shadowed_deferred_functions(tools: Sequence[Toolkit], deferred_toolkits: Sequence[DeferredToolkit]) -> None:
-    """Remove deferred functions whose name an earlier toolkit already provides.
-
-    Agno registers only the first function of each name, so a shadowed deferred function could be found by tool search
-    and hidden from the request while the earlier toolkit's function ran instead.
-    """
-    deferred_ids = {id(deferred.toolkit) for deferred in deferred_toolkits}
-    seen: set[str] = set()
-    for toolkit in tools:
-        names = set(toolkit.get_async_functions())
-        if id(toolkit) in deferred_ids:
-            for name in names & seen:
-                toolkit.functions.pop(name, None)
-                toolkit.async_functions.pop(name, None)
-            names -= seen
-        seen |= names
-
-
-def _has_deferred_tools(config: Config, agent_name: str) -> bool:
-    """Return whether one agent has at least one authored deferred tool."""
-    return bool(config.resolve_entity(agent_name).authored_deferred_tool_configs)
-
-
-def defer_toolkit(domain_name: str, description: str, toolkit: Toolkit) -> DeferredToolkit:
+def defer_toolkit(domain_name: str, description: str, toolkit: Toolkit) -> ToolDeferral:
     """Record a wire-deferred toolkit's renderable instructions, then keep them out of the system prompt.
 
     The system prompt is sent before tool search finds a toolkit, so its instructions travel with search results.
     """
-    deferred = DeferredToolkit(
+    deferral = ToolDeferral(
         domain_name=domain_name,
         description=description,
         instructions=toolkit.instructions if toolkit.add_instructions else None,
@@ -104,12 +81,11 @@ def defer_toolkit(domain_name: str, description: str, toolkit: Toolkit) -> Defer
             for name, function in toolkit.get_async_functions().items()
             if function.add_instructions and function.instructions
         },
-        toolkit=toolkit,
     )
     toolkit.add_instructions = False
     for function in (*toolkit.get_functions().values(), *toolkit.get_async_functions().values()):
         function.add_instructions = False
-    return deferred
+    return deferral
 
 
 def _special_tool_names(
@@ -143,7 +119,7 @@ def _special_tool_names(
     if config.agent_uses_knowledge_graph(agent_name):
         tool_names.append("knowledge_graph")
 
-    if enable_dynamic_tools_manager and _has_deferred_tools(config, agent_name):
+    if enable_dynamic_tools_manager and config.resolve_entity(agent_name).authored_deferred_tool_configs:
         tool_names.append("dynamic_tools")
 
     return tool_names
@@ -179,15 +155,11 @@ def _visible_authored_tool_configs(
         is_visible_owner = not authored_entry.defer or authored_entry.name in attached_deferred_tools
         for tool_name in config.expand_tool_names([authored_entry.name]):
             expanded = _expanded_authored_entry_config(authored_entry, tool_name)
-            expanded_precedence = _tool_config_owner_precedence(config, expanded)
-            if is_visible_owner:
-                current = visible_by_name.get(tool_name)
-                if current is None or expanded_precedence > _tool_config_owner_precedence(config, current):
-                    visible_by_name[tool_name] = expanded
-                continue
-            current_hidden = hidden_deferred_by_name.get(tool_name)
-            if current_hidden is None or expanded_precedence > _tool_config_owner_precedence(config, current_hidden):
-                hidden_deferred_by_name[tool_name] = expanded
+            owners = visible_by_name if is_visible_owner else hidden_deferred_by_name
+            current = owners.get(tool_name)
+            precedence = _tool_config_owner_precedence(config, expanded)
+            if current is None or precedence > _tool_config_owner_precedence(config, current):
+                owners[tool_name] = expanded
 
     resolved: list[EffectiveToolConfig] = []
     for tool_name in config.resolve_entity(agent_name).available_tools:
@@ -271,10 +243,7 @@ def visible_tool_surface(
     runtime_tool_configs = [
         EffectiveToolConfig(
             name=entry.name,
-            tool_config_overrides=_normalize_effective_tool_config_overrides(
-                entry.name,
-                dict(entry.tool_config_overrides),
-            ),
+            tool_config_overrides=validate_authored_tool_entry_overrides(entry.name, dict(entry.tool_config_overrides)),
             defer=entry.defer,
             initial=entry.initial,
             authored_order=entry.authored_order,

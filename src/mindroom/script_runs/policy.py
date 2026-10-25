@@ -12,10 +12,9 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from agno.tools import Toolkit
-
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 __all__ = [

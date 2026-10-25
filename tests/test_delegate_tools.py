@@ -18,15 +18,16 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.thread_models import set_thread_model_override
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
@@ -138,6 +139,11 @@ class TestDelegateTools:
         """Test that the toolkit is registered with the correct name."""
         assert tools.name == "delegate"
 
+    def test_toolkit_offers_exactly_the_delegation_functions(self, tools: DelegateTools) -> None:
+        """The names the driver, the approval capability, and the tool metadata share are the toolkit's own functions."""
+        assert tuple(tools.async_functions) == DELEGATION_FUNCTIONS
+        assert TOOL_METADATA["delegate"].function_names == DELEGATION_FUNCTIONS
+
     def test_toolkit_has_delegate_task(self, tools: DelegateTools) -> None:
         """Test that the toolkit exposes the run_subagent function."""
         func_names = [f.name for f in tools.async_functions.values()]
@@ -177,13 +183,9 @@ class TestDelegateTools:
 
     def test_model_facing_tool_description_lists_allowed_targets(self, tools: DelegateTools) -> None:
         """Test that the model-visible function description includes delegation targets."""
-        function = tools.async_functions["run_subagent"].model_copy(deep=True)
+        description = adapt_function(tools.async_functions["run_subagent"]).description
 
-        snapshot = cached_processed_schema(function, strict=False)
-
-        assert snapshot is not None
-        assert snapshot.description is not None
-        description = snapshot.description
+        assert description is not None
         assert "Allowed subagents for this caller:" in description
         for target in ("code", "research"):
             assert target in description
@@ -533,14 +535,8 @@ class TestDelegateKnowledge:
             _assert_direct_result_with_receipt(result, "Found relevant docs")
 
     @pytest.mark.asyncio
-    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-    async def test_delegation_schedules_initial_load_for_unready_shared_base(
-        self,
-        mock_storage: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    async def test_delegation_schedules_initial_load_for_unready_shared_base(self, tmp_path: Path) -> None:
         """Delegation should trigger the shared-base initial load when the published index is still initializing."""
-        assert mock_storage is not None
         scheduled_base_ids: list[str] = []
 
         class _FakeRefreshScheduler:
@@ -588,7 +584,7 @@ class TestDelegateKnowledge:
             knowledge_bases={"docs": {"path": "./docs"}},
         )
         config = _bind_runtime_paths(config, tmp_path)
-        agent = create_agent(
+        build = create_agent(
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -596,7 +592,13 @@ class TestDelegateKnowledge:
             include_interactive_questions=False,
             refresh_scheduler=_FakeRefreshScheduler(),
         )
-        delegate_tool = next(tool for tool in agent.tools if tool.name == "delegate")
+        run_subagent = next(
+            function
+            for toolkit in build.spec.toolkits
+            if toolkit.name == "delegate"
+            for function in toolkit.functions
+            if function.name == "run_subagent"
+        )
 
         with (
             tool_runtime_context(_delegate_runtime_context(config, runtime_paths_for(config))),
@@ -607,7 +609,7 @@ class TestDelegateKnowledge:
                 return_value="Found relevant docs",
             ),
         ):
-            result = await delegate_tool.run_subagent(agent_name="researcher", task="Find info about X")
+            result = await run_subagent.entrypoint(agent_name="researcher", task="Find info about X")
 
         _assert_direct_result_with_receipt(result, "Found relevant docs")
         assert scheduled_base_ids == ["docs"]
@@ -970,8 +972,7 @@ class TestDelegateConfigValidation:
 class TestDelegateAutoInjection:
     """Test that DelegateTools is auto-injected when delegate_to is configured."""
 
-    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-    def test_auto_inject_delegate_tool(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
+    def test_auto_inject_delegate_tool(self, tmp_path: Path) -> None:
         """Agent with delegate_to should automatically get the delegate tool."""
         config = _make_config(
             {
@@ -984,18 +985,17 @@ class TestDelegateAutoInjection:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        agent = create_agent(
+        build = create_agent(
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
         )
-        tool_names = [tool.name for tool in agent.tools]
+        tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" in tool_names
 
-    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-    def test_no_delegate_tool_without_config(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
+    def test_no_delegate_tool_without_config(self, tmp_path: Path) -> None:
         """Agent without delegate_to should not get the delegate tool."""
         config = _make_config(
             {
@@ -1003,18 +1003,17 @@ class TestDelegateAutoInjection:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        agent = create_agent(
+        build = create_agent(
             "worker",
             config=config,
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
         )
-        tool_names = [tool.name for tool in agent.tools]
+        tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-    def test_depth_limit_prevents_injection(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
+    def test_depth_limit_prevents_injection(self, tmp_path: Path) -> None:
         """At max depth, delegate tool should not be auto-injected."""
         config = _make_config(
             {
@@ -1027,7 +1026,7 @@ class TestDelegateAutoInjection:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        agent = create_agent(
+        build = create_agent(
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -1035,11 +1034,10 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
-        tool_names = [tool.name for tool in agent.tools]
+        tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-    def test_explicit_delegate_skipped_when_delegate_to_empty(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
+    def test_explicit_delegate_skipped_when_delegate_to_empty(self, tmp_path: Path) -> None:
         """Explicit 'delegate' in tools list should be skipped when delegate_to is empty."""
         config = _make_config(
             {
@@ -1051,24 +1049,18 @@ class TestDelegateAutoInjection:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        agent = create_agent(
+        build = create_agent(
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
         )
-        tool_names = [tool.name for tool in agent.tools]
+        tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-    def test_depth_limit_prevents_explicit_delegate_tool(
-        self,
-        mock_storage: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_depth_limit_prevents_explicit_delegate_tool(self, tmp_path: Path) -> None:
         """At max depth, explicit 'delegate' in tools list should be skipped."""
-        assert mock_storage is not None
         config = _make_config(
             {
                 "leader": AgentConfig(
@@ -1081,7 +1073,7 @@ class TestDelegateAutoInjection:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        agent = create_agent(
+        build = create_agent(
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -1089,17 +1081,11 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
-        tool_names = [tool.name for tool in agent.tools]
+        tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-    def test_depth_limit_prevents_default_tools_delegate(
-        self,
-        mock_storage: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_depth_limit_prevents_default_tools_delegate(self, tmp_path: Path) -> None:
         """At max depth, 'delegate' from defaults.tools should be skipped."""
-        assert mock_storage is not None
         config = Config(
             agents={
                 "leader": AgentConfig(
@@ -1113,7 +1099,7 @@ class TestDelegateAutoInjection:
             defaults=DefaultsConfig(tools=["delegate"]),
         )
         config = _bind_runtime_paths(config, tmp_path)
-        agent = create_agent(
+        build = create_agent(
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -1121,7 +1107,7 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
-        tool_names = [tool.name for tool in agent.tools]
+        tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
 
 

@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
 
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
@@ -17,18 +15,19 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_outcome
 from mindroom.delegation.lifecycle import prepare_child_turn
+from mindroom.llm.runs import RunStatus
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
     lookup,
+    run_built_turn,
     start_delegation_job,
     start_job,
     tool_job_runtime,
@@ -38,10 +37,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from agno.agent import Agent
-    from agno.run.agent import RunOutput
-
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.runs import RunRecord
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -51,20 +49,23 @@ pytestmark = pytest.mark.asyncio
 
 @dataclass
 class _OutputAgent:
-    agent: Agent
-    model: DelegationModel
+    build: AgentBuild
+    model: ScriptedModel
     runtime: ToolJobRuntime
     owner: ToolExecutionIdentity
     workspace: Path
     paths: RuntimePaths
     config: Config
 
-    async def call(self, name: str, **arguments: object) -> RunOutput:
-        self.model.responses = [
-            ModelResponse(tool_calls=[_call(name, "output-call", **arguments)]),
-            ModelResponse(content="done"),
-        ]
-        return await self.agent.arun("retrieve output", session_id=self.owner.session_id)
+    async def call(self, name: str, **arguments: object) -> RunRecord:
+        self.model.turns.extend([calls(tool_call(name, "output-call", **arguments)), answer("done")])
+        return await run_built_turn(
+            self.build,
+            config=self.config,
+            runtime_paths=self.paths,
+            prompt="retrieve output",
+            session_id=self.owner.session_id or "session",
+        )
 
     async def save_job(self) -> str:
         async def operation() -> BackgroundOutcome:
@@ -87,8 +88,8 @@ class _OutputAgent:
 
 
 @pytest_asyncio.fixture
-async def output_agent(tmp_path: Path) -> AsyncIterator[_OutputAgent]:
-    """Build a workspace agent with real SDK dispatch and isolated durable jobs."""
+async def output_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_OutputAgent]:
+    """Build a workspace agent with the owned loop's dispatch and isolated durable jobs."""
     paths = _runtime_paths(tmp_path)
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
@@ -103,20 +104,17 @@ async def output_agent(tmp_path: Path) -> AsyncIterator[_OutputAgent]:
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
-    model = DelegationModel(id="output-test")
-    install_tool_job_execution(model)
-    agent.model = model
+    model = ScriptedModel([])
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    build = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
     workspace = resolve_agent_runtime("leader", config, paths, execution_identity=owner).workspace
     assert workspace is not None
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                yield _OutputAgent(agent, model, runtime, owner, workspace.root, paths, config)
+                yield _OutputAgent(build, model, runtime, owner, workspace.root, paths, config)
     finally:
         await runtime.shutdown()
-        if agent.db is not None:
-            agent.db.close()
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -127,14 +125,14 @@ async def test_job_retrieval_applies_workspace_output_policy(output_agent: _Outp
     arguments = {"mindroom_output_path": "results/job.txt"} if explicit else {}
     response = await case.call("job", action="wait", job_id=job_id, **arguments)
     assert response.tools
-    assert not response.tools[0].tool_call_error
-    result = literal_eval(response.tools[0].result)
+    assert not response.tools[0].is_error
+    result = literal_eval(str(response.tools[0].result))
     receipt = result["mindroom_tool_output"]
     assert receipt["status"] == "saved_to_file"
     saved = (case.workspace / receipt["path"]).read_bytes()
     assert saved == _LARGE_RESULT.encode()
     assert "truncated" not in saved.decode()
-    assert len(response.tools[0].result) < 12_000
+    assert len(str(response.tools[0].result)) < 12_000
     if explicit:
         assert receipt["path"] == "results/job.txt"
     else:
@@ -149,8 +147,8 @@ async def test_job_output_path_is_validated_before_claiming_result(output_agent:
     job_id = await case.save_job()
     response = await case.call("job", action="wait", job_id=job_id, mindroom_output_path="../escape.txt")
     assert response.tools
-    assert not response.tools[0].tool_call_error
-    assert literal_eval(response.tools[0].result)["mindroom_tool_output"]["status"] == "error"
+    assert not response.tools[0].is_error
+    assert literal_eval(str(response.tools[0].result))["mindroom_tool_output"]["status"] == "error"
     saved = await lookup(case.runtime, job_id, owner=case.owner, depth=0)
     assert not saved.consumed
     assert not (case.workspace.parent / "escape.txt").exists()
@@ -177,12 +175,11 @@ async def test_native_delegation_job_wait_redirects_saved_result(output_agent: _
     job = await start_delegation_job(case.runtime, child, owner=case.owner, operation=completed)
     ready = await case.runtime.wait(job.job_id, owner=case.owner, depth=0)
     await case.runtime.release_wait(job.job_id, ready.claim)
-    case.agent.db = create_session_storage("leader", case.config, case.paths, case.owner)
     arguments = {"mindroom_output_path": "results/child.txt"} if explicit else {}
     response = await case.call("job", action="wait", job_id=job.job_id, **arguments)
-    assert response.status == RunStatus.completed
+    assert response.status is RunStatus.completed
     assert response.tools
-    assert not response.tools[0].tool_call_error
-    receipt = literal_eval(response.tools[0].result)["mindroom_tool_output"]
+    assert not response.tools[0].is_error
+    receipt = literal_eval(str(response.tools[0].result))["mindroom_tool_output"]
     assert receipt["status"] == "saved_to_file"
     assert (case.workspace / receipt["path"]).read_bytes() == _LARGE_RESULT.encode()

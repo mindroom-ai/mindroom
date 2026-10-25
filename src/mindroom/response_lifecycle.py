@@ -8,21 +8,17 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar, cast
 
-from agno.db.base import SessionType
-
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
 from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
-from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Sequence
 
-    from agno.db.base import BaseDb
     from structlog.stdlib import BoundLogger
 
     from mindroom.delivery_gateway import ResponseHookService, ResponseIdentity
@@ -32,6 +28,8 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import SessionKind
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -602,7 +600,7 @@ class ResponseLifecycleCoordinator:
 
 
 @dataclass(frozen=True)
-class _SessionStartedWatch:
+class SessionStartedWatch:
     """Pre-computed session:started eligibility and emission arguments."""
 
     should_watch: bool
@@ -611,9 +609,8 @@ class _SessionStartedWatch:
     session_id: str
     room_id: str
     thread_id: str | None
-    session_type: SessionType
     correlation_id: str
-    create_storage: Callable[[], BaseDb]
+    create_storage: Callable[[], ConversationStore]
 
 
 @dataclass(frozen=True)
@@ -625,15 +622,8 @@ class ResponseLifecycleDeps:
     process_shutdown_requested: Callable[[], bool]
 
 
-def _session_exists(
-    *,
-    storage: BaseDb,
-    session_id: str,
-    session_type: SessionType,
-) -> bool:
-    if session_type is SessionType.TEAM:
-        return get_team_session(storage, session_id) is not None
-    return get_agent_session(storage, session_id) is not None
+def _session_exists(create_storage: Callable[[], ConversationStore], session_id: str, kind: SessionKind) -> bool:
+    return create_storage().has_session(session_id, kind)
 
 
 def _response_outcome_label(final_delivery_outcome: FinalDeliveryOutcome | None) -> str:
@@ -691,52 +681,43 @@ class ResponseLifecycle:
             error_type=error.__class__.__name__,
         )
 
-    def _session_started_watch_is_needed(
+    async def _session_started_watch_is_needed(
         self,
         *,
         tool_context: ToolRuntimeContext | None,
         session_id: str,
-        session_type: SessionType,
-        create_storage: Callable[[], BaseDb],
+        scope: HistoryScope,
+        create_storage: Callable[[], ConversationStore],
     ) -> bool:
         if tool_context is None or not tool_context.hook_registry.has_hooks(EVENT_SESSION_STARTED):
             return False
         try:
-            storage = create_storage()
-            try:
-                return not _session_exists(
-                    storage=storage,
-                    session_id=session_id,
-                    session_type=session_type,
-                )
-            finally:
-                storage.close()
+            return not await asyncio.to_thread(_session_exists, create_storage, session_id, scope.kind)
         except Exception as error:
             self.deps.logger.exception(
                 "Failed to probe session storage for session:started eligibility",
                 session_id=session_id,
-                session_type=str(session_type),
+                session_type=scope.kind,
                 failure_reason=str(error),
             )
             return False
 
-    def setup_session_watch(
+    async def setup_session_watch(
         self,
         *,
         tool_context: ToolRuntimeContext | None,
         session_id: str,
-        session_type: SessionType,
         scope: HistoryScope,
         room_id: str,
         thread_id: str | None,
-        create_storage: Callable[[], BaseDb],
-    ) -> _SessionStartedWatch:
+        create_storage: Callable[[], ConversationStore],
+    ) -> SessionStartedWatch:
         """Pre-compute session:started eligibility for one response path."""
-        return _SessionStartedWatch(
-            should_watch=self._session_started_watch_is_needed(
+        return SessionStartedWatch(
+            should_watch=await self._session_started_watch_is_needed(
                 tool_context=tool_context,
                 session_id=session_id,
-                session_type=session_type,
+                scope=scope,
                 create_storage=create_storage,
             ),
             tool_context=tool_context,
@@ -744,20 +725,15 @@ class ResponseLifecycle:
             session_id=session_id,
             room_id=room_id,
             thread_id=thread_id,
-            session_type=session_type,
             correlation_id=self.identity.correlation_id,
             create_storage=create_storage,
         )
 
-    async def _maybe_emit_session_started(self, watch: _SessionStartedWatch) -> None:
+    async def _maybe_emit_session_started(self, watch: SessionStartedWatch) -> None:
         if watch.tool_context is None or not watch.should_watch:
             return
-        storage = watch.create_storage()
-        try:
-            if not _session_exists(storage=storage, session_id=watch.session_id, session_type=watch.session_type):
-                return
-        finally:
-            storage.close()
+        if not await asyncio.to_thread(_session_exists, watch.create_storage, watch.session_id, watch.scope.kind):
+            return
 
         bindings = resolve_tool_runtime_hook_bindings(watch.tool_context)
         context = SessionHookContext(
@@ -781,7 +757,7 @@ class ResponseLifecycle:
         )
         await emit(watch.tool_context.hook_registry, EVENT_SESSION_STARTED, context)
 
-    async def emit_session_started(self, watch: _SessionStartedWatch) -> None:
+    async def emit_session_started(self, watch: SessionStartedWatch) -> None:
         """Emit session:started without aborting delivery on ordinary failures."""
         if self.deps.process_shutdown_requested():
             return

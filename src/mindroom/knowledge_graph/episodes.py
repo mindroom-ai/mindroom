@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.history.conversation_text import one_line, run_requester, utterances
 from mindroom.history.session_runs import DELEGATION_SESSION_PREFIX, run_key
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
@@ -25,11 +26,9 @@ from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from agno.models.response import ToolExecution
-    from agno.run.agent import RunOutput
-
     from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
     from mindroom.knowledge_graph.names import EntityNames, KnownEntity
+    from mindroom.llm.runs import RunRecord, ToolExecution
 
 type _ThreadKind = Literal["conversation", "exploration", "delegation", "automation"]
 type Progress = tuple[int, str, int]
@@ -45,8 +44,7 @@ _GRAPH_FUNCTIONS = ("search_graph", "graph_entity")
 _PROSE_FUNCTIONS = (
     "think",
     "analyze",
-    "run_subagent",
-    "continue_subagent",
+    *DELEGATION_FUNCTIONS,
     "run_workflow",
     "get_workflow_run",
     "claude_send",
@@ -75,7 +73,7 @@ def is_evidence(execution: ToolExecution) -> bool:
     return not any(name in arguments for name in _GRAPH_FUNCTIONS)
 
 
-def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) -> _ThreadKind:
+def classify_thread(runs: Sequence[RunRecord], automation_thread_ids: set[str]) -> _ThreadKind:
     """Return what a thread is, from its session, its root run's trusted hook source, or the threads automations recorded."""
     if not runs:
         return "conversation"
@@ -99,7 +97,7 @@ def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) 
 
 
 def render_episodes(
-    runs: Sequence[RunOutput],
+    runs: Sequence[RunRecord],
     *,
     thread_kind: _ThreadKind,
     episode_kind: EpisodeKind,
@@ -121,7 +119,7 @@ def render_episodes(
     lines: list[str] = []
     calls: list[str] = []
     speakers: list[KnownEntity] = []
-    newest: RunOutput | None = None
+    newest: RunRecord | None = None
     progress: Progress | None = None
 
     def flush() -> None:
@@ -167,7 +165,7 @@ def render_episodes(
     return rendered
 
 
-def newest_display_names(runs: Sequence[RunOutput]) -> dict[str, str]:
+def newest_display_names(runs: Sequence[RunRecord]) -> dict[str, str]:
     """Return the newest display name each sender's messages in ``runs`` carry."""
     return {
         said.sender: said.display_name
@@ -177,12 +175,12 @@ def newest_display_names(runs: Sequence[RunOutput]) -> dict[str, str]:
     }
 
 
-def _day(run: RunOutput) -> str:
-    return datetime.fromtimestamp(run.created_at or 0, UTC).date().isoformat()
+def _day(run: RunRecord) -> str:
+    return datetime.fromtimestamp(run.created_at, UTC).date().isoformat()
 
 
 def _episode_items(
-    run: RunOutput,
+    run: RunRecord,
     episode_kind: EpisodeKind,
     settings: KnowledgeGraphIngestConfig,
     speaker: Callable[[str | None], KnownEntity],
@@ -202,7 +200,7 @@ def _episode_items(
 def _episode(
     kind: EpisodeKind,
     lines: list[str],
-    last_run: RunOutput,
+    last_run: RunRecord,
     settings: KnowledgeGraphIngestConfig,
     calls: Sequence[str],
     known_entities: tuple[KnownEntity, ...],
@@ -218,13 +216,13 @@ def _episode(
         name=f"{kind} {last_run.session_id} {last_run.run_id}",
         body="\n".join(lines)[: settings.max_episode_chars],
         source_description=description,
-        reference_time=datetime.fromtimestamp(last_run.created_at or 0, UTC),
+        reference_time=datetime.fromtimestamp(last_run.created_at, UTC),
         known_entities=known_entities,
     )
 
 
 def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
-    outcome = "error" if execution.tool_call_error else "result"
+    outcome = "error" if execution.is_error else "result"
     output = _clean(str(execution.result or ""), settings.max_tool_result_chars)
     # Clipped to half a result, so arguments and result together stay within an episode.
     arguments = tool_arguments(execution)[: settings.max_tool_result_chars // 2]

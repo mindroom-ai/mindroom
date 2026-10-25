@@ -91,7 +91,7 @@ async def test_launch_preapproval_does_not_expand_from_live_script_config(
         }
     else:
         assert receipt.state is ScriptCallState.COMPLETED
-        assert receipt.result == '{"operation": "addition", "result": 3}'
+        assert receipt.result == '{"operation": "addition", "result": 3.0}'
 
 
 def _origin(*, run_id: str = "run-1", call_id: str = "call-1") -> BackgroundScriptToolOrigin:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
@@ -108,7 +107,6 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
         session_ttl_minutes=5,
     )
     run_context = RunContext(run_id="run-soak", session_id="soak-session")
-    agent = SimpleNamespace(name="soak")
 
     session_labels = [f"seq-{i}" for i in range(6)]
     parallel_labels = [f"par-{i}" for i in range(4)]
@@ -124,7 +122,6 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                     f"fail:turn-{turn}",
                     session_label=label,
                     run_context=run_context,
-                    agent=agent,
                 ),
                 timeout=3,
             )
@@ -135,7 +132,6 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                     f"recover-{turn}",
                     session_label=label,
                     run_context=run_context,
-                    agent=agent,
                 ),
                 timeout=3,
             )
@@ -148,7 +144,6 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                     f"write:file-{turn % 3}:line-{turn}",
                     session_label=label,
                     run_context=run_context,
-                    agent=agent,
                 ),
                 timeout=3,
             )
@@ -159,7 +154,6 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                     f"read:file-{turn % 3}",
                     session_label=label,
                     run_context=run_context,
-                    agent=agent,
                 ),
                 timeout=3,
             )
@@ -174,7 +168,6 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                             f"parallel-{turn}-{idx}",
                             session_label=parallel_labels[idx],
                             run_context=run_context,
-                            agent=agent,
                         )
                         for idx in range(len(parallel_labels))
                     ],
@@ -190,7 +183,6 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                 f"turn-{turn}",
                 session_label=label,
                 run_context=run_context,
-                agent=agent,
             ),
             timeout=3,
         )
@@ -202,6 +194,6 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
     assert _NightlySoakSDKClient.max_concurrent_queries >= 2
 
     for label in session_labels + parallel_labels:
-        await tools.claude_end_session(session_label=label, run_context=run_context, agent=agent)
+        await tools.claude_end_session(session_label=label, run_context=run_context)
 
     assert not manager._sessions

@@ -3846,7 +3846,6 @@ class ManagedTuwunelStack:
                     "model": "default",
                     "tools": [],
                     "rooms": list(self.room_keys),
-                    "learning": False,
                 },
             },
             "defaults": {"tools": [], "enable_streaming": True, "markdown": False},
@@ -3881,7 +3880,6 @@ class ManagedTuwunelStack:
                 "model": "synthetic",
                 "tools": [],
                 "rooms": [ROOM_KEY],
-                "learning": False,
             }
         self.config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 

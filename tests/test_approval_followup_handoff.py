@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
 
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.event_journal import (
@@ -22,6 +21,7 @@ from mindroom.event_journal import (
     InboundEvent,
     ProjectedEvent,
 )
+from mindroom.llm.runs import ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval

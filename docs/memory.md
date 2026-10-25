@@ -5,13 +5,13 @@ icon: lucide/brain
 # Memory System
 
 Memory lets agents remember facts, preferences, and context across conversations.
-This page covers choosing a memory backend, configuring embeddings and extraction, file-based memory, the `memory` tool, and Agno Learning.
+This page covers choosing a memory backend, configuring embeddings and extraction, file-based memory, and the `memory` tool.
 
 | Backend | What it does | Use it when |
 |---|---|---|
 | `mem0` (default) | Vector memory: relevant memories are retrieved before each reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
-| `none` | No built-in memory | The agent should keep no memories ([Agno Learning](#agno-learning) stays on unless disabled) |
+| `none` | No built-in memory | The agent should keep no memories |
 
 <video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
   <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -39,9 +39,8 @@ agents:
 ```
 
 With `none`, the agent gets no memories in its prompt, stores none after its turns, and does not receive the `memory` tool.
-`none` does not turn off [Agno Learning](#agno-learning); set `learning: false` as well to disable all built-in memory and learning.
 Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
-What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written, and [Agno Learning](#agno-learning) reads conversations without this removal.
+What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written.
 Conversation history is separate and stays in the session; see [History & Compaction](configuration/history.md).
 OpenClaw-compatible agents use this same backend selection.
 
@@ -373,21 +372,5 @@ Save from the Memory page to write the changes to `config.yaml`.
 
 ## Agno Learning
 
-Agno Learning builds a persistent profile of user preferences from conversations, separately from the memory backends above.
-It is on by default for every agent, and `memory_backend: none` does not disable it.
-
-```yaml
-defaults:
-  learning: true          # default
-  learning_mode: always   # learn after every turn; agentic lets the agent decide via a tool
-
-agents:
-  assistant:
-    learning: false       # disable for one agent
-  research:
-    learning_mode: agentic
-```
-
-See [Agent fields](configuration/agents.md#defaults) for how `learning` and `learning_mode` inherit from `defaults`.
-Disabled agents create and update no learning data.
-Learning data is stored in `learning/<agent>.db` under the agent's state root (`agents/<agent>/` in the storage directory for shared agents), so it survives container restarts when the storage directory is mounted.
+Agno Learning is retired: configs that still set `learning` or `learning_mode` load with a warning and the values are ignored.
+Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.

@@ -154,10 +154,7 @@ def _record_proxy_exception_for_worker(
     """Classify one proxy exception as either worker-health or request-level failure."""
     if worker_handle is None:
         return
-    if _is_request_level_proxy_http_error(exc):
-        worker_manager.touch_worker(worker_handle.worker_key)
-        return
-    if _is_request_level_proxy_transport_error(exc):
+    if _is_request_level_proxy_http_error(exc) or _is_request_level_proxy_transport_error(exc):
         worker_manager.touch_worker(worker_handle.worker_key)
         return
     worker_manager.record_failure(worker_handle.worker_key, str(exc), startup_count=worker_handle.startup_count)
@@ -199,13 +196,43 @@ def record_proxy_response_failure_for_worker(
     error: str,
     failure_kind: object,
 ) -> None:
-    """Classify one structured runner failure response for worker health."""
+    """Record one failed worker response against worker health, unless the runner reports a tool failure."""
     if worker_handle is None:
         return
     if failure_kind == "tool":
         worker_manager.touch_worker(worker_handle.worker_key)
         return
     worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
+
+
+def checked_worker_response(
+    data: object,
+    *,
+    worker_handle: WorkerHandle | None,
+    worker_manager: WorkerBackend,
+    non_object_error: str,
+    failure: str,
+) -> dict[str, object]:
+    """Return one successful runner response, recording a non-object or failed one against the worker."""
+    response = _json_object(data)
+    if response is None:
+        record_proxy_response_failure_for_worker(
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            error=non_object_error,
+            failure_kind=None,
+        )
+        raise TypeError(non_object_error)
+    if response.get("ok") is not True:
+        error = str(response.get("error") or failure)
+        record_proxy_response_failure_for_worker(
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            error=error,
+            failure_kind=response.get("failure_kind"),
+        )
+        raise RuntimeError(error)
+    return response
 
 
 def post_worker_proxy_json(
@@ -440,28 +467,16 @@ def execute_worker_proxy_request(
         )
         raise
 
-    if data is None:
-        msg = "Sandbox proxy returned a non-object response."
-        record_proxy_response_failure_for_worker(
-            worker_handle=worker_handle,
-            worker_manager=worker_manager,
-            error=msg,
-            failure_kind=None,
-        )
-        raise TypeError(msg)
-    if data.get("ok") is True:
-        if worker_handle is not None:
-            worker_manager.touch_worker(worker_handle.worker_key)
-        return data.get("result")
-
-    error = data.get("error") or "Sandbox execution failed."
-    record_proxy_response_failure_for_worker(
+    response = checked_worker_response(
+        data,
         worker_handle=worker_handle,
         worker_manager=worker_manager,
-        error=str(error),
-        failure_kind=data.get("failure_kind"),
+        non_object_error="Sandbox proxy returned a non-object response.",
+        failure="Sandbox execution failed.",
     )
-    raise RuntimeError(str(error))
+    if worker_handle is not None:
+        worker_manager.touch_worker(worker_handle.worker_key)
+    return response.get("result")
 
 
 def _create_credential_lease(

@@ -15,6 +15,7 @@ from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
 
 from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
+from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_file import encrypted_file_content
 
@@ -332,16 +333,9 @@ def _sniff_image_mime_type(media_bytes: bytes | None) -> str | None:
     return mime_type
 
 
-def _normalize_mime_type(mime_type: str | None) -> str | None:
-    if not isinstance(mime_type, str):
-        return None
-    normalized = mime_type.split(";", 1)[0].strip().lower()
-    return normalized or None
-
-
 def resolve_image_mime_type(media_bytes: bytes | None, declared_mime_type: str | None) -> _ImageMimeResolution:
     """Resolve effective image MIME type with byte-signature fallback."""
-    normalized_declared = _normalize_mime_type(declared_mime_type)
+    normalized_declared = canonical_mime_type(declared_mime_type)
     detected_mime_type = _sniff_image_mime_type(media_bytes)
     is_mismatch = (
         detected_mime_type is not None and normalized_declared is not None and detected_mime_type != normalized_declared

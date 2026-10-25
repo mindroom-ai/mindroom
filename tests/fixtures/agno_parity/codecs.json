@@ -1,0 +1,4440 @@
+{
+  "media": {
+    "image-content": {
+      "dict": {
+        "id": "img-1",
+        "format": "png",
+        "mime_type": "image/png",
+        "detail": "high",
+        "original_prompt": "a cat",
+        "revised_prompt": "a tabby cat",
+        "alt_text": "cat",
+        "content": "iVBORw0KGgoAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw==",
+        "metadata": {
+          "source": "test"
+        }
+      },
+      "dict_without_content": {
+        "id": "img-1",
+        "format": "png",
+        "mime_type": "image/png",
+        "detail": "high",
+        "original_prompt": "a cat",
+        "revised_prompt": "a tabby cat",
+        "alt_text": "cat",
+        "metadata": {
+          "source": "test"
+        }
+      }
+    },
+    "image-url": {
+      "dict": {
+        "id": "img-2",
+        "url": "https://example.invalid/cat.png",
+        "mime_type": "image/png"
+      },
+      "dict_without_content": {
+        "id": "img-2",
+        "url": "https://example.invalid/cat.png",
+        "mime_type": "image/png"
+      }
+    },
+    "image-filepath": {
+      "dict": {
+        "id": "img-3",
+        "filepath": "/data/cat.png",
+        "format": "png"
+      },
+      "dict_without_content": {
+        "id": "img-3",
+        "filepath": "/data/cat.png",
+        "format": "png"
+      }
+    },
+    "audio-content": {
+      "dict": {
+        "id": "aud-1",
+        "format": "wav",
+        "mime_type": "audio/wav",
+        "duration": 1.5,
+        "sample_rate": 16000,
+        "channels": 2,
+        "transcript": "hello",
+        "expires_at": 1900000000,
+        "content": "UklGRgAAAABXQVZFZm10IAABAgMEBQYHCAkKCwwNDg8=",
+        "metadata": {
+          "source": "voice"
+        }
+      },
+      "dict_without_content": {
+        "id": "aud-1",
+        "format": "wav",
+        "mime_type": "audio/wav",
+        "duration": 1.5,
+        "sample_rate": 16000,
+        "channels": 2,
+        "transcript": "hello",
+        "expires_at": 1900000000,
+        "metadata": {
+          "source": "voice"
+        }
+      }
+    },
+    "audio-filepath": {
+      "dict": {
+        "id": "aud-2",
+        "filepath": "/data/clip.ogg",
+        "mime_type": "audio/ogg",
+        "sample_rate": 24000,
+        "channels": 1
+      },
+      "dict_without_content": {
+        "id": "aud-2",
+        "filepath": "/data/clip.ogg",
+        "mime_type": "audio/ogg",
+        "sample_rate": 24000,
+        "channels": 1
+      }
+    },
+    "video-content": {
+      "dict": {
+        "id": "vid-1",
+        "format": "mp4",
+        "mime_type": "video/mp4",
+        "duration": 2.25,
+        "width": 640,
+        "height": 480,
+        "fps": 29.97,
+        "eta": "soon",
+        "original_prompt": "a dog",
+        "revised_prompt": "a running dog",
+        "content": "AAAAGGZ0eXBtcDQyAAECAwQFBgcICQoLDA0ODxAREhMUFRYX",
+        "metadata": {
+          "source": "tool"
+        }
+      },
+      "dict_without_content": {
+        "id": "vid-1",
+        "format": "mp4",
+        "mime_type": "video/mp4",
+        "duration": 2.25,
+        "width": 640,
+        "height": 480,
+        "fps": 29.97,
+        "eta": "soon",
+        "original_prompt": "a dog",
+        "revised_prompt": "a running dog",
+        "metadata": {
+          "source": "tool"
+        }
+      }
+    },
+    "video-url": {
+      "dict": {
+        "id": "vid-2",
+        "url": "https://example.invalid/dog.mp4"
+      },
+      "dict_without_content": {
+        "id": "vid-2",
+        "url": "https://example.invalid/dog.mp4"
+      }
+    },
+    "file-binary": {
+      "dict": {
+        "id": "file-1",
+        "mime_type": "application/pdf",
+        "file_type": "document",
+        "filename": "report.pdf",
+        "size": 15,
+        "format": "pdf",
+        "name": "report",
+        "content": "JVBERi0xLjcKJeLjz9MK",
+        "metadata": {
+          "pages": 1
+        }
+      },
+      "dict_without_content": {
+        "id": "file-1",
+        "mime_type": "application/pdf",
+        "file_type": "document",
+        "filename": "report.pdf",
+        "size": 15,
+        "format": "pdf",
+        "name": "report",
+        "metadata": {
+          "pages": 1
+        }
+      }
+    },
+    "file-text": {
+      "dict": {
+        "id": "file-2",
+        "mime_type": "text/plain",
+        "filename": "a.txt",
+        "content": "hello\nworld"
+      },
+      "dict_without_content": {
+        "id": "file-2",
+        "mime_type": "text/plain",
+        "filename": "a.txt"
+      }
+    },
+    "file-string": {
+      "dict": {
+        "id": "file-3",
+        "mime_type": "text/markdown",
+        "content": "raw text"
+      },
+      "dict_without_content": {
+        "id": "file-3",
+        "mime_type": "text/markdown"
+      }
+    },
+    "file-filepath": {
+      "dict": {
+        "id": "file-4",
+        "filepath": "/data/sheet.csv",
+        "mime_type": "text/csv",
+        "filename": "sheet.csv"
+      },
+      "dict_without_content": {
+        "id": "file-4",
+        "filepath": "/data/sheet.csv",
+        "mime_type": "text/csv",
+        "filename": "sheet.csv"
+      }
+    }
+  },
+  "media_content_image": {
+    "id": "6304145e-e1e9-45c3-b85d-fec080eb6e83",
+    "content": "iVBORw0KGgoAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw=="
+  },
+  "media_content_text_file": {
+    "id": "4c89c330-2f0c-4b56-9936-fdfe8081b58e",
+    "mime_type": "text/plain",
+    "content": "plain"
+  },
+  "media_content_binary_file": {
+    "id": "0af50153-ce31-4a85-b410-fd4aa824fc3b",
+    "mime_type": "application/pdf",
+    "content": "JVBERi0xLjcKJeLjz9MK"
+  },
+  "message_metrics": {
+    "input_tokens": 120,
+    "output_tokens": 30,
+    "total_tokens": 150,
+    "audio_input_tokens": 4,
+    "audio_output_tokens": 2,
+    "audio_total_tokens": 6,
+    "cache_read_tokens": 100,
+    "cache_write_tokens": 20,
+    "reasoning_tokens": 10,
+    "cost": 0.0123,
+    "duration": 1.25,
+    "time_to_first_token": 0.4,
+    "provider_metrics": {
+      "context_usage": {
+        "input_tokens": 40
+      },
+      "service_tier": "default",
+      "timings": 3
+    }
+  },
+  "message_metrics_addend": {
+    "input_tokens": 5,
+    "output_tokens": 7,
+    "cost": 0.001,
+    "duration": 0.5,
+    "time_to_first_token": 9.0,
+    "provider_metrics": {
+      "timings": 2,
+      "service_tier": "flex",
+      "new": 1
+    }
+  },
+  "message_metrics_sum": {
+    "input_tokens": 125,
+    "output_tokens": 37,
+    "total_tokens": 150,
+    "audio_input_tokens": 4,
+    "audio_output_tokens": 2,
+    "audio_total_tokens": 6,
+    "cache_read_tokens": 100,
+    "cache_write_tokens": 20,
+    "reasoning_tokens": 10,
+    "cost": 0.0133,
+    "duration": 1.75,
+    "time_to_first_token": 0.4,
+    "provider_metrics": {
+      "context_usage": {
+        "input_tokens": 40
+      },
+      "service_tier": "flex",
+      "timings": 5,
+      "new": 1
+    }
+  },
+  "tool_call_metrics": {
+    "start_time": 1.0,
+    "end_time": 2.5,
+    "duration": 1.5
+  },
+  "run_metrics": {
+    "input_tokens": 300,
+    "output_tokens": 60,
+    "total_tokens": 360,
+    "cache_read_tokens": 200,
+    "reasoning_tokens": 12,
+    "cost": 0.05,
+    "time_to_first_token": 0.3,
+    "duration": 4.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 200,
+          "output_tokens": 40,
+          "total_tokens": 240,
+          "cache_read_tokens": 200,
+          "cost": 0.04,
+          "id": "claude-opus-5-5",
+          "provider": "Anthropic",
+          "provider_metrics": {
+            "context_usage": {
+              "input_tokens": 50
+            }
+          }
+        },
+        {
+          "input_tokens": 100,
+          "output_tokens": 20,
+          "total_tokens": 120,
+          "reasoning_tokens": 12,
+          "cost": 0.01,
+          "id": "gpt-6-luna",
+          "provider": "OpenAI Chat"
+        }
+      ],
+      "learning_model": [
+        {
+          "input_tokens": 9,
+          "id": "gpt-6-luna",
+          "provider": "OpenAI Chat",
+          "provider_metrics": {}
+        }
+      ]
+    },
+    "additional_metrics": {
+      "eval_duration": 1.5,
+      "label": "x"
+    }
+  },
+  "run_metrics_accumulated": {
+    "input_tokens": 16,
+    "output_tokens": 4,
+    "total_tokens": 20,
+    "cache_read_tokens": 4,
+    "cost": 0.1,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 15,
+          "output_tokens": 3,
+          "total_tokens": 18,
+          "cache_read_tokens": 4,
+          "cost": 0.1,
+          "id": "claude-opus-5-5",
+          "provider": "Anthropic",
+          "provider_metrics": {
+            "n": 3,
+            "tier": "a"
+          }
+        },
+        {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2,
+          "id": "gpt-6-luna",
+          "provider": "OpenAI Chat"
+        }
+      ]
+    }
+  },
+  "run_metrics_addend": {
+    "input_tokens": 10,
+    "output_tokens": 1,
+    "cost": 0.5,
+    "time_to_first_token": 0.1,
+    "duration": 1.0,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 10,
+          "cost": 0.5,
+          "id": "claude-opus-5-5",
+          "provider": "Anthropic"
+        }
+      ]
+    },
+    "additional_metrics": {
+      "eval_duration": 0.5,
+      "label": "y"
+    }
+  },
+  "run_metrics_sum": {
+    "input_tokens": 310,
+    "output_tokens": 61,
+    "total_tokens": 360,
+    "cache_read_tokens": 200,
+    "reasoning_tokens": 12,
+    "cost": 0.55,
+    "time_to_first_token": 0.1,
+    "duration": 5.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 210,
+          "output_tokens": 40,
+          "total_tokens": 240,
+          "cache_read_tokens": 200,
+          "cost": 0.54,
+          "id": "claude-opus-5-5",
+          "provider": "Anthropic",
+          "provider_metrics": {
+            "context_usage": {
+              "input_tokens": 50
+            }
+          }
+        },
+        {
+          "input_tokens": 100,
+          "output_tokens": 20,
+          "total_tokens": 120,
+          "reasoning_tokens": 12,
+          "cost": 0.01,
+          "id": "gpt-6-luna",
+          "provider": "OpenAI Chat"
+        }
+      ],
+      "learning_model": [
+        {
+          "input_tokens": 9,
+          "id": "gpt-6-luna",
+          "provider": "OpenAI Chat"
+        }
+      ]
+    },
+    "additional_metrics": {
+      "eval_duration": 2.0,
+      "label": "y"
+    }
+  },
+  "model_metrics": {
+    "input_tokens": 1,
+    "cost": 0.2,
+    "id": "m",
+    "provider": "P",
+    "provider_metrics": {
+      "k": 1
+    }
+  },
+  "messages": {
+    "m-sys": {
+      "id": "m-sys",
+      "content": "You are MindRoom.",
+      "from_history": false,
+      "stop_after_tool_call": false,
+      "role": "system",
+      "created_at": 1700000000
+    },
+    "m-user": {
+      "id": "m-user",
+      "content": "Look at these",
+      "from_history": false,
+      "stop_after_tool_call": false,
+      "role": "user",
+      "name": "alice",
+      "provider_data": {
+        "mindroom_queued_message_notice": true
+      },
+      "images": [
+        {
+          "id": "img",
+          "mime_type": "image/png",
+          "detail": "low",
+          "content": "iVBORw0KGgoAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw=="
+        }
+      ],
+      "audio": [
+        {
+          "id": "aud",
+          "format": "wav",
+          "sample_rate": 24000,
+          "channels": 1,
+          "content": "UklGRgAAAABXQVZFZm10IAABAgMEBQYHCAkKCwwNDg8="
+        }
+      ],
+      "videos": [
+        {
+          "id": "vid",
+          "mime_type": "video/mp4",
+          "content": "AAAAGGZ0eXBtcDQyAAECAwQFBgcICQoLDA0ODxAREhMUFRYX"
+        }
+      ],
+      "files": [
+        {
+          "id": "doc",
+          "mime_type": "application/pdf",
+          "filename": "r.pdf",
+          "content": "JVBERi0xLjcKJeLjz9MK"
+        }
+      ],
+      "created_at": 1700000001
+    },
+    "m-assistant": {
+      "id": "m-assistant",
+      "content": "Running it.",
+      "reasoning_content": "think",
+      "from_history": false,
+      "compressed_content": "short",
+      "stop_after_tool_call": true,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "shell",
+            "arguments": "{\"cmd\": \"ls\"}"
+          }
+        }
+      ],
+      "redacted_reasoning_content": "redacted",
+      "provider_data": {
+        "mindroom_model": {
+          "id": "claude-opus-5-5",
+          "provider": "Anthropic"
+        },
+        "signature": "sig"
+      },
+      "metrics": {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "audio_input_tokens": 4,
+        "audio_output_tokens": 2,
+        "audio_total_tokens": 6,
+        "cache_read_tokens": 100,
+        "cache_write_tokens": 20,
+        "reasoning_tokens": 10,
+        "cost": 0.0123,
+        "duration": 1.25,
+        "time_to_first_token": 0.4,
+        "provider_metrics": {
+          "context_usage": {
+            "input_tokens": 40
+          },
+          "service_tier": "default",
+          "timings": 3
+        }
+      },
+      "created_at": 1700000002
+    },
+    "m-tool": {
+      "id": "m-tool",
+      "content": "file.txt",
+      "from_history": true,
+      "stop_after_tool_call": false,
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "tool_name": "shell",
+      "tool_args": {
+        "cmd": "ls"
+      },
+      "tool_call_error": false,
+      "created_at": 1700000003
+    },
+    "m-blocks": {
+      "id": "m-blocks",
+      "content": [
+        {
+          "type": "text",
+          "text": "block"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:,"
+          }
+        }
+      ],
+      "from_history": false,
+      "stop_after_tool_call": false,
+      "role": "user",
+      "created_at": 1700000004
+    },
+    "m-empty": {
+      "id": "m-empty",
+      "content": "",
+      "from_history": false,
+      "stop_after_tool_call": false,
+      "role": "assistant",
+      "created_at": 1700000005
+    },
+    "m-none": {
+      "id": "m-none",
+      "from_history": false,
+      "stop_after_tool_call": false,
+      "role": "user",
+      "tool_call_error": true,
+      "created_at": 1700000006
+    }
+  },
+  "message_every_field": {
+    "id": "same",
+    "content": "x",
+    "reasoning_content": "r",
+    "from_history": true,
+    "compressed_content": "cc",
+    "stop_after_tool_call": true,
+    "role": "assistant",
+    "name": "n",
+    "tool_call_id": "c",
+    "tool_name": "t",
+    "tool_args": {
+      "a": 1
+    },
+    "tool_call_error": true,
+    "tool_calls": [
+      {
+        "id": "c"
+      }
+    ],
+    "redacted_reasoning_content": "rr",
+    "provider_data": {
+      "k": "v"
+    },
+    "images": [
+      {
+        "id": "i",
+        "url": "https://example.invalid/i"
+      }
+    ],
+    "audio": [
+      {
+        "id": "a",
+        "url": "https://example.invalid/a",
+        "sample_rate": 24000,
+        "channels": 1
+      }
+    ],
+    "videos": [
+      {
+        "id": "v",
+        "url": "https://example.invalid/v"
+      }
+    ],
+    "files": [
+      {
+        "id": "f",
+        "url": "https://example.invalid/f"
+      }
+    ],
+    "metrics": {
+      "input_tokens": 1
+    },
+    "created_at": 5
+  },
+  "message_with_agno_only_fields": {
+    "id": "m",
+    "content": "hi",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "assistant",
+    "checkpoint_status": "COMPLETED",
+    "checkpoint_created_at": 2,
+    "audio_output": {
+      "id": "out",
+      "sample_rate": 24000,
+      "channels": 1,
+      "content": "UklGRgAAAABXQVZFZm10IAABAgMEBQYHCAkKCwwNDg8="
+    },
+    "created_at": 1
+  },
+  "message_with_media_scalars": {
+    "id": "c6dd4948-21df-4ae6-8955-d45acaabd888",
+    "content": "look",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "user",
+    "images": [
+      {
+        "id": "img",
+        "detail": "high",
+        "alt_text": "cat",
+        "content": "iVBORw0KGgoAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw==",
+        "metadata": {
+          "k": "v"
+        }
+      }
+    ],
+    "created_at": 1792651070
+  },
+  "message_model_dump_with_non_persisted_flags": {
+    "id": "c6cfb53e-b803-4fe2-8a13-a83572860df5",
+    "role": "user",
+    "content": "x",
+    "compressed_content": null,
+    "name": null,
+    "tool_call_id": null,
+    "tool_calls": null,
+    "audio": null,
+    "images": null,
+    "videos": null,
+    "files": null,
+    "audio_output": null,
+    "image_output": null,
+    "video_output": null,
+    "file_output": null,
+    "redacted_reasoning_content": null,
+    "provider_data": null,
+    "citations": null,
+    "reasoning_content": null,
+    "tool_name": null,
+    "tool_args": null,
+    "tool_call_error": null,
+    "stop_after_tool_call": false,
+    "add_to_agent_memory": false,
+    "from_history": false,
+    "metrics": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "audio_input_tokens": 0,
+      "audio_output_tokens": 0,
+      "audio_total_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost": null,
+      "timer": null,
+      "duration": null,
+      "time_to_first_token": null,
+      "provider_metrics": null
+    },
+    "references": null,
+    "created_at": 1792651070,
+    "temporary": true,
+    "checkpoint_status": null,
+    "checkpoint_created_at": null
+  },
+  "tool_execution": {
+    "tool_call_id": "call_1",
+    "tool_name": "shell",
+    "tool_args": {
+      "cmd": "rm -rf /tmp/x"
+    },
+    "tool_call_error": false,
+    "result": "done",
+    "metrics": {
+      "start_time": 1.0,
+      "end_time": 2.5,
+      "duration": 1.5
+    },
+    "child_run_id": "child-1",
+    "stop_after_tool_call": true,
+    "created_at": 1700000010,
+    "requires_confirmation": true,
+    "confirmed": true,
+    "confirmation_note": "ok",
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": false,
+    "external_execution_silent": true,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "tool_execution_default": {
+    "tool_call_id": "c",
+    "tool_name": "t",
+    "tool_args": {},
+    "tool_call_error": null,
+    "result": null,
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 7,
+    "requires_confirmation": null,
+    "confirmed": null,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": null,
+    "approval_id": null
+  },
+  "run_requirement": {
+    "id": "req-1",
+    "created_at": "2026-01-02T03:04:05+00:00",
+    "member_agent_id": "writer",
+    "member_agent_name": "Writer",
+    "member_run_id": "member-run-1",
+    "tool_execution": {
+      "tool_call_id": "call_2",
+      "tool_name": "delegate",
+      "tool_args": {
+        "task": "x"
+      },
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 3,
+      "requires_confirmation": true,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": null,
+      "approval_id": null
+    }
+  },
+  "run_requirement_decided": {
+    "confirm": {
+      "id": "req-1",
+      "created_at": "2026-01-02T03:04:05+00:00",
+      "confirmation": true,
+      "member_agent_id": "writer",
+      "member_agent_name": "Writer",
+      "member_run_id": "member-run-1",
+      "tool_execution": {
+        "tool_call_id": "call_2",
+        "tool_name": "delegate",
+        "tool_args": {
+          "task": "x"
+        },
+        "tool_call_error": null,
+        "result": null,
+        "metrics": null,
+        "child_run_id": null,
+        "stop_after_tool_call": false,
+        "created_at": 3,
+        "requires_confirmation": true,
+        "confirmed": true,
+        "confirmation_note": null,
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    },
+    "reject": {
+      "id": "req-1",
+      "created_at": "2026-01-02T03:04:05+00:00",
+      "confirmation": false,
+      "member_agent_id": "writer",
+      "member_agent_name": "Writer",
+      "member_run_id": "member-run-1",
+      "tool_execution": {
+        "tool_call_id": "call_2",
+        "tool_name": "delegate",
+        "tool_args": {
+          "task": "x"
+        },
+        "tool_call_error": null,
+        "result": null,
+        "metrics": null,
+        "child_run_id": null,
+        "stop_after_tool_call": false,
+        "created_at": 3,
+        "requires_confirmation": true,
+        "confirmed": false,
+        "confirmation_note": null,
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    },
+    "reject_with_note": {
+      "id": "req-1",
+      "created_at": "2026-01-02T03:04:05+00:00",
+      "confirmation": false,
+      "confirmation_note": "Not approved by requester",
+      "member_agent_id": "writer",
+      "member_agent_name": "Writer",
+      "member_run_id": "member-run-1",
+      "tool_execution": {
+        "tool_call_id": "call_2",
+        "tool_name": "delegate",
+        "tool_args": {
+          "task": "x"
+        },
+        "tool_call_error": null,
+        "result": null,
+        "metrics": null,
+        "child_run_id": null,
+        "stop_after_tool_call": false,
+        "created_at": 3,
+        "requires_confirmation": true,
+        "confirmed": false,
+        "confirmation_note": "Not approved by requester",
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    }
+  },
+  "run_requirement_external": {
+    "id": "req-2",
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "tool_execution": {
+      "tool_call_id": "call_3",
+      "tool_name": "run_subagent",
+      "tool_args": {},
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 4,
+      "requires_confirmation": null,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": true,
+      "external_execution_silent": null,
+      "approval_type": null,
+      "approval_id": null
+    }
+  },
+  "run_requirement_external_resolved": {
+    "id": "req-2",
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "external_execution_result": "subagent said hi",
+    "tool_execution": {
+      "tool_call_id": "call_3",
+      "tool_name": "run_subagent",
+      "tool_args": {},
+      "tool_call_error": null,
+      "result": "subagent said hi",
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 4,
+      "requires_confirmation": null,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": true,
+      "external_execution_silent": null,
+      "approval_type": null,
+      "approval_id": null
+    }
+  },
+  "paused_agent_run": {
+    "run_id": "run-1",
+    "agent_id": "assistant",
+    "agent_name": "Assistant",
+    "session_id": "session-1",
+    "user_id": "@alice:example.org",
+    "content": "Waiting for approval.",
+    "content_type": "str",
+    "model": "claude-opus-5-5",
+    "model_provider": "Anthropic",
+    "session_state": {
+      "mindroom_pending_compaction_scope_keys": [
+        "k"
+      ]
+    },
+    "created_at": 1700000100,
+    "status": "PAUSED",
+    "metrics": {
+      "input_tokens": 300,
+      "output_tokens": 60,
+      "total_tokens": 360,
+      "cache_read_tokens": 200,
+      "reasoning_tokens": 12,
+      "cost": 0.05,
+      "time_to_first_token": 0.3,
+      "duration": 4.5,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 200,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.04,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat",
+            "provider_metrics": {}
+          }
+        ]
+      },
+      "additional_metrics": {
+        "eval_duration": 1.5,
+        "label": "x"
+      }
+    },
+    "messages": [
+      {
+        "id": "m-sys",
+        "content": "You are MindRoom.",
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "system",
+        "created_at": 1700000000
+      },
+      {
+        "id": "m-user",
+        "content": "Look at these",
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "user",
+        "name": "alice",
+        "provider_data": {
+          "mindroom_queued_message_notice": true
+        },
+        "images": [
+          {
+            "id": "img",
+            "mime_type": "image/png",
+            "detail": "low",
+            "content": "iVBORw0KGgoAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw=="
+          }
+        ],
+        "audio": [
+          {
+            "id": "aud",
+            "format": "wav",
+            "sample_rate": 24000,
+            "channels": 1,
+            "content": "UklGRgAAAABXQVZFZm10IAABAgMEBQYHCAkKCwwNDg8="
+          }
+        ],
+        "videos": [
+          {
+            "id": "vid",
+            "mime_type": "video/mp4",
+            "content": "AAAAGGZ0eXBtcDQyAAECAwQFBgcICQoLDA0ODxAREhMUFRYX"
+          }
+        ],
+        "files": [
+          {
+            "id": "doc",
+            "mime_type": "application/pdf",
+            "filename": "r.pdf",
+            "content": "JVBERi0xLjcKJeLjz9MK"
+          }
+        ],
+        "created_at": 1700000001
+      },
+      {
+        "id": "m-assistant",
+        "content": "Running it.",
+        "reasoning_content": "think",
+        "from_history": false,
+        "compressed_content": "short",
+        "stop_after_tool_call": true,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "shell",
+              "arguments": "{\"cmd\": \"ls\"}"
+            }
+          }
+        ],
+        "redacted_reasoning_content": "redacted",
+        "provider_data": {
+          "mindroom_model": {
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic"
+          },
+          "signature": "sig"
+        },
+        "metrics": {
+          "input_tokens": 120,
+          "output_tokens": 30,
+          "total_tokens": 150,
+          "audio_input_tokens": 4,
+          "audio_output_tokens": 2,
+          "audio_total_tokens": 6,
+          "cache_read_tokens": 100,
+          "cache_write_tokens": 20,
+          "reasoning_tokens": 10,
+          "cost": 0.0123,
+          "duration": 1.25,
+          "time_to_first_token": 0.4,
+          "provider_metrics": {
+            "context_usage": {
+              "input_tokens": 40
+            },
+            "service_tier": "default",
+            "timings": 3
+          }
+        },
+        "created_at": 1700000002
+      },
+      {
+        "id": "m-tool",
+        "content": "file.txt",
+        "from_history": true,
+        "stop_after_tool_call": false,
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "tool_name": "shell",
+        "tool_args": {
+          "cmd": "ls"
+        },
+        "tool_call_error": false,
+        "created_at": 1700000003
+      },
+      {
+        "id": "m-blocks",
+        "content": [
+          {
+            "type": "text",
+            "text": "block"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:,"
+            }
+          }
+        ],
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "user",
+        "created_at": 1700000004
+      },
+      {
+        "id": "m-empty",
+        "content": "",
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "assistant",
+        "created_at": 1700000005
+      },
+      {
+        "id": "m-none",
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "user",
+        "tool_call_error": true,
+        "created_at": 1700000006
+      }
+    ],
+    "metadata": {
+      "room_id": "!room:example.org",
+      "requester_id": "@alice:example.org",
+      "mindroom_compacted_requests": 1
+    },
+    "tools": [
+      {
+        "tool_call_id": "call_1",
+        "tool_name": "shell",
+        "tool_args": {
+          "cmd": "rm -rf /tmp/x"
+        },
+        "tool_call_error": false,
+        "result": "done",
+        "metrics": {
+          "start_time": 1.0,
+          "end_time": 2.5,
+          "duration": 1.5
+        },
+        "child_run_id": "child-1",
+        "stop_after_tool_call": true,
+        "created_at": 1700000010,
+        "requires_confirmation": true,
+        "confirmed": true,
+        "confirmation_note": "ok",
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": false,
+        "external_execution_silent": true,
+        "approval_type": "mindroom_policy",
+        "approval_id": null
+      },
+      {
+        "tool_call_id": "call_2",
+        "tool_name": "delegate",
+        "tool_args": {
+          "task": "x"
+        },
+        "tool_call_error": null,
+        "result": null,
+        "metrics": null,
+        "child_run_id": null,
+        "stop_after_tool_call": false,
+        "created_at": 3,
+        "requires_confirmation": true,
+        "confirmed": null,
+        "confirmation_note": null,
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    ],
+    "requirements": [
+      {
+        "id": "req-1",
+        "created_at": "2026-01-02T03:04:05+00:00",
+        "member_agent_id": "writer",
+        "member_agent_name": "Writer",
+        "member_run_id": "member-run-1",
+        "tool_execution": {
+          "tool_call_id": "call_2",
+          "tool_name": "delegate",
+          "tool_args": {
+            "task": "x"
+          },
+          "tool_call_error": null,
+          "result": null,
+          "metrics": null,
+          "child_run_id": null,
+          "stop_after_tool_call": false,
+          "created_at": 3,
+          "requires_confirmation": true,
+          "confirmed": null,
+          "confirmation_note": null,
+          "requires_user_input": null,
+          "user_input_schema": null,
+          "user_feedback_schema": null,
+          "answered": null,
+          "external_execution_required": null,
+          "external_execution_silent": null,
+          "approval_type": null,
+          "approval_id": null
+        }
+      }
+    ],
+    "input": {
+      "input_content": [
+        {
+          "id": "m-sys",
+          "content": "You are MindRoom.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system",
+          "created_at": 1700000000
+        },
+        {
+          "id": "m-user",
+          "content": "Look at these",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "name": "alice",
+          "provider_data": {
+            "mindroom_queued_message_notice": true
+          },
+          "images": [
+            {
+              "id": "img",
+              "mime_type": "image/png",
+              "detail": "low",
+              "content": "iVBORw0KGgoAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw=="
+            }
+          ],
+          "audio": [
+            {
+              "id": "aud",
+              "format": "wav",
+              "sample_rate": 24000,
+              "channels": 1,
+              "content": "UklGRgAAAABXQVZFZm10IAABAgMEBQYHCAkKCwwNDg8="
+            }
+          ],
+          "videos": [
+            {
+              "id": "vid",
+              "mime_type": "video/mp4",
+              "content": "AAAAGGZ0eXBtcDQyAAECAwQFBgcICQoLDA0ODxAREhMUFRYX"
+            }
+          ],
+          "files": [
+            {
+              "id": "doc",
+              "mime_type": "application/pdf",
+              "filename": "r.pdf",
+              "content": "JVBERi0xLjcKJeLjz9MK"
+            }
+          ],
+          "created_at": 1700000001
+        }
+      ]
+    }
+  },
+  "minimal_agent_run": {
+    "run_id": "r",
+    "agent_id": "a",
+    "session_id": "s",
+    "content_type": "str",
+    "created_at": 1,
+    "status": "COMPLETED",
+    "metrics": {},
+    "messages": []
+  },
+  "agent_run_with_empty_tools_and_requirements": {
+    "run_id": "r",
+    "agent_id": "a",
+    "content_type": "str",
+    "created_at": 1,
+    "status": "RUNNING",
+    "messages": [],
+    "tools": [],
+    "requirements": []
+  },
+  "team_run": {
+    "run_id": "team-run-1",
+    "team_id": "writers",
+    "team_name": "Writers",
+    "session_id": "session-2",
+    "user_id": "@alice:example.org",
+    "content": "Here is the draft.",
+    "content_type": "str",
+    "model": "claude-opus-5-5",
+    "model_provider": "Anthropic",
+    "created_at": 1700000300,
+    "metrics": {
+      "input_tokens": 30,
+      "output_tokens": 5,
+      "total_tokens": 35
+    },
+    "status": "COMPLETED",
+    "messages": [
+      {
+        "id": "t1",
+        "content": "write",
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "user",
+        "created_at": 1
+      }
+    ],
+    "metadata": {
+      "room_id": "!room:example.org",
+      "mindroom_delegation": {
+        "version": 1
+      }
+    },
+    "member_responses": [
+      {
+        "run_id": "member-run-1",
+        "agent_id": "writer",
+        "agent_name": "Writer",
+        "session_id": "session-2",
+        "parent_run_id": "team-run-1",
+        "user_id": "@alice:example.org",
+        "content": "Draft written.",
+        "content_type": "str",
+        "model": "gpt-6-luna",
+        "model_provider": "OpenAI",
+        "created_at": 1700000200,
+        "status": "COMPLETED",
+        "metrics": {
+          "input_tokens": 3,
+          "output_tokens": 4,
+          "total_tokens": 7
+        },
+        "messages": [
+          {
+            "id": "w1",
+            "content": "write",
+            "from_history": false,
+            "stop_after_tool_call": false,
+            "role": "user",
+            "created_at": 1
+          },
+          {
+            "id": "w2",
+            "content": "Draft written.",
+            "from_history": false,
+            "stop_after_tool_call": false,
+            "role": "assistant",
+            "created_at": 2
+          }
+        ],
+        "metadata": {
+          "requester_id": "@alice:example.org"
+        }
+      }
+    ],
+    "tools": [
+      {
+        "tool_call_id": "d1",
+        "tool_name": "delegate_task_to_member",
+        "tool_args": {
+          "member_id": "writer"
+        },
+        "tool_call_error": null,
+        "result": "Draft written.",
+        "metrics": null,
+        "child_run_id": "member-run-1",
+        "stop_after_tool_call": false,
+        "created_at": 9,
+        "requires_confirmation": null,
+        "confirmed": null,
+        "confirmation_note": null,
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    ]
+  },
+  "team_run_with_nested_team": {
+    "run_id": "team-run-1",
+    "team_id": "writers",
+    "team_name": "Writers",
+    "session_id": "session-2",
+    "user_id": "@alice:example.org",
+    "content": "Here is the draft.",
+    "content_type": "str",
+    "model": "claude-opus-5-5",
+    "model_provider": "Anthropic",
+    "created_at": 1700000300,
+    "metrics": {
+      "input_tokens": 30,
+      "output_tokens": 5,
+      "total_tokens": 35
+    },
+    "status": "COMPLETED",
+    "messages": [
+      {
+        "id": "t1",
+        "content": "write",
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "user",
+        "created_at": 1
+      }
+    ],
+    "metadata": {
+      "room_id": "!room:example.org",
+      "mindroom_delegation": {
+        "version": 1
+      }
+    },
+    "member_responses": [
+      {
+        "run_id": "member-run-1",
+        "agent_id": "writer",
+        "agent_name": "Writer",
+        "session_id": "session-2",
+        "parent_run_id": "team-run-1",
+        "user_id": "@alice:example.org",
+        "content": "Draft written.",
+        "content_type": "str",
+        "model": "gpt-6-luna",
+        "model_provider": "OpenAI",
+        "created_at": 1700000200,
+        "status": "COMPLETED",
+        "metrics": {
+          "input_tokens": 3,
+          "output_tokens": 4,
+          "total_tokens": 7
+        },
+        "messages": [
+          {
+            "id": "w1",
+            "content": "write",
+            "from_history": false,
+            "stop_after_tool_call": false,
+            "role": "user",
+            "created_at": 1
+          },
+          {
+            "id": "w2",
+            "content": "Draft written.",
+            "from_history": false,
+            "stop_after_tool_call": false,
+            "role": "assistant",
+            "created_at": 2
+          }
+        ],
+        "metadata": {
+          "requester_id": "@alice:example.org"
+        }
+      },
+      {
+        "run_id": "inner",
+        "team_id": "inner-team",
+        "session_id": "s",
+        "content_type": "str",
+        "created_at": 1,
+        "metrics": {
+          "input_tokens": 1
+        },
+        "status": "COMPLETED",
+        "messages": [
+          {
+            "id": "i1",
+            "content": "inner",
+            "from_history": false,
+            "stop_after_tool_call": false,
+            "role": "user",
+            "created_at": 1
+          }
+        ],
+        "member_responses": []
+      }
+    ],
+    "tools": [
+      {
+        "tool_call_id": "d1",
+        "tool_name": "delegate_task_to_member",
+        "tool_args": {
+          "member_id": "writer"
+        },
+        "tool_call_error": null,
+        "result": "Draft written.",
+        "metrics": null,
+        "child_run_id": "member-run-1",
+        "stop_after_tool_call": false,
+        "created_at": 9,
+        "requires_confirmation": null,
+        "confirmed": null,
+        "confirmation_note": null,
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    ]
+  },
+  "member_run": {
+    "run_id": "member-run-1",
+    "agent_id": "writer",
+    "agent_name": "Writer",
+    "session_id": "session-2",
+    "parent_run_id": "team-run-1",
+    "user_id": "@alice:example.org",
+    "content": "Draft written.",
+    "content_type": "str",
+    "model": "gpt-6-luna",
+    "model_provider": "OpenAI",
+    "created_at": 1700000200,
+    "status": "COMPLETED",
+    "metrics": {
+      "input_tokens": 3,
+      "output_tokens": 4,
+      "total_tokens": 7
+    },
+    "messages": [
+      {
+        "id": "w1",
+        "content": "write",
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "user",
+        "created_at": 1
+      },
+      {
+        "id": "w2",
+        "content": "Draft written.",
+        "from_history": false,
+        "stop_after_tool_call": false,
+        "role": "assistant",
+        "created_at": 2
+      }
+    ],
+    "metadata": {
+      "requester_id": "@alice:example.org"
+    }
+  },
+  "usage_only_run": {
+    "run_id": "u",
+    "content_type": "str",
+    "model": "m",
+    "model_provider": "P",
+    "created_at": 1792651070,
+    "status": "RUNNING",
+    "metrics": {},
+    "messages": []
+  },
+  "run_statuses": [
+    [
+      "pending",
+      "PENDING"
+    ],
+    [
+      "running",
+      "RUNNING"
+    ],
+    [
+      "completed",
+      "COMPLETED"
+    ],
+    [
+      "paused",
+      "PAUSED"
+    ],
+    [
+      "cancelled",
+      "CANCELLED"
+    ],
+    [
+      "error",
+      "ERROR"
+    ],
+    [
+      "regenerated",
+      "REGENERATED"
+    ]
+  ],
+  "runs_by_status": {
+    "PENDING": {
+      "run_id": "r",
+      "agent_id": "a",
+      "content_type": "str",
+      "created_at": 1,
+      "status": "PENDING",
+      "messages": []
+    },
+    "REGENERATED": {
+      "run_id": "r",
+      "agent_id": "a",
+      "content_type": "str",
+      "created_at": 1,
+      "status": "REGENERATED",
+      "messages": []
+    }
+  },
+  "run_requirement_read_leniently": {
+    "id": "req-9",
+    "created_at": "2026-10-22T06:37:50.650596+00:00",
+    "confirmation": true,
+    "tool_execution": {
+      "tool_call_id": null,
+      "tool_name": "unknown",
+      "tool_args": {},
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 1792651070,
+      "requires_confirmation": null,
+      "confirmed": true,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": null,
+      "approval_id": null
+    }
+  },
+  "run_requirement_decision_moved": {
+    "rejection": {
+      "id": "req-1",
+      "created_at": "2026-01-02T03:04:05+00:00",
+      "confirmation": false,
+      "confirmation_note": "No.",
+      "tool_execution": {
+        "tool_call_id": null,
+        "tool_name": "t",
+        "tool_args": null,
+        "tool_call_error": null,
+        "result": null,
+        "metrics": null,
+        "child_run_id": null,
+        "stop_after_tool_call": false,
+        "created_at": 3,
+        "requires_confirmation": true,
+        "confirmed": false,
+        "confirmation_note": "No.",
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    },
+    "approval": {
+      "id": "req-1",
+      "created_at": "2026-01-02T03:04:05+00:00",
+      "confirmation": true,
+      "tool_execution": {
+        "tool_call_id": null,
+        "tool_name": "t",
+        "tool_args": null,
+        "tool_call_error": null,
+        "result": null,
+        "metrics": null,
+        "child_run_id": null,
+        "stop_after_tool_call": false,
+        "created_at": 3,
+        "requires_confirmation": true,
+        "confirmed": true,
+        "confirmation_note": null,
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    },
+    "external-result": {
+      "id": "req-1",
+      "created_at": "2026-01-02T03:04:05+00:00",
+      "external_execution_result": "done",
+      "tool_execution": {
+        "tool_call_id": null,
+        "tool_name": "t",
+        "tool_args": null,
+        "tool_call_error": null,
+        "result": "done",
+        "metrics": null,
+        "child_run_id": null,
+        "stop_after_tool_call": false,
+        "created_at": 3,
+        "requires_confirmation": true,
+        "confirmed": null,
+        "confirmation_note": null,
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    },
+    "explicit-tool-decision-wins": {
+      "id": "req-1",
+      "created_at": "2026-01-02T03:04:05+00:00",
+      "confirmation": false,
+      "tool_execution": {
+        "tool_call_id": null,
+        "tool_name": "t",
+        "tool_args": null,
+        "tool_call_error": null,
+        "result": null,
+        "metrics": null,
+        "child_run_id": null,
+        "stop_after_tool_call": false,
+        "created_at": 3,
+        "requires_confirmation": true,
+        "confirmed": true,
+        "confirmation_note": null,
+        "requires_user_input": null,
+        "user_input_schema": null,
+        "user_feedback_schema": null,
+        "answered": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "approval_type": null,
+        "approval_id": null
+      }
+    }
+  },
+  "run_metrics_with_empty_details": {
+    "input_tokens": 10,
+    "output_tokens": 1,
+    "cost": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 10,
+          "cost": 0.5,
+          "id": "claude-opus-5-5",
+          "provider": "Anthropic"
+        },
+        {
+          "input_tokens": 1,
+          "id": "new-model",
+          "provider": "P",
+          "provider_metrics": {}
+        }
+      ],
+      "memory_model": []
+    },
+    "additional_metrics": {
+      "eval_duration": 0.5,
+      "label": "y",
+      "flag": true
+    }
+  },
+  "session_metrics_totals": [
+    {
+      "input_tokens": 300,
+      "output_tokens": 60,
+      "total_tokens": 360,
+      "cache_read_tokens": 200,
+      "reasoning_tokens": 12,
+      "cost": 0.05,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 200,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.04,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ]
+      },
+      "additional_metrics": {
+        "eval_duration": 1.5,
+        "label": "x"
+      }
+    },
+    {
+      "input_tokens": 310,
+      "output_tokens": 61,
+      "total_tokens": 360,
+      "cache_read_tokens": 200,
+      "reasoning_tokens": 12,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 310,
+      "output_tokens": 61,
+      "total_tokens": 360,
+      "cache_read_tokens": 200,
+      "reasoning_tokens": 12,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 430,
+      "output_tokens": 69,
+      "total_tokens": 488,
+      "cache_read_tokens": 300,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 15,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 120,
+            "output_tokens": 8,
+            "total_tokens": 128,
+            "cache_read_tokens": 100,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 3,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 940,
+      "output_tokens": 115,
+      "total_tokens": 1044,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 630,
+            "output_tokens": 54,
+            "total_tokens": 684,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 1240,
+      "output_tokens": 130,
+      "total_tokens": 1359,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 930,
+            "output_tokens": 69,
+            "total_tokens": 999,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 1710,
+      "output_tokens": 149,
+      "total_tokens": 1848,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 1400,
+            "output_tokens": 88,
+            "total_tokens": 1488,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 1950,
+      "output_tokens": 156,
+      "total_tokens": 2095,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 1640,
+            "output_tokens": 95,
+            "total_tokens": 1735,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 2260,
+      "output_tokens": 167,
+      "total_tokens": 2416,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 1950,
+            "output_tokens": 106,
+            "total_tokens": 2056,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 2260,
+      "output_tokens": 167,
+      "total_tokens": 2416,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 1950,
+            "output_tokens": 106,
+            "total_tokens": 2056,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 2400,
+      "output_tokens": 171,
+      "total_tokens": 2560,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 2090,
+            "output_tokens": 110,
+            "total_tokens": 2200,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 2501,
+      "output_tokens": 172,
+      "total_tokens": 2662,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 2191,
+            "output_tokens": 111,
+            "total_tokens": 2302,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 2603,
+      "output_tokens": 174,
+      "total_tokens": 2766,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 2293,
+            "output_tokens": 113,
+            "total_tokens": 2406,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 2706,
+      "output_tokens": 177,
+      "total_tokens": 2872,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 2396,
+            "output_tokens": 116,
+            "total_tokens": 2512,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 3086,
+      "output_tokens": 191,
+      "total_tokens": 3266,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 2776,
+            "output_tokens": 130,
+            "total_tokens": 2906,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 3586,
+      "output_tokens": 207,
+      "total_tokens": 3782,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 3276,
+            "output_tokens": 146,
+            "total_tokens": 3422,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 4086,
+      "output_tokens": 223,
+      "total_tokens": 4298,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 3776,
+            "output_tokens": 162,
+            "total_tokens": 3938,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 4726,
+      "output_tokens": 240,
+      "total_tokens": 4955,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 4816,
+      "output_tokens": 245,
+      "total_tokens": 5050,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 90,
+            "output_tokens": 5,
+            "total_tokens": 95,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 5006,
+      "output_tokens": 251,
+      "total_tokens": 5246,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 5181,
+      "output_tokens": 256,
+      "total_tokens": 5426,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 6031,
+      "output_tokens": 277,
+      "total_tokens": 6297,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 850,
+            "output_tokens": 21,
+            "total_tokens": 871,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 6031,
+      "output_tokens": 277,
+      "total_tokens": 6297,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 850,
+            "output_tokens": 21,
+            "total_tokens": 871,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 6921,
+      "output_tokens": 297,
+      "total_tokens": 7207,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 1740,
+            "output_tokens": 41,
+            "total_tokens": 1781,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 7006,
+      "output_tokens": 302,
+      "total_tokens": 7297,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 1740,
+            "output_tokens": 41,
+            "total_tokens": 1781,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 85,
+            "output_tokens": 5,
+            "total_tokens": 90,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 7436,
+      "output_tokens": 314,
+      "total_tokens": 7739,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 2170,
+            "output_tokens": 53,
+            "total_tokens": 2223,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 85,
+            "output_tokens": 5,
+            "total_tokens": 90,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 7521,
+      "output_tokens": 319,
+      "total_tokens": 7829,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 2170,
+            "output_tokens": 53,
+            "total_tokens": 2223,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 170,
+            "output_tokens": 10,
+            "total_tokens": 180,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 7701,
+      "output_tokens": 325,
+      "total_tokens": 8015,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 2170,
+            "output_tokens": 53,
+            "total_tokens": 2223,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 350,
+            "output_tokens": 16,
+            "total_tokens": 366,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 8601,
+      "output_tokens": 344,
+      "total_tokens": 8934,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 175,
+            "output_tokens": 5,
+            "total_tokens": 180,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 3070,
+            "output_tokens": 72,
+            "total_tokens": 3142,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 350,
+            "output_tokens": 16,
+            "total_tokens": 366,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 8661,
+      "output_tokens": 347,
+      "total_tokens": 8997,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 235,
+            "output_tokens": 8,
+            "total_tokens": 243,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 3070,
+            "output_tokens": 72,
+            "total_tokens": 3142,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 350,
+            "output_tokens": 16,
+            "total_tokens": 366,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 8722,
+      "output_tokens": 350,
+      "total_tokens": 9061,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 235,
+            "output_tokens": 8,
+            "total_tokens": 243,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 3070,
+            "output_tokens": 72,
+            "total_tokens": 3142,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 411,
+            "output_tokens": 19,
+            "total_tokens": 430,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 9512,
+      "output_tokens": 367,
+      "total_tokens": 9868,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 235,
+            "output_tokens": 8,
+            "total_tokens": 243,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 3860,
+            "output_tokens": 89,
+            "total_tokens": 3949,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 411,
+            "output_tokens": 19,
+            "total_tokens": 430,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 9513,
+      "output_tokens": 368,
+      "total_tokens": 9870,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 235,
+            "output_tokens": 8,
+            "total_tokens": 243,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 3860,
+            "output_tokens": 89,
+            "total_tokens": 3949,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 411,
+            "output_tokens": 19,
+            "total_tokens": 430,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 9515,
+      "output_tokens": 370,
+      "total_tokens": 9874,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 235,
+            "output_tokens": 8,
+            "total_tokens": 243,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 3860,
+            "output_tokens": 89,
+            "total_tokens": 3949,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 411,
+            "output_tokens": 19,
+            "total_tokens": 430,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    },
+    {
+      "input_tokens": 9518,
+      "output_tokens": 373,
+      "total_tokens": 9880,
+      "cache_read_tokens": 450,
+      "cache_write_tokens": 20,
+      "reasoning_tokens": 21,
+      "cost": 0.55,
+      "details": {
+        "model": [
+          {
+            "input_tokens": 210,
+            "output_tokens": 40,
+            "total_tokens": 240,
+            "cache_read_tokens": 200,
+            "cost": 0.54,
+            "id": "claude-opus-5-5",
+            "provider": "Anthropic",
+            "provider_metrics": {
+              "context_usage": {
+                "input_tokens": 50
+              }
+            }
+          },
+          {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": 12,
+            "cost": 0.01,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          },
+          {
+            "input_tokens": 1,
+            "id": "new-model",
+            "provider": "P"
+          },
+          {
+            "input_tokens": 4416,
+            "output_tokens": 179,
+            "total_tokens": 4595,
+            "cache_read_tokens": 250,
+            "cache_write_tokens": 20,
+            "reasoning_tokens": 9,
+            "id": "code-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 280,
+            "output_tokens": 11,
+            "total_tokens": 291,
+            "id": "helper-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 235,
+            "output_tokens": 8,
+            "total_tokens": 243,
+            "id": "writer-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 3860,
+            "output_tokens": 89,
+            "total_tokens": 3949,
+            "id": "leader-model",
+            "provider": "Synthetic"
+          },
+          {
+            "input_tokens": 411,
+            "output_tokens": 19,
+            "total_tokens": 430,
+            "id": "checker-model",
+            "provider": "Synthetic"
+          }
+        ],
+        "learning_model": [
+          {
+            "input_tokens": 9,
+            "id": "gpt-6-luna",
+            "provider": "OpenAI Chat"
+          }
+        ],
+        "memory_model": []
+      },
+      "additional_metrics": {
+        "eval_duration": 2.0,
+        "label": "y",
+        "flag": true
+      }
+    }
+  ]
+}

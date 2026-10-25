@@ -1,0 +1,1051 @@
+{
+  "store": "agent_code",
+  "session_id": "!room:example.org:$approved",
+  "get_messages": {
+    "all": {
+      "params": {},
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "last_run": {
+      "params": {
+        "last_n_runs": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "last_two_runs": {
+      "params": {
+        "last_n_runs": 2
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "no_runs": {
+      "params": {
+        "last_n_runs": 0
+      },
+      "messages": []
+    },
+    "limit_1": {
+      "params": {
+        "limit": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "limit_3": {
+      "params": {
+        "limit": 3
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "limit_4": {
+      "params": {
+        "limit": 4
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "last_three_runs_limit_5": {
+      "params": {
+        "last_n_runs": 3,
+        "limit": 5
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "skip_prompt_roles": {
+      "params": {
+        "skip_roles": [
+          "system",
+          "developer"
+        ]
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "every_status_limit_6": {
+      "params": {
+        "skip_statuses": [],
+        "limit": 6
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "every_status": {
+      "params": {
+        "skip_statuses": []
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    }
+  },
+  "filter_tool_calls": {
+    "all/max_tool_calls_0": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 0,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "all/max_tool_calls_1": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "all/max_tool_calls_2": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 2,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    },
+    "every_status/max_tool_calls_1": {
+      "selection": "every_status",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000032",
+          "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "content": "Checking first.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-run-approved",
+              "type": "function",
+              "function": {
+                "name": "multiply",
+                "arguments": "{\"a\": 6, \"b\": 7}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 240,
+            "output_tokens": 7,
+            "total_tokens": 247,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001320
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000034",
+          "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-run-approved",
+          "tool_name": "multiply",
+          "tool_args": {
+            "a": 6,
+            "b": 7
+          },
+          "tool_call_error": false,
+          "created_at": 1800001380
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000035",
+          "content": "6 x 7 = 42.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 260,
+            "output_tokens": 9,
+            "total_tokens": 269,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001380
+        }
+      ]
+    }
+  }
+}

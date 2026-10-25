@@ -1,0 +1,499 @@
+{
+  "store": "agent_code",
+  "session_id": "!room:example.org:$compacted",
+  "get_messages": {
+    "all": {
+      "params": {},
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "last_run": {
+      "params": {
+        "last_n_runs": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "last_two_runs": {
+      "params": {
+        "last_n_runs": 2
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "no_runs": {
+      "params": {
+        "last_n_runs": 0
+      },
+      "messages": []
+    },
+    "limit_1": {
+      "params": {
+        "limit": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "limit_3": {
+      "params": {
+        "limit": 3
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "limit_4": {
+      "params": {
+        "limit": 4
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "last_three_runs_limit_5": {
+      "params": {
+        "last_n_runs": 3,
+        "limit": 5
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "skip_prompt_roles": {
+      "params": {
+        "skip_roles": [
+          "system",
+          "developer"
+        ]
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "every_status_limit_6": {
+      "params": {
+        "skip_statuses": [],
+        "limit": 6
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "every_status": {
+      "params": {
+        "skip_statuses": []
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    }
+  },
+  "filter_tool_calls": {
+    "all/max_tool_calls_0": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 0,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "all/max_tool_calls_1": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "all/max_tool_calls_2": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 2,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    },
+    "every_status/max_tool_calls_1": {
+      "selection": "every_status",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000002e",
+          "content": "Current message:\n<msg event_id=\"$run-c5\" from=\"@alice:example.org\"><![CDATA[Add 2 and 3.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800000960
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000031",
+          "content": "2 + 3 = 5.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 200,
+            "output_tokens": 6,
+            "total_tokens": 206,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800000960
+        }
+      ]
+    }
+  }
+}

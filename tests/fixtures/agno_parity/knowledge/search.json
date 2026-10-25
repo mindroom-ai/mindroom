@@ -1,0 +1,724 @@
+{
+  "format": {
+    "ensure_ascii": false,
+    "indent": 2
+  },
+  "input": {
+    "config": {
+      "agents": {
+        "archivist": {
+          "display_name": "Archivist",
+          "knowledge_bases": [
+            "empty"
+          ]
+        },
+        "librarian": {
+          "display_name": "Librarian",
+          "knowledge_bases": [
+            "handbook"
+          ]
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "knowledge_bases": [
+            "handbook",
+            "notes"
+          ]
+        }
+      },
+      "knowledge_bases": {
+        "empty": {
+          "chunk_overlap": 24,
+          "chunk_size": 128,
+          "description": "A base without content.",
+          "path": "./empty"
+        },
+        "handbook": {
+          "chunk_overlap": 24,
+          "chunk_size": 128,
+          "description": "The team handbook.",
+          "path": "./handbook"
+        },
+        "notes": {
+          "chunk_overlap": 24,
+          "chunk_size": 128,
+          "description": "Personal travel notes.",
+          "path": "./notes"
+        }
+      },
+      "models": {}
+    },
+    "failing_query_embedder": true,
+    "query_embedding": "parity_vector of the query"
+  },
+  "searches": [
+    {
+      "agent": "librarian",
+      "documents": [
+        {
+          "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 128,
+            "content_hash": "<sha256>",
+            "distances": 0.5828447341918945,
+            "linked_to": "",
+            "similarity_score": 0.5828447341918945,
+            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "guide.md",
+            "source_size": 279
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "city, cap",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 0.6045231819152832,
+            "linked_to": "",
+            "row_number": 1,
+            "similarity_score": 0.6045231819152832,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 123,
+            "content_hash": "<sha256>",
+            "distances": 0.8707394003868103,
+            "linked_to": "",
+            "similarity_score": 0.8707394003868103,
+            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "team/policies.txt",
+            "source_size": 149
+          },
+          "name": "policies.txt"
+        },
+        {
+          "content": "before�after the null byte",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 26,
+            "content_hash": "<sha256>",
+            "distances": 0.9601258039474487,
+            "linked_to": "",
+            "similarity_score": 0.9601258039474487,
+            "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "control.txt",
+            "source_size": 26
+          },
+          "name": "control.txt"
+        },
+        {
+          "content": "{\"name\": \"Ada\", \"role\": \"lead\"}",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 31,
+            "content_hash": "<sha256>",
+            "distances": 0.995894730091095,
+            "linked_to": "",
+            "page": 1,
+            "similarity_score": 0.995894730091095,
+            "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "records.json",
+            "source_size": 99
+          },
+          "name": "records.json"
+        },
+        {
+          "content": "{\"timezone\": \"UTC\", \"features\": {\"search\": true}}",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 49,
+            "content_hash": "<sha256>",
+            "distances": 1.0876811742782593,
+            "linked_to": "",
+            "page": 1,
+            "similarity_score": 1.0876811742782593,
+            "source_digest": "b22455cab350542fb426cefaa999a85578b58482643af0348bc06c0fe11b419a",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "settings.json",
+            "source_size": 49
+          },
+          "name": "settings.json"
+        },
+        {
+          "content": " and late reports need a short written reason. ",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 47,
+            "content_hash": "<sha256>",
+            "distances": 1.1320685148239136,
+            "linked_to": "",
+            "similarity_score": 1.1320685148239136,
+            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "team/policies.txt",
+            "source_size": 149
+          },
+          "name": "policies.txt"
+        },
+        {
+          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 128,
+            "content_hash": "<sha256>",
+            "distances": 1.1543807983398438,
+            "linked_to": "",
+            "similarity_score": 1.1543807983398438,
+            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "guide.md",
+            "source_size": 279
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "Paris, 200",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 1.202522873878479,
+            "linked_to": "",
+            "row_number": 3,
+            "similarity_score": 1.202522873878479,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": "Berlin, 180",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 1.2365418672561646,
+            "linked_to": "",
+            "row_number": 2,
+            "similarity_score": 1.2365418672561646,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        }
+      ],
+      "query": "hotel nightly cap"
+    },
+    {
+      "agent": "librarian",
+      "documents": [
+        {
+          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 128,
+            "content_hash": "<sha256>",
+            "distances": 0.5304011106491089,
+            "linked_to": "",
+            "similarity_score": 0.5304011106491089,
+            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "guide.md",
+            "source_size": 279
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 123,
+            "content_hash": "<sha256>",
+            "distances": 0.6581578254699707,
+            "linked_to": "",
+            "similarity_score": 0.6581578254699707,
+            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "team/policies.txt",
+            "source_size": 149
+          },
+          "name": "policies.txt"
+        },
+        {
+          "content": "before�after the null byte",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 26,
+            "content_hash": "<sha256>",
+            "distances": 0.9311469197273254,
+            "linked_to": "",
+            "similarity_score": 0.9311469197273254,
+            "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "control.txt",
+            "source_size": 26
+          },
+          "name": "control.txt"
+        },
+        {
+          "content": "{\"name\": \"Ada\", \"role\": \"lead\"}",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 31,
+            "content_hash": "<sha256>",
+            "distances": 0.93320631980896,
+            "linked_to": "",
+            "page": 1,
+            "similarity_score": 0.93320631980896,
+            "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "records.json",
+            "source_size": 99
+          },
+          "name": "records.json"
+        },
+        {
+          "content": "Paris, 200",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 0.9381505250930786,
+            "linked_to": "",
+            "row_number": 3,
+            "similarity_score": 0.9381505250930786,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 128,
+            "content_hash": "<sha256>",
+            "distances": 1.0069458484649658,
+            "linked_to": "",
+            "similarity_score": 1.0069458484649658,
+            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "guide.md",
+            "source_size": 279
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "city, cap",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 1.0494847297668457,
+            "linked_to": "",
+            "row_number": 1,
+            "similarity_score": 1.0494847297668457,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": " and late reports need a short written reason. ",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 47,
+            "content_hash": "<sha256>",
+            "distances": 1.0581741333007812,
+            "linked_to": "",
+            "similarity_score": 1.0581741333007812,
+            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "team/policies.txt",
+            "source_size": 149
+          },
+          "name": "policies.txt"
+        },
+        {
+          "content": "London, 220",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 1.083837628364563,
+            "linked_to": "",
+            "row_number": 5,
+            "similarity_score": 1.083837628364563,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": "Berlin, 180",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 1.1686739921569824,
+            "linked_to": "",
+            "row_number": 2,
+            "similarity_score": 1.1686739921569824,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        }
+      ],
+      "query": "who leads the team"
+    },
+    {
+      "agent": "researcher",
+      "documents": [
+        {
+          "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 128,
+            "content_hash": "<sha256>",
+            "distances": 0.5828447341918945,
+            "linked_to": "",
+            "similarity_score": 0.5828447341918945,
+            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "guide.md",
+            "source_size": 279
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "Remember to book the conference hotel early, because the venue fills up fast. ",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 78,
+            "content_hash": "<sha256>",
+            "distances": 1.3297736644744873,
+            "linked_to": "",
+            "similarity_score": 1.3297736644744873,
+            "source_digest": "b32f11bbe66058c79b6c2435a5937d54597ea0ef8d1b941e7dd228057375ad45",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "notes.md",
+            "source_size": 78
+          },
+          "name": "notes.md"
+        },
+        {
+          "content": "city, cap",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 0.6045231819152832,
+            "linked_to": "",
+            "row_number": 1,
+            "similarity_score": 0.6045231819152832,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 123,
+            "content_hash": "<sha256>",
+            "distances": 0.8707394003868103,
+            "linked_to": "",
+            "similarity_score": 0.8707394003868103,
+            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "team/policies.txt",
+            "source_size": 149
+          },
+          "name": "policies.txt"
+        },
+        {
+          "content": "before�after the null byte",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 26,
+            "content_hash": "<sha256>",
+            "distances": 0.9601258039474487,
+            "linked_to": "",
+            "similarity_score": 0.9601258039474487,
+            "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "control.txt",
+            "source_size": 26
+          },
+          "name": "control.txt"
+        },
+        {
+          "content": "{\"name\": \"Ada\", \"role\": \"lead\"}",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 31,
+            "content_hash": "<sha256>",
+            "distances": 0.995894730091095,
+            "linked_to": "",
+            "page": 1,
+            "similarity_score": 0.995894730091095,
+            "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "records.json",
+            "source_size": 99
+          },
+          "name": "records.json"
+        },
+        {
+          "content": "{\"timezone\": \"UTC\", \"features\": {\"search\": true}}",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 49,
+            "content_hash": "<sha256>",
+            "distances": 1.0876811742782593,
+            "linked_to": "",
+            "page": 1,
+            "similarity_score": 1.0876811742782593,
+            "source_digest": "b22455cab350542fb426cefaa999a85578b58482643af0348bc06c0fe11b419a",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "settings.json",
+            "source_size": 49
+          },
+          "name": "settings.json"
+        },
+        {
+          "content": " and late reports need a short written reason. ",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 47,
+            "content_hash": "<sha256>",
+            "distances": 1.1320685148239136,
+            "linked_to": "",
+            "similarity_score": 1.1320685148239136,
+            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "team/policies.txt",
+            "source_size": 149
+          },
+          "name": "policies.txt"
+        },
+        {
+          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 128,
+            "content_hash": "<sha256>",
+            "distances": 1.1543807983398438,
+            "linked_to": "",
+            "similarity_score": 1.1543807983398438,
+            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "guide.md",
+            "source_size": 279
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "Paris, 200",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 1.202522873878479,
+            "linked_to": "",
+            "row_number": 3,
+            "similarity_score": 1.202522873878479,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        }
+      ],
+      "query": "hotel nightly cap"
+    },
+    {
+      "agent": "researcher",
+      "documents": [
+        {
+          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 128,
+            "content_hash": "<sha256>",
+            "distances": 0.5304011106491089,
+            "linked_to": "",
+            "similarity_score": 0.5304011106491089,
+            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "guide.md",
+            "source_size": 279
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "Remember to book the conference hotel early, because the venue fills up fast. ",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 78,
+            "content_hash": "<sha256>",
+            "distances": 0.34666454792022705,
+            "linked_to": "",
+            "similarity_score": 0.34666454792022705,
+            "source_digest": "b32f11bbe66058c79b6c2435a5937d54597ea0ef8d1b941e7dd228057375ad45",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "notes.md",
+            "source_size": 78
+          },
+          "name": "notes.md"
+        },
+        {
+          "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 123,
+            "content_hash": "<sha256>",
+            "distances": 0.6581578254699707,
+            "linked_to": "",
+            "similarity_score": 0.6581578254699707,
+            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "team/policies.txt",
+            "source_size": 149
+          },
+          "name": "policies.txt"
+        },
+        {
+          "content": "before�after the null byte",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 26,
+            "content_hash": "<sha256>",
+            "distances": 0.9311469197273254,
+            "linked_to": "",
+            "similarity_score": 0.9311469197273254,
+            "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "control.txt",
+            "source_size": 26
+          },
+          "name": "control.txt"
+        },
+        {
+          "content": "{\"name\": \"Ada\", \"role\": \"lead\"}",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 31,
+            "content_hash": "<sha256>",
+            "distances": 0.93320631980896,
+            "linked_to": "",
+            "page": 1,
+            "similarity_score": 0.93320631980896,
+            "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "records.json",
+            "source_size": 99
+          },
+          "name": "records.json"
+        },
+        {
+          "content": "Paris, 200",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 0.9381505250930786,
+            "linked_to": "",
+            "row_number": 3,
+            "similarity_score": 0.9381505250930786,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 128,
+            "content_hash": "<sha256>",
+            "distances": 1.0069458484649658,
+            "linked_to": "",
+            "similarity_score": 1.0069458484649658,
+            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "guide.md",
+            "source_size": 279
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "city, cap",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 1.0494847297668457,
+            "linked_to": "",
+            "row_number": 1,
+            "similarity_score": 1.0494847297668457,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": " and late reports need a short written reason. ",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 47,
+            "content_hash": "<sha256>",
+            "distances": 1.0581741333007812,
+            "linked_to": "",
+            "similarity_score": 1.0581741333007812,
+            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "team/policies.txt",
+            "source_size": 149
+          },
+          "name": "policies.txt"
+        },
+        {
+          "content": "London, 220",
+          "meta_data": {
+            "content_hash": "<sha256>",
+            "distances": 1.083837628364563,
+            "linked_to": "",
+            "row_number": 5,
+            "similarity_score": 1.083837628364563,
+            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
+            "source_mtime_ns": 1790000000000000000,
+            "source_path": "table.csv",
+            "source_size": 46
+          },
+          "name": "table.csv"
+        }
+      ],
+      "query": "who leads the team"
+    },
+    {
+      "agent": "archivist",
+      "query": "hotel nightly cap",
+      "text": "No documents found"
+    },
+    {
+      "agent": "librarian",
+      "query": "hotel nightly cap",
+      "text": "Error searching knowledge base: EmbedderRequestError"
+    }
+  ]
+}

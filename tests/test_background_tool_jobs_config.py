@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import textwrap
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
 import yaml
-from agno.models.response import ModelResponse
 from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -22,7 +18,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import current_execution_resources
@@ -31,11 +26,14 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
 from tests.conftest import make_turn_context, test_runtime_paths
-from tests.delegation_helpers import DelegationModel
+from tests.delegation_helpers import ScriptedAgents
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_config_lifecycle import _make_lifecycle
 from tests.tool_job_helpers import (
     completed_delegation_job,
+    job_owner,
+    run_built_turn,
     tool_job_journal,
 )
 
@@ -70,9 +68,9 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
     monkeypatch: pytest.MonkeyPatch,
     enabled: bool,
 ) -> None:
-    """Ordinary saved runs omit job authority, including after an ignored config toggle."""
+    """A run's metadata omits job authority; whether calls can be jobs follows the startup setting, not a later toggle."""
     config = Config(
-        agents={"lead": AgentConfig(display_name="Lead", tools=[], learning=False)},
+        agents={"lead": AgentConfig(display_name="Lead", tools=[])},
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
     )
     config.memory.backend = "none"
@@ -81,25 +79,14 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
     persist_entity_accounts(config, paths)
     instance = pin_background_tool_jobs(config, paths)
     config.background_tool_jobs.enabled = not enabled
-    model = DelegationModel(id="test", responses=[ModelResponse(content="done")])
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
+    ScriptedAgents({"lead": ScriptedModel([answer("done")])}).install(monkeypatch)
     owner = completed_delegation_job().owner
-    storage = create_session_storage("lead", config, paths, owner)
     try:
-        agent = create_agent(
-            "lead",
-            config,
-            paths,
-            owner,
-            history_storage=storage,
-            include_interactive_questions=False,
-        )
-        response = await agent.arun("hello", session_id=owner.session_id, user_id=owner.requester_id)
-        saved = storage.get_run(response.run_id)
-        assert "mindroom_tool_authority" not in (saved.metadata or {})
-        assert ("mindroom_tool_authority" in vars(agent)) is enabled
+        build = create_agent("lead", config, paths, owner, include_interactive_questions=False)
+        record = await run_built_turn(build, config=config, runtime_paths=paths, prompt="hello")
+        assert "mindroom_tool_authority" not in (record.metadata or {})
+        assert (build.tool_jobs is not None) is enabled
     finally:
-        storage.close()
         release_background_tool_jobs(paths, instance)
 
 
@@ -217,29 +204,67 @@ async def test_execution_scope_bypasses_owners_when_disabled(enabled: bool) -> N
     assert [value async for value in streaming()] == [enabled]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
-def test_agent_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: bool) -> None:
-    """Each constructed provider follows the effective feature setting."""
+async def test_an_agent_admits_its_calls_as_jobs_only_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+) -> None:
+    """Each built agent follows the effective setting; while it is off, no definition offers a wait budget."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
-        agents={"lead": AgentConfig(display_name="Lead", tools=[])},
+        agents={"lead": AgentConfig(display_name="Lead", tools=["calculator"])},
         models={"default": ModelConfig(provider="ollama", id="test")},
     )
     config.memory.backend = "none"
+    config.defaults.tools = []
     paths = test_runtime_paths(tmp_path)
     persist_entity_accounts(config, paths)
-    agent = create_agent("lead", config, paths, execution_identity=None, persist_runtime_state=False)
-    assert agent.model is not None
-    assert bool(vars(agent.model).get("_mindroom_tool_jobs")) is enabled
+    model = ScriptedModel([answer("done")])
+    # Without an execution identity, the agent's model is served by its configured model name.
+    ScriptedAgents({"default": model}).install(monkeypatch)
+    build = create_agent("lead", config, paths, execution_identity=None, persist_runtime_state=False)
+    assert (build.tool_jobs is not None) is enabled
+    if build.tool_jobs is not None:
+        assert "add" in build.tool_jobs.tools
+    await run_built_turn(build, config=config, runtime_paths=paths)
+    [request] = model.requests
+    assert "add" in {tool.name for tool in request.tools}
+    assert all(tool.name != "job" for tool in request.tools)
+    assert all("background_after" not in tool.parameters.get("properties", {}) for tool in request.tools)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
-def test_team_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: bool) -> None:
-    """A team's model, like an agent's, follows the effective feature setting."""
+async def test_a_team_leader_gets_job_controls_only_when_enabled(tmp_path: Path, enabled: bool) -> None:
+    """A team leader's job controls, like an agent's, follow the effective feature setting while the runtime runs."""
+    paths = test_runtime_paths(tmp_path)
     config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled))
-    model = DelegationModel(id="team")
-    assert team_background_jobs(model, config, test_runtime_paths(tmp_path), None) is None
-    assert bool(vars(model).get("_mindroom_tool_jobs")) is enabled
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _: None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+    )
+    try:
+        await coordinator.sync()
+        jobs = team_background_jobs(config, paths, job_owner())
+        assert (jobs is not None) is enabled
+        if jobs is not None:
+            offered = {function.name: function for function in jobs.controls.functions}
+            assert "job" in offered
+            assert jobs.actor.team
+            # The team describes each control it offers, by that function and the job toolkit, and nothing else.
+            assert set(jobs.actor.tools) == set(offered)
+            assert all(
+                tool.function is offered[name] and tool.toolkit_name == "job" for name, tool in jobs.actor.tools.items()
+            )
+        # A team without a Matrix owner has no jobs to collect.
+        assert team_background_jobs(config, paths, None) is None
+    finally:
+        await coordinator.stop()
 
 
 @pytest.mark.parametrize(
@@ -257,53 +282,3 @@ def test_a_turn_runs_its_calls_as_jobs_only_with_jobs_on_and_outside_a_voice_cal
     config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled))
     turn = replace(make_turn_context(entity_label="lead"), inline_tools=voice_call)
     assert _with_background_tool_jobs(turn, config, test_runtime_paths(tmp_path)).background_tool_jobs is expected
-
-
-def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tmp_path: Path) -> None:
-    """An earlier enabled test cannot conceal accidental SDK installation in disabled mode."""
-    script = textwrap.dedent("""
-        import asyncio
-        import sys
-        from pathlib import Path
-        from agno.agent import _init as agent_init
-        from agno.team import _init as team_init
-
-        names = ("connect_connectable_tools", "disconnect_connectable_tools", "connect_mcp_tools", "disconnect_mcp_tools")
-        bindings = [(module, prefix + name, vars(module)[prefix + name])
-                    for module, prefix in ((agent_init, ""), (team_init, "_")) for name in names]
-        from mindroom.agents import create_agent
-        from mindroom.config.agent import AgentConfig
-        from mindroom.config.main import Config
-        from mindroom.config.models import ModelConfig
-        from mindroom.tool_jobs import agno_compat_execution
-        from tests.conftest import test_runtime_paths
-        from tests.identity_helpers import persist_entity_accounts
-
-        config = Config(
-            agents={"lead": AgentConfig(display_name="Lead", tools=["calculator"], learning=False)},
-            models={"default": ModelConfig(provider="synthetic", id="lorem-ipsum", extra_kwargs={
-                "chars_per_second": 0, "tool_call_probability": 0, "min_response_chars": 32, "max_response_chars": 32,
-            })},
-        )
-        config.memory.backend = "none"
-        config.defaults.tools = []
-        paths = test_runtime_paths(Path(sys.argv[1]))
-        persist_entity_accounts(config, paths)
-        agent = create_agent("lead", config, paths, execution_identity=None, persist_runtime_state=False)
-        response = asyncio.run(agent.arun("Reply normally"))
-        assert response.content
-        functions = [function for toolkit in agent.tools for function in toolkit.get_async_functions().values()]
-        assert any(function.name == "add" for function in functions)
-        assert all(function.name != "job" for function in functions)
-        assert all("background_after" not in function.parameters.get("properties", {}) for function in functions)
-        assert not vars(agent.model).get("_mindroom_tool_jobs")
-        assert not agno_compat_execution._SDK_BINDINGS_INSTALLED
-        assert all(vars(module)[name] is original for module, name, original in bindings)
-    """)
-    subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )

@@ -36,7 +36,7 @@ from .context import (
 from .types import EVENT_MESSAGE_RECEIVED, EnrichmentItem, RegisteredHook, default_timeout_ms_for_event
 
 if TYPE_CHECKING:
-    from agno.models.message import Message
+    from mindroom.llm.messages import Message
 
     from .registry import HookRegistry
 
@@ -143,20 +143,16 @@ def _snapshot_tool_observer_error(error: BaseException | None) -> BaseException 
 
 
 def _snapshot_compaction_messages(messages: list[Message]) -> list[Message] | None:
-    """Return one best-effort isolated snapshot of compaction messages."""
+    """Return one isolated snapshot of compaction messages, or None when they cannot be copied."""
     try:
         return deepcopy(messages)
-    except Exception as deepcopy_error:
-        try:
-            return [message.model_copy(deep=True) for message in messages]
-        except Exception as model_copy_error:
-            logger.warning(
-                "Skipping compaction hooks after snapshot copy failures",
-                deepcopy_error=repr(deepcopy_error),
-                model_copy_error=repr(model_copy_error),
-                message_count=len(messages),
-            )
-            return None
+    except Exception as error:
+        logger.warning(
+            "Skipping compaction hooks after a snapshot copy failure",
+            error=repr(error),
+            message_count=len(messages),
+        )
+        return None
 
 
 def _bind_hook_context(

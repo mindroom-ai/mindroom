@@ -3,22 +3,20 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from agno.agent import Agent
-from agno.db.base import SessionType
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
+import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.history.session_context import create_scope_session_storage, open_bound_scope_session_context
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
+from mindroom.history.session_context import create_scope_session_storage, load_bound_scope_session
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -27,9 +25,27 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path) -> None:
     """Response linkage belongs in run metadata, not assistant-role content."""
-    run = RunOutput(
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    writer = ConversationStateWriter(
+        ConversationStateWriterDeps(
+            runtime=SimpleNamespace(config=config),
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="test_agent",
+        ),
+    )
+    scope = writer.history_scope()
+    run = RunRecord(
         run_id="run-1",
         agent_id="test_agent",
         session_id="session-1",
@@ -39,49 +55,33 @@ def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path)
             Message(role="assistant", content="Final answer"),
         ],
     )
-    storage = create_state_storage(
-        "test_agent",
-        tmp_path,
-        subdir="sessions",
-        session_table="test_agent_sessions",
-    )
+    storage = writer.create_storage(None, scope=scope)
     seed_session(
         storage,
-        AgentSession(
+        ConversationSession(
+            kind="agent",
             session_id="session-1",
-            agent_id="test_agent",
+            owner_id="test_agent",
             runs=[run],
             created_at=1,
-            updated_at=1,
-        ),
-    )
-    writer = ConversationStateWriter(
-        ConversationStateWriterDeps(
-            runtime=MagicMock(),
-            logger=MagicMock(),
-            runtime_paths=test_runtime_paths(tmp_path),
-            agent_name="test_agent",
         ),
     )
 
-    try:
-        writer._persist_response_event_id_in_session_run(
-            storage=storage,
-            session_id="session-1",
-            session_type=SessionType.AGENT,
-            run_id="run-1",
-            response_event_id="$answer",
-        )
+    await writer.apersist_response_event_id_in_session_run(
+        execution_identity=None,
+        scope=scope,
+        session_id="session-1",
+        run_id="run-1",
+        response_event_id="$answer",
+    )
 
-        persisted = get_agent_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs is not None
-        persisted_run = persisted.runs[0]
-        assert persisted_run.metadata == {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer"}
-        assert persisted_run.messages is not None
-        assert persisted_run.messages[-1].content == "Final answer"
-    finally:
-        storage.close()
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert persisted.runs is not None
+    persisted_run = persisted.runs[0]
+    assert persisted_run.metadata == {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer"}
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[-1].content == "Final answer"
 
 
 def test_private_ad_hoc_team_history_scope_is_requester_partitioned(tmp_path: Path) -> None:
@@ -129,7 +129,7 @@ def test_private_ad_hoc_team_history_scope_is_requester_partitioned(tmp_path: Pa
 
 
 def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: Path) -> None:
-    """Bookkeeping storage and the real Agno team run must use the same private ad hoc scope."""
+    """Bookkeeping storage and the team run must use the same private ad hoc scope."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -164,32 +164,24 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    agents = [
-        Agent(id="private_worker", name="PrivateWorker"),
-        Agent(id="shared", name="Shared"),
-    ]
-
     writer_scope = writer.team_history_scope(
         [ids["private_worker"], ids["shared"]],
         requester_user_id="@alice:localhost",
     )
     writer_storage = create_scope_session_storage(
-        agent_name="shared",
         scope=writer_scope,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
-    try:
-        with open_bound_scope_session_context(
-            agents=agents,
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-        ) as bound_scope_context:
-            assert bound_scope_context is not None
-            assert bound_scope_context.scope == writer_scope
-            assert cast("Any", bound_scope_context.storage).db_file == cast("Any", writer_storage).db_file
-    finally:
-        writer_storage.close()
+    bound_scope_context = load_bound_scope_session(
+        member_names=["private_worker", "shared"],
+        team_name=None,
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    )
+    assert bound_scope_context is not None
+    assert bound_scope_context.scope == writer_scope
+    assert bound_scope_context.storage.path == writer_storage.path
