@@ -82,7 +82,6 @@
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6-astra",
@@ -116,7 +115,6 @@
       },
       "reasoning_content": "Check the forecast first.",
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "call_id": "call_parity_weather",

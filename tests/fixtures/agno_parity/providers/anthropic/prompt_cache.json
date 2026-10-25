@@ -79,7 +79,6 @@
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -94,8 +93,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "end_turn"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "cache_read_tokens": 30,

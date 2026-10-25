@@ -27,7 +27,6 @@
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and",
-      "from_history": false,
       "provider_data": {
         "incomplete_reason": "max_output_tokens",
         "mindroom_model": {
@@ -38,8 +37,7 @@
         "response_id": "resp_parity",
         "response_status": "incomplete"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

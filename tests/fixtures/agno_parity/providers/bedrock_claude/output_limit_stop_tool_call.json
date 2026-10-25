@@ -83,7 +83,6 @@
   "parsed": {
     "message": {
       "content": "Checking the forecast. ",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -105,7 +104,6 @@
         "stop_reason": "max_tokens"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {

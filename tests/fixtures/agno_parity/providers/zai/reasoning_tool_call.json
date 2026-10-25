@@ -78,7 +78,6 @@
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -89,7 +88,6 @@
       },
       "reasoning_content": "Check the forecast first.",
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {

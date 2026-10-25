@@ -9,12 +9,10 @@
       },
       {
         "content": "What should I pack for Paris tomorrow?",
-        "from_history": true,
         "role": "user"
       },
       {
         "content": "Pack a light rain jacket and comfortable shoes.",
-        "from_history": true,
         "metrics": {
           "cost": 0.00021,
           "input_tokens": 42,
@@ -29,8 +27,7 @@
           },
           "system_fingerprint": "fp_parity"
         },
-        "role": "assistant",
-        "stop_after_tool_call": false
+        "role": "assistant"
       },
       {
         "content": "And for the evening?",
@@ -51,7 +48,6 @@
   "parsed": {
     "message": {
       "content": "Add a warm layer.",
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -60,8 +56,7 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "cost": 0.00021,

@@ -278,7 +278,6 @@
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -321,7 +320,6 @@
         "stop_reason": "tool_use"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {

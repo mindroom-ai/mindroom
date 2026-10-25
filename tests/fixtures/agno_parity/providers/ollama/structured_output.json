@@ -50,15 +50,13 @@
   "parsed": {
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "qwen3.8:27b",
           "provider": "Ollama"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

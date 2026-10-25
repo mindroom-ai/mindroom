@@ -31,7 +31,6 @@
   "parsed": {
     "message": {
       "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
-      "from_history": false,
       "provider_data": {
         "finish_reason": "stop",
         "id": "chatcmpl-parity",
@@ -41,8 +40,7 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

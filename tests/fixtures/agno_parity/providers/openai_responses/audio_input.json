@@ -34,7 +34,6 @@
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6-astra",
@@ -45,8 +44,7 @@
         "mindroom_response_stored": true,
         "response_id": "resp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

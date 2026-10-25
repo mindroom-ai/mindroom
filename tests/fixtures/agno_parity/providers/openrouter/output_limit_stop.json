@@ -26,7 +26,6 @@
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and",
-      "from_history": false,
       "provider_data": {
         "finish_reason": "length",
         "id": "chatcmpl-parity",
@@ -36,8 +35,7 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "cost": 0.00021,

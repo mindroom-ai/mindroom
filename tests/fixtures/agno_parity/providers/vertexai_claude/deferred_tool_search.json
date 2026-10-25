@@ -102,7 +102,6 @@
   "parsed": {
     "message": {
       "content": "I can look that up.",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -117,8 +116,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "end_turn"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

@@ -82,7 +82,6 @@
   "parsed": {
     "message": {
       "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6.1-sol",
@@ -93,8 +92,7 @@
         "mindroom_response_stored": false,
         "response_id": "resp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

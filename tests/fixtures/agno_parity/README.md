@@ -37,7 +37,7 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | --- | --- |
 | `family`, `scenario` | The provider route and scenario names. |
 | `input.model_config` | Authored `ModelConfig` fields (`provider`, `id`, `api`, `host`, `api_key`, `extra_kwargs`). |
-| `input.messages` | Stored-message dicts in `Message.to_dict()` shape, oldest first; earlier turns carry `from_history: true` as replayed history does. |
+| `input.messages` | The request's messages, oldest first, each as `Message.to_dict()` without the storage-only `id`, `created_at`, `from_history`, and `stop_after_tool_call`, which no adapter reads. |
 | `input.tools` | The request's `ToolSpec` definitions, every field present and null where the tool sets none; the capture's `Function.to_dict()` dicts left out unset approval flags, which Agno read as false. |
 | `input.tool_choice` | `null` or `"none"`; the owned loop never forces a call. |
 | `input.response_format` | `null`, `{"type": "dict", "value": ...}`, or `{"type": "pydantic", "model": "module:Class", "json_schema": ...}`; it is the value Agno's agent resolves for the model's structured-output support, and replay fails when the class's JSON schema no longer equals `json_schema`. |
@@ -49,7 +49,7 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | `input.native_compaction` | Present only as `{"threshold", "history_generation"}`, the arguments of `configure_native_compaction`. |
 | `request` | `method`, `url`, the stable `headers`, and the JSON `body` of the SDK request. |
 | `response_raw` | `status`, `headers`, and one of `sse` (events as `{"event"?, "data"}`, where `data` is a JSON object or the literal `[DONE]`), `ndjson` (one object per line), or `json` (the body). |
-| `parsed.message` | The assistant message's `Message.to_dict()` once the request completes, before the run loop resolves or runs its tool calls. |
+| `parsed.message` | The assistant message once the request completes, before the run loop resolves or runs its tool calls, encoded like `input.messages` and without its `metrics`. |
 | `parsed.metrics` | That message's `MessageMetrics.to_dict()`. |
 | `parsed.stop_reason` | The first of `provider_data` `stop_reason`, `finish_reason`, and `response_status`, or `null` when the route records none. |
 
@@ -62,7 +62,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 - `cerebras` bodies list `messages` before `model`, as the OpenAI SDK that now sends them does, where the Cerebras SDK the capture used put `model` first.
 - Agno closed the Cerebras structured-output schema in place, so the capture recorded the closed schema as its input; `cerebras/structured_output` and `cerebras/structured_output_nested` hold the schema Agno received.
 - Request headers are dropped when they carry credentials (`authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, AWS `x-amz-*` signing headers) or SDK, platform, and transport details (`x-stainless-*`, `amz-sdk-*`, `user-agent`, `x-goog-api-client`, `host`, `content-length`, `accept-encoding`, `connection`); every other header, such as `anthropic-beta`, `anthropic-version`, `chatgpt-account-id`, and the Codex session headers, is kept.
-- `id` and `created_at` are dropped from `parsed.message`, and the wall-clock `duration` and `time_to_first_token` from `parsed.metrics`.
+- The wall-clock `duration` and `time_to_first_token` are dropped from `parsed.metrics`.
 - uuid4 values Agno generates for tool calls sent without ids (every Ollama call, and the Gemini `tool_definitions` reply) become `<uuid4>`; a follow-up golden replays such a call with the id `parity-generated-call-<n>`.
 - The Cerebras SDK's `/v1/tcp_warming` request, sent when a client is built, is answered and not recorded.
 

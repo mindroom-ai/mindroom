@@ -274,7 +274,6 @@
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "qwen3.8:27b",
@@ -282,7 +281,6 @@
         }
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {

@@ -87,7 +87,6 @@
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gemini-3.8-flash",
@@ -95,7 +94,6 @@
         }
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {

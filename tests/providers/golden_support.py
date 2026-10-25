@@ -33,7 +33,7 @@ from mindroom.providers.tool_policy import without_provider_tools
 from mindroom.routing import _RoutingSuggestion
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.tool_jobs.execution import project_definitions
-from tests.agno_parity.golden_files import sorted_keys
+from tests.agno_parity.golden_files import STORAGE_ONLY_MESSAGE_KEYS, sorted_keys, turn_message
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
@@ -82,7 +82,6 @@ _VOLATILE_HEADERS = frozenset(
 )
 _UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 GENERATED_ID = "<uuid4>"
-_VOLATILE_MESSAGE_KEYS = ("id", "created_at")
 _TIMING_METRIC_KEYS = ("duration", "time_to_first_token")
 _STOP_KEYS = ("stop_reason", "finish_reason", "response_status")
 # The classes the JSON-schema structured-output goldens name, which record no module.
@@ -300,10 +299,8 @@ def normalized_request(request: httpx.Request) -> dict[str, Any]:
 
 
 def normalized_parsed(message: Message) -> dict[str, Any]:
-    """Return the assistant message dict, its usage, and the stored stop reason, as C1 recorded them."""
-    message_dict = message.to_dict()
-    for key in _VOLATILE_MESSAGE_KEYS:
-        message_dict.pop(key, None)
+    """Return the assistant message as a turn, its usage, and the stored stop reason."""
+    message_dict = turn_message(message)
     metrics = message_dict.pop("metrics", {})
     for key in _TIMING_METRIC_KEYS:
         metrics.pop(key, None)
@@ -398,6 +395,8 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
     deferred = case_input["deferred_tool_search"]
     tool_choice = case_input["tool_choice"]
     assert tool_choice in (None, "none"), "the owned loop sends tool_choice only as None or 'none'"
+    stored = [sorted(set(message) & STORAGE_ONLY_MESSAGE_KEYS) for message in case_input["messages"]]
+    assert not any(stored), f"golden input messages are turns, without the storage-only keys {stored}"
     return ModelRequest(
         messages=[Message.from_dict(deepcopy(message)) for message in case_input["messages"]],
         tools=tools,

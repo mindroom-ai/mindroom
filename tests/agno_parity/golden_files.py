@@ -1,7 +1,8 @@
 """How every regenerable golden file is written, so that regenerating an unchanged golden reproduces it byte for byte.
 
 A golden is pretty JSON in the key order its writer built; writers sort the keys whose order carries no meaning with
-``sorted_keys`` and keep the order of values a provider or model receives as serialized bytes.
+``sorted_keys`` and keep the order of values a provider or model receives as serialized bytes. ``turn_message`` is
+the one encoding of a request or reply message that the provider and prompt goldens share.
 """
 
 from __future__ import annotations
@@ -11,6 +12,21 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.llm.messages import Message
+
+# What ``Message.to_dict()`` stores beside the turn itself, none of which a provider adapter reads: the message's
+# storage identity, and the flags saying it was replayed from history and stopped its run's tool loop.
+STORAGE_ONLY_MESSAGE_KEYS = frozenset({"id", "created_at", "from_history", "stop_after_tool_call"})
+
+
+def turn_message(message: Message) -> dict[str, Any]:
+    """Return ``message`` as the goldens record a provider-neutral turn.
+
+    That is its stored fields without the storage-only ones, in sorted order, each value as stored.
+    """
+    stored = message.to_dict()
+    return {key: stored[key] for key in sorted(stored) if key not in STORAGE_ONLY_MESSAGE_KEYS}
 
 
 def render(value: object) -> str:

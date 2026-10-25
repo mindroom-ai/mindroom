@@ -54,15 +54,13 @@
   "parsed": {
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gemini-3.8-flash",
           "provider": "Google"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

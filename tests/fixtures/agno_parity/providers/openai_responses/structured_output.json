@@ -51,7 +51,6 @@
   "parsed": {
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-      "from_history": false,
       "provider_data": {
         "incomplete_reason": null,
         "mindroom_model": {
@@ -64,8 +63,7 @@
         "response_id": "resp_parity",
         "response_status": "completed"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

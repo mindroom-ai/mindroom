@@ -15,11 +15,9 @@
       },
       {
         "content": "Where is order A-1001?",
-        "from_history": true,
         "role": "user"
       },
       {
-        "from_history": true,
         "metrics": {
           "input_tokens": 42,
           "output_tokens": 12,
@@ -96,7 +94,6 @@
           "stop_reason": "tool_use"
         },
         "role": "assistant",
-        "stop_after_tool_call": false,
         "tool_calls": [
           {
             "function": {
@@ -110,7 +107,6 @@
       },
       {
         "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
-        "from_history": true,
         "role": "tool",
         "tool_args": {
           "order_id": "A-1001"
@@ -204,7 +200,6 @@
   "parsed": {
     "message": {
       "content": "Order A-1001 has shipped.",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -219,8 +214,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "end_turn"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,

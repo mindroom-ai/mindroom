@@ -86,7 +86,6 @@
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -114,7 +113,6 @@
       },
       "reasoning_content": "Check the forecast first.",
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {
