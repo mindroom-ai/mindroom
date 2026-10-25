@@ -60,7 +60,7 @@ def extract_classified_embedder_detail(text: str | None) -> str | None:
     return match.group(0) if match else None
 
 
-def _as_embedder_error(exc: BaseException) -> EmbedderRequestError | None:
+def as_embedder_error(exc: BaseException) -> EmbedderRequestError | None:
     """Return ``exc`` as a classified embedder error, classifying a raw OpenAI SDK error; None for anything else."""
     if isinstance(exc, EmbedderRequestError):
         return exc
@@ -73,7 +73,7 @@ def _as_embedder_error(exc: BaseException) -> EmbedderRequestError | None:
 
 def classified_embedder_error(exc: BaseException) -> str | None:
     """Return a safe detail only for a known embedding-provider failure."""
-    error = _as_embedder_error(exc)
+    error = as_embedder_error(exc)
     return None if error is None else str(error)
 
 
@@ -125,7 +125,7 @@ def embedder_request_error(
 
 def openai_embedder_error(error: Exception) -> EmbedderRequestError:
     """Return the classified error of one OpenAI SDK or transport failure, keeping the provider's ``Retry-After`` hint."""
-    # Deferred like the SDK import in ``_as_embedder_error``.
+    # Deferred like the SDK import in ``as_embedder_error``.
     from openai import APIStatusError  # noqa: PLC0415
 
     retry_after_seconds = (
@@ -146,7 +146,7 @@ def embedder_failure_is_transient(exc: BaseException) -> bool:
     payloads are not: retrying them repeats the same rejected request, burns
     the retry budget, and buries the real cause.
     """
-    error = _as_embedder_error(exc)
+    error = as_embedder_error(exc)
     if error is not None:
         return error.retryable
     return isinstance(exc, (TimeoutError, ConnectionError))
@@ -169,7 +169,7 @@ def embedder_batch_cardinality_mismatch(exc: BaseException) -> bool:
 
 def embedder_retry_after_seconds(exc: BaseException) -> float | None:
     """Return the provider's ``Retry-After`` hint in seconds, when it gave one."""
-    error = _as_embedder_error(exc)
+    error = as_embedder_error(exc)
     return None if error is None else error.retry_after_seconds
 
 
@@ -187,4 +187,4 @@ def _retry_after_seconds_from_headers(headers: Mapping[str, str]) -> float | Non
 
 def describe_embedder_error(exc: BaseException) -> str:
     """Return a compact failure description that never includes provider text."""
-    return classified_embedder_error(exc) or f"embedder request failed ({type(exc).__name__})"
+    return str(as_embedder_error(exc) or embedder_request_error(exc, None))
