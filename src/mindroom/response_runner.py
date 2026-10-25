@@ -5379,11 +5379,10 @@ class ResponseRunner:
         on_delivery_started: Callable[[str | None], None] | None,
         attempt_run_id_collector: list[str] | None,
         runtime: _PreparedResponseRuntime,
-        response_kind: str = "ai",
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a response without streaming."""
         request = self._request_with_locked_target(request, runtime.resolved_target)
-        response_identity = self._response_identity(request, response_kind=response_kind)
+        response_identity = self._response_identity(request, response_kind="ai")
         lifecycle = self._build_lifecycle(
             identity=response_identity,
             request=request,
@@ -5505,11 +5504,10 @@ class ResponseRunner:
         on_delivery_started: Callable[[str | None], None] | None,
         attempt_run_id_collector: list[str] | None,
         runtime: _PreparedResponseRuntime,
-        response_kind: str = "ai",
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a streamed response."""
         request = self._request_with_locked_target(request, runtime.resolved_target)
-        response_identity = self._response_identity(request, response_kind=response_kind)
+        response_identity = self._response_identity(request, response_kind="ai")
         lifecycle = self._build_lifecycle(
             identity=response_identity,
             request=request,
