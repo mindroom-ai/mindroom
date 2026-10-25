@@ -117,15 +117,18 @@ def _directories(root: Path) -> list[Path]:
 def _connect_by_name(path: Path, timeout: float) -> sqlite3.Connection:
     """Connect to the file ``path`` names itself, never to a link's target, which ``sqlite3.connect`` would open or create.
 
-    A link is refused before connecting, and the file SQLite opened is checked after, which it names with every link
-    resolved, so a link planted between the check and the connect is refused too.
+    A link at the database or its sessions directory is refused before connecting. The file SQLite opened, which it
+    names with every link resolved, must then be the one ``path`` named before the connect, so a link swapped in at
+    either place between the check and the connect is refused before anything is written; SQLite's open can still have
+    created an empty file at that link's target.
     """
     if path.parent.is_symlink() or path.is_symlink():
         msg = f"Refusing to convert {path} to storage v2: the database or its directory is a link"
         raise ValueError(msg)
+    expected = str(path.parent.resolve() / path.name)
     connection = connect_conversation_database(path, timeout=timeout)
     (opened,) = connection.execute("SELECT file FROM pragma_database_list WHERE name = 'main'").fetchone()
-    if opened != str(path.parent.resolve() / path.name):
+    if opened != expected:
         connection.close()
         msg = f"Refusing to convert {path} to storage v2: SQLite opened {opened} instead"
         raise ValueError(msg)
@@ -212,7 +215,7 @@ class _Run:
     updated_at: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _Places:
     """The session's written runs in ``seq`` order: each one's ``seq`` and the ``run_index`` it sorted by."""
 
@@ -257,17 +260,21 @@ def _has_row(connection: sqlite3.Connection, names: TableNames, run_id: str) -> 
 
 # LEGACY_COMPAT: Agno 3 run rows, one `run_data` JSON document per run.
 # Legacy format: `<s>_runs` (`agno_runs` for the storage name `agno`) rows ordered by `run_index`, each run's messages,
-# tools, and a paused team run's embedded `member_responses` inside `run_data`; workflow rows; members of members.
-# Last legacy release: the last release before storage v2; replacement: unreleased, `<s>_log_runs` rows.
-# Handling: Per session, in the order a load read them, each agent or team row becomes a `<s>_log_runs` row with the
-# next `seq`, decoded through `run_from_row`, the row's ids winning; a member of a member is re-parented to its team
-# run. A paused team run's embedded members replace or create their member rows, since a resume read them; a fold
-# whose run has no row gets a cancelled one right after its latest summary row, with the fold's metadata and members.
-# Workflow rows and rows that do not decode are left out, the latter logged by id; the backup keeps both.
+# tools, and a paused team run's embedded `member_responses` inside `run_data`; workflow rows and members of members.
+# Last legacy release: run rows, the last release before storage v2; replacement: unreleased, `<s>_log_runs` rows.
+# Workflow rows and members of members have no known MindRoom writer (unversioned external input).
+# Handling: Per session, in the order a load read them, except that a row without a position goes last, where no
+# summary row covers it, as none did, each agent or team row becomes a `<s>_log_runs` row with the next `seq`, decoded
+# through `run_from_row`, the row's ids winning; a member of a member is re-parented to its team run. A paused team run's
+# embedded members replace or create their member rows, since a resume read them; a fold whose run has no row gets a
+# cancelled one right after its latest summary row, with the fold's metadata and members. Workflow rows and rows that
+# do not decode are left out, the latter logged by id; the backup keeps both.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
 # ::test_members_of_members_join_their_team_run, ::test_a_paused_team_runs_embedded_members_become_its_member_rows,
 # ::test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary,
-# ::test_workflow_rows_and_rows_that_do_not_decode_are_left_out, and
+# ::test_fold_runs_without_a_row_sort_by_their_latest_fold,
+# ::test_workflow_rows_and_rows_that_do_not_decode_are_left_out,
+# ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, and
 # tests/storage_oracle/test_migrated.py::test_a_converted_input_shows_its_recording_but_for_named_masks.
 def _convert_runs(
     connection: sqlite3.Connection,
@@ -292,6 +299,8 @@ def _convert_runs(
         places.add(run, seq)
         _write_run(connection, names, session_id, run, seq, path)
 
+    # A load read a row without a position first, but no summary row ever covered it, so it always loaded; first here,
+    # it would sort under every summary's ``through``, so it goes last, where none covers it.
     for run_id, parent_run_id, kind, run_data, run_index, created_at, updated_at in connection.execute(
         f"SELECT run_id, parent_run_id, run_type, CAST(run_data AS TEXT), run_index, created_at, "  # noqa: S608
         f"COALESCE(updated_at, created_at) FROM {runs} WHERE session_id = ? "
@@ -302,17 +311,18 @@ def _convert_runs(
         # A fold's run without a row sorts after every run at or before its summary row, before every later one.
         while pending and pending[0].index < index:
             write(pending.pop(0))
-        record = _decoded_run(path, run_id, kind, run_data)
+        # A resume read the copy a paused team run embedded, not the member's own row, even one that does not decode.
+        record = embedded.get(run_id)
         if record is None:
-            continue
-        record.run_id, record.parent_run_id = run_id, _team_run(parents, parent_run_id)
-        # A resume read the copy a paused team run embedded, not the member's own row.
-        record = embedded.get(run_id, record)
+            record = _decoded_run(path, run_id, kind, run_data)
+            if record is None:
+                continue
+            record.run_id, record.parent_run_id = run_id, _team_run(parents, parent_run_id)
         write(_Run(record, index, created_at, updated_at))
         if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
             for member in record.member_responses:
                 if not _has_row(connection, names, member.run_id):
-                    member.parent_run_id, member.session_id = run_id, session_id
+                    member.parent_run_id = run_id
                     write(_Run(member, index, member.created_at, updated_at))
     for run in pending:
         write(run)
@@ -330,7 +340,10 @@ def _decoded_run(path: Path, run_id: str, kind: str, run_data: str) -> AnyRunRec
 
 
 def _team_run(parents: Mapping[str, str | None], parent_run_id: str | None) -> str | None:
-    """Return the top-level run above ``parent_run_id``: team members are agents, so a member of a member joins its team."""
+    """Return the top-level run above ``parent_run_id``: team members are agents, so a member of a member joins its team.
+
+    Parents that form a cycle, which no writer stores, stop where the cycle closes.
+    """
     seen: set[str] = set()
     while parent_run_id is not None and parents.get(parent_run_id) is not None and parent_run_id not in seen:
         seen.add(parent_run_id)
@@ -348,7 +361,7 @@ def _embedded_members(connection: sqlite3.Connection, names: TableNames, session
     ):
         team = _decoded(partial(run_from_row, "team"), run_data)
         for member in team.member_responses if isinstance(team, TeamRunRecord) else ():
-            member.parent_run_id, member.session_id = run_id, session_id
+            member.parent_run_id = run_id
             embedded[member.run_id] = member
     return embedded
 
@@ -374,7 +387,6 @@ def _fold_owners_without_rows(connection: sqlite3.Connection, names: TableNames,
             {
                 "run_id": run_id,
                 f"{kind}_id": owner,
-                "session_id": session_id,
                 "status": RunStatus.cancelled.value,
                 "created_at": latest.created_at,
                 "metadata": metadata if isinstance(metadata, dict) else None,
@@ -385,7 +397,7 @@ def _fold_owners_without_rows(connection: sqlite3.Connection, names: TableNames,
         members = {member.get("run_id"): member for row in owned for member in row.segment_list("member_responses")}
         for member_id, data in members.items():
             if isinstance(member_id, str) and not _has_row(connection, names, member_id):
-                member = _decoded(RunRecord.from_dict, {**data, "parent_run_id": run_id, "session_id": session_id})
+                member = _decoded(RunRecord.from_dict, {**data, "parent_run_id": run_id})
                 if member is not None:
                     runs.append(_Run(member, index, member.created_at, latest.created_at))
     # Stable, so each run's new members stay right after it.
@@ -410,8 +422,12 @@ def _write_run(
 
 # LEGACY_COMPAT: Run messages stored as a list inside an Agno 3 run row.
 # Legacy format: `run_data.messages`, which may hold history copies (CLI checkpoints), system messages of runs that
-# are not paused (rows Agno's runtime wrote), and one message id twice.
-# Last legacy release: the last release before storage v2; replacement: unreleased, one `<s>_log_messages` row each.
+# are not paused, and one message id twice.
+# Last legacy release: history copies, the last release before storage v2; replacement: unreleased, one
+# `<s>_log_messages` row each. System messages of runs that are not paused: no single verified cutoff; v2026.5.250
+# (#1013) stripped them from the reply path's agent and team-scope stores, an agent built without such a store kept
+# an unstripped one through v2026.10.498 (`agents.py` `_open_agent_session_storage`), not shown never to save, and from
+# v2026.10.499 (#3022) every save drops them. One message id twice: no known writer (unversioned external input).
 # Handling: The list becomes message rows in its order under the save's rule: history copies are dropped, and system
 # messages unless the run is paused; a repeated id gets one derived from its run and place, so no row is lost.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_messages_convert_under_the_saves_rule and
@@ -434,8 +450,8 @@ def _convert_messages(connection: sqlite3.Connection, names: TableNames, data: d
 # LEGACY_COMPAT: Delegation snapshots in run metadata missing fields later releases added.
 # Legacy format: `metadata.mindroom_delegation` whose `children` and `pending_tool_sources[*].child` omit `agent_mode`
 # (written through v2026.10.18), `requested_model_name` (through v2026.10.244), or `persona` (through v2026.10.230), or
-# whose persona omits `skills` (through v2026.10.245) or `knowledge` (through v2026.10.262).
-# Last legacy release: v2026.10.262; replacement: v2026.10.263 writes every field.
+# whose persona omits `skills` (through v2026.10.245) or `knowledge` (through v2026.10.263).
+# Last legacy release: v2026.10.263; replacement: v2026.10.264 writes every field.
 # Handling: Each converted run's snapshot is read through `DelegationState.from_metadata` and stored as it writes it
 # back, every field present, so the readers' defaults for absent fields can go later; a snapshot the reader refuses
 # stays as stored and is logged by run id.
@@ -504,8 +520,9 @@ def _convert_summary(
 # holds gains the flag; a tool execution no folded message names becomes a folded tool-result message with its call
 # id; the segment's members gain the flag on their rows, so the run's folded tool calls stay what they were. A segment
 # whose run is not this session's converted row, or that does not decode, flags nothing.
-# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_segment_flags_what_its_fold_took and
-# ::test_a_segment_tool_no_folded_message_names_stays_folded.
+# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_segment_flags_what_its_fold_took,
+# ::test_a_segment_tool_no_folded_message_names_stays_folded, ::test_a_segment_whose_run_is_not_converted_flags_nothing,
+# and ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone.
 def _convert_segment(
     connection: sqlite3.Connection,
     names: TableNames,
