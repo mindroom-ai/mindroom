@@ -14,7 +14,7 @@ from mindroom.history.run_visibility import NON_VISIBLE_RUN_STATUSES
 from mindroom.usage.storage import quote_identifier
 
 NON_VISIBLE_RUN_STATUS_VALUES = tuple(sorted(status.value for status in NON_VISIBLE_RUN_STATUSES))
-_NON_VISIBLE_RUN_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
+NON_VISIBLE_RUN_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
 
 
 def summary_rows_table_names(session_table: str) -> tuple[str, str]:
@@ -70,4 +70,4 @@ def loads_sql(alias: str, latest_row_index: str) -> str:
     Paused, cancelled, and errored runs always load, and so does every run of a scope without summary
     rows, whose ``latest_row_index`` is ``NULL``.
     """
-    return f"({alias}.status IN ({_NON_VISIBLE_RUN_STATUS_SQL}) OR COALESCE({alias}.run_index > {latest_row_index}, 1))"
+    return f"({alias}.status IN ({NON_VISIBLE_RUN_STATUS_SQL}) OR COALESCE({alias}.run_index > {latest_row_index}, 1))"

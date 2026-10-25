@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from time import time
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
-from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES
+from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_SQL, NON_VISIBLE_RUN_STATUS_VALUES
 from mindroom.session_storage.store_next import (
     decoded_mapping,
     delete_runs_in_transaction,
@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import SessionKind
 
 type _Key = tuple[int, int]
-_NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +253,7 @@ def cut_at_event(
         retired_through, barrier_id = _barrier_key(rows)
         runs = connection.execute(
             f"SELECT seq, metadata FROM {tables.runs} WHERE session_id = ? AND parent_run_id IS NULL "  # noqa: S608
-            f"AND scope_key = ? AND (status IN ({_NON_VISIBLE_STATUS_SQL}) OR seq > ?) ORDER BY seq",
+            f"AND scope_key = ? AND (status IN ({NON_VISIBLE_RUN_STATUS_SQL}) OR seq > ?) ORDER BY seq",
             (session_id, scope_key, retired_through),
         ).fetchall()
         holders = [

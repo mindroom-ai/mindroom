@@ -29,7 +29,11 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES, owner_scope_key
+from mindroom.history.summary_rows_schema import (
+    NON_VISIBLE_RUN_STATUS_SQL,
+    NON_VISIBLE_RUN_STATUS_VALUES,
+    owner_scope_key,
+)
 from mindroom.history.types import ScopeSummary
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
@@ -52,7 +56,6 @@ if TYPE_CHECKING:
 # How long an operation waits for another connection's write lock on the database, its migrations included.
 BUSY_TIMEOUT_SECONDS = 30.0
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
-_NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
 # The run-row columns a run's stored dict fills: ``RunColumns``' fields, in their order.
 _RECORD_COLUMNS = tuple(field.name for field in fields(RunColumns))
 
@@ -885,7 +888,7 @@ def _loads_sql(alias: str, summaries: str) -> str:
     row, a barrier included, covers it. Every run of a scope without summary rows loads.
     """
     return (
-        f"({alias}.parent_run_id IS NULL AND ({alias}.status IN ({_NON_VISIBLE_STATUS_SQL}) OR {alias}.seq > COALESCE("  # noqa: S608
+        f"({alias}.parent_run_id IS NULL AND ({alias}.status IN ({NON_VISIBLE_RUN_STATUS_SQL}) OR {alias}.seq > COALESCE("  # noqa: S608
         f"(SELECT row.through FROM {summaries} AS row WHERE row.session_id = {alias}.session_id "
         f"AND row.scope_key = {alias}.scope_key ORDER BY row.id DESC LIMIT 1), 0)))"
     )
