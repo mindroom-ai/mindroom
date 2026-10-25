@@ -104,7 +104,7 @@ def _encoded(value: object) -> str | None:
     return None if value is None else json.dumps(value)
 
 
-def _decoded(text: str | None) -> Any:  # noqa: ANN401
+def _decoded(text: str | None) -> object:
     return None if text is None else json.loads(text)
 
 

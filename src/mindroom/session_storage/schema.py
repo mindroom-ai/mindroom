@@ -188,8 +188,8 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         f"CREATE TABLE IF NOT EXISTS {meta} (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL, "
         "next_seq INTEGER NOT NULL)",
         f"INSERT OR IGNORE INTO {meta} (id, version, next_seq) VALUES (1, {LOG_VERSION}, 1)",  # noqa: S608
-        # The JSON columns come last, the metadata a cut scans first, so scans of the small columns skip the
-        # overflow pages of the large ones.
+        # The JSON columns come last, the metadata a cut scans first among them, so scans of the small columns and
+        # of the metadata skip the overflow pages of the larger ones.
         f"CREATE TABLE IF NOT EXISTS {runs} (run_id TEXT NOT NULL PRIMARY KEY, "
         f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE, parent_run_id TEXT, "
         "kind TEXT NOT NULL, scope_key TEXT NOT NULL, status TEXT NOT NULL, seq INTEGER NOT NULL, "
@@ -197,7 +197,8 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         "record TEXT NOT NULL, requirements TEXT, tools TEXT)",
         _index_sql(names.log_runs, "session_id", "seq"),
         _index_sql(names.log_runs, "parent_run_id"),
-        # A rowid table: messages are often larger than the 1/20 of a page up to which SQLite advises WITHOUT ROWID.
+        # Not WITHOUT ROWID: SQLite recommends that only for rows under about a twentieth of a page, and messages are
+        # often larger.
         f"CREATE TABLE IF NOT EXISTS {quote_identifier(names.log_messages)} ("
         f"run_id TEXT NOT NULL REFERENCES {runs}(run_id) ON DELETE CASCADE, message_id TEXT NOT NULL, "
         "ord INTEGER NOT NULL, folded_by INTEGER, data TEXT NOT NULL, PRIMARY KEY (run_id, message_id))",
