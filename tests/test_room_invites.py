@@ -18,6 +18,8 @@ import nio
 import pytest
 
 from mindroom import bot_room_lifecycle, thread_summary
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -275,6 +277,7 @@ def _live_router_invite_scenario(
         storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        agent_reply_membership_sync=AgentReplyMembershipSync(AgentReplyMembershipIndex()),
     )
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)

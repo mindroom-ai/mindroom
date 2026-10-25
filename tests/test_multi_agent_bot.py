@@ -732,7 +732,8 @@ class TestAgentBot(AgentBotTestBase):
                 current_membership="join",
             ),
         ]
-        assert session.wait_for_membership_idle.await_count == 3
+        # Every command waits for earlier work; each sent join also waits for the sync that observes it.
+        assert session.wait_for_membership_idle.await_count == 5
         assert principal.ingestion_membership_position.await_args_list == [
             call(room_id),
             call(room_id),

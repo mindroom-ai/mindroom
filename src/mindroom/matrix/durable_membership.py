@@ -12,7 +12,7 @@ from mindroom.event_journal.models import RoomMembershipPosition
 _OPERATION_NAMESPACE = UUID("0bd4e975-c3e9-5b10-8d46-68fdda1adc07")
 
 
-async def change_local_membership(
+async def change_local_membership(  # noqa: C901
     session: DurableSync,
     *,
     account_id: str,
@@ -28,6 +28,10 @@ async def change_local_membership(
     A producer can commit membership before the application admits its batch,
     including across restart, so an admitted position alone cannot certify a
     no-op or supply the precondition for a new command.
+
+    A join returns only after this client's sync has observed it: nio resets a
+    room's state when the join succeeds and refuses to send there until a sync
+    establishes it again, so a caller can send into the room once this returns.
     """
     if type(room_id) is not str or not room_id:
         message = "room_id must be a nonempty str"
@@ -67,6 +71,8 @@ async def change_local_membership(
             previous_epoch=position.membership_epoch,
             current_membership=target_membership,
         ):
+            if target_membership == "join":
+                await session.wait_for_membership_idle()
             return True
         # nio can finish captured input while taking command ownership. Retry
         # only when admission moved or still owes that producer work; an HTTP
