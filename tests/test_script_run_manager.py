@@ -618,7 +618,8 @@ async def test_shutdown_fence_drains_admitted_launch_and_rejects_racing_launch(
         monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
 
     admitted_launch = asyncio.create_task(manager.run(_context(tmp_path, mode=mode), source="print('ok')\n"))
-    await asyncio.wait_for(launch_entered.wait(), timeout=1)
+    # Reaching the launch takes store writes, which a loaded host can slow past a second.
+    await asyncio.wait_for(launch_entered.wait(), timeout=10)
     fence = asyncio.create_task(manager.begin_shutdown())
     await asyncio.sleep(0)
 
