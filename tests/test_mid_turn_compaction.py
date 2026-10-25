@@ -20,6 +20,7 @@ from mindroom import helper_usage
 from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner
@@ -54,7 +55,11 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    detached_requester_context,
+    tool_runtime_context,
+)
 from mindroom.usage.storage import project_usage, quote_identifier
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
@@ -200,6 +205,7 @@ async def _run(
     stream: bool = False,
     session_id: str = "session-1",
     metadata: dict[str, Any] | None = None,
+    user_id: str | None = None,
 ) -> RunRecord:
     turn = _turn(prompt)
     store = agent.store
@@ -252,7 +258,7 @@ async def _run(
             turn=turn,
             media=MediaInputs(),
         ),
-        ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), metadata=metadata),
+        ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), user_id=user_id, metadata=metadata),
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),
         persist=persist,
         request_template=ModelRequest(messages=(), stream=stream, native_compaction=agent.native_compaction),
@@ -289,6 +295,18 @@ def _usage_rows(storage: ConversationStore) -> list[tuple[str, dict[str, Any]]]:
             f"SELECT session_id, usage_data FROM {quote_identifier(storage.names.usage)}",  # noqa: S608
         ).fetchall()
     return [(session_id, json.loads(data)) for session_id, data in rows]
+
+
+def _api_requester(config: Config, paths: RuntimePaths) -> DetachedRequesterContext:
+    """Return the authority of an OpenAI-compatible request, whose requester has no Matrix conversation."""
+    return DetachedRequesterContext(
+        requester_id="@api:localhost",
+        config=config,
+        runtime_paths=paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        config_provider=lambda: config,
+        budget_monitor=None,
+    )
 
 
 def _summary_usage(storage: ConversationStore) -> list[tuple[str, dict[str, Any]]]:
@@ -1012,6 +1030,21 @@ async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls
 
 
 @pytest.mark.asyncio
+async def test_run_local_summary_usage_counts_toward_the_requester(tmp_path: Path, summary_calls: SummaryCalls) -> None:
+    """A run-local summary is charged to the request's requester, as a compaction before the reply is."""
+    config, paths = _config(tmp_path)
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+
+    with detached_requester_context(_api_requester(config, paths)):
+        agent = _agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage)
+        await _run(agent, "Do the task", user_id="@api:localhost")
+
+    summaries = _summary_usage(storage)
+    assert len(summaries) == len(summary_calls.inputs) >= 1
+    assert {usage["user_id"] for _session_id, usage in summaries} == {"@api:localhost"}
+
+
+@pytest.mark.asyncio
 async def test_scoped_summary_usage_is_recorded_in_the_scope_storage(
     tmp_path: Path,
     summary_calls: SummaryCalls,
@@ -1039,13 +1072,14 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     token = helper_usage._HELPER_USAGE_OWNER.set(owner)
     try:
         # A team member keeps no storage of its own; the reply's owner records its summary usage.
-        await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
+        with detached_requester_context(_api_requester(config, paths)):
+            await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task", user_id="@api:localhost")
     finally:
         helper_usage._HELPER_USAGE_OWNER.reset(token)
 
     summaries = _summary_usage(owner_storage)
     assert len(summaries) == len(summary_calls.inputs) >= 1
-    assert {session_id for session_id, _ in summaries} == {"owner-session"}
+    assert {(session_id, usage["user_id"]) for session_id, usage in summaries} == {("owner-session", "@api:localhost")}
 
 
 @pytest.mark.asyncio

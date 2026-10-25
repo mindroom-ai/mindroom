@@ -56,7 +56,7 @@ from mindroom.token_budget import (
     estimate_compaction_input_tokens,
 )
 from mindroom.tool_system.runtime_context import (
-    get_detached_requester_context,
+    current_requester_id,
     get_tool_runtime_context,
     resolve_tool_runtime_hook_bindings,
 )
@@ -210,15 +210,8 @@ def scope_usage_recorder(
     storage: ConversationStore,
     session_id: str,
 ) -> Callable[[ModelIdentity, MessageMetrics], Awaitable[None]]:
-    """Record each summary response's usage in the scope's storage, under the reply's requester."""
-    # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
-    requester_context = get_tool_runtime_context() or get_detached_requester_context()
-    return partial(
-        record_summary_usage,
-        storage=storage,
-        session_id=session_id,
-        requester_id=requester_context.requester_id if requester_context is not None else None,
-    )
+    """Record each summary response's usage in the scope's storage, under the current request's requester."""
+    return partial(record_summary_usage, storage=storage, session_id=session_id, requester_id=current_requester_id())
 
 
 @dataclass(frozen=True)

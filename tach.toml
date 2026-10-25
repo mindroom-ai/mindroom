@@ -6977,6 +6977,7 @@ expose = [
     "DetachedRequesterContext",
     "detached_requester_context",
     "current_budget_monitor",
+    "current_requester_id",
     "get_detached_requester_context",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
@@ -9519,6 +9520,7 @@ depends_on = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
+    "mindroom.tool_system.runtime_context",
     "mindroom.usage.storage",
 ]
 visibility = [

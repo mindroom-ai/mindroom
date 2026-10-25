@@ -28,7 +28,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
-from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
@@ -323,15 +323,13 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
         metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider="Anthropic")
     if not (metrics.tokens.total_tokens or metrics.tokens.cache_read_tokens or metrics.tokens.cache_write_tokens):
         return
-    # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
-    requester_context = get_tool_runtime_context() or get_detached_requester_context()
     invocation_id = uuid4().hex
     await record_helper_usage(
         RunRecord(run_id=invocation_id, metrics=metrics),
         owner=owner,
         invocation_id=invocation_id,
         kind="claude_agent",
-        requester_id=requester_context.requester_id if requester_context is not None else None,
+        requester_id=current_requester_id(),
     )
 
 
