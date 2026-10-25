@@ -718,7 +718,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
         is_error=False,
     )
     # The fold took the earlier shell call out of the run's record and stored it on its summary row.
-    store_fold(store, "session", HistoryScope(kind="agent", scope_id="helper"), "run", tools=[folded.to_dict()])
+    store_fold(store, "session", HistoryScope(kind="agent", scope_id="helper"), "run", tool_call_ids=["folded-bash"])
     arguments = {"command": "touch never"}
     requirement = _outer_bash_approval(arguments)
     persisted, session = _saved(

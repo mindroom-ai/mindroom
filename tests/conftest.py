@@ -154,7 +154,8 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.store import ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -3527,24 +3528,54 @@ def squad_probe() -> Iterator[type["ProbeToolkit"]]:
         yield toolkit
 
 
-def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":
-    """Create the session's row from its fields, then save every run it holds, in order, and return the session.
+@pytest.fixture
+def store(tmp_path: Path) -> "ConversationStore":
+    """Open the conversation database ``code`` under ``tmp_path`` as production opens one, with every table."""
+    return create_state_storage("code", tmp_path)
 
-    Production code writes runs one at a time as they finish; tests seed whole histories with this instead. The
-    runs are saved as conversation writes, so the usage ledger and session totals stay empty; ``persist_session``
-    seeds those too. A row that already exists keeps its fields; change them through the store's field writers.
-    The session's runs are handed over as copies, since a save refuses a run object the session holds.
+
+def seed_session_row(storage: "ConversationStore", session: "ConversationSession") -> None:
+    """Create the session's row from its fields unless one exists, as the store's first write of a session does."""
+    with storage.transaction(write=True) as connection:
+        created = ensure_session_row(connection, storage.names, session)
+    if created is not None:
+        session.stored_session_state = created
+
+
+def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":
+    """Create the session's row from its fields, then save every run it holds with ``save_run``, and return the session.
+
+    Production code saves runs one at a time as they finish; tests seed whole histories with this instead. The runs
+    are saved as conversation writes, so the usage ledger and session totals stay empty; ``persist_session`` seeds
+    those too. A row that already exists keeps its fields; change them through the store's field writers.
     """
-    storage.ensure_session_row(session)
-    storage.save_runs(session, [replace(run) for run in session.runs])
+    seed_session_row(storage, session)
+    for run in _in_save_order(session.runs):
+        storage.save_run(session, run, record_usage=False)
     return session
 
 
 def persist_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":
     """Seed the session as ``seed_session`` does, but save each run as its turn's terminal record, usage included."""
-    storage.ensure_session_row(session)
-    persist_runs(storage, session, *session.runs)
+    seed_session_row(storage, session)
+    persist_runs(storage, session, *_in_save_order(session.runs))
     return session
+
+
+def _in_save_order(runs: "Sequence[AnyRunRecord]") -> "list[AnyRunRecord]":
+    """Return ``runs`` with each team run's members moved right before it, the order a team turn saves them in.
+
+    Members finish before their team run, and a member saved after its finished team run is final, so it writes
+    nothing. A member whose team run is not among ``runs`` keeps its place.
+    """
+    team_run_ids = {run.run_id for run in runs if run.parent_run_id is None}
+    ordered: list[AnyRunRecord] = []
+    for run in runs:
+        if run.parent_run_id is None:
+            ordered += [*(member for member in runs if member.parent_run_id == run.run_id), run]
+        elif run.parent_run_id not in team_run_ids:
+            ordered.append(run)
+    return ordered
 
 
 def persist_runs(storage: "ConversationStore", session: "ConversationSession", *runs: "AnyRunRecord") -> None:

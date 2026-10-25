@@ -28,7 +28,6 @@ from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
     _with_scope_state,
     append_compaction_chunk,
-    new_scope_session,
     read_chunk_basis,
 )
 from mindroom.history.types import (
@@ -64,6 +63,7 @@ from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import quote_identifier
 from tests.authorization_helpers import (
@@ -75,6 +75,7 @@ from tests.conftest import (
     make_relation_lookup,
     persist_session,
     seed_session,
+    seed_session_row,
 )
 from tests.fakes.summary_model import summary_model
 
@@ -384,18 +385,17 @@ def _forced_compaction_context(
 
 
 def folded_run_ids(storage: ConversationStore, session_id: str = "session-1") -> list[str]:
-    """Return one session's top-level runs behind their scope's latest summary row, in log order."""
-    runs = quote_identifier(storage.names.runs)
-    summaries = quote_identifier(storage.names.summaries)
-    scope = "CASE WHEN run.run_type = 'team' THEN 'team:' || run.team_id ELSE 'agent:' || run.agent_id END"
+    """Return one session's visible top-level runs behind their scope's latest summary row, in log order."""
+    runs = quote_identifier(storage.names.log_runs)
+    summaries = quote_identifier(storage.names.log_summaries)
     with closing(sqlite3.connect(storage.path)) as connection:
         return [
             row[0]
             for row in connection.execute(
                 f"SELECT run.run_id FROM {runs} AS run WHERE run.session_id = ? AND run.parent_run_id IS NULL "  # noqa: S608
-                "AND run.status NOT IN ('PAUSED', 'CANCELLED', 'ERROR') AND run.run_index <= ("
-                f"SELECT row.after_run_index FROM {summaries} AS row WHERE row.session_id = run.session_id "
-                f"AND row.scope_key = {scope} ORDER BY row.id DESC LIMIT 1) ORDER BY run.run_index",
+                f"AND run.status NOT IN ({NON_VISIBLE_RUN_STATUS_SQL}) AND run.seq <= ("
+                f"SELECT row.through FROM {summaries} AS row WHERE row.session_id = run.session_id "
+                "AND row.scope_key = run.scope_key ORDER BY row.id DESC LIMIT 1) ORDER BY run.seq",
                 (session_id,),
             )
         ]
@@ -403,12 +403,12 @@ def folded_run_ids(storage: ConversationStore, session_id: str = "session-1") ->
 
 def stored_run_ids(storage: ConversationStore, session_id: str = "session-1") -> list[str]:
     """Return every run row of one session, folded or not, in log order."""
-    runs = quote_identifier(storage.names.runs)
+    runs = quote_identifier(storage.names.log_runs)
     with closing(sqlite3.connect(storage.path)) as connection:
         return [
             row[0]
             for row in connection.execute(
-                f"SELECT run_id FROM {runs} WHERE session_id = ? ORDER BY run_index",  # noqa: S608
+                f"SELECT run_id FROM {runs} WHERE session_id = ? ORDER BY seq",  # noqa: S608
                 (session_id,),
             )
         ]
@@ -416,10 +416,9 @@ def stored_run_ids(storage: ConversationStore, session_id: str = "session-1") ->
 
 @dataclass(frozen=True)
 class StoredSummaryRow:
-    """One summary row as stored."""
+    """One summary row as stored; a barrier has no text."""
 
     summary: str | None
-    summary_model: str | None
     legacy: bool
 
 
@@ -429,13 +428,12 @@ def summary_rows_of(
     session_id: str = "session-1",
 ) -> list[StoredSummaryRow]:
     """Return one scope's summary rows, oldest first."""
-    table = quote_identifier(storage.names.summaries)
+    table = quote_identifier(storage.names.log_summaries)
     with closing(sqlite3.connect(storage.path)) as connection:
         return [
-            StoredSummaryRow(summary=row[0], summary_model=row[1], legacy=bool(row[2]))
+            StoredSummaryRow(summary=row[0], legacy=bool(row[1]))
             for row in connection.execute(
-                f"SELECT summary, summary_model, legacy FROM {table} "  # noqa: S608
-                "WHERE session_id = ? AND scope_key = ? ORDER BY id",
+                f"SELECT summary, legacy FROM {table} WHERE session_id = ? AND scope_key = ? ORDER BY id",  # noqa: S608
                 (session_id, scope_key),
             )
         ]
@@ -446,50 +444,65 @@ def log_of(storage: ConversationStore, scope_key: str, session_id: str = "sessio
 
     A barrier row reads ``row:None``.
     """
-    runs = quote_identifier(storage.names.runs)
-    summaries = quote_identifier(storage.names.summaries)
-    scope = "CASE WHEN run_type = 'team' THEN 'team:' || team_id ELSE 'agent:' || agent_id END"
+    runs = quote_identifier(storage.names.log_runs)
+    summaries = quote_identifier(storage.names.log_summaries)
     with closing(sqlite3.connect(storage.path)) as connection:
         entries = [
-            ((run_index, 0), f"run:{run_id}")
-            for run_id, run_index in connection.execute(
-                f"SELECT run_id, run_index FROM {runs} WHERE session_id = ? AND parent_run_id IS NULL "  # noqa: S608
-                f"AND {scope} = ?",
+            ((seq, 0), f"run:{run_id}")
+            for run_id, seq in connection.execute(
+                f"SELECT run_id, seq FROM {runs} WHERE session_id = ? AND parent_run_id IS NULL AND scope_key = ?",  # noqa: S608
                 (session_id, scope_key),
             )
         ]
         entries += [
-            ((after_run_index, row_id), f"row:{summary}")
-            for row_id, after_run_index, summary in connection.execute(
-                f"SELECT id, after_run_index, summary FROM {summaries} WHERE session_id = ? AND scope_key = ?",  # noqa: S608
+            ((through, row_id), f"row:{summary}")
+            for row_id, through, summary in connection.execute(
+                f"SELECT id, through, summary FROM {summaries} WHERE session_id = ? AND scope_key = ?",  # noqa: S608
                 (session_id, scope_key),
             )
         ]
     return [label for _key, label in sorted(entries)]
 
 
-def segments_of(
-    storage: ConversationStore,
-    scope_key: str,
-    session_id: str = "session-1",
-) -> list[tuple[str, dict[str, Any]]]:
-    """Return the run and decoded segment of each of one scope's mid-turn fold rows, oldest first."""
-    summaries = quote_identifier(storage.names.summaries)
+@dataclass(frozen=True)
+class StoredFold:
+    """One mid-turn fold's summary row: its running run and what it flagged in that run's rows, as stored."""
+
+    run_id: str
+    messages: list[dict[str, Any]]
+    member_run_ids: list[str]
+
+
+def folds_of(storage: ConversationStore, scope_key: str, session_id: str = "session-1") -> list[StoredFold]:
+    """Return each of one scope's mid-turn fold rows, oldest first, with the message and member rows it flagged."""
+    names = storage.names
+    runs, messages = quote_identifier(names.log_runs), quote_identifier(names.log_messages)
+    summaries = quote_identifier(names.log_summaries)
     with closing(sqlite3.connect(storage.path)) as connection:
         return [
-            (run_id, json.loads(segment))
-            for run_id, segment in connection.execute(
-                f"SELECT segment_run_id, segment FROM {summaries} WHERE session_id = ? AND scope_key = ? "  # noqa: S608
-                "AND segment_run_id IS NOT NULL ORDER BY id",
-                (session_id, scope_key),
+            StoredFold(
+                run_id=run_id,
+                messages=[
+                    json.loads(data)
+                    for (data,) in connection.execute(
+                        f"SELECT data FROM {messages} WHERE folded_by = ? ORDER BY ord",  # noqa: S608
+                        (row_id,),
+                    )
+                ],
+                member_run_ids=[
+                    member_id
+                    for (member_id,) in connection.execute(
+                        f"SELECT run_id FROM {runs} WHERE folded_by = ? ORDER BY seq",  # noqa: S608
+                        (row_id,),
+                    )
+                ],
             )
+            for row_id, run_id in connection.execute(
+                f"SELECT id, fold_run_id FROM {summaries} WHERE session_id = ? AND scope_key = ? "  # noqa: S608
+                "AND fold_run_id IS NOT NULL ORDER BY id",
+                (session_id, scope_key),
+            ).fetchall()
         ]
-
-
-def latest_summary_model(storage: ConversationStore, scope: HistoryScope, session_id: str = "session-1") -> str | None:
-    """Return the model recorded for the scope's latest summary row."""
-    rows = summary_rows_of(storage, scope.key, session_id)
-    return rows[-1].summary_model if rows else None
 
 
 def compact_runs(
@@ -498,8 +511,6 @@ def compact_runs(
     scope: HistoryScope,
     run_ids: list[str],
     summary: str,
-    *,
-    summary_model: str = "summary-model",
 ) -> None:
     """Append one compaction chunk folding ``run_ids`` behind ``summary``, as compaction commits a chunk."""
     assert append_compaction_chunk(
@@ -515,7 +526,6 @@ def compact_runs(
         ),
         included_run_ids=run_ids,
         summary=summary,
-        summary_model=summary_model,
     )
 
 
@@ -526,15 +536,16 @@ def _stored_summary(storage: ConversationStore, session: ConversationSession, sc
 
 def seed_summary(storage: ConversationStore, session: ConversationSession, scope: HistoryScope, summary: str) -> None:
     """Give ``session`` a summary row that sorts before its runs, as an earlier compaction would have left it."""
+    seed_session_row(storage, session)
     latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
     assert summary_rows.append_summary(
         storage,
-        session=session,
+        session_id=session.session_id,
         scope_key=scope.key,
         based_on=latest.id if latest is not None else None,
         covered=[],
         summary=summary,
-        summary_model="summary-model",
+        session=session,
     )
 
 
@@ -544,30 +555,29 @@ def store_fold(
     scope: HistoryScope,
     run_id: str,
     *,
-    messages: list[dict[str, object]] | None = None,
-    tools: list[dict[str, object]] | None = None,
-    member_responses: list[dict[str, object]] | None = None,
-    metadata: dict[str, object] | None = None,
-    summary: str = "FOLD",
+    tool_call_ids: Sequence[str],
 ) -> int:
-    """Append a mid-turn fold's summary row holding ``run_id``'s segment, covering no stored run."""
-    session = new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
-    storage.ensure_session_row(session)
+    """Append a mid-turn fold's summary row that took calls ``tool_call_ids`` out of run ``run_id``, covering no run.
+
+    Each call becomes a folded tool-result message of the run, which gets a cancelled row when it has none, as a
+    fold stores one.
+    """
+    if scope.kind == "team":
+        run: AnyRunRecord = TeamRunRecord(run_id=run_id, session_id=session_id, team_id=scope.scope_id)
+    else:
+        run = RunRecord(run_id=run_id, session_id=session_id, agent_id=scope.scope_id)
     latest = summary_rows.latest_row(storage, session_id=session_id, scope_key=scope.key)
     row_id = summary_rows.append_summary(
         storage,
-        session=session,
+        session_id=session_id,
         scope_key=scope.key,
         based_on=latest.id if latest is not None else None,
         covered=[],
-        summary=summary,
-        summary_model="summary-model",
-        segment=summary_rows.Segment(
-            run_id=run_id,
-            metadata=metadata or {},
-            messages=messages or [],
-            tools=tools or [],
-            member_responses=member_responses or [],
+        summary="FOLD",
+        fold=summary_rows.Fold(
+            run=run,
+            messages=tuple(Message(role="tool", tool_call_id=call_id) for call_id in tool_call_ids),
+            member_run_ids=frozenset(),
         ),
     )
     assert row_id is not None

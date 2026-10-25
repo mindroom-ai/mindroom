@@ -800,7 +800,7 @@ def test_an_interrupted_record_without_a_turn_recorder_leaves_out_what_its_folds
         "session-1",
         HistoryScope(kind="agent", scope_id="test_agent"),
         "stopped-run",
-        tools=[{"tool_call_id": "folded-call"}],
+        tool_call_ids=["folded-call"],
     )
     snapshot = build_interrupted_replay_snapshot(
         user_message="Please continue",
