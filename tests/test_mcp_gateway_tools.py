@@ -49,7 +49,6 @@ from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_tool_hooks import _tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.api.connection_agents import AgentToolContext
@@ -1326,37 +1325,58 @@ async def test_a_tool_image_reaches_the_gateway_client_as_a_reference_beside_the
     }
 
 
-def _sync_stream() -> Iterator[str]:
-    """Stream a result in parts."""
-    yield "first "
-    yield "second"
-
-
-async def _async_stream() -> AsyncIterator[str]:
-    """Stream a result in parts."""
-    yield "first "
-    yield "second"
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [_sync_stream, _async_stream])
-async def test_a_streaming_tool_runs_through_the_gateway(
+@pytest.mark.parametrize("kind", ["plain", "async", "sync stream", "async stream"])
+async def test_a_tool_runs_through_the_gateway_only_after_the_selection_check(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
-    stream: Callable[[], object],
+    kind: str,
 ) -> None:
-    """A tool that streams its result runs to the end of its stream under the selection check at its entrypoint."""
-    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[stream]))
+    """Every kind of tool runs to the end of its result, with the selection checked again after the hooks load."""
+    events: list[str] = []
+
+    def no_plugins(*_args: object, **_kwargs: object) -> list[object]:
+        events.append("hooks loaded")
+        return []
+
+    monkeypatch.setattr("mindroom.mcp_gateway.tools.load_plugins", no_plugins)
+
+    def plain() -> str:
+        """Answer at once."""
+        events.append("tool ran")
+        return "first second"
+
+    async def plain_async() -> str:
+        """Answer at once."""
+        events.append("tool ran")
+        return "first second"
+
+    def sync_stream() -> Iterator[str]:
+        """Stream a result in parts."""
+        events.append("tool ran")
+        yield "first "
+        yield "second"
+
+    async def async_stream() -> AsyncIterator[str]:
+        """Stream a result in parts."""
+        events.append("tool ran")
+        yield "first "
+        yield "second"
+
+    tool = {"plain": plain, "async": plain_async, "sync stream": sync_stream, "async stream": async_stream}[kind]
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[tool]))
 
     result = await gateway.invoke_tool(
         context,
         toolkit="calculator",
-        function=stream.__name__,
+        function=tool.__name__,
         arguments={},
-        require_current_config=lambda: None,
+        require_current_config=lambda: events.append("selection checked"),
     )
 
     assert result == {"result": "first second"}
+    # Selecting and routing check the selection before the hooks load; the entrypoint checks it again, just before the tool.
+    assert events[events.index("hooks loaded") :] == ["hooks loaded", "selection checked", "tool ran"]
 
 
 @pytest.mark.asyncio
