@@ -187,6 +187,10 @@ class ChatUITools(Toolkit):
         """Map only the functions this toolkit was built with; include_tools and exclude_tools remove the others."""
         return self.instructions_for({*self.functions, *self.async_functions})
 
+    @instructions.setter
+    def instructions(self, _value: str | None) -> None:
+        """Ignore Agno's constructor assignment; the map is derived from the enabled functions."""
+
     def instructions_for(self, function_names: Collection[str]) -> str:
         """Map only ``function_names``, the functions an agent is offered of this toolkit once its filters ran."""
         enabled = set(function_names)
@@ -200,10 +204,6 @@ class ChatUITools(Toolkit):
         if "show_canvas" in enabled and self._canvas_libraries:
             lines.append(_CANVAS_LIBRARIES_HINT)
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
-
-    @instructions.setter
-    def instructions(self, _value: str | None) -> None:
-        """Ignore Agno's constructor assignment; the map is derived from the enabled functions."""
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
