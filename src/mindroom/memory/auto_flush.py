@@ -30,6 +30,7 @@ from mindroom.history.session_runs import (
     unredacted_runs,
     updated_sessions,
 )
+from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.logging_config import get_logger
 from mindroom.memory._prompting import redact_memory_text
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
@@ -503,6 +504,14 @@ class MemoryAutoFlushWorker:
                 batch, lines = _next_batch(pending[skipped:], settings)
                 if lines:
                     await self._write_note(config, scope, session_id, batch[-1], lines, memories)
+        except ModelSafeguardRefusal:
+            # The model refuses the same turns every time, so they are given up at once instead of retried.
+            logger.warning(
+                "Memory auto-flush gave up on turns the model's safeguards refused",
+                agent=scope.agent_name,
+                session_id=session_id,
+            )
+            batch = _next_batch(pending[skipped:], settings)[0]
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 logger.warning(

@@ -593,9 +593,9 @@ async def test_expiry_rechecks_a_read_completed_during_source_lookup(tmp_path: P
         )
         waited = await runtime.wait("reread", owner=job_owner(), depth=0)
         await runtime.acknowledge_wait("reread", waited.claim)
-        cutoff = datetime.now(UTC) - timedelta(days=30)
-        backdate_job(runtime, "reread", cutoff - timedelta(seconds=1))
-        await runtime.expire_ended(before=cutoff, source_finished=source_finished)
+        now = datetime.now(UTC)
+        backdate_job(runtime, "reread", now - timedelta(days=30, seconds=1))
+        await runtime.expire_ended(now=now, source_finished=source_finished)
         assert (await lookup(runtime, "reread", owner=job_owner(), depth=0)).result == "saved"
     finally:
         await runtime.shutdown()
@@ -613,7 +613,7 @@ async def test_result_expiry_deletes_only_old_ended_jobs_with_finished_sources(t
     async def source_finished(job: runtime_module.BackgroundJob) -> bool:
         return job.job_id != "approval"
 
-    cutoff = datetime.now(UTC) - timedelta(days=30)
+    now = datetime.now(UTC)
     kept = ("approval", "recent", "claimed")
     expired = ("expire", "unread")
     claimed = None
@@ -634,9 +634,9 @@ async def test_result_expiry_deletes_only_old_ended_jobs_with_finished_sources(t
             else:
                 await runtime.release_wait(name, waited.claim)
             if name != "recent":
-                backdate_job(runtime, name, cutoff - timedelta(seconds=1))
+                backdate_job(runtime, name, now - timedelta(days=30, seconds=1))
         claimed = await runtime.wait("claimed", owner=job_owner(), depth=0)
-        await runtime.expire_ended(before=cutoff, source_finished=source_finished)
+        await runtime.expire_ended(now=now, source_finished=source_finished)
         for name in expired:
             assert name not in runtime._entries
             assert name not in await saved_jobs(tmp_path)
@@ -655,6 +655,59 @@ async def test_result_expiry_deletes_only_old_ended_jobs_with_finished_sources(t
         await restored.recover()
         assert set(restored._entries) == set(kept)
         assert [await saved_payload(tmp_path, name) for name in kept] == [payload] * len(kept)
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_result_its_own_call_returned_inline_expires_after_a_day(tmp_path: Path) -> None:
+    """A result the call that started its job returned inline is kept a day; one read later or never read, 30 days.
+
+    Jobs saved before a restart expire by the same rule.
+    """
+    payload = encode_result_payload(ToolResultPayload("saved"))
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved", result_payload=payload)
+
+    async def source_finished(_job: runtime_module.BackgroundJob) -> bool:
+        return True
+
+    runtime = await tool_job_runtime(tmp_path)
+    try:
+        for name in ("inline", "recent inline", "read", "unread"):
+            await start_job(
+                runtime,
+                name,
+                tool_name="tool",
+                depth=0,
+                adapter={},
+                owner=job_owner(),
+                operation=completed,
+            )
+            waited = await runtime.wait(name, owner=job_owner(), depth=0)
+            if name == "unread":
+                await runtime.release_wait(name, waited.claim)
+            else:
+                await runtime.acknowledge_wait(name, waited.claim, returned_inline=name != "read")
+    finally:
+        await runtime.shutdown()
+    restored = await tool_job_runtime(tmp_path)
+    kept = {"recent inline", "read", "unread"}
+    try:
+        await restored.recover()
+        now = datetime.now(UTC)
+        for name in ("inline", "read", "unread"):
+            backdate_job(restored, name, now - timedelta(days=2))
+        backdate_job(restored, "recent inline", now - timedelta(hours=23))
+        assert [job.job_id for job in await restored.expire_ended(now=now, source_finished=source_finished)] == [
+            "inline",
+        ]
+        assert set(restored._entries) == kept
+        assert set(await saved_jobs(tmp_path)) == kept
+        assert await saved_payload(tmp_path, "inline") is None
+        for name in kept:
+            assert await restored.read_payload(await lookup(restored, name, owner=job_owner(), depth=0)) == payload
     finally:
         await restored.shutdown()
 
@@ -718,7 +771,7 @@ async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_pat
         async def source_finished(_job: runtime_module.BackgroundJob) -> bool:
             return True
 
-        await runtime.expire_ended(before=datetime.now(UTC) - timedelta(days=30), source_finished=source_finished)
+        await runtime.expire_ended(now=datetime.now(UTC), source_finished=source_finished)
         assert await lookups(runtime) == ["b", "c", "unsourced"]
         assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation, {}).values()] == [
             "b",
