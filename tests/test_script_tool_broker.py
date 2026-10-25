@@ -114,6 +114,14 @@ async def _cancel_cleanup_owner(
     return replacement[0]
 
 
+async def _assert_cleanup_forgotten(broker: ScriptToolBroker) -> None:
+    """Assert the broker keeps no cleanup owner once every owner has finished."""
+    # A finished owner leaves the set from its done callback one loop pass later, and a drain that finds every
+    # owner already done returns without yielding.
+    await asyncio.sleep(0)
+    assert broker._cleanup_tasks == set()
+
+
 def _hook_registry(events: list[str]) -> HookRegistry:
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(_context: ToolBeforeCallContext) -> None:
@@ -1109,7 +1117,7 @@ async def test_cancelled_sync_connect_closes_only_after_connect_returns(
     assert close_after_connect is True
     assert cleanup_drained is True
     assert broker.get_call(request.run_id, request.call_id).state is ScriptCallState.INDETERMINATE
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1322,7 +1330,7 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
     assert cleanup_drained is True
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1393,7 +1401,7 @@ async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellatio
     assert second_drain is False
     assert close_finished_before_release is False
     assert close_calls == 1
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1451,7 +1459,7 @@ async def test_cancelled_async_tool_close_keeps_one_owner_through_repeated_cance
     assert cleanup_retained is True
     assert drained_before_release is False
     assert close_finished_before_release is False
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1535,7 +1543,7 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
     assert close_started_before_body_returned is False
     assert cleanup_owned_after_timeout is True
     assert cleanup_drained is True
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
