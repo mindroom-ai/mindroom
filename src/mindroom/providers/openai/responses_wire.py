@@ -140,8 +140,9 @@ def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> 
     text replays the history instead.
     """
     # LEGACY_COMPAT: Stored Responses replies without the digest of their system text.
-    # Legacy format: an assistant message whose ``provider_data`` records a ``response_id`` but no
-    # ``mindroom_system_sha256``.
+    # Legacy format: a stored Responses reply, an assistant message whose ``provider_data`` records a ``response_id``
+    # but no ``mindroom_system_sha256`` and whose ``mindroom_response_stored`` is not false. An unstored reply records
+    # no digest by design and is not legacy.
     # Last legacy release: v2026.10.499; replacement: unreleased, which records the digest on every stored response.
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once, with the current system text, and continues the response it stores from then on.
