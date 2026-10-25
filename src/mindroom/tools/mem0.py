@@ -95,7 +95,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["mem0ai"],  # Already in pyproject.toml
-    docs_url="https://docs.agno.com/tools/toolkits/database/mem0",
+    docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#mem0",
     function_names=("add_memory", "delete_all_memories", "get_all_memories", "search_memory"),
 )
 def mem0_tools() -> type[Mem0Tools]:

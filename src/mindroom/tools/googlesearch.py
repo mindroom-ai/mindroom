@@ -87,7 +87,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["ddgs"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/websearch",
+    docs_url="https://docs.mindroom.chat/tools/web-search/#googlesearch",
     function_names=("web_search", "search_news"),
 )
 def googlesearch_tools() -> type[WebSearchTools]:

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     icon="MessageSquare",
     icon_color="text-green-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/matrix-message/",
     function_names=("matrix_message",),
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
 )

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],  # Only standard dependency needed
-    docs_url="https://docs.agno.com/tools/toolkits/others/financial_datasets",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#financial_datasets_api",
     function_names=(
         "get_balance_sheets",
         "get_cash_flow_statements",

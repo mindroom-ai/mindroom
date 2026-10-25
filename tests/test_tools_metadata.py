@@ -193,25 +193,6 @@ def test_export_tools_metadata_json() -> None:
 
 
 _DOCS_ROOT = Path(__file__).parent.parent / "docs"
-_MINDROOM_DOCS_HOST = "docs.mindroom.chat"
-# Tools whose dashboard docs button opened Agno's toolkit page, which describes another setup than MindRoom's.
-_TOOLS_DOCUMENTED_BY_MINDROOM = frozenset(
-    {
-        "calculator",
-        "e2b",
-        "file",
-        "github",
-        "gmail",
-        "google_calendar",
-        "google_drive",
-        "google_sheets",
-        "python",
-        "shell",
-        "sleep",
-        "spotify",
-        "website",
-    },
-)
 
 
 def _docs_page(url_path: str) -> Path:
@@ -240,17 +221,14 @@ def _heading_anchors(page: Path) -> set[str]:
     return anchors
 
 
-def test_every_mindroom_docs_link_opens_an_existing_page_at_an_existing_heading() -> None:
-    """A tool's dashboard docs button that opens MindRoom's docs lands on a page and heading the docs have."""
+def test_every_builtin_tool_docs_link_opens_an_existing_heading_of_mindroom_docs() -> None:
+    """A built-in tool's dashboard docs button opens MindRoom's docs, on a page and heading the docs have."""
     _restore_builtin_tool_metadata_state()
-    links = {
-        tool["name"]: urlsplit(tool["docs_url"])
-        for tool in export_tools_metadata()
-        if tool.get("docs_url") and urlsplit(tool["docs_url"]).netloc == _MINDROOM_DOCS_HOST
-    }
+    links = {tool["name"]: urlsplit(tool["docs_url"]) for tool in export_tools_metadata() if tool.get("docs_url")}
 
-    assert set(links) >= _TOOLS_DOCUMENTED_BY_MINDROOM
+    assert links
     for name, link in sorted(links.items()):
+        assert link.netloc == "docs.mindroom.chat", f"{name} links to {link.geturl()}, outside MindRoom's docs"
         page = _docs_page(link.path)
         assert page.is_file(), f"{name} links to {link.geturl()}, which has no page"
         if link.fragment:

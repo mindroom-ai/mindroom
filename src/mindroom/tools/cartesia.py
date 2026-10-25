@@ -75,7 +75,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["cartesia"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/cartesia",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#cartesia",
     function_names=("list_voices", "localize_voice", "text_to_speech"),
 )
 def cartesia_tools() -> type[CartesiaTools]:

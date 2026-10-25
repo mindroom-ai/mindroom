@@ -99,7 +99,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],  # Already in pyproject.toml
-    docs_url="https://docs.agno.com/tools/toolkits/others/models_labs",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#modelslabs",
     function_names=("generate_media",),
 )
 def modelslabs_tools() -> type[ModelsLabTools]:

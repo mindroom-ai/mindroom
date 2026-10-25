@@ -94,7 +94,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests", "pytz"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/calcom",
+    docs_url="https://docs.mindroom.chat/tools/calendar-and-scheduling/#cal_com",
     function_names=(
         "cancel_booking",
         "create_booking",

@@ -49,7 +49,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["oxylabs"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/oxylabs",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#oxylabs",
     function_names=("get_amazon_product", "scrape_website", "search_amazon_products", "search_google"),
 )
 def oxylabs_tools() -> type[OxylabsTools]:

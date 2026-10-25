@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["moviepy"],  # From agno requirements
-    docs_url="https://docs.agno.com/tools/toolkits/others/moviepy",  # URL from llms.txt but WITHOUT .md extension
+    docs_url="https://docs.mindroom.chat/tools/media-and-content/#moviepy_video_tools",  # URL from llms.txt but WITHOUT .md extension
     function_names=(
         "create_caption_clips",
         "create_srt",

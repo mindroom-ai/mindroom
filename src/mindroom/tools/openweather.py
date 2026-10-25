@@ -80,7 +80,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],  # From agno requirements
-    docs_url="https://docs.agno.com/tools/toolkits/others/openweather",  # URL without .md extension
+    docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#openweather",  # URL without .md extension
     function_names=("geocode_location", "get_air_pollution", "get_current_weather", "get_forecast"),
 )
 def openweather_tools() -> type[OpenWeatherTools]:

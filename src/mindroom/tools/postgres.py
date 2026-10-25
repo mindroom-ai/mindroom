@@ -74,7 +74,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["psycopg"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/postgres",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#postgres",
     function_names=(
         "describe_table",
         "export_table_to_path",

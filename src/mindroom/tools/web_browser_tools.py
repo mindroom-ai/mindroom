@@ -38,7 +38,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=[],  # Uses standard library webbrowser module
-    docs_url="https://docs.agno.com/tools/toolkits/others/web-browser",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#web_browser_tools",
     function_names=("open_page",),
 )
 def web_browser_tools() -> type[MindRoomWebBrowserTools]:

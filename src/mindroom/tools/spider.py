@@ -66,7 +66,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["spider-client"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/spider",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#spider",
     helper_text="Get your API key from the [Spider dashboard](https://spider.cloud)",
     function_names=("crawl", "scrape", "search_web"),
 )

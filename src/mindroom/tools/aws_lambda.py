@@ -52,7 +52,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["boto3"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/aws_lambda",
+    docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#aws_lambda",
     function_names=("invoke_function", "list_functions"),
 )
 def aws_lambda_tools() -> type[AWSLambdaTools]:

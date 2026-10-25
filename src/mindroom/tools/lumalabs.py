@@ -87,7 +87,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["lumaai"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/lumalabs",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#lumalabs",
     function_names=("generate_video", "image_to_video"),
 )
 def lumalabs_tools() -> type[LumaLabTools]:

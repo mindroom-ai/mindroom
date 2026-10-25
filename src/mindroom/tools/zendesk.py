@@ -66,7 +66,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/zendesk",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#zendesk",
     function_names=("search_zendesk",),
 )
 def zendesk_tools() -> type[ZendeskTools]:

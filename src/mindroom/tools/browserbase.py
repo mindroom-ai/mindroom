@@ -95,7 +95,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["browserbase", "playwright"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/browserbase",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#browserbase",
     function_names=(
         "aclose_session",
         "aget_page_content",

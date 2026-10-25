@@ -380,7 +380,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
             description="Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
         ),
     ],
-    docs_url="https://www.home-assistant.io/integrations/",
+    docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#homeassistant",
     function_names=(
         "activate_scene",
         "call_service",

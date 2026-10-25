@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     config_fields=[],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["agno", "pydantic", "pyyaml"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#config_manager",
     function_names=("get_info", "manage_config", "manage_agent", "manage_team"),
 )
 def config_manager_tools() -> type[ConfigManagerTools]:

@@ -175,7 +175,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["daytona"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/daytona",
+    docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#daytona",
     function_names=(
         "change_directory",
         "create_file",

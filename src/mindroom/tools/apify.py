@@ -42,7 +42,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["apify-client"],  # Required dependency for Apify integration
-    docs_url="https://docs.agno.com/tools/toolkits/others/apify",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#apify",
     function_names=("register_actor",),
 )
 def apify_tools() -> type[ApifyTools]:
