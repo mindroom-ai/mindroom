@@ -44,10 +44,8 @@ def formatted_input_with_provider_items(
         if anchor is None:
             continue
         data = message.provider_data or {}
-        # The formatter emits calls, or one text item followed by its single reasoning item.
+        # The formatter emits a turn's function calls, or its one message item.
         size = len(message.tool_calls) if message.tool_calls else 1
-        if not message.tool_calls and replay_reasoning and data.get("reasoning_output") is not None:
-            size += 1
         replacement = checkpoint_items(message, native_route) or _canonical_response_output(
             message,
             prepared_input[anchor : anchor + size],
@@ -90,7 +88,7 @@ def _reconstructed_response_input(
         # The formatter's span is the turn's function calls; their text goes ahead of them.
         span = [{"role": "assistant", "content": content}, *formatted_span] if content else list(formatted_span)
     else:
-        # The formatter's span is the turn's message item, then any recorded reasoning, which stays out.
+        # The formatter's span is the turn's message item.
         span = [{**formatted_span[0], "content": content if content is not None else ""}]
     return [{key: value for key, value in item.items() if key != "id"} for item in (*search_items, *span)]
 

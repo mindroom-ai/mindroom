@@ -144,7 +144,7 @@ def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> 
     # Legacy format: a stored Responses reply, an assistant message whose ``provider_data`` records a ``response_id``
     # but no ``mindroom_system_sha256`` and whose ``mindroom_response_stored`` is not false. An unstored reply records
     # no digest by design and is not legacy.
-    # Last legacy release: v2026.10.501; replacement: unreleased, which records the digest on every stored response.
+    # Last legacy release: v2026.10.508; replacement: unreleased, which records the digest on every stored response.
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once, with the current system text, and continues the response it stores from then on.
     # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_system_digest_replays_once
@@ -242,9 +242,6 @@ def _input_items(replay: ResponsesReplay) -> list[Any]:
                 items.extend(_function_call_items(message))
         elif message.role == "assistant":
             items.append({"role": "assistant", "content": message.content if message.content is not None else ""})
-            reasoning = (message.provider_data or {}).get("reasoning_output")
-            if replay.replay_reasoning and reasoning is not None:
-                items.append(copy.deepcopy(reasoning))
     return items
 
 
