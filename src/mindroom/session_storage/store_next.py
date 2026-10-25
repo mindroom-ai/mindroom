@@ -814,11 +814,7 @@ def _read_runs(
     for record in records:
         if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
             named = list(dict.fromkeys(item.member_run_id for item in record.requirements or () if item.member_run_id))
-            rows = [
-                row
-                for row in _run_rows(connection, names, "run.parent_run_id = ?", (record.run_id,))
-                if row.run_id in named
-            ]
+            rows = _run_rows(connection, names, "run.parent_run_id = ?", (record.run_id,))
             members = {member.run_id: cast("RunRecord", member) for member in _decoded(connection, names, rows)}
             record.member_responses = [members[member_id] for member_id in named if member_id in members]
     return records

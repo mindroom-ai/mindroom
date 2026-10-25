@@ -630,16 +630,18 @@ def test_a_metadata_patch_joins_nothing_behind_the_latest_barrier(store: Convers
 
 
 def test_a_metadata_patch_of_a_run_that_is_not_visible_joins_nothing(store: ConversationStore) -> None:
-    """Only a visible top-level run is covered; a paused run and a member are not, wherever they sit."""
+    """Only a visible top-level run is covered; a paused run and a member are not, even by their own scope's row."""
     team = _team()
     _save(store, _member("m1", "t2"), _team_run("t2", RunStatus.paused), _team_run("t3"), session=team)
     row_id = _summary(store, 3, scope_key="team:eng")
+    member_scope = _summary(store, 3, scope_key="agent:helper")
 
     store.patch_run_metadata("s1", "m1", {"matrix_response_event_id": "$member"})
     store.patch_run_metadata("s1", "t2", {"matrix_response_event_id": "$paused"})
     store.patch_run_metadata("s1", "t3", {"matrix_response_event_id": "$covered"})
 
     assert _summary_sets(store, row_id) == (["$covered"], ["$covered"])
+    assert _summary_sets(store, member_scope) == ([], [])
 
 
 def test_a_metadata_patch_replaces_the_sessions_copy_in_a_new_list(store: ConversationStore) -> None:
