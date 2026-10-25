@@ -53,15 +53,8 @@ if TYPE_CHECKING:
 BUSY_TIMEOUT_SECONDS = 30.0
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
-# A run row's columns, ``RunColumns``' fields in their order, and the ones every full save writes.
-_COLUMNS = ("run_id", "session_id", "parent_run_id", *(field.name for field in fields(RunColumns)))
-_WRITTEN = ("parent_run_id", *(field.name for field in fields(RunColumns)), "seq", "updated_at")
-_SELECTED = ", ".join(f"run.{column}" for column in _COLUMNS)
-_UPSERT = (
-    f"INSERT INTO {{runs}} (run_id, session_id, created_at, {', '.join(_WRITTEN)}) "  # noqa: S608
-    f"VALUES ({', '.join('?' * (len(_WRITTEN) + 3))}) "
-    f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(f'{column} = excluded.{column}' for column in _WRITTEN)}"
-)
+# The run-row columns a run's stored dict fills: ``RunColumns``' fields, in their order.
+_RECORD_COLUMNS = tuple(field.name for field in fields(RunColumns))
 
 # What a full save did: wrote the run, wrote nothing because a cut removed it, or wrote nothing because it is final.
 type SaveOutcome = Literal["written", "removed", "final"]
@@ -524,7 +517,7 @@ def _adopt_log(session: ConversationSession, loaded: _Load | None) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _Saved:
-    """One full save: its outcome and, for a written run, its row's timestamps, its move, and the run read back."""
+    """One full save: its outcome, the timestamps its usage snapshot takes, and for a written run its move and read-back."""
 
     run_id: str
     outcome: SaveOutcome
@@ -541,15 +534,6 @@ class _StoredRow(NamedTuple):
     status: str
     seq: int
     created_at: int
-
-
-class _RunRow(NamedTuple):
-    """One run row as read, its message rows aside."""
-
-    run_id: str
-    session_id: str
-    parent_run_id: str | None
-    columns: RunColumns
 
 
 def _mirror(session: ConversationSession, saved: _Saved) -> None:
@@ -729,14 +713,14 @@ def _write_run(
 ) -> _Saved:
     """Write one run from its stored dict by ``ConversationStore.save_run``'s rules; an interrupted one is not final."""
     run_id, parent_run_id, now = data["run_id"], data.get("parent_run_id"), int(time())
-    runs, ids = quote_identifier(names.log_runs), (session_id, run_id, parent_run_id)
+    ids = (session_id, run_id, parent_run_id)
     removed = f"SELECT 1 FROM {quote_identifier(names.log_removed)} WHERE session_id = ? AND run_id IN (?, ?)"  # noqa: S608
     if connection.execute(removed, ids).fetchone():
         return _Saved(run_id, "removed", data.get("created_at") or now, now)
     rows = {
         row[0]: _StoredRow(*row[1:])
         for row in connection.execute(
-            f"SELECT run_id, parent_run_id, status, seq, created_at FROM {runs} "  # noqa: S608
+            f"SELECT run_id, parent_run_id, status, seq, created_at FROM {quote_identifier(names.log_runs)} "  # noqa: S608
             "WHERE session_id = ? AND run_id IN (?, ?)",
             ids,
         )
@@ -749,19 +733,42 @@ def _write_run(
     judged = team_run if parent_run_id is not None else stored
     if not interrupted and judged is not None and judged.status not in _NON_VISIBLE:
         return _Saved(run_id, "final")
-    columns = run_columns(data, kind)
     if stored is None:
         moved, created_at, seq = True, data.get("created_at") or now, next_seq(connection, names)
     else:
         # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
-        moved = parent_run_id is None and stored.status in _NON_VISIBLE and columns.status not in _NON_VISIBLE
+        moved = parent_run_id is None and stored.status in _NON_VISIBLE and data["status"] not in _NON_VISIBLE
         created_at, seq = stored.created_at, next_seq(connection, names) if moved else stored.seq
-    values = (run_id, session_id, created_at, parent_run_id, *astuple(columns), seq, now)
-    connection.execute(_UPSERT.format(runs=runs), values)
-    _set_visible_messages(connection, names, run_id, data["messages"], columns.status)
+    _upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
+    _set_visible_messages(connection, names, run_id, data["messages"], data["status"])
     _adopt_requester(connection, names, session_id, data.get("user_id"))
     [written] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
     return _Saved(run_id, "written", created_at, now, moved, written)
+
+
+def _upsert_run(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    data: Mapping[str, Any],
+    kind: SessionKind,
+    *,
+    seq: int,
+    created_at: int,
+    updated_at: int,
+) -> None:
+    """Insert the row of the run whose stored dict is ``data``, or update every column but its ids and ``created_at``.
+
+    An update rather than a replace, which would cascade the run's message rows away.
+    """
+    written = ("parent_run_id", *_RECORD_COLUMNS, "seq", "updated_at")
+    run_id, parent_run_id, columns = data["run_id"], data.get("parent_run_id"), run_columns(data, kind)
+    connection.execute(
+        f"INSERT INTO {quote_identifier(names.log_runs)} (run_id, session_id, created_at, {', '.join(written)}) "  # noqa: S608
+        f"VALUES ({', '.join('?' * (len(written) + 3))}) "
+        f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(f'{column} = excluded.{column}' for column in written)}",
+        (run_id, session_id, created_at, parent_run_id, *astuple(columns), seq, updated_at),
+    )
 
 
 def _set_visible_messages(
@@ -810,41 +817,41 @@ def _read_runs(
     A paused team run's ``member_responses``, which its resume reads, are the member runs its requirements name, in
     first-mention order, each decoded apart from the member's own record so the two share nothing.
     """
-    records = _decoded(connection, names, _run_rows(connection, names, f"{condition} ORDER BY run.seq", parameters))
+    records = _decoded_runs(connection, names, f"{condition} ORDER BY run.seq", parameters)
     for record in records:
         if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
             named = list(dict.fromkeys(item.member_run_id for item in record.requirements or () if item.member_run_id))
-            rows = _run_rows(connection, names, "run.parent_run_id = ?", (record.run_id,))
-            members = {member.run_id: cast("RunRecord", member) for member in _decoded(connection, names, rows)}
-            record.member_responses = [members[member_id] for member_id in named if member_id in members]
+            members = _decoded_runs(connection, names, "run.parent_run_id = ?", (record.run_id,))
+            by_id = {member.run_id: cast("RunRecord", member) for member in members}
+            record.member_responses = [by_id[member_id] for member_id in named if member_id in by_id]
     return records
 
 
-def _run_rows(
+def _decoded_runs(
     connection: sqlite3.Connection,
     names: TableNames,
     condition: str,
     parameters: tuple[object, ...],
-) -> list[_RunRow]:
-    selected = f"SELECT {_SELECTED} FROM {quote_identifier(names.log_runs)} AS run WHERE {condition}"  # noqa: S608
-    return [
-        _RunRow(run_id, session_id, parent_run_id, RunColumns(cast("SessionKind", kind), *columns))
-        for run_id, session_id, parent_run_id, kind, *columns in connection.execute(selected, parameters)
-    ]
+) -> list[AnyRunRecord]:
+    """Decode the runs whose rows meet ``condition`` with their unfolded message rows, in order.
 
-
-def _decoded(connection: sqlite3.Connection, names: TableNames, rows: Sequence[_RunRow]) -> list[AnyRunRecord]:
-    """Decode ``rows`` with their unfolded message rows, in order; each call parses its own copy of the JSON."""
+    Each call parses its own copy of the JSON.
+    """
+    rows = connection.execute(
+        f"SELECT run_id, session_id, parent_run_id, {', '.join(_RECORD_COLUMNS)} "  # noqa: S608
+        f"FROM {quote_identifier(names.log_runs)} AS run WHERE {condition}",
+        parameters,
+    ).fetchall()
     messages: dict[str, list[dict[str, Any]]] = {}
     for run_id, data in connection.execute(
         f"SELECT run_id, data FROM {quote_identifier(names.log_messages)} WHERE folded_by IS NULL "  # noqa: S608
         "AND run_id IN (SELECT value FROM json_each(?)) ORDER BY run_id, ord",
-        (json.dumps([row.run_id for row in rows]),),
+        (json.dumps([run_id for run_id, *_ in rows]),),
     ):
         messages.setdefault(run_id, []).append(json.loads(data))
     return [
-        run_record(row.run_id, row.session_id, row.parent_run_id, row.columns, messages.get(row.run_id, []))
-        for row in rows
+        run_record(run_id, session_id, parent_run_id, RunColumns(*columns), messages.get(run_id, []))
+        for run_id, session_id, parent_run_id, *columns in rows
     ]
 
 
@@ -941,8 +948,8 @@ def store_fold(connection: sqlite3.Connection, names: TableNames, fold: FoldWrit
     move = f"UPDATE {runs} SET seq = ? WHERE session_id = ? AND run_id = ?"  # noqa: S608
     if not connection.execute(move, (seq, session_id, record.run_id)).rowcount:
         data = {**record.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
-        values = (record.parent_run_id, *astuple(run_columns(data, run_type(record))), seq, now)
-        connection.execute(_UPSERT.format(runs=runs), (record.run_id, session_id, record.created_at or now, *values))
+        created_at, kind = record.created_at or now, run_type(record)
+        _upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
     connection.executemany(
         f"INSERT INTO {quote_identifier(names.log_messages)} (run_id, message_id, ord, folded_by, data) "  # noqa: S608
         "VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, message_id) DO UPDATE SET folded_by = COALESCE(folded_by, excluded.folded_by)",
