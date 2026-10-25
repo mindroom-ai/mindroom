@@ -27,7 +27,8 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `zai` - Z.ai GLM models
 - `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
-Any other `provider` value fails config load with an error that names the model and lists these values, even when no agent uses that model.
+Letter case, surrounding spaces, and `-` versus `_` do not matter, so `Llama-CPP` means `llama_cpp`.
+A `provider` value that does not match one of these fails config load with an error that names the model and lists these values, even when no agent uses that model.
 
 To generate a starter config for one provider, use `mindroom config init --provider <preset>` (see [Getting Started](../getting-started.md)).
 The [macOS app's local model setup](../installation/macos-app.md#local-ai-models) downloads and runs models with one click, with hardware recommendations including Qwen3.8 27B when memory permits.
