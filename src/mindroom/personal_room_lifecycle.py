@@ -188,7 +188,9 @@ class PersonalRoomLifecycle:
 
         When personal_rooms.agent names a template, the requester's own agent
         serves the room: a missing one is provisioned, and until it is in the
-        live config and connected the trigger is pending.
+        live config, connected, and past its first sync the trigger is pending.
+        An unsynced agent's membership changes wait for its sync to catch up,
+        which would stall the pass for every other user.
         """
         settings = self.runtime.config.personal_rooms
         if (
@@ -205,10 +207,12 @@ class PersonalRoomLifecycle:
             msg = "Personal agent is not in the live config yet"
             raise _TargetPendingError(msg)
         target = self.lookup_target(target_name)
-        if target is None or self.runtime.client is None:
-            msg = "Personal-room target is not ready"
-            if target_name != settings.agent:
+        if target_name != settings.agent:
+            if target is None or not target.first_sync_complete or self.runtime.client is None:
+                msg = "Personal agent is not connected and synced yet"
                 raise _TargetPendingError(msg)
+        elif target is None or self.runtime.client is None:
+            msg = "Personal-room target is not ready"
             raise _TargetNotReadyError(msg)
         await target.service.ensure(
             user_id,
@@ -400,7 +404,12 @@ class PersonalRoomLifecycle:
         return candidates, failed
 
     async def _reconcile(self) -> None:
-        """Retry recorded intent and optional lobby backfill after the owner has synced."""
+        """Retry recorded intent and optional lobby backfill once the serving agents have synced.
+
+        A static target must have synced before the pass starts; each user's
+        own agent from a template is checked per candidate, which stays
+        pending until that agent has synced.
+        """
         revision = self._config_revision
         settings = self.runtime.config.personal_rooms
         if self._reconciled or not self.observes_onboarding_joins or settings is None:

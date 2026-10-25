@@ -1061,12 +1061,18 @@ async def test_template_reconciliation_retries_intent_recorded_by_each_users_age
 
 
 @pytest.mark.asyncio
-async def test_template_pending_target_does_not_back_off(template_coordination: TemplateCoordination) -> None:
-    """A user's agent that is still starting is retried on the next pass, without a growing delay or a warning."""
+@pytest.mark.parametrize("connected", [False, True])
+async def test_template_pending_target_does_not_back_off(
+    template_coordination: TemplateCoordination,
+    connected: bool,
+) -> None:
+    """A user's agent that is not connected or not synced yet is retried later, without a delay or a warning."""
     lifecycle = template_coordination.lifecycle
     add_alices_agent(lifecycle)
     template_coordination.lookup.side_effect = None
-    template_coordination.lookup.return_value = None
+    template_coordination.lookup.return_value = (
+        PersonalRoomTarget(template_coordination.target, first_sync_complete=False) if connected else None
+    )
     with capture_logs() as logs:
         await lifecycle._reconcile()
     template_coordination.target.ensure.assert_not_awaited()
