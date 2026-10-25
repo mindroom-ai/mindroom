@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -37,7 +37,7 @@ from mindroom.history.summary_message import (
     is_scope_summary,
     mark_summary_follows,
 )
-from mindroom.history.summary_rows import Segment, folded_tool_call_ids
+from mindroom.history.summary_rows import Fold
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -97,8 +97,6 @@ class _MidTurnCompaction:
     # Set when compaction failed or cannot bring the request under the limit; this run is not compacted again. An
     # approval resume builds a new hook, so it may try once more.
     stopped: bool = False
-    # Member runs an earlier fold of this run already stored in its segment.
-    folded_member_ids: set[str] = field(default_factory=set)
 
     @property
     def scope_fold(self) -> tuple[ConversationStore, ConversationSession, HistoryScope] | None:
@@ -298,24 +296,21 @@ async def _compact_scope(
 ) -> Message | None:
     """Append one summary row to ``scope`` covering its stored runs after the latest row and this run's exchanges.
 
-    The row holds the run's folded part as its segment; the append leaves the turn's session as the store holds it,
-    and once the row is stored, the run's request and record follow.
+    The append stores the run's folded part with the row and leaves the turn's session as the store holds it, and
+    once the row is stored, the run's request and record follow.
     """
     basis = await asyncio.to_thread(read_fold_basis, store, session, scope)
     if basis is None:
         logger.warning("Mid-turn compaction skipped because the conversation changed", run_id=record.run_id)
         return None
-    segment = _segment(record, layout, compaction.folded_member_ids)
-    folded_calls = folded_tool_call_ids(segment.payload())
+    fold = _fold(record, layout)
+    folded_calls = _folded_calls(fold)
     summary_messages: list[Message] = []
 
     def on_commit(summary: str) -> None:
         # Runs together with the row's commit, so a stopped or failed reply's record leaves the folded calls out.
         summary_message = compaction_summary_message(summary, run_local=False)
         summary_messages.append(summary_message)
-        compaction.folded_member_ids.update(
-            member["run_id"] for member in segment.member_responses if member.get("run_id")
-        )
         if compaction.turn_recorder is not None:
             compaction.turn_recorder.record_folded_tool_calls(folded_calls)
         _finish(messages, layout, summary_message, record)
@@ -326,7 +321,7 @@ async def _compact_scope(
         scope=scope,
         resolved_inputs=inputs,
         basis=basis,
-        segment=segment,
+        fold=fold,
         snapshots=_snapshots(record, layout, inputs),
         folded_messages=layout.folded,
         # The size that triggered this compaction, so the history budget sees what the request needs.
@@ -339,29 +334,22 @@ async def _compact_scope(
     return summary_messages[0] if outcome is not None and summary_messages else None
 
 
-def _segment(record: AnyRunRecord, layout: _Layout, folded_member_ids: set[str]) -> Segment:
+def _fold(record: AnyRunRecord, layout: _Layout) -> Fold:
     """Return what this fold takes out of the running run, from the live request and run tree.
 
-    The run's messages are written only when the run ends, so the request's folded exchanges and the member runs
-    that ended so far, less those an earlier fold of the run stored, are the fold's part of the turn.
+    The run's messages are written only when the run ends, so the request's folded exchanges and the member runs that
+    ended so far are the fold's part of the turn; a member an earlier fold of the run took stays that fold's.
     """
-    folded = layout.folded
-    call_ids = {
-        call["id"] for message in folded for call in message.tool_calls or [] if isinstance(call.get("id"), str)
-    }
-    members = (
-        [member for member in record.ended_member_runs if member.run_id not in folded_member_ids]
-        if isinstance(record, TeamRunRecord)
-        else []
-    )
-    return Segment(
-        run_id=record.run_id,
-        # Folded usage stays in the run's metadata; the segment needs only the events the run read and answered.
-        metadata=without_fold_records(deepcopy(record.metadata)) or {},
-        messages=[message.to_dict() for message in folded],
-        tools=[tool.to_dict() for tool in record.tools or [] if tool.tool_call_id in call_ids],
-        member_responses=[member.to_dict() for member in members],
-    )
+    members = record.ended_member_runs if isinstance(record, TeamRunRecord) else []
+    return Fold(run=record, messages=layout.folded, member_run_ids=frozenset(member.run_id for member in members))
+
+
+def _folded_calls(fold: Fold) -> set[str]:
+    """Return the tool calls ``fold`` summarizes: its messages' calls and the tools of the run's ended member runs."""
+    members = fold.run.ended_member_runs if isinstance(fold.run, TeamRunRecord) else []
+    calls = {call.get("id") for message in fold.messages for call in message.tool_calls or []}
+    calls |= {tool.tool_call_id for member in members for tool in member.tools or []}
+    return {call for call in calls if isinstance(call, str)}
 
 
 def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:

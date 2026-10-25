@@ -2,12 +2,12 @@
 
 This module owns the durable compaction-state locations of a stored session;
 outside it, only the session loader and run-insertion rules in
-``session_storage/store.py`` and the open-time migration in
-``history/legacy_compaction_state.py`` read or write summary rows directly:
+``session_storage/store.py`` and the open-time conversion in
+``session_storage/legacy_agno3_conversion.py`` read or write summary rows directly:
 
 - the summary rows of the conversation log (``history/summary_rows.py``), positioned
-  between the runs of the runs table; replay is the scope's latest summary row
-  and the runs after it, and ``session.summary`` is derived from that row on read
+  between the runs by ``seq``; replay is the scope's latest summary row and the
+  runs it does not cover, and ``session.summary`` is derived from that row on read
 - per-scope control state under ``MINDROOM_COMPACTION_METADATA_KEY`` (force flag)
 - per-scope consumed Matrix event ids under ``MINDROOM_MATRIX_HISTORY_METADATA_KEY``
   that no stored run carries (team consumption)
@@ -19,15 +19,14 @@ applies to the metadata the stored row holds, under the write lock, so it never
 restores what another writer dropped, and every write here leaves the in-memory
 session holding what the store does.
 
-Compaction appends summary rows and never deletes a run (a mid-turn fold moves
-only its own stored run after its row); edits and redactions cut the log,
+Compaction appends summary rows and never deletes a run (a mid-turn fold stores
+only its own run after its row); edits and redactions cut the log,
 deleting one element and everything after it, which returns the runs a deleted
 summary covered to replay (see ``tests/test_compaction_fuzz.py`` for the invariants).
 """
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -39,6 +38,7 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history import summary_rows
+from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.legacy_revision_replay import summary_depends_on_source
@@ -437,7 +437,6 @@ def append_compaction_chunk(
     basis: _ChunkBasis,
     included_run_ids: Collection[str],
     summary: str,
-    summary_model: str,
 ) -> bool:
     """Durably append one compaction chunk's summary row before the next chunk is attempted.
 
@@ -447,12 +446,12 @@ def append_compaction_chunk(
     """
     row_id = summary_rows.append_summary(
         storage,
-        session=session,
+        session_id=session.session_id,
         scope_key=scope.key,
         based_on=basis.based_on,
         covered=[run for run in basis.covered if run.run_id in included_run_ids],
         summary=summary,
-        summary_model=summary_model,
+        session=session,
     )
     return row_id is not None
 
@@ -497,30 +496,29 @@ def append_fold(
     scope: HistoryScope,
     basis: FoldBasis,
     summary: str,
-    summary_model: str,
-    segment: summary_rows.Segment,
+    fold: summary_rows.Fold,
 ) -> bool:
-    """Append a mid-turn fold's summary row with its segment, unless its basis went stale or a cut removed its run.
+    """Append a mid-turn fold's summary row and store what it took, unless its basis went stale or a cut removed its run.
 
     ``session``, the turn's own, then holds what a fresh load does, so a request rebuilt from it within the turn,
     as a delegation continuation is, replays only what the summary does not cover.
     """
     row_id = summary_rows.append_summary(
         storage,
-        session=session,
+        session_id=session.session_id,
         scope_key=scope.key,
         based_on=basis.based_on,
         covered=basis.covered,
         summary=summary,
-        summary_model=summary_model,
-        segment=segment,
+        fold=fold,
+        session=session,
     )
     return row_id is not None
 
 
 def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
-    """Return the tool calls the run's mid-turn folds summarized, from their summary rows."""
-    return summary_rows.segment_tool_call_ids(storage, session_id=session_id, run_id=run_id)
+    """Return the tool calls the run's mid-turn folds summarized, from the rows they flagged."""
+    return summary_rows.folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
 
 
 def first_scope_session(scope: HistoryScope, session_id: str) -> ConversationSession:
@@ -528,40 +526,19 @@ def first_scope_session(scope: HistoryScope, session_id: str) -> ConversationSes
     return new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
 
 
-def ensure_scope_session_row(storage: ConversationStore, session: ConversationSession, scope: HistoryScope) -> None:
-    """Create the session row a first turn's fold writes against; the run's own save creates it otherwise."""
-    storage.ensure_session_row(first_scope_session(scope, session.session_id))
+def strip_kept_replay_fields(storage: ConversationStore, *, session: ConversationSession, scope: HistoryScope) -> None:
+    """Store compaction's strip of stale replay fields from the runs of ``scope`` it kept, a load's runs edited in place.
 
-
-def save_working_run_changes(
-    storage: ConversationStore,
-    *,
-    session: ConversationSession,
-    loaded_runs: Sequence[AnyRunRecord],
-    working_session: ConversationSession,
-) -> None:
-    """Persist the message edits compaction made to the runs it kept, such as stripped replay fields.
-
-    A run is written only when its working messages differ from ``loaded_runs``, the copies
-    compaction started from, and then as the copy ``session`` holds now with those messages,
-    so what another writer stored meanwhile, such as a completed approval or a linked reply
-    event, stays.
+    Only messages change, under the write lock, so what another writer stored meanwhile, such as a completed approval
+    or a linked reply event, stays. ``session`` then holds what a load returns.
     """
-    loaded = {run.run_id: _message_dicts(run) for run in loaded_runs}
-    current = {run.run_id: run for run in session.runs}
-    edited: list[AnyRunRecord] = []
-    for run in working_session.runs:
-        stored = current.get(run.run_id)
-        if stored is None or run.run_id not in loaded or _message_dicts(run) == loaded[run.run_id]:
-            continue
-        merged = deepcopy(stored)
-        merged.messages = deepcopy(run.messages)
-        edited.append(merged)
-    storage.save_runs(session, edited)
 
+    def strip(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
+        kept = [run for run in runs if replays_in_scope(run, scope)]
+        strip_stale_anthropic_replay_fields([message for run in kept for message in run.messages])
+        return kept
 
-def _message_dicts(run: AnyRunRecord) -> list[dict[str, Any]]:
-    return [message.to_dict() for message in run.messages]
+    storage.rewrite_run_messages(session.session_id, session.kind, strip, session=session)
 
 
 def _read_preserved_scope_seen_event_ids(metadata: dict[str, Any] | None, scope: HistoryScope) -> set[str]:

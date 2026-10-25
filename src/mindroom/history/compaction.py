@@ -12,16 +12,14 @@ from uuid import uuid4
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.error_handling import is_model_safeguard_refusal
-from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
 from mindroom.history.storage import (
     FoldBasis,
     append_compaction_chunk,
     append_fold,
-    ensure_scope_session_row,
     read_chunk_basis,
     record_summary_usage,
-    save_working_run_changes,
+    strip_kept_replay_fields,
     update_scope_state_on_latest,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
@@ -67,7 +65,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.summary_call import SummaryRetryDecision
-    from mindroom.history.summary_rows import Segment
+    from mindroom.history.summary_rows import Fold
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
@@ -209,8 +207,10 @@ def load_summarizer(
 def scope_usage_recorder(
     storage: ConversationStore,
     session_id: str,
+    *,
+    initial_session: ConversationSession | None = None,
 ) -> Callable[[ModelIdentity, MessageMetrics], Awaitable[None]]:
-    """Record each summary response's usage in the scope's storage, under the reply's requester."""
+    """Record each summary response's usage under the reply's requester, first creating ``initial_session``'s row."""
     # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
     requester_context = get_tool_runtime_context() or get_detached_requester_context()
     return partial(
@@ -218,6 +218,7 @@ def scope_usage_recorder(
         storage=storage,
         session_id=session_id,
         requester_id=requester_context.requester_id if requester_context is not None else None,
+        initial_session=initial_session,
     )
 
 
@@ -354,7 +355,6 @@ async def compact_scope_history(
         return None
 
     mode = "manual" if state.force_compact_before_next_run else "auto"
-    loaded_runs = list(session.runs)
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     compacted_messages: list[Message] = []
@@ -418,7 +418,7 @@ async def compact_scope_history(
     compacted_at = _iso_utc_now()
     await run_session_storage_operation(
         lambda: storage,
-        partial(save_working_run_changes, session=session, loaded_runs=loaded_runs, working_session=working_session),
+        partial(strip_kept_replay_fields, session=session, scope=scope),
     )
     await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
     logger.info(
@@ -511,7 +511,6 @@ async def _rewrite_working_session_for_compaction(
                 basis=basis,
                 included_run_ids=compacted_run_ids,
                 summary=chunk.summary,
-                summary_model=chunk.summarizer.model.model.identity.id,
             ),
         )
         if not appended:
@@ -527,9 +526,6 @@ async def _rewrite_working_session_for_compaction(
 
     if summary_text is None:
         return None
-    strip_stale_anthropic_replay_fields(
-        [message for run in scope_visible_runs(working_session, scope) for message in run.messages],
-    )
     return _CompactionRewriteResult(
         summary_text=summary_text,
         compacted_run_count=compacted_run_count,
@@ -587,7 +583,7 @@ async def compact_running_turn(
     session: ConversationSession,
     scope: HistoryScope,
     basis: FoldBasis,
-    segment: Segment,
+    fold: Fold,
     snapshots: Sequence[AnyRunRecord],
     folded_messages: Sequence[Message],
     summarizer: Summarizer,
@@ -598,7 +594,7 @@ async def compact_running_turn(
     on_commit: Callable[[str], None],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
 ) -> CompactionOutcome:
-    """Summarize the basis's stored runs and the running turn's ``snapshots``, then append one row with ``segment``.
+    """Summarize the basis's stored runs and the running turn's ``snapshots``, then append one row storing ``fold``.
 
     Nothing is written until every chunk has been summarized. The append leaves ``session`` holding what the store
     does; once it starts, ``on_commit`` receives the stored summary and the compaction is reported even when the turn
@@ -606,11 +602,6 @@ async def compact_running_turn(
     failed. Raises when the conversation changed since ``basis`` was read.
     """
     runs = [*basis.runs, *snapshots]
-    # The summary's usage row and summary row reference the session row, which a first turn has not written yet.
-    await run_session_storage_operation(
-        lambda: storage,
-        partial(ensure_scope_session_row, session=session, scope=scope),
-    )
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads.
     hook_runs = [*basis.runs, RunRecord(run_id="", messages=list(folded_messages))]
@@ -637,8 +628,7 @@ async def compact_running_turn(
                 scope=scope,
                 basis=basis,
                 summary=summary,
-                summary_model=summarizer.model.model.identity.id,
-                segment=segment,
+                fold=fold,
             ),
         )
         if not appended:

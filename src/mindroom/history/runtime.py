@@ -40,6 +40,7 @@ from mindroom.history.session_context import (
 )
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
+    first_scope_session,
     read_scope_state,
     set_force_compaction,
 )
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.storage import FoldBasis
-    from mindroom.history.summary_rows import Segment
+    from mindroom.history.summary_rows import Fold
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
@@ -609,7 +610,7 @@ async def compact_scope_mid_turn(
     scope: HistoryScope,
     resolved_inputs: HistoryPreparationInputs,
     basis: FoldBasis,
-    segment: Segment,
+    fold: Fold,
     snapshots: Sequence[AnyRunRecord],
     folded_messages: Sequence[Message],
     before_tokens: int,
@@ -631,7 +632,7 @@ async def compact_scope_mid_turn(
             session=session,
             scope=scope,
             basis=basis,
-            segment=segment,
+            fold=fold,
             snapshots=snapshots,
             folded_messages=folded_messages,
             summarizer=load_summarizer(
@@ -641,7 +642,12 @@ async def compact_scope_mid_turn(
                 runtime_paths=runtime_paths,
                 session_id=session.session_id,
                 scope=scope,
-                on_usage=scope_usage_recorder(storage, session.session_id),
+                # A first turn's fold records its summary usage before any run of the conversation is stored.
+                on_usage=scope_usage_recorder(
+                    storage,
+                    session.session_id,
+                    initial_session=first_scope_session(scope, session.session_id),
+                ),
             ),
             before_tokens=before_tokens,
             replay_window_tokens=execution_plan.replay_window_tokens,
