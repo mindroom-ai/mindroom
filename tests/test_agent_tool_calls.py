@@ -194,7 +194,7 @@ async def test_a_failed_offloaded_cli_call_ends_as_that_calls_failure(tmp_path: 
     try:
         with job_control_context(JobControl()) if in_job else nullcontext():
             events = await _events(catalog, "threads", "offloading")
-        assert events[-1].kind == "failed"
+        assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
         assert "runner refused the call" in str(events[-1].call.result)
     finally:
         shared.shutdown(wait=False)
@@ -304,12 +304,12 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
 
     catalog = await _catalog(tmp_path, [_function(action)], max_tool_calls_per_turn=1)
     events = await _events(catalog, "actions", "action", {"value": "wrong"})
-    assert events[-1].kind == "failed"
+    assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
     assert seen == []
     events = await _events(catalog, "actions", "action", {"value": 1})
-    assert events[-1].kind == "completed"
+    assert (events[-1].kind, events[-1].call.is_error) == ("completed", False)
     events = await _events(catalog, "actions", "action", {"value": 2})
-    assert events[-1].kind == "failed"
+    assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
     assert seen == [1]
 
     for flag in ("requires_confirmation", "external_execution"):
@@ -616,8 +616,7 @@ async def test_generator_failure_is_terminal_and_does_not_leak_context(tmp_path:
 
     catalog = await _catalog(tmp_path, [_toolkit("stream", broken)])
     events = await _events(catalog, "stream", "broken")
-    assert events[-1].kind == "failed"
-    assert events[-1].call.is_error
+    assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
     assert get_tool_runtime_context() is None
 
 
@@ -765,7 +764,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(
         )
     ]
     assert seen == ([3] if approved else [])
-    assert resumed[-1].kind == ("completed" if approved else "failed")
+    assert (resumed[-1].kind, resumed[-1].call.is_error) == ("completed", not approved)
     assert approved or resumed[-1].call.result == denial
     assert binding.function.requires_confirmation is True
     for changed in (4, 3.0):

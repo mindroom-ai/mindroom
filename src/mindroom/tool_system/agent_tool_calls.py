@@ -97,12 +97,12 @@ class PreparedAgentToolBinding:
 
 @dataclass(frozen=True, slots=True)
 class AgentToolCallStep:
-    """A CLI call started or ended, with the call as reported then; an ended call carries its result.
+    """A CLI call started or ended, with the call as reported then; an ended call carries its result and error flag.
 
     ``continuation_required`` ends a call after which the run stops, so the next attempt runs with what it did.
     """
 
-    kind: Literal["started", "continuation_required", "completed", "failed"]
+    kind: Literal["started", "continuation_required", "completed"]
     key: ToolKey
     call: ReportedCall
 
@@ -318,7 +318,7 @@ def _failure(
     message: str,
 ) -> AgentToolCallStep:
     call = ReportedCall(call_id, binding.key.function, arguments, result=message, is_error=True)
-    return AgentToolCallStep("failed", binding.key, call)
+    return AgentToolCallStep("completed", binding.key, call)
 
 
 def _check_resolves(
@@ -455,7 +455,7 @@ async def _execute_agent_tool_call(
             await _settle_call(binding, tracker)
         if outcome.images or outcome.audios or outcome.videos or outcome.files:
             yield AgentToolCallMedia(outcome)
-        kind = "continuation_required" if outcome.stop_after_call else "failed" if outcome.is_error else "completed"
+        kind = "continuation_required" if outcome.stop_after_call else "completed"
         yield AgentToolCallStep(kind, binding.key, replace(call, result=outcome.content, is_error=outcome.is_error))
 
 
