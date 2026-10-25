@@ -117,15 +117,18 @@ def _directories(root: Path) -> list[Path]:
 def _connect_by_name(path: Path, timeout: float) -> sqlite3.Connection:
     """Connect to the file ``path`` names itself, never to a link's target, which ``sqlite3.connect`` would open or create.
 
-    A link at the database or its sessions directory is refused before connecting. The file SQLite opened, which it
-    names with every link resolved, must then be the one ``path`` named before the connect, so a link swapped in at
-    either place between the check and the connect is refused before anything is written; SQLite's open can still have
-    created an empty file at that link's target.
+    A link at the database or its sessions directory is refused before connecting. The name SQLite resolves for the
+    file, every link followed, must then be ``path`` with only the directories above the sessions directory resolved,
+    so a link swapped in at either place before SQLite resolves the path is refused before anything is written, though
+    SQLite's open can have created an empty file at the link's target. Two residuals remain: a swap inside SQLite's own
+    resolve-then-open window opens the link's target under the expected name, and a missing or empty file there gets
+    the v2 tables (one with tables stops at the backup's no-follow walk); and links above the sessions directory are
+    followed, as the store follows them.
     """
     if path.parent.is_symlink() or path.is_symlink():
         msg = f"Refusing to convert {path} to storage v2: the database or its directory is a link"
         raise ValueError(msg)
-    expected = str(path.parent.resolve() / path.name)
+    expected = str(path.parent.parent.resolve() / path.parent.name / path.name)
     connection = connect_conversation_database(path, timeout=timeout)
     (opened,) = connection.execute("SELECT file FROM pragma_database_list WHERE name = 'main'").fetchone()
     if opened != expected:
@@ -263,10 +266,10 @@ def _has_row(connection: sqlite3.Connection, names: TableNames, run_id: str) -> 
 # tools, and a paused team run's embedded `member_responses` inside `run_data`; workflow rows and members of members.
 # Last legacy release: run rows, the last release before storage v2; replacement: unreleased, `<s>_log_runs` rows.
 # Workflow rows and members of members have no known MindRoom writer (unversioned external input).
-# Handling: Per session, in the order a load read them, except that a row without a position goes last, where no
-# summary row covers it, as none did, each agent or team row becomes a `<s>_log_runs` row with the next `seq`, decoded
-# through `run_from_row`, the row's ids winning; a member of a member is re-parented to its team run. A paused team run's
-# embedded members replace or create their member rows, since a resume read them; a fold whose run has no row gets a
+# Handling: Per session, each agent or team row becomes a `<s>_log_runs` row with the next `seq` in the order a load
+# read them, decoded through `run_from_row`, the row's ids winning; a row without a position goes last rather than
+# first, so no summary row covers it, as none did; a member of a member is re-parented to its team run. A paused team
+# run's embedded members replace or create their member rows, since a resume read them; a fold whose run has no row gets a
 # cancelled one right after its latest summary row, with the fold's metadata and members. Workflow rows and rows that
 # do not decode are left out, the latter logged by id; the backup keeps both.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
@@ -424,10 +427,10 @@ def _write_run(
 # Legacy format: `run_data.messages`, which may hold history copies (CLI checkpoints), system messages of runs that
 # are not paused, and one message id twice.
 # Last legacy release: history copies, the last release before storage v2; replacement: unreleased, one
-# `<s>_log_messages` row each. System messages of runs that are not paused: no single verified cutoff; v2026.5.250
-# (#1013) stripped them from the reply path's agent and team-scope stores, an agent built without such a store kept
-# an unstripped one through v2026.10.498 (`agents.py` `_open_agent_session_storage`), not shown never to save, and from
-# v2026.10.499 (#3022) every save drops them. One message id twice: no known writer (unversioned external input).
+# `<s>_log_messages` row each. System messages of runs that are not paused: no single verified cutoff. v2026.5.250
+# (#1013) stopped the reply path's agent and team-scope stores writing them, but through v2026.10.498 an agent built
+# without such a store opened an unstripped one (`agents.py` `_open_agent_session_storage`), and v2026.10.499 (#3022)
+# is the first release where every save drops them. One message id twice: no known writer (unversioned external input).
 # Handling: The list becomes message rows in its order under the save's rule: history copies are dropped, and system
 # messages unless the run is paused; a repeated id gets one derived from its run and place, so no row is lost.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_messages_convert_under_the_saves_rule and

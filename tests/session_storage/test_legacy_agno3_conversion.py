@@ -974,6 +974,29 @@ def test_a_sessions_directory_swapped_for_a_link_after_the_check_is_refused(
     assert not planted.exists() or planted.stat().st_size == 0
 
 
+def test_a_sessions_directory_swapped_for_a_link_before_the_resolve_is_refused(tmp_path: Path) -> None:
+    """A link swapped in for the sessions directory while the conversion resolves its expected path is refused too."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sessions = _NAMES.database_path(tmp_path / "store").parent
+    sessions.mkdir(parents=True)
+
+    class SwappedOnFirstResolve(Path):
+        def resolve(self, strict: bool = False) -> Path:
+            if not sessions.is_symlink():
+                sessions.rename(tmp_path / "moved")
+                sessions.symlink_to(outside, target_is_directory=True)
+            return super().resolve(strict=strict)
+
+    database = SwappedOnFirstResolve(_NAMES.database_path(tmp_path / "store"))
+    with pytest.raises(ValueError, match="instead"):
+        migrate_conversation_database(database, _NAMES)
+
+    assert sessions.is_symlink()
+    planted = outside / database.name
+    assert not planted.exists() or planted.stat().st_size == 0
+
+
 def _wal_crash_copy(tmp_path: Path) -> tuple[Path, TableNames]:
     """Return a copy of a golden in write-ahead-log mode as a crash left it: a commit only in its log."""
     source, names = _restore(GOLDEN_DUMPS[0], tmp_path / "source")
