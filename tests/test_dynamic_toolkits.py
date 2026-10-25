@@ -30,7 +30,7 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, function_instructions_error
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, offered_refusal
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     defer_toolkit,
@@ -1006,8 +1006,8 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
 
     assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
     # An agent offers the deferred toolkit, whose function instructions travel with tool search, and refuses it eager.
-    assert function_instructions_error(deferred) is None
-    assert function_instructions_error(adapted) == (
+    assert offered_refusal(deferred) is None
+    assert offered_refusal(adapted) == (
         "Tool function 'deferred_tool' sets instructions for Agno to add to the system prompt, which MindRoom adds only"
         " per toolkit; set them on the toolkit instead"
     )

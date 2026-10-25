@@ -472,6 +472,49 @@ def test_a_function_asking_for_prompt_instructions_loads_only_in_a_deferred_tool
     )
 
 
+def _no_hook(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+_REFUSED_FIELDS = [{"pre_hook": _no_hook}, {"requires_user_input": True}, {"instructions": "Look up named pages."}]
+
+
+@pytest.mark.parametrize(
+    ("agent_mode", "narrowed_by"),
+    [("standard", "caller"), ("standard", "persona"), ("minimal", "caller")],
+)
+@pytest.mark.parametrize("refused", _REFUSED_FIELDS, ids=["hook", "user_input", "instructions"])
+def test_a_refused_function_the_agent_never_offers_costs_its_toolkit_nothing(
+    tmp_path: Path,
+    agent_mode: str,
+    narrowed_by: str,
+    refused: dict[str, object],
+) -> None:
+    """A function setting a field MindRoom refuses fails its toolkit only when the agent offers it."""
+    config, runtime_paths = _config(tmp_path, tools=["wikipedia"])
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name=tool_name, tools=[Function(name="lookup", entrypoint=ping, **refused), ping])
+
+    narrowing: dict[str, Any] = (
+        {"tool_function_filter": lambda function: function.name != "lookup"}
+        if narrowed_by == "caller"
+        else {
+            "persona": SubagentPersona(
+                source_kind="inline",
+                source_name="",
+                system_prompt="You ping.",
+                tools=("wikipedia.ping",),
+            ),
+        }
+    )
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+        build = _build(config, runtime_paths, persist_runtime_state=False, agent_mode=agent_mode, **narrowing)
+
+    assert not [log for log in logs if log["event"] == "Could not load tool for agent construction"]
+    assert [function.name for function in build.spec.toolkits[0].functions] == ["ping"]
+
+
 def test_the_prompt_shows_a_toolkits_instructions_once_even_when_another_offers_its_names(tmp_path: Path) -> None:
     """The same toolkit built for two tools shows its instructions once, though a run offers only the first's functions."""
     config, runtime_paths = _config(tmp_path, tools=["calculator", "wikipedia"])
@@ -486,12 +529,32 @@ def test_the_prompt_shows_a_toolkits_instructions_once_even_when_another_offers_
     assert build.prompt.tool_instructions == ("Ping politely.",)
 
 
-def test_a_toolkit_claiming_a_room_recovery_function_stops_the_build(tmp_path: Path) -> None:
-    """Only the registered room recovery tool may offer its function, whatever the caller's filters would keep."""
+@pytest.mark.parametrize(
+    ("claimed_async", "beside"),
+    [
+        (False, None),
+        (True, None),
+        (False, Function(name="lookup", entrypoint=ping, pre_hook=_no_hook)),
+        (False, Function(name="lookup")),
+    ],
+    ids=["alone", "async_only", "beside_a_refused_function", "beside_a_function_without_entrypoint"],
+)
+def test_a_toolkit_claiming_a_room_recovery_function_stops_the_build(
+    tmp_path: Path,
+    *,
+    claimed_async: bool,
+    beside: Function | None,
+) -> None:
+    """Only the registered room recovery tool may offer its function, whatever else the toolkit or the filters hold."""
     config, runtime_paths = _config(tmp_path)
 
     def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
-        return Toolkit(name=tool_name, tools=[Function(name="invite_router", entrypoint=ping)])
+        toolkit = Toolkit(name=tool_name)
+        claimed = toolkit.async_functions if claimed_async else toolkit.functions
+        claimed["invite_router"] = Function(name="invite_router", entrypoint=ping)
+        if beside is not None:
+            toolkit.functions[beside.name] = beside
+        return toolkit
 
     with (
         patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit),

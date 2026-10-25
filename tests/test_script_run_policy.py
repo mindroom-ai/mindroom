@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.tools import Toolkit
+from agno.tools.function import Function
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
@@ -35,8 +37,6 @@ from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from agno.tools import Toolkit
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -94,6 +94,34 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
         ScriptToolGrant("attachments", "get_attachment"),
     )
     assert all(grant.toolkit_name != "dynamic_workflow" for grant in grants)
+
+
+def _echo(text: str) -> str:
+    return text
+
+
+def test_launch_grants_skip_a_refused_function_the_filter_leaves_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function setting a field MindRoom refuses costs the grants nothing when the context's filter drops it."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(context, tool_function_filter=lambda function: function.name != "hooked")
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        hooked = Function(name="hooked", entrypoint=_echo, pre_hook=_echo)
+        return Toolkit(name=tool_name, tools=[hooked, Function(name="echo", entrypoint=_echo)])
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
 
 
 @pytest.mark.parametrize(

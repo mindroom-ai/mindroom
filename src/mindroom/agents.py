@@ -58,7 +58,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, function_instructions_error
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, offered_refusal
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
@@ -647,13 +647,10 @@ class _MatrixRoomRuntimeToolCollisionError(ValueError):
     """Raised when another registered tool claims a reserved runtime function."""
 
 
-def _reject_matrix_room_runtime_tool_function_collisions(
-    registered_tool_name: str,
-    toolkit: AdaptedToolkit,
-) -> None:
-    """Keep reserved room-runtime functions owned by their registered built-in tool."""
+def _reject_matrix_room_runtime_tool_function_collisions(registered_tool_name: str, toolkit: Toolkit) -> None:
+    """Keep reserved room-runtime functions owned by their registered built-in tool, whatever else the toolkit holds."""
     reserved_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-    function_names = {function.name for function in toolkit.functions}
+    function_names = set(toolkit.get_async_functions())
     collisions = sorted(name for name in function_names & reserved_names if registered_tool_name != name)
     if collisions:
         msg = f"Tool function name(s) {', '.join(collisions)} are reserved for Matrix room recovery tools."
@@ -1385,9 +1382,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             )
         if toolkit is None:
             return None
+        _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
         adapted = adapt_toolkit(toolkit, key=authored_name)
-        _reject_matrix_room_runtime_tool_function_collisions(tool_name, adapted)
         if persona_tools is not None:
             # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
             adapted = _keep_functions(adapted, lambda function: persona_allows(persona_tools, tool_name, function.name))
@@ -1425,7 +1422,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:
             metadata = TOOL_METADATA.get(authored_name)
             deferral, adapted = defer_toolkit(authored_name, metadata.description if metadata else "", adapted)
-        if (refusal := function_instructions_error(adapted)) is not None:
+        # Refused only now, so a function the filters and the approval policy left out costs its toolkit nothing.
+        if (refusal := offered_refusal(adapted)) is not None:
             raise ValueError(refusal)
         announcement = computer_announcement_middleware(
             toolkit,

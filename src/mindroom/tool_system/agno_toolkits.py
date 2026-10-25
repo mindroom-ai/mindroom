@@ -61,9 +61,11 @@ _UNBINDABLE_KINDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class _Rejected:
-    """Fields whose value the owned loop cannot honor: adapting a function for which ``sets`` holds raises ``error``.
+    """Fields whose value the owned loop cannot honor: a function for which ``sets`` holds is refused with ``error``.
 
-    Rejected rather than dropped, because the tool's author relies on what the value asks for.
+    Rejected rather than dropped, because the tool's author relies on what the value asks for. A function adapted
+    alone raises it; a toolkit's adapter names the function in ``AdaptedToolkit.refused`` instead, so an agent refuses
+    the toolkit only while it still offers the function (``offered_refusal``).
     """
 
     sets: Callable[[Function], bool]
@@ -104,8 +106,8 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
         sets=lambda function: bool(function.requires_user_input),
         error="sets Agno's requires_user_input, but MindRoom never pauses a run to ask its user for input",
     ),
-    # A toolkit's adapter hands them over as ``function_instructions``, which tool search shows for a deferred
-    # toolkit and an eager agent refuses (``function_instructions_error``); a function adapted alone refuses them.
+    # A toolkit's adapter hands them over as ``function_instructions`` instead, which tool search shows for a
+    # deferred toolkit and an agent refuses in an eager one.
     ("instructions", "add_instructions"): _FUNCTION_INSTRUCTIONS,
     # Agno reads these only for a function that requires user input, which is rejected.
     ("user_input_fields", "user_input_schema"): "ignored",
@@ -126,16 +128,22 @@ def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None) -> AdaptedToolkit
     """Adapt the functions of ``toolkit`` in Agno's async-run order, one per name; they share one ``actor_state``.
 
     ``key`` is the authored toolkit an agent is offered the functions from, which each one carries as its
-    ``toolkit``; None for a toolkit generated for the agent.
+    ``toolkit``; None for a toolkit generated for the agent. A function's prompt instructions are handed over as
+    ``function_instructions``, and a function that sets any other field MindRoom refuses is adapted without it and
+    named in ``refused``, so whoever offers the toolkit refuses it only for a function it still offers.
     """
     functions = toolkit.get_async_functions().values()
     actor_state: dict[str, Any] = {}
+    adapted: list[ToolFunction] = []
+    refused: dict[str, str] = {}
+    for function in functions:
+        offered = _without_instructions(function)
+        if (refusal := _refusal(offered)) is not None:
+            refused[function.name] = refusal
+        adapted.append(replace(_adapt(offered), toolkit=key, actor_state=actor_state))
     return AdaptedToolkit(
         name=toolkit.name,
-        functions=tuple(
-            replace(adapt_function(_without_instructions(function)), toolkit=key, actor_state=actor_state)
-            for function in functions
-        ),
+        functions=tuple(adapted),
         instructions=toolkit.instructions if toolkit.add_instructions else None,
         guidance=toolkit.instructions or None,
         function_instructions={
@@ -143,12 +151,19 @@ def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None) -> AdaptedToolkit
             for function in functions
             if _FUNCTION_INSTRUCTIONS.sets(function) and function.instructions is not None
         },
+        refused=refused,
     )
 
 
-def function_instructions_error(toolkit: AdaptedToolkit) -> str | None:
-    """Return why an eager agent refuses ``toolkit``: the first function it offers that asks for prompt instructions."""
+def offered_refusal(toolkit: AdaptedToolkit) -> str | None:
+    """Return why an agent cannot offer ``toolkit``: the first function it offers that sets a field MindRoom refuses.
+
+    A function's prompt instructions count only while ``function_instructions`` holds them, which a deferred toolkit
+    hands to tool search instead.
+    """
     for function in toolkit.functions:
+        if (refusal := toolkit.refused.get(function.name)) is not None:
+            return refusal
         if function.name in toolkit.function_instructions:
             return f"Tool function {function.name!r} {_FUNCTION_INSTRUCTIONS.error}"
     return None
@@ -164,19 +179,31 @@ def _without_instructions(function: Function) -> Function:
 
 
 def adapt_function(function: Function) -> ToolFunction:
+    """Return one Agno function as a ``ToolFunction``, refusing it when it sets a field MindRoom refuses."""
+    if (refusal := _refusal(function)) is not None:
+        raise ValueError(refusal)
+    return _adapt(function)
+
+
+def _refusal(function: Function) -> str | None:
+    """Return why MindRoom refuses ``function``: the first field it sets that the owned loop cannot honor."""
+    for handling in _FUNCTION_FIELDS.values():
+        if isinstance(handling, _Rejected) and handling.sets(function):
+            return f"Tool function {function.name!r} {handling.error}"
+    return None
+
+
+def _adapt(function: Function) -> ToolFunction:
     """Process one Agno function once, on a copy, and return it as a ``ToolFunction`` with its finished schema.
 
     ``process_entrypoint`` rewrites a user-authored schema in place and replaces the entrypoint with its coercing
     wrapper, so the shared ``Function`` stays untouched for whoever else holds it. A MindRoom wrapper that forges its
-    entrypoint's signature declares how the schema Agno derives from it is completed.
+    entrypoint's signature declares how the schema Agno derives from it is completed. A field MindRoom refuses is
+    left unread.
     """
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
-    for handling in _FUNCTION_FIELDS.values():
-        if isinstance(handling, _Rejected) and handling.sets(function):
-            msg = f"Tool function {function.name!r} {handling.error}"
-            raise ValueError(msg)
     prepared = function.model_copy(deep=False)
     prepared.parameters = deepcopy(function.parameters)
     # An explicit strict setting on the function wins; MindRoom never asks Agno for strict schemas otherwise.
@@ -453,9 +480,9 @@ __all__ = [
     "adapt_function",
     "adapt_toolkit",
     "framework_arguments",
-    "function_instructions_error",
     "injected_parameters",
     "model_arguments",
+    "offered_refusal",
     "read_tool_value",
     "tool_value",
     "warm_agno_tool_imports",
