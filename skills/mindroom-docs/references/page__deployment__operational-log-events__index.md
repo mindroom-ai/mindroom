@@ -139,7 +139,7 @@ Skill reviews also log this record under the reviewed agent's name, with a fixed
 
 ## Debug Logging
 
-Every model request logs an `LLM usage` event when it ends with provider and model identifiers and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
+When a request to a model under `models` ends, completed or not, MindRoom logs an `LLM usage` event with provider and model identifiers and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
 
 To record full provider requests, enable `debug.log_llm_requests`:
 
