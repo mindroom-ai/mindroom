@@ -1016,6 +1016,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Tools** - configured tools (green badge) and tools that need no setup
 - **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
+- **Personal agents** - a read-only list of the agents generated from [`personal_agents`](https://docs.mindroom.chat/personal-agents/) templates, with each owner, Matrix ID, template, and status; edit the templates under Settings → Personal rooms
 
 ### Teams
 
@@ -1151,6 +1152,7 @@ The dashboard uses the backend REST API under `/api/`, with the same authenticat
 | PUT | `/api/config/raw` | Replace raw `config.yaml` text |
 | GET | `/api/config/schema` | Configuration JSON schema used by Settings and More settings |
 | GET | `/api/config/agents` | List agents |
+| GET | `/api/config/personal-agents` | List generated personal agents |
 | POST | `/api/config/agents` | Create agent |
 | PUT | `/api/config/agents/{id}` | Update agent |
 | DELETE | `/api/config/agents/{id}` | Delete agent |
@@ -2011,6 +2013,10 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
+Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
+An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
+
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
 Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
@@ -2030,7 +2036,7 @@ With adaptive thinking, the notes these models write between tool calls are hidd
 Provider credentials come from environment variables, stored credentials, CLI logins, or a model-specific key.
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
-A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key, although the provider SDK may still read `ANTHROPIC_API_KEY` or `AZURE_OPENAI_API_KEY` from the process environment.
+A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
@@ -2346,7 +2352,7 @@ A model with any other key, including a misspelled key or a retired Agno model s
 | `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
 | `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
-When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
+When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
 Some models reject sampling controls:
 
@@ -2948,7 +2954,7 @@ With `defer_reaction` set, each message that can wait gets that reaction once.
 
 When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
 If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
-A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
+A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the agent starts sending its reply, leaves the original text as the one answered.
 Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
 While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
 Edits by agents never trigger regeneration, and an agent's message edited while it still waits is answered with its original text.
@@ -6982,6 +6988,7 @@ MindRoom's own accounts and the internal `mindroom_user` never get an agent.
 
 The dashboard's Settings page edits `personal_agents` next to Personal rooms.
 Its `personal_rooms.agent` dropdown lists the configured agents and the `personal_agents` templates.
+The Agents page lists every generated agent, read-only, with its owner, Matrix ID, template, and whether it is active, pending, or stopped because its template was removed.
 
 ## Switching From a Single Personal-Room Agent
 
@@ -7831,6 +7838,7 @@ mindroom-agent context read NAME --offset 0 --limit 8000
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
+A toolkit keeps its own tool name when a preset or another tool brings it in, so with `matrix_message` or `openclaw_compat` configured, attachments are listed with `attachments.list_attachments`.
 Discovery and calls use the current agent's permissions and requester context.
 Use command-specific `--help` for arguments and options.
 
@@ -20745,7 +20753,7 @@ Skill reviews also log this record under the reviewed agent's name, with a fixed
 
 ## Debug Logging
 
-When a request to a model under `models` ends, completed or not, MindRoom logs an `LLM usage` event with provider and model identifiers and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
+When a request to a model under `models` ends, completed or not, MindRoom logs an `LLM usage` event with provider and model identifiers, the `stop_reason` of a reply that finished (`output_limit` or `content_filter` for one the provider cut off), and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
 
 To record full provider requests, enable `debug.log_llm_requests`:
 
@@ -20782,6 +20790,12 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to OpenAI SDK 3
+
+OpenAI-compatible and Claude model requests, and the other OpenAI SDK requests [Model Configuration](https://docs.mindroom.chat/configuration/models/#configuration-examples) lists, now verify certificates against the operating system's trust store instead of certifi's bundle.
+The published images include system CA certificates.
+On a host without them, install them (for example the `ca-certificates` package) before upgrading, or point `SSL_CERT_FILE` at a complete CA bundle, such as certifi's `cacert.pem` with any private CA appended.
 
 ## Upgrading to durable reply records
 
@@ -21135,7 +21149,7 @@ mindroom run --log-level DEBUG
 To debug MindRoom alone, keep the global level at `INFO` and set per-logger overrides with [`MINDROOM_LOGGER_LEVELS`](https://docs.mindroom.chat/configuration/#environment-variables):
 
 ```bash
-LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
+LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpx2:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
 ```
 
 Matrix decrypt warnings from `nio.crypto` are hidden by default; add `nio.crypto:WARNING` to `MINDROOM_LOGGER_LEVELS` to see them while debugging encryption.

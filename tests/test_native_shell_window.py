@@ -36,10 +36,18 @@ async def _run_shell_command(command: str) -> str:
     return f"ran {command}"
 
 
-def _function(name: str, toolkit: str, *, requires_confirmation: bool | None = None) -> ToolFunction:
+def _function(
+    name: str,
+    toolkit: str,
+    *,
+    authored: str | None = None,
+    requires_confirmation: bool | None = None,
+) -> ToolFunction:
+    """Return a function of the registered tool ``toolkit``, which ``authored`` brings in when given."""
     return ToolFunction(
         name=name,
-        toolkit=toolkit,
+        toolkit=authored or toolkit,
+        registered_toolkit=toolkit,
         description=None,
         parameters={"type": "object", "properties": {}, "required": []},
         requires_confirmation=requires_confirmation,
@@ -47,21 +55,27 @@ def _function(name: str, toolkit: str, *, requires_confirmation: bool | None = N
     )
 
 
-def _toolkits(*, requires_confirmation: bool | None = None, shell_owner: str = "shell") -> tuple[AdaptedToolkit, ...]:
+def _toolkits(
+    *,
+    requires_confirmation: bool | None = None,
+    shell_owner: str = "shell",
+    authored: str | None = None,
+) -> tuple[AdaptedToolkit, ...]:
+    shell = _function("run_shell_command", shell_owner, authored=authored, requires_confirmation=requires_confirmation)
     return (
         AdaptedToolkit(name="calculator", functions=(_function("add", "calculator"),), instructions=None),
-        AdaptedToolkit(
-            name="shell",
-            functions=(_function("run_shell_command", shell_owner, requires_confirmation=requires_confirmation),),
-            instructions=None,
-        ),
+        AdaptedToolkit(name="shell", functions=(shell,), instructions=None),
     )
 
 
 @pytest.mark.asyncio
-async def test_only_the_shell_command_is_windowed_and_runs_as_before_without_a_cli() -> None:
-    """The offered shell command gets the window wrapper, which calls the command directly outside a CLI."""
-    toolkits = _toolkits()
+@pytest.mark.parametrize("authored", [None, "openclaw_compat"], ids=["shell", "preset-shell"])
+async def test_only_the_shell_command_is_windowed_and_runs_as_before_without_a_cli(authored: str | None) -> None:
+    """The offered shell command gets the window wrapper, which calls the command directly outside a CLI.
+
+    The shell tool's command is windowed whether the agent lists `shell` or a preset brings it in.
+    """
+    toolkits = _toolkits(authored=authored)
 
     windowed = wrap_native_shell_window(toolkits)
 

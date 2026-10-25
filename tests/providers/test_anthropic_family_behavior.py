@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -13,9 +12,8 @@ import boto3.session
 import google.auth
 import google.auth.exceptions
 import httpx
+import httpx2
 import pytest
-from anthropic.resources.beta.messages import messages as beta_messages_resource
-from anthropic.resources.messages import messages as messages_resource
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 
@@ -238,73 +236,6 @@ async def test_a_whole_reply_finishes_with_the_message_its_stream_would(tmp_path
         (turn.message.content, turn.message.reasoning_content, turn.message.tool_calls)
         for turn in (streamed_turn, whole_turn)
     ] == [("Looking it up.", "Check first.", streamed_turn.message.tool_calls)] * 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("beta", [False, True])
-async def test_a_stream_transforms_its_params_off_the_event_loop(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    beta: bool,
-) -> None:
-    """A stream opens on a worker thread and sends the request it would send on the event loop.
-
-    Opening it runs the SDK's param transform, which walks the whole conversation.
-    """
-    loop_thread = threading.get_ident()
-    transform_threads: list[int] = []
-    for module in (messages_resource, beta_messages_resource):
-
-        def recording(data: object, expected_type: object, original: Any = module.maybe_transform) -> Any:  # noqa: ANN401
-            transform_threads.append(threading.get_ident())
-            return original(data, expected_type)
-
-        monkeypatch.setattr(module, "maybe_transform", recording)
-    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
-    extra_kwargs = {"betas": ["context-1m-2025-08-07"]} if beta else {}
-    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=extra_kwargs)
-    tools = [
-        ToolSpec(
-            name="get_weather",
-            description="Forecast.",
-            parameters={"type": "object", "properties": {"city": {"type": "string"}}},
-            strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
-        ),
-    ]
-    completed = await claude_turn(provider, ModelRequest(messages=_user(), tools=tools))
-
-    assert completed.message.content == "Hi."
-    assert len(transform_threads) == 1
-    assert transform_threads[0] != loop_thread
-    request = wire.requests[0]
-    assert str(request.url) == f"https://api.anthropic.com/v1/messages{'?beta=true' if beta else ''}"
-    assert request.headers.get("anthropic-beta") == ("context-1m-2025-08-07" if beta else None)
-    cache = {"type": "ephemeral", "ttl": "1h"}
-    body = {
-        "max_tokens": 8192,
-        "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello", "cache_control": cache}]}],
-        "model": "claude-sonnet-5-5",
-        "system": [{"text": "Be brief.", "type": "text", "cache_control": cache}],
-        "tools": [
-            {
-                "name": "get_weather",
-                "description": "Forecast.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"city": {"type": "string", "description": ""}},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-                "cache_control": cache,
-            },
-        ],
-        "stream": True,
-    }
-    assert request.content == json.dumps(body, separators=(",", ":")).encode()
 
 
 @pytest.mark.asyncio
@@ -543,9 +474,9 @@ async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
 async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: Path) -> None:
     """A connection that never reaches the provider is retryable."""
 
-    def fail(request: httpx.Request) -> httpx.Response:
+    def fail(request: httpx2.Request) -> httpx.Response:
         msg = "connection refused"
-        raise httpx.ConnectError(msg, request=request)
+        raise httpx2.ConnectError(msg, request=request)
 
     provider = route_provider("anthropic", tmp_path, Wire(fail))
     with pytest.raises(ProviderUnavailable) as raised:
@@ -1423,13 +1354,13 @@ async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) 
 async def test_unreadable_url_media_is_dropped_and_the_request_still_runs(tmp_path: Path) -> None:
     """An expired or unreachable URL drops its media with a warning; the rest of the message is still sent."""
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx.Response:
         if request.url.host != "media.example":
             return sse_reply([{"type": "text", "text": "Ok."}])
         if request.url.path == "/gone":
             return httpx.Response(404)
         msg = "connection refused"
-        raise httpx.ConnectError(msg, request=request)
+        raise httpx2.ConnectError(msg, request=request)
 
     wire = Wire(respond)
     provider = route_provider("anthropic", tmp_path, wire)

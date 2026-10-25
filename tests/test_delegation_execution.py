@@ -31,7 +31,7 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, chi
 from mindroom.history.storage import new_scope_session
 from mindroom.llm.errors import ModelOutputLimitError, ProviderError
 from mindroom.llm.events import ToolCompleted
-from mindroom.llm.provider import Capabilities, TurnCompleted
+from mindroom.llm.provider import TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -1153,7 +1153,6 @@ async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
             _cut_off_turn("cut-3"),
             answer("The hooks were rebuilt."),
         ],
-        capabilities=Capabilities(claude_family=True),
     )
     code = ScriptedModel([answer("first result"), answer("second result")])
     ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)

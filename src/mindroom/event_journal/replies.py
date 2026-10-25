@@ -419,8 +419,23 @@ def _record_stop(
         return True
     if found.room_id != room_id:
         return False
-    reply = reply_messages.lock(transaction, principal_id, found.reply_id)
-    assert reply is not None
+    stopped = _stop_reply(transaction, principal_id, found.reply_id, receipt_order=receipt_order, now_ns=now_ns)
+    assert stopped is not None
+    return stopped
+
+
+def _stop_reply(
+    transaction: Transaction,
+    principal_id: str,
+    reply_id: str,
+    *,
+    receipt_order: int,
+    now_ns: int,
+) -> AppliedTransition | None:
+    """Record a Stop on one reply, before or after Matrix acknowledged its event; ``None`` when no record of it remains."""
+    reply = reply_messages.lock(transaction, principal_id, reply_id)
+    if reply is None:
+        return None
     span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
     return _apply_stop(transaction, principal_id, reply, span, receipt_order=receipt_order, now_ns=now_ns)
 
@@ -921,6 +936,18 @@ class ReplyStore:
                 room_id=room_id,
                 receipt_order=receipt_order,
                 may_wait=may_wait,
+                now_ns=now_ns,
+            ),
+        )
+
+    async def stop(self, reply_id: str, *, receipt_order: int, now_ns: int) -> AppliedTransition | None:
+        """Record a Stop on one reply; see ``_stop_reply``."""
+        return await self._backend.write(
+            lambda transaction: _stop_reply(
+                transaction,
+                self._principal_id,
+                reply_id,
+                receipt_order=receipt_order,
                 now_ns=now_ns,
             ),
         )

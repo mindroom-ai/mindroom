@@ -1390,9 +1390,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             return None
         _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
-        adapted = adapt_toolkit(toolkit, key=authored_name)
+        adapted = adapt_toolkit(toolkit, key=authored_name, registered=tool_name)
         if persona_tools is not None:
-            # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
+            # Match the concrete toolkit; a preset's or implied tool's functions name the tool bringing them in.
             adapted = _keep_functions(adapted, lambda function: persona_allows(persona_tools, tool_name, function.name))
         if tool_function_filter is not None:
             adapted = _keep_functions(adapted, tool_function_filter)
@@ -2079,9 +2079,10 @@ def create_agent(
         output_file_policy=output_file_policy,
     )
     if agent_mode == "minimal":
+        # The roster names each toolkit by the registered tool the agent CLI reaches it under.
         # A persona's roster names the toolkits it actually built, deferred ones it named included.
         roster = (
-            [entry.name for entry in visible_tool_surface(agent_name=agent_name, config=config).runtime_tool_configs]
+            visible_tool_surface(agent_name=agent_name, config=config).toolkit_names(config)
             if persona is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]
         )

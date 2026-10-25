@@ -13,7 +13,8 @@ from mindroom.llm.runs import RunRequirement
 class CliApprovalCall:
     """One exact hidden call; the journal retains its existing JSON wire shape.
 
-    ``toolkit`` is the toolkit the call is approved under, which the resumed agent offers ``function`` from.
+    ``toolkit`` is the toolkit the call is approved under, which the resumed agent attaches and finds the binding of
+    ``function`` by.
     """
 
     toolkit: str

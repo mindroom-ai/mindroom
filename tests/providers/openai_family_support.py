@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import httpx
+import httpx2
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -19,14 +19,23 @@ from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.responses import ResponsesAdapter
-from tests.providers.golden_support import Replay, encoded_response, pipeline_provider, replay_through_pipeline
+from tests.providers.golden_support import (
+    Replay,
+    encoded_response,
+    httpx2_transport,
+    pipeline_provider,
+    replay_through_pipeline,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    import httpx
+
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider
+    from tests.providers.golden_support import SentRequest
 
 OPENAI_FAMILIES = (
     "openai_chat",
@@ -50,7 +59,7 @@ _TOKEN_EXPIRY = 4102444800
 def provider_runtime(
     runtime_paths: RuntimePaths,
     *,
-    http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT,
+    http_client: httpx2.AsyncClient = MODEL_HTTP_CLIENT,
     codex_default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS,
 ) -> ProviderRuntime:
     """Return the runtime a test builds a provider with: the production prompt and client unless given."""
@@ -109,13 +118,13 @@ class GoldenProvider:
 
     provider: ModelProvider
     adapter: ModelProvider
-    requests: list[httpx.Request]
+    requests: list[SentRequest]
 
 
 def openai_family_adapter(
     model_config: dict[str, Any],
     root: Path,
-    respond: Callable[[httpx.Request], httpx.Response],
+    respond: Callable[[SentRequest], httpx.Response],
 ) -> ModelProvider:
     """Build the owned adapter of a model config under ``root``, with its HTTP traffic answered by ``respond``.
 
@@ -130,7 +139,7 @@ def openai_family_adapter(
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime = provider_runtime(
         resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)),
     )
     return build_provider(ModelConfig(**config), runtime)
 
@@ -144,9 +153,9 @@ def golden_provider(
 ) -> GoldenProvider:
     """Build the owned adapter and pipeline for a golden's model config under ``root``."""
     reply = response_raw if response_raw is not None else golden["response_raw"]
-    recorded: list[httpx.Request] = []
+    recorded: list[SentRequest] = []
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: SentRequest) -> httpx.Response:
         recorded.append(request)
         return encoded_response(reply)
 

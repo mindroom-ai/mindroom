@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.models import DebugConfig
-    from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
+    from mindroom.llm.provider import ModelProvider, ModelRequest, StopReason, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
 __all__ = ["RequestLog", "logged_stream"]
@@ -120,6 +120,7 @@ def _log_usage(
     log: RequestLog,
     usage: MessageMetrics | None,
     served_provider: str | None,
+    stop_reason: StopReason | None,
     context: Mapping[str, Any],
 ) -> None:
     identity = inner.identity
@@ -131,6 +132,8 @@ def _log_usage(
     }
     if served_provider is not None:
         payload["served_provider"] = served_provider
+    if stop_reason is not None:
+        payload["stop_reason"] = stop_reason
     payload |= _attribution(context)
     if usage is not None:
         counts = usage.tokens
@@ -185,6 +188,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
             log_path = None
     reported = ReportedUsage()
     served_provider: str | None = None
+    stop_reason: StopReason | None = None
     try:
         events = inner.stream(request)
         async with closing_async_stream(events):
@@ -192,11 +196,12 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                 reported.observe(event)
                 if isinstance(event, TurnCompleted):
                     served_provider = _served_provider(event.message.provider_data)
+                    stop_reason = event.stop_reason
                 yield event
     finally:
         usage = reported.received
         try:
-            _log_usage(inner, log, usage, served_provider, context)
+            _log_usage(inner, log, usage, served_provider, stop_reason, context)
             if log_path is not None and usage is not None:
                 response: dict[str, Any] = {
                     "timestamp": datetime.now().astimezone().isoformat(),

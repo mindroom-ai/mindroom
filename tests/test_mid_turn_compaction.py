@@ -262,6 +262,7 @@ async def _run(
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),
         persist=persist,
         request_template=ModelRequest(messages=(), stream=stream, native_compaction=agent.native_compaction),
+        metadata=metadata,
     )
     finished = [event async for event in events][-1]
     assert isinstance(finished, RunFinished)

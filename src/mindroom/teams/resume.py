@@ -163,8 +163,7 @@ class TeamResume:
 
     ``built`` is the team the run resumes as. ``plan`` selects the stored history the leader's resume request
     replays: the turn's own plan within a turn, the configured policy for a saved approval. ``model_name`` is the
-    turn's model within a turn, which the resumed run's tool calls carry; a saved approval's resume has none, so its
-    calls keep the model of the tool context it runs in.
+    configured model the team run uses, which the resumed run's tool calls carry.
     """
 
     built: BuiltTeam
@@ -175,7 +174,7 @@ class TeamResume:
     plan: ResolvedReplayPlan | None
     user_id: str | None
     toolkit_owners: Mapping[tuple[str, str], str]
-    model_name: str | None = None
+    model_name: str
 
     def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[TeamRunEvent]:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
@@ -452,8 +451,6 @@ async def continue_paused_team_run(
             prepared_history=None,
         )
         plan = configured_replay_plan(history_settings=built.history_settings, estimated_tokens=0)
-        # TODO(simplify): like ResumeRunner.events (approval/resume.py), this resume names no model, so its tools see
-        # the tool context's. Pass model_name. Tools that follow the reply's model, such as claude_agent, would notice.
         resume = TeamResume(
             built=built,
             storage=storage,
@@ -474,6 +471,7 @@ async def continue_paused_team_run(
             plan=plan,
             user_id=user_id,
             toolkit_owners=toolkit_owners,
+            model_name=model_name,
         )
         # A run the delegation driver owns resumes through it with the decisions on its children's calls; any
         # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses

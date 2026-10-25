@@ -34,8 +34,11 @@ from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.state import MatrixAccount
 
 
 def _write_personal_agent_roster(runtime_paths: RuntimePaths, roster: list[PersonalAgentRosterEntry]) -> None:
@@ -60,18 +63,37 @@ def _activate_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: Pe
         _write_personal_agent_roster(runtime_paths, roster)
 
 
+def _personal_agent_user_id(
+    entry: PersonalAgentRosterEntry,
+    runtime_paths: RuntimePaths,
+    accounts: Mapping[str, MatrixAccount],
+) -> str:
+    """Return the Matrix ID of one roster entry's agent: its registered account, else the one it will register."""
+    domain = runtime_matrix_domain(runtime_paths)
+    # A re-paired namespace or a server name unlike the homeserver host changes the computed ID, not the account.
+    if (account := accounts.get(managed_account_key(entry.agent_name))) is not None:
+        return matrix_account_user_id(account, domain)
+    localpart = entry.matrix_username or agent_username_localpart(entry.agent_name, runtime_paths)
+    return MatrixID.from_username(localpart, domain).full_id
+
+
+def read_personal_agent_user_ids(runtime_paths: RuntimePaths) -> list[tuple[PersonalAgentRosterEntry, str]]:
+    """Return every roster entry with its agent's Matrix ID, reading the roster and Matrix state once."""
+    accounts = matrix_state_for_runtime(runtime_paths).accounts
+    return [
+        (entry, _personal_agent_user_id(entry, runtime_paths, accounts))
+        for entry in read_personal_agent_roster(runtime_paths)
+    ]
+
+
 def is_mindroom_account_id(user_id: str, runtime_paths: RuntimePaths) -> bool:
     """Whether a Matrix ID is an account MindRoom manages, including agents the live config does not have yet."""
     domain = runtime_matrix_domain(runtime_paths)
-    accounts = matrix_state_for_runtime(runtime_paths).accounts.values()
-    if any(matrix_account_user_id(account, domain) == user_id for account in accounts):
+    accounts = matrix_state_for_runtime(runtime_paths).accounts
+    if any(matrix_account_user_id(account, domain) == user_id for account in accounts.values()):
         return True
     return any(
-        MatrixID.from_username(
-            entry.matrix_username or agent_username_localpart(entry.agent_name, runtime_paths),
-            domain,
-        ).full_id
-        == user_id
+        _personal_agent_user_id(entry, runtime_paths, accounts) == user_id
         for entry in read_personal_agent_roster(runtime_paths)
     )
 

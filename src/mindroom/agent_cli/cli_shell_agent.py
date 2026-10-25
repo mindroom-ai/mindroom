@@ -55,14 +55,15 @@ def standard_cli_eligible(
 def wrap_native_shell_window(toolkits: Sequence[AdaptedToolkit]) -> tuple[AdaptedToolkit, ...] | None:
     """Return ``toolkits`` with the native `run_shell_command` running inside its own CLI window; None without one.
 
-    ``toolkits`` are a run's, which offer each function name once; only the shell tool's own command is windowed.
+    ``toolkits`` are a run's, which offer each function name once; only the shell tool's own command is windowed,
+    whether the agent lists `shell` or a preset brings it in.
     """
     for index, toolkit in enumerate(toolkits):
         for position, function in enumerate(toolkit.functions):
             if function.name != "run_shell_command":
                 continue
             # An approved command resumes in a later run without this response's CLI, like a minimal subagent's.
-            if function.toolkit != "shell" or function.requires_confirmation:
+            if function.registered_toolkit != "shell" or function.requires_confirmation:
                 return None
             functions = list(toolkit.functions)
             functions[position] = replace(function, entrypoint=_windowed(function.entrypoint))
