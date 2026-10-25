@@ -39,8 +39,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "custom_scrape_website",
@@ -72,8 +71,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -122,8 +120,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "read_dag_file",
@@ -156,8 +153,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -203,8 +199,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "read_arxiv_papers",
@@ -242,8 +237,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -281,8 +275,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "invoke_function",
@@ -317,8 +310,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -368,8 +360,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -417,8 +408,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -461,8 +451,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_by_brand",
@@ -494,8 +483,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -540,8 +528,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_screenshot",
@@ -573,8 +560,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_engine",
@@ -618,8 +604,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "web_data_feed",
@@ -658,8 +643,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -707,8 +691,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "screenshot",
@@ -746,8 +729,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_page_content",
@@ -777,8 +759,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "close_session",
@@ -805,8 +786,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -856,8 +836,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "create_booking",
@@ -897,8 +876,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_upcoming_bookings",
@@ -928,8 +906,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "reschedule_booking",
@@ -969,8 +946,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "cancel_booking",
@@ -1006,8 +982,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -1066,8 +1041,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "text_to_speech",
@@ -1102,8 +1076,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_voices",
@@ -1130,8 +1103,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -1168,8 +1140,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "open_settings",
@@ -1208,8 +1179,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "open_panel",
@@ -1243,8 +1213,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "show_canvas",
@@ -1314,8 +1283,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "read_canvas_state",
@@ -1347,8 +1315,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -1410,8 +1377,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -1459,8 +1425,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_csv_files",
@@ -1487,8 +1452,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_columns",
@@ -1520,8 +1484,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "query_csv_file",
@@ -1557,8 +1520,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -1680,8 +1642,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -1731,8 +1692,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_channel_messages",
@@ -1767,8 +1727,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_channel_info",
@@ -1800,8 +1759,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_channels",
@@ -1833,8 +1791,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "delete_message",
@@ -1870,8 +1827,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -1916,8 +1872,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_news",
@@ -1952,8 +1907,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -1992,8 +1946,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_sound_effect",
@@ -2028,8 +1981,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "text_to_speech",
@@ -2061,8 +2013,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -2112,8 +2063,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -2165,8 +2115,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_contents",
@@ -2201,8 +2150,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "find_similar",
@@ -2237,8 +2185,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "exa_answer",
@@ -2273,8 +2220,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "research",
@@ -2317,8 +2263,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -2361,8 +2306,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "image_to_image",
@@ -2404,8 +2348,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -2464,8 +2407,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "read_file",
@@ -2500,8 +2442,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_files",
@@ -2531,8 +2472,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_files",
@@ -2564,8 +2504,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "delete_file",
@@ -2597,8 +2536,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "read_file_chunk",
@@ -2641,8 +2579,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "replace_file_chunk",
@@ -2689,8 +2626,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_content",
@@ -2735,8 +2671,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -2806,8 +2741,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_csv_file",
@@ -2873,8 +2807,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_pdf_file",
@@ -2912,8 +2845,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_docx_file",
@@ -2951,8 +2883,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_text_file",
@@ -2987,8 +2918,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_html_file",
@@ -3023,8 +2953,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_code_file",
@@ -3062,8 +2991,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -3108,8 +3036,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "crawl_website",
@@ -3144,8 +3071,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "map_website",
@@ -3177,8 +3103,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_web",
@@ -3213,8 +3138,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -3252,8 +3176,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_video",
@@ -3285,8 +3208,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -3328,8 +3250,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -3365,8 +3286,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "describe_table",
@@ -3398,8 +3318,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "run_sql_query",
@@ -3431,8 +3350,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -3477,8 +3395,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "google_drive_search_files",
@@ -3514,8 +3431,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "google_drive_read_file",
@@ -3547,8 +3463,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "google_drive_download_file",
@@ -3590,8 +3505,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "google_drive_upload_file",
@@ -3653,8 +3567,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "google_drive_update_file",
@@ -3700,8 +3613,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "google_drive_create_folder",
@@ -3743,8 +3655,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "google_drive_move_file",
@@ -3790,8 +3701,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "google_drive_trash_file",
@@ -3823,8 +3733,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -3869,8 +3778,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_news",
@@ -3905,8 +3813,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -3950,8 +3857,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "translate_audio",
@@ -3983,8 +3889,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_speech",
@@ -4016,8 +3921,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -4058,8 +3962,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_user_details",
@@ -4091,8 +3994,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -4135,8 +4037,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_query",
@@ -4168,8 +4069,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -4216,8 +4116,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "create_issue",
@@ -4264,8 +4163,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_issues",
@@ -4302,8 +4200,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "add_comment",
@@ -4341,8 +4238,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "add_worklog",
@@ -4384,8 +4280,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -4433,8 +4328,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -4507,8 +4401,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "image_to_video",
@@ -4562,8 +4455,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -4621,8 +4513,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_memory",
@@ -4654,8 +4545,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_all_memories",
@@ -4682,8 +4572,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "delete_all_memories",
@@ -4710,8 +4599,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -4759,8 +4647,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "create_srt",
@@ -4796,8 +4683,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "embed_captions",
@@ -4855,8 +4741,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -4896,8 +4781,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_relationship_types",
@@ -4924,8 +4808,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_schema",
@@ -4952,8 +4835,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "run_cypher_query",
@@ -4985,8 +4867,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5028,8 +4909,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5081,8 +4961,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "update_page",
@@ -5118,8 +4997,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_pages",
@@ -5151,8 +5029,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5196,8 +5073,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_image",
@@ -5229,8 +5105,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "generate_speech",
@@ -5262,8 +5137,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5309,8 +5183,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_company_symbol",
@@ -5342,8 +5215,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_company_news",
@@ -5378,8 +5250,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_company_profile",
@@ -5411,8 +5282,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_price_targets",
@@ -5444,8 +5314,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5490,8 +5359,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_forecast",
@@ -5526,8 +5394,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_air_pollution",
@@ -5559,8 +5426,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "geocode_location",
@@ -5595,8 +5461,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5658,8 +5523,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "run_dataframe_operation",
@@ -5710,8 +5574,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5763,8 +5626,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5817,8 +5679,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "analyze",
@@ -5864,8 +5725,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5907,8 +5767,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -5958,8 +5817,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -6009,8 +5867,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "markdownify",
@@ -6042,8 +5899,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "searchscraper",
@@ -6075,8 +5931,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "crawl",
@@ -6130,8 +5985,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "scrape",
@@ -6163,8 +6017,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -6210,8 +6063,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_youtube",
@@ -6243,8 +6095,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -6292,8 +6143,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_news",
@@ -6328,8 +6178,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_scholar",
@@ -6364,8 +6213,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "scrape_webpage",
@@ -6400,8 +6248,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -6470,8 +6317,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -6528,8 +6374,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_message_thread",
@@ -6569,8 +6414,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_channels",
@@ -6600,8 +6444,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_channel_history",
@@ -6636,8 +6479,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "upload_file",
@@ -6695,8 +6537,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "download_file",
@@ -6731,8 +6572,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_messages",
@@ -6767,8 +6607,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_workspace",
@@ -6830,8 +6669,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_thread",
@@ -6870,8 +6708,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_users",
@@ -6901,8 +6738,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_user_info",
@@ -6934,8 +6770,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_channel_info",
@@ -6967,8 +6802,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -7010,8 +6844,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -7058,8 +6891,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "scrape",
@@ -7091,8 +6923,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "crawl",
@@ -7127,8 +6958,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -7167,8 +6997,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "describe_table",
@@ -7200,8 +7029,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "run_sql_query",
@@ -7236,8 +7064,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -7281,8 +7108,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "extract_url_content",
@@ -7314,8 +7140,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -7369,8 +7194,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_photo",
@@ -7407,8 +7231,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_document",
@@ -7449,8 +7272,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_video",
@@ -7487,8 +7309,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_audio",
@@ -7528,8 +7349,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_animation",
@@ -7566,8 +7386,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_sticker",
@@ -7601,8 +7420,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "edit_message",
@@ -7638,8 +7456,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "delete_message",
@@ -7671,8 +7488,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "react_with_emoji",
@@ -7708,8 +7524,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "pin_message",
@@ -7744,8 +7559,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_chat",
@@ -7772,8 +7586,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_file",
@@ -7805,8 +7618,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -7855,8 +7667,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "extract_metadata_only",
@@ -7891,8 +7702,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "html_to_text",
@@ -7927,8 +7737,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "extract_batch",
@@ -7963,8 +7772,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "crawl_website",
@@ -7999,8 +7807,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -8052,8 +7859,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_call_details",
@@ -8085,8 +7891,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_messages",
@@ -8116,8 +7921,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -8174,8 +7978,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_photo",
@@ -8207,8 +8010,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_random_photo",
@@ -8244,8 +8046,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "download_photo",
@@ -8277,8 +8078,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -8317,8 +8117,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_my_private_usage",
@@ -8348,8 +8147,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_all_usage",
@@ -8379,8 +8177,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -8472,8 +8269,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "create_line_chart",
@@ -8551,8 +8347,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "create_pie_chart",
@@ -8624,8 +8419,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "create_scatter_plot",
@@ -8758,8 +8552,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "create_histogram",
@@ -8816,8 +8609,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -8862,8 +8654,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -8910,8 +8701,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "list_rooms",
@@ -8938,8 +8728,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -8994,8 +8783,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_template_message",
@@ -9047,8 +8835,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_reply_buttons",
@@ -9114,8 +8901,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_list_message",
@@ -9219,8 +9005,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_image",
@@ -9259,8 +9044,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_document",
@@ -9302,8 +9086,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_location",
@@ -9362,8 +9145,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "send_reaction",
@@ -9402,8 +9184,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -9445,8 +9226,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -9496,8 +9276,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_company_info",
@@ -9529,8 +9308,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_stock_fundamentals",
@@ -9562,8 +9340,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_income_statements",
@@ -9595,8 +9372,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_key_financial_ratios",
@@ -9628,8 +9404,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_analyst_recommendations",
@@ -9661,8 +9436,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_company_news",
@@ -9697,8 +9471,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_technical_indicators",
@@ -9733,8 +9506,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_historical_stock_prices",
@@ -9772,8 +9544,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -9817,8 +9588,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_youtube_video_data",
@@ -9850,8 +9620,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_video_timestamps",
@@ -9883,8 +9652,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -9926,8 +9694,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -9975,8 +9742,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "get_zep_memory",
@@ -10006,8 +9772,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       },
       {
         "name": "search_zep_memory",
@@ -10042,8 +9807,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
+        "stop_after_tool_call": false
       }
     ]
   }

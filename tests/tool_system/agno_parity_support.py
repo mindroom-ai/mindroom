@@ -277,10 +277,8 @@ def normalize_error_text(text: str) -> str:
 def golden_entry(toolkit: Toolkit, adapted: AdaptedToolkit) -> dict[str, object]:
     """Return the golden entry of one built toolkit: Agno's toolkit settings, then each function as the adapter reports it.
 
-    The functions are in Agno's async-run order, which the adapter keeps. ``show_result`` comes from Agno's function
-    because the owned loop never reads it: it never echoes a tool result, so a function that sets it asks for nothing.
+    The functions are in Agno's async-run order, which the adapter keeps.
     """
-    agno_functions = toolkit.get_async_functions().values()
     entry = {
         "instructions": toolkit.instructions,
         "add_instructions": toolkit.add_instructions,
@@ -294,9 +292,8 @@ def golden_entry(toolkit: Toolkit, adapted: AdaptedToolkit) -> dict[str, object]
                 "external_execution": function.external_execution,
                 "approval_type": function.approval_type,
                 "stop_after_tool_call": function.stop_after_call,
-                "show_result": agno_function.show_result,
             }
-            for function, agno_function in zip(adapted.functions, agno_functions, strict=True)
+            for function in adapted.functions
         ],
     }
     normalized = normalize_version(entry)
