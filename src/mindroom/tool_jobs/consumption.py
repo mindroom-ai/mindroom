@@ -34,7 +34,7 @@ _JOB_FAILED_TEXT = "Background tool job failed."
 # empty error. The job runtime saved the text of an exception its operation raised as the job's result, and the job
 # executor saved a failed call's exception text as both the result and the payload's error; that text is empty for
 # exceptions such as ``TimeoutError`` and ``httpx.ReadTimeout``.
-# Last legacy release: v2026.10.512; replacement: unreleased, whose writers save the exception's type name when its
+# Last legacy release: v2026.10.512; replacement: v2026.10.513, whose writers save the exception's type name when its
 # text is empty.
 # Handling: such a job reads as ``_JOB_FAILED_TEXT`` wherever its outcome is read, when the call that started it reads
 # it, when the job tool waits for it, and when the job tool collects it, so the model reads that the call failed
