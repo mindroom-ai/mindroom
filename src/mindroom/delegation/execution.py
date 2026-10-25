@@ -611,12 +611,12 @@ def _resolve_delegation_requirement(
     result: str,
     emit_call: Callable[[ToolStarted | ToolCompleted], None],
     *,
-    failed: bool = False,
+    failed: bool,
 ) -> str:
     """Answer one external call with its finished result and close its live tool trace, including rejections.
 
-    A ``failed`` call, one delegation refused or whose child did not complete, is marked failed so Claude and Gemini
-    read it as a failure.
+    Every answer says whether it ``failed``: a call delegation refused, or whose child did not complete, is marked
+    failed so Claude and Gemini read it as a failure.
     The answer stays on the parent's requirement, so a later entry never advances the call again; the parent's
     continuation hands every answer to the loop's own decision check.
     """
