@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -50,9 +51,10 @@ from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
-from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_async_entrypoint_blocking_call
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     ProcessRuntime,
@@ -466,6 +468,46 @@ async def test_oversized_result_becomes_a_failed_job(tmp_path: Path, monkeypatch
         job = (await runtime.list_jobs(owner=owner, depth=0))[0]
         assert job.status == "failed"
         assert not job.has_result_payload
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_call_a_plugin_hook_declines_fails_its_job_with_the_decline(tmp_path: Path) -> None:
+    """A managed call a before-call hook declines never runs: its job fails, and its call reads the decline as failed."""
+    ran: list[str] = []
+
+    async def write_note() -> str:
+        ran.append("note")
+        return "noted"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        ctx.decline("notes are paused")
+
+    declined = (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: write_note\n"
+        "Reason: notes are paused\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    policy = build_tool_hook_middleware(HookRegistry.from_plugins([_plugin("policy", [decline])]), "leader")
+    context, runtime = await _managed_context(tmp_path)
+    owner = build_execution_identity_from_runtime_context(context)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                outcome = await call_job_tool(
+                    job_actor(job_tool(write_note)),
+                    "write_note",
+                    call_id="note-call",
+                    run_id="note-run",
+                    middleware=(policy,),
+                )
+        assert outcome == ToolOutcome(content=declined, is_error=True)
+        assert ran == []
+        job = (await runtime.list_jobs(owner=owner, depth=0))[0]
+        assert (job.status, job.result) == ("failed", declined)
     finally:
         await runtime.shutdown()
 
