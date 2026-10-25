@@ -355,15 +355,25 @@ async def test_entity_without_exact_match_lists_other_close_matches(store: Graph
 
 @pytest.mark.asyncio
 async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: GraphitiStore) -> None:
-    """A configured alias, Matrix ID, or agent key finds the entity under its one name, ahead of one named the alias."""
-    await _seed_entity(store, ALPHA, "Robin", summary="A stray duplicate.")
+    """A configured alias, Matrix ID, or agent key finds the entity under its one name, ahead of one named the alias.
+
+    The entity named exactly as asked is listed with its id, so a duplicate extracted under the alias can be merged.
+    """
+    stray = await _seed_entity(store, ALPHA, "Robin", summary="A stray duplicate.")
     await _seed_entity(store, ALPHA, "Robin Vale", summary="A person.", facts=2)
     await _seed_entity(store, ALPHA, "Mind", summary="The agent.")
 
-    for name in ("robin", "@robin:example.test", "ROBIN VALE"):
+    for name in ("robin", "ROBIN VALE"):
         entity = await store.entity(ALPHA, name)
         assert entity is not None
         assert entity.name == "Robin Vale"
+        assert entity.exact
+    alias = await store.entity(ALPHA, "robin")
+    assert alias is not None
+    assert alias.others == [_EntityRef(name="Robin", uuid=stray)]
+    matrix_id = await store.entity(ALPHA, "@robin:example.test")
+    assert matrix_id is not None
+    assert matrix_id.name == "Robin Vale"
     mind = await store.entity(ALPHA, "mind")
     assert mind is not None
     assert mind.summary == "The agent."
@@ -521,6 +531,36 @@ async def test_merging_moves_the_duplicates_facts_onto_the_kept_entity(store: Gr
     assert entity.summary == "A person."
     employs = next(fact for fact in entity.facts if fact.fact == "Acme employs Ali")
     assert [source.description for source in employs.sources] == ["tool_results: hr"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_merges_keep_a_fact_between_both_duplicates(store: GraphitiStore) -> None:
+    """Merges in one batch of tool calls run one after another, so a fact between their duplicates survives both."""
+    alice = await _seed_entity(store, ALPHA, "Alice Smith")
+    ali = await _seed_entity(store, ALPHA, "Ali")
+    robert = await _seed_entity(store, ALPHA, "Robert Jones")
+    bob = await _seed_entity(store, ALPHA, "Bob")
+    await _seed_edge(store, ALPHA, ali, bob, "Ali mentors Bob")
+
+    await asyncio.gather(store.merge_entities(ALPHA, ali, alice), store.merge_entities(ALPHA, bob, robert))
+
+    assert await _graph_contents(store, ALPHA) == (
+        {"Alice Smith", "Robert Jones"},
+        {("Alice Smith", "Ali mentors Bob", "Robert Jones")},
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_entity_summary_can_be_rewritten(store: GraphitiStore) -> None:
+    """A summary that still states a deleted fact can be rewritten, and lookups and search read the new one."""
+    alice = await _seed_entity(store, ALPHA, "Alice", summary="Alice leads Project Atlas and waters the office plant.")
+
+    assert await store.update_entity_summary(BETA, alice, "Alice leads Project Atlas.") is None
+    assert await store.update_entity_summary(ALPHA, alice, "Alice leads Project Atlas.") == "Alice"
+
+    entity = await store.entity(ALPHA, alice)
+    assert entity is not None
+    assert entity.summary == "Alice leads Project Atlas."
 
 
 def _holds_embedding(value: object) -> bool:

@@ -56,7 +56,16 @@ class KnowledgeGraphTools(Toolkit):
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
         self._edits = config.agent_edits_knowledge_graph(agent_name)
-        edits = [self.delete_graph_fact, self.delete_graph_entity, self.merge_graph_entities] if self._edits else []
+        edits = (
+            [
+                self.delete_graph_fact,
+                self.delete_graph_entity,
+                self.merge_graph_entities,
+                self.update_graph_entity_summary,
+            ]
+            if self._edits
+            else []
+        )
         super().__init__(name="knowledge_graph", tools=[self.search_graph, self.graph_entity, *edits])
 
     async def search_graph(self, query: str, limit: int = 10) -> str:
@@ -83,12 +92,12 @@ class KnowledgeGraphTools(Toolkit):
     async def graph_entity(self, name: str) -> str:
         """Show what the knowledge graph knows about one person, organization, project, or other entity.
 
-        An entity with the id ``name``, or named exactly ``name`` in any letter case, is returned, and a configured
-        alias, agent key, or Matrix ID finds the entity it names; otherwise the closest match, followed by the names of
-        other close matches to look up if it is not the one you meant.
+        An entity named exactly ``name`` in any letter case is returned, and a configured alias, agent key, or Matrix
+        ID finds the entity it names; otherwise the closest match, followed by the names of other close matches to look
+        up if it is not the one you meant.
 
         Args:
-            name: The entity's name or id, for example "Alice" or "Project Atlas".
+            name: The entity's name, for example "Alice" or "Project Atlas", or an id an earlier lookup showed.
 
         Returns:
             The entity's summary and the facts that touch it.
@@ -105,8 +114,8 @@ class KnowledgeGraphTools(Toolkit):
                 others = [f"{other.name} (id {other.uuid})" for other in entity.others]
             else:
                 rendered = f"{entity.name}: {entity.summary}\n{facts}"
-                # Without ids, another entity of the same name cannot be looked up.
-                others = [other.name for other in entity.others if other.name.casefold() != entity.name.casefold()]
+                # Without ids, the other entities found under the name asked for cannot be looked up.
+                others = [] if entity.exact else [other.name for other in entity.others]
             if others:
                 rendered += f"\nOther close matches: {', '.join(others)}"
             return rendered
@@ -118,7 +127,8 @@ class KnowledgeGraphTools(Toolkit):
 
         Delete a fact that never held, names the wrong person or thing, or records your own lookups instead of a fact
         about your subjects. A fact that held and later changed is history: keep it, because newer evidence marks it
-        superseded. A later conversation or tool result that states the fact again can add it back.
+        superseded. A later conversation or tool result that states the fact again can add it back. The summaries of
+        the entities it connects can still state it; rewrite those with `update_graph_entity_summary`.
 
         Args:
             fact_id: The fact's id, as `search_graph` and `graph_entity` show it.
@@ -183,6 +193,29 @@ class KnowledgeGraphTools(Toolkit):
             return f"Merged {merged.duplicate!r} into {merged.into!r}, moving {merged.moved_facts} facts."
 
         return await self._in_graph("merge_graph_entities", merge)
+
+    async def update_graph_entity_summary(self, entity_id: str, summary: str) -> str:
+        """Replace an entity's summary, for example to remove what a fact you deleted said.
+
+        Keep everything the old summary says that is still right; later conversations and tool results that mention
+        the entity add to the new summary.
+
+        Args:
+            entity_id: The entity's id, as `graph_entity` shows it.
+            summary: The new summary.
+
+        Returns:
+            The entity's name, or that no entity has this id.
+
+        """
+
+        async def update(store: GraphStore, scope: GraphScope) -> str:
+            name = await store.update_entity_summary(scope, entity_id, summary)
+            if name is None:
+                return f"No entity in your graph has id {entity_id!r}."
+            return f"Updated the summary of {name!r}."
+
+        return await self._in_graph("update_graph_entity_summary", update)
 
     async def _in_graph(self, function: str, work: Callable[[GraphStore, GraphScope], Awaitable[str]]) -> str:
         """Run ``work`` on the caller's own graph, turning a failure into a message the agent can relay."""

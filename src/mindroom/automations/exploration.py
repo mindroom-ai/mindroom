@@ -38,7 +38,7 @@ _STATE_FILE = "exploration.json"
 _MAX_ARGUMENT_CHARS = 300
 _FIX_STEP = (
     "\n4. Fix the mistakes step 1 showed in your graph: delete facts that never held and entities that do not belong, "
-    "and merge entities that are the same person or thing."
+    "merge entities that are the same person or thing, and rewrite summaries that still state what you deleted."
 )
 
 

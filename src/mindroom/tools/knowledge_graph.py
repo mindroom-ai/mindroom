@@ -20,7 +20,7 @@ register_builtin_tool_metadata(
         display_name="Knowledge Graph",
         description=(
             "Look up facts, entities, and their sources in the agent's knowledge graph, and with knowledge_graph_edits "
-            "delete wrong facts and entities and merge duplicates"
+            "delete wrong facts and entities, merge duplicates, and rewrite summaries"
         ),
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
@@ -35,6 +35,7 @@ register_builtin_tool_metadata(
             "graph_entity",
             "merge_graph_entities",
             "search_graph",
+            "update_graph_entity_summary",
         ),
     ),
 )

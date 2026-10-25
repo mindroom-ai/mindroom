@@ -9010,7 +9010,7 @@
       "dependencies": [
         "graphiti-core"
       ],
-      "description": "Look up facts, entities, and their sources in the agent's knowledge graph, and with knowledge_graph_edits delete wrong facts and entities and merge duplicates",
+      "description": "Look up facts, entities, and their sources in the agent's knowledge graph, and with knowledge_graph_edits delete wrong facts and entities, merge duplicates, and rewrite summaries",
       "display_name": "Knowledge Graph",
       "docs_url": null,
       "executes_code": false,
@@ -9020,7 +9020,8 @@
         "delete_graph_fact",
         "graph_entity",
         "merge_graph_entities",
-        "search_graph"
+        "search_graph",
+        "update_graph_entity_summary"
       ],
       "helper_text": null,
       "icon": "Network",

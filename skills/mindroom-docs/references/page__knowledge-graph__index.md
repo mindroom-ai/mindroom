@@ -117,24 +117,26 @@ agents:
 ```
 
 `agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `false`) lets an agent with a graph correct it; setting it on an agent without `knowledge_graph` is a config error.
-Its lookups then show each fact's and entity's id, `graph_entity` also takes an id and lists the other entities with the same name, and the tool gains three functions:
+Its lookups then show each fact's and entity's id, `graph_entity` also takes an id and lists the other entities found under the name it was given, such as a duplicate extracted under an alias, and the tool gains four functions:
 
 ```python
 delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing
 delete_graph_entity("<entity id>")                   # a file path, URL, or other non-entity, with every fact that touches it
 merge_graph_entities("<duplicate id>", "<kept id>")  # the duplicate's facts and their sources move to the kept entity
+update_graph_entity_summary("<entity id>", "...")    # a summary that still states a deleted fact
 ```
 
 The kept entity keeps its name and summary, and facts between the two merged entities are dropped.
+An entity's summary is model-written text that collects what was said about it, so a deleted fact stays in it until the agent rewrites the summary.
 Ask the agent to fix what it finds wrong, or let an [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) run do it: with edits on, its prompt also asks the agent to fix the mistakes it found in the graph.
 Deleting is permanent, and a later conversation or tool result that states a deleted fact again adds it back; the agent is told to keep a fact that held and later changed, because newer evidence marks it superseded.
-To approve each edit before it happens, add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules for `delete_graph_*` and `merge_graph_entities`.
+To approve each edit before it happens, add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules for `delete_graph_*`, `merge_graph_entities`, and `update_graph_entity_summary`.
 To keep extraction from creating a merged-away name again, list it in [`knowledge_graph.aliases`](#names).
 
 ## Privacy
 
 A shared agent's graph holds what it learned from every requester's conversations, including tool results, and anyone who can talk to that agent can query it.
-With `knowledge_graph_edits`, anyone who can talk to a shared agent can also have it delete or merge what that graph holds.
+With `knowledge_graph_edits`, anyone who can talk to a shared agent can also have it delete, merge, or rewrite what that graph holds.
 Use a private agent when requesters must not see or change each other's facts.
 
 ## Cost and Health

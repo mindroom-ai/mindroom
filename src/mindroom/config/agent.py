@@ -303,7 +303,10 @@ class AgentConfig(BaseModel):
     )
     knowledge_graph_edits: bool | None = Field(
         default=None,
-        description="Let this agent delete wrong facts and entities from its knowledge graph and merge duplicate entities",
+        description=(
+            "Let this agent delete wrong facts and entities from its knowledge graph, merge duplicate entities, and "
+            "rewrite entity summaries"
+        ),
     )
     model: str = Field(
         default="default",

@@ -59,6 +59,11 @@ RETURN n.uuid AS uuid, n.name AS name, n.created_at AS created_at, count(r) AS f
 ORDER BY facts DESC, created_at, uuid LIMIT $limit
 """
 
+_SET_SUMMARY_QUERY = """
+MATCH (n:Entity {uuid: $uuid}) SET n.summary = $summary
+RETURN n.name AS name
+"""
+
 
 @dataclass(frozen=True)
 class EpisodeInput:
@@ -111,6 +116,9 @@ class _GraphEntity:
     summary: str
     facts: list[GraphFact]
     others: list[_EntityRef]
+    # Whether the entity was found by its id or exact name, so ``others`` are the other entities under that name
+    # rather than close matches.
+    exact: bool
 
 
 @dataclass(frozen=True)
@@ -142,6 +150,9 @@ class GraphStore(Protocol):
 
     async def merge_entities(self, scope: GraphScope, duplicate_id: str, into_id: str) -> _MergedEntities | None:
         """Move one entity's facts onto another of the scope and delete it, or return None when either is missing."""
+
+    async def update_entity_summary(self, scope: GraphScope, entity_id: str, summary: str) -> str | None:
+        """Replace the summary of the scope's entity with id ``entity_id`` and return its name, or None when it has none."""
 
 
 class UnusableExtractionError(ValueError):
@@ -312,6 +323,9 @@ class GraphitiStore:
         self._runtime_loop = runtime_loop
         self._graph_loop: _GraphLoop | None = None
         self._lock: asyncio.Lock | None = None
+        # Edits run one at a time: two merges in one batch of tool calls would each move a fact between their
+        # duplicates and then delete the other's copy with their own duplicate.
+        self._edit_lock: asyncio.Lock | None = None
         self._graphiti: Graphiti | None = None
         self._signature: str | None = None
         self._embedded_server: EmbeddedServer | None = None
@@ -321,7 +335,18 @@ class GraphitiStore:
         if self._graph_loop is None:
             self._graph_loop = _GraphLoop()
             self._lock = asyncio.Lock()
+            self._edit_lock = asyncio.Lock()
         return await run_on_loop(self._graph_loop.loop, coroutine)
+
+    async def _run_edit[T](self, edit: Callable[[], Coroutine[Any, Any, T]]) -> T:
+        """Run ``edit`` on the graph loop once the edits before it have finished."""
+
+        async def locked() -> T:
+            assert self._edit_lock is not None, "the lock is created with the graph loop"
+            async with self._edit_lock:
+                return await edit()
+
+        return await self._run(locked())
 
     async def _graphiti_client(self) -> Graphiti:
         config = self._config_provider()
@@ -378,15 +403,19 @@ class GraphitiStore:
 
     async def delete_fact(self, scope: GraphScope, fact_id: str) -> str | None:
         """Delete the scope's fact with id ``fact_id`` and return its text, or None when it has none."""
-        return await self._run(self._delete_fact(scope, fact_id))
+        return await self._run_edit(functools.partial(self._delete_fact, scope, fact_id))
 
     async def delete_entity(self, scope: GraphScope, entity_id: str) -> str | None:
         """Delete the scope's entity with id ``entity_id`` and its facts and return its name, or None when it has none."""
-        return await self._run(self._delete_entity(scope, entity_id))
+        return await self._run_edit(functools.partial(self._delete_entity, scope, entity_id))
 
     async def merge_entities(self, scope: GraphScope, duplicate_id: str, into_id: str) -> _MergedEntities | None:
         """Move one entity's facts onto another of the scope and delete it, or return None when either is missing."""
-        return await self._run(self._merge_entities(scope, duplicate_id, into_id))
+        return await self._run_edit(functools.partial(self._merge_entities, scope, duplicate_id, into_id))
+
+    async def update_entity_summary(self, scope: GraphScope, entity_id: str, summary: str) -> str | None:
+        """Replace the summary of the scope's entity with id ``entity_id`` and return its name, or None when it has none."""
+        return await self._run_edit(functools.partial(self._update_entity_summary, scope, entity_id, summary))
 
     async def _add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
         # The client installs and imports Graphiti first, so the imports below find it loaded.
@@ -436,15 +465,16 @@ class GraphitiStore:
         agent_keys = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self._runtime_paths)
         canonical = entity_names(config, agent_keys).canonical(name)
         # Hybrid search ranks an entity whose summary or longer name mentions the text above one named exactly that
-        # (a bare first name), so an exact name is looked up first.
+        # (a bare first name), so an exact name is looked up first. The entity under the one name comes first, and the
+        # others named either way are duplicates, such as one extracted under an alias, that only their ids reach.
+        records: dict[str, str] = {}
         for exact in dict.fromkeys([canonical, name]):
-            records, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=exact, limit=_ENTITY_CANDIDATES)
-            if records:
-                break
+            found, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=exact, limit=_ENTITY_CANDIDATES)
+            records.update((record["uuid"], record["name"]) for record in found)
         if records:
-            node = await EntityNode.get_by_uuid(driver, records[0]["uuid"])
-            # Other entities of the same name are duplicates that only their ids reach.
-            others = [_EntityRef(record["name"], record["uuid"]) for record in records[1:]]
+            first, *rest = records
+            node = await EntityNode.get_by_uuid(driver, first)
+            others = [_EntityRef(records[uuid], uuid) for uuid in rest]
         else:
             results = await graphiti.search_(
                 canonical,
@@ -464,6 +494,7 @@ class GraphitiStore:
             summary=node.summary,
             facts=await _facts(driver, edges[:_MAX_ENTITY_FACTS]),
             others=others,
+            exact=bool(records),
         )
 
     async def _delete_fact(self, scope: GraphScope, fact_id: str) -> str | None:
@@ -523,6 +554,12 @@ class GraphitiStore:
             moved += 1
         await duplicate.delete(driver)
         return _MergedEntities(duplicate=duplicate.name, into=into.name, moved_facts=moved)
+
+    async def _update_entity_summary(self, scope: GraphScope, entity_id: str, summary: str) -> str | None:
+        graphiti = await self._graphiti_client()
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        records, _, _ = await driver.execute_query(_SET_SUMMARY_QUERY, uuid=entity_id, summary=summary)
+        return records[0]["name"] if records else None
 
     async def close(self) -> None:
         """Close the client, stop the embedded database server, and stop the graph loop."""

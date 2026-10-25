@@ -51,8 +51,9 @@ It lets a model paraphrase, omit, or invent evidence, and its own summaries woul
 ### Agents may clean their graph, never write facts into it
 
 An agent reading its graph found many mistakes and had no way to fix them; the sections below record kinds that extraction makes, such as file paths as entities and one person under several entities.
-With `knowledge_graph_edits`, the `knowledge_graph` tool also deletes a fact, deletes an entity with its facts, and merges a duplicate entity into another, which moves its facts with their sources.
+With `knowledge_graph_edits`, the `knowledge_graph` tool also deletes a fact, deletes an entity with its facts, merges a duplicate entity into another, which moves its facts with their sources, and rewrites an entity's summary.
 These edits only remove facts or move them between entities, so every remaining fact still comes from an episode and keeps its sources, and the rule above holds.
+A summary has no sources: Graphiti's model writes it from the entity's earlier summary and the facts and episodes that mention it, appending fact text while it is short and condensing it past 2,000 characters, so a deleted fact stays in it, and the agent that deleted the fact rewrites it.
 They are off by default: a shared agent's requesters, or a tool result that steers the agent, can delete what other requesters' conversations added.
 Edit calls and their results are never ingested, because they echo the graph's own facts.
 
@@ -61,6 +62,7 @@ The agent would author the content while the fact kept sources that never said i
 Rejected: edits by entity name or fact text, because names repeat, and same-name duplicates are what a merge fixes.
 Edits take ids, which lookups show only when edits are on, so read-only agents' lookups stay as short as before.
 Rejected: a separate edit tool listed in `tools`, because the lookups would still need to know about it to show ids.
+Rejected: clearing the summaries of a deleted fact's entities, which drops the condensed summary of a central entity for one wrong fact, and removing the fact's text from them, which misses the condensed ones that central entities have.
 
 Limitations: edits do not wait for ingestion, so an episode extracted into the same graph during a merge or deletion can recreate the entity it resolved against, and a later episode that states a deleted fact again adds it back.
 A merge drops the duplicate's links from episodes to entities (Graphiti's `MENTIONS` edges), which MindRoom never reads; each fact's own sources stay.

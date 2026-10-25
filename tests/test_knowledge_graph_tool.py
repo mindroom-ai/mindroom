@@ -77,8 +77,9 @@ class _Store:
                 name="Alice",
                 summary="Alice leads Atlas.",
                 facts=[FACT],
-                # A duplicate of the same name, which only its id reaches.
-                others=[_EntityRef("alice", "stray-alice-id")],
+                # Duplicates under the same name and under an alias of it, which only their ids reach.
+                others=[_EntityRef("alice", "stray-alice-id"), _EntityRef("Ali", "ali-id")],
+                exact=True,
             )
         if name == "Dan":
             return _GraphEntity(
@@ -87,6 +88,7 @@ class _Store:
                 summary="A person.",
                 facts=[],
                 others=[_EntityRef("Dana Whitfield", "whitfield-id"), _EntityRef("Dana's workspace", "workspace-id")],
+                exact=False,
             )
         return None
 
@@ -105,6 +107,10 @@ class _Store:
         if (duplicate_id, into_id) == ("stray-alice-id", "alice-id"):
             return _MergedEntities(duplicate="alice", into="Alice", moved_facts=2)
         return None
+
+    async def update_entity_summary(self, scope: GraphScope, entity_id: str, summary: str) -> str | None:
+        self.edits.append(("update_entity_summary", scope.graph_name, entity_id, summary))
+        return "Alice" if entity_id == "alice-id" else None
 
 
 @pytest.fixture
@@ -178,7 +184,7 @@ async def test_graph_entity_shows_other_close_matches(tmp_path: Path) -> None:
     exact = await tools.graph_entity("Alice")
 
     assert fuzzy.endswith("\nOther close matches: Dana Whitfield, Dana's workspace")
-    # Without ids a duplicate of the same name cannot be looked up, so it is not offered.
+    # Without ids a duplicate found under the name asked for cannot be looked up, so it is not offered.
     assert "Other close matches" not in exact
     assert "(id " not in fuzzy + exact
     assert "id: " not in fuzzy + exact
@@ -244,7 +250,7 @@ async def test_an_editing_agent_sees_the_ids_it_edits_by(tmp_path: Path) -> None
     assert f"- Alice leads Project Atlas\n  id: {FACT_ID}\n" in found
     assert exact.startswith("Alice (id alice-id): Alice leads Atlas.\n")
     assert f"id: {FACT_ID}" in exact
-    assert exact.endswith("\nOther close matches: alice (id stray-alice-id)")
+    assert exact.endswith("\nOther close matches: alice (id stray-alice-id), Ali (id ali-id)")
     assert fuzzy.endswith("\nOther close matches: Dana Whitfield (id whitfield-id), Dana's workspace (id workspace-id)")
 
 
@@ -268,6 +274,10 @@ async def test_graph_edits_change_only_the_callers_graph(tmp_path: Path, store: 
         await tools.merge_graph_entities("nope", "alice-id")
         == "'nope' or 'alice-id' is not the id of an entity in your graph."
     )
+    assert (
+        await tools.update_graph_entity_summary("alice-id", "Alice leads Atlas.") == "Updated the summary of 'Alice'."
+    )
+    assert await tools.update_graph_entity_summary("nope", "x") == "No entity in your graph has id 'nope'."
 
     assert store.edits == [
         ("delete_fact", graph, FACT_ID),
@@ -276,6 +286,8 @@ async def test_graph_edits_change_only_the_callers_graph(tmp_path: Path, store: 
         ("delete_entity", graph, "nope"),
         ("merge_entities", graph, "stray-alice-id", "alice-id"),
         ("merge_entities", graph, "nope", "alice-id"),
+        ("update_entity_summary", graph, "alice-id", "Alice leads Atlas."),
+        ("update_entity_summary", graph, "nope", "x"),
     ]
 
 

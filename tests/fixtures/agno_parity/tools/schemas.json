@@ -16880,7 +16880,7 @@
       },
       {
         "name": "graph_entity",
-        "description": "Show what the knowledge graph knows about one person, organization, project, or other entity.\nAn entity with the id ``name``, or named exactly ``name`` in any letter case, is returned, and a configured\nalias, agent key, or Matrix ID finds the entity it names; otherwise the closest match, followed by the names of\nother close matches to look up if it is not the one you meant.",
+        "description": "Show what the knowledge graph knows about one person, organization, project, or other entity.\nAn entity named exactly ``name`` in any letter case is returned, and a configured alias, agent key, or Matrix\nID finds the entity it names; otherwise the closest match, followed by the names of other close matches to look\nup if it is not the one you meant.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -16913,7 +16913,7 @@
       },
       {
         "name": "delete_graph_fact",
-        "description": "Delete a wrong fact from your knowledge graph.\nDelete a fact that never held, names the wrong person or thing, or records your own lookups instead of a fact\nabout your subjects. A fact that held and later changed is history: keep it, because newer evidence marks it\nsuperseded. A later conversation or tool result that states the fact again can add it back.",
+        "description": "Delete a wrong fact from your knowledge graph.\nDelete a fact that never held, names the wrong person or thing, or records your own lookups instead of a fact\nabout your subjects. A fact that held and later changed is history: keep it, because newer evidence marks it\nsuperseded. A later conversation or tool result that states the fact again can add it back. The summaries of\nthe entities it connects can still state it; rewrite those with `update_graph_entity_summary`.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17005,6 +17005,43 @@
           "required": [
             "duplicate_id",
             "into_id"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": false,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false,
+        "show_result": false
+      },
+      {
+        "name": "update_graph_entity_summary",
+        "description": "Replace an entity's summary, for example to remove what a fact you deleted said.\nKeep everything the old summary says that is still right; later conversations and tool results that mention\nthe entity add to the new summary.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "entity_id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "entity_id",
+            "summary"
           ]
         },
         "strict": false,
