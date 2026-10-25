@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -19,6 +20,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.message_target import MessageTarget
 from mindroom.skill_learning import library
 from mindroom.tool_system.agno_toolkits import adapt_function
@@ -33,6 +35,7 @@ from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock
 from tests.cpu_budget_helpers import cpu_budget
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping, Sequence
     from pathlib import Path
 
 
@@ -71,6 +74,29 @@ def _write_skill_script(skill_dir: Path, name: str, content: str) -> None:
     scripts_dir = skill_dir / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     (scripts_dir / name).write_text(content, encoding="utf-8")
+
+
+def _build_skills(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    roots: Sequence[Path] | None = None,
+    env: Mapping[str, str] | None = None,
+    credentials: Collection[str] = (),
+    **kwargs: Any,  # noqa: ANN401
+) -> SkillsToolkit | None:
+    """Build the toolkit with ``roots`` as the default skill roots, only ``env`` in the environment, and stored keys.
+
+    ``credentials`` names the keys a stored credential carries; without ``roots`` the default roots stay as they are.
+    """
+    runtime_paths = replace(runtime_paths, process_env=dict(env or {}), env_file_values={})
+    if credentials:
+        get_runtime_credentials_manager(runtime_paths).save_credentials("skill_test", dict.fromkeys(credentials, "set"))
+    if roots is None:
+        return build_skills_toolkit(agent_name, config, runtime_paths, **kwargs)
+    with patch.object(skills_module, "_get_default_skill_roots", return_value=list(roots)):
+        return build_skills_toolkit(agent_name, config, runtime_paths, **kwargs)
 
 
 def _base_config(skills: list[str]) -> Config:
@@ -130,13 +156,11 @@ def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
 @pytest.mark.parametrize("skill_name", ["open-knowledge-format", "agent-conversations"])
 def test_bundled_skill_loads_for_allowlisted_agent(tmp_path: Path, skill_name: str) -> None:
     """Ensure an agent that allowlists a bundled skill can load it."""
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config([skill_name]),
         _runtime_paths(tmp_path),
-        skill_roots=[skills_module._get_bundled_skills_dir()],
-        env_vars={},
-        credential_keys=set(),
+        roots=[skills_module._get_bundled_skills_dir()],
     )
 
     assert _skill_names(skills) == [skill_name]
@@ -162,13 +186,11 @@ def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
     _write_skill(tmp_path, "alpha", "Alpha skill", metadata)
 
     config = _base_config(["alpha"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
 
     assert skills is not None
@@ -182,33 +204,29 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     _write_skill(tmp_path, "envconfig", "Requires env and config", metadata)
 
     config = _base_config(["envconfig"])
-    eligible = build_skills_toolkit(
+    eligible = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={"TEST_ENV": "1"},
-        credential_keys=set(),
+        roots=[tmp_path],
+        env={"TEST_ENV": "1"},
     )
     assert _skill_names(eligible) == ["envconfig"]
 
-    ineligible = build_skills_toolkit(
+    ineligible = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(ineligible) == []
 
-    eligible_with_credentials = build_skills_toolkit(
+    eligible_with_credentials = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys={"TEST_ENV"},
+        roots=[tmp_path],
+        credentials={"TEST_ENV"},
     )
     assert _skill_names(eligible_with_credentials) == ["envconfig"]
 
@@ -224,24 +242,20 @@ def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.Mon
         return "/bin/git" if name == "git" else None
 
     monkeypatch.setattr(skills_module.shutil, "which", only_git)
-    missing = build_skills_toolkit(
+    missing = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(missing) == []
 
     monkeypatch.setattr(skills_module.shutil, "which", lambda name: f"/bin/{name}")
-    available = build_skills_toolkit(
+    available = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(available) == ["bins"]
 
@@ -257,24 +271,20 @@ def test_skill_eligibility_any_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         return "/bin/fd" if name == "fd" else None
 
     monkeypatch.setattr(skills_module.shutil, "which", only_fd)
-    eligible = build_skills_toolkit(
+    eligible = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(eligible) == ["anybins"]
 
     monkeypatch.setattr(skills_module.shutil, "which", lambda _name: None)
-    ineligible = build_skills_toolkit(
+    ineligible = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(ineligible) == []
 
@@ -288,13 +298,11 @@ def test_skill_eligibility_os_mismatch(tmp_path: Path) -> None:
     _write_skill(tmp_path, "oscheck", "OS restricted", metadata)
 
     config = _base_config(["oscheck"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(skills) == []
 
@@ -305,13 +313,11 @@ def test_skill_eligibility_always_overrides_requirements(tmp_path: Path) -> None
     _write_skill(tmp_path, "always", "Always eligible", metadata)
 
     config = _base_config(["always"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(skills) == ["always"]
 
@@ -325,13 +331,11 @@ def test_skill_eligibility_os_mismatch_wins_over_always(tmp_path: Path) -> None:
     _write_skill(tmp_path, "always-wrong-os", "Always wrong OS", metadata)
 
     config = _base_config(["always-wrong-os"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(skills) == []
 
@@ -342,13 +346,11 @@ def test_get_agent_skills_ordering(tmp_path: Path) -> None:
     _write_skill(tmp_path, "beta", "Beta skill")
 
     config = _base_config(["beta", "alpha"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
 
     assert _skill_names(skills) == ["beta", "alpha"]
@@ -359,13 +361,11 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     skill_path = _write_skill(tmp_path, "alpha", "Alpha v1")
 
     config = _base_config(["alpha"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert skills is not None
     assert _skill(skills, "alpha").description == "Alpha v1"
@@ -374,13 +374,11 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     skill_path = _write_skill(tmp_path, "alpha", "Alpha v2")
     os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
 
-    refreshed = build_skills_toolkit(
+    refreshed = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert refreshed is not None
     assert _skill(refreshed, "alpha").description == "Alpha v2"
@@ -428,13 +426,11 @@ def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:
     _write_skill(workspace_skills, "ws-skill", "Workspace skill")
 
     config = _base_config(["ws-skill"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(storage),
-        skill_roots=[tmp_path / "empty"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "empty"],
     )
     assert _skill_names(skills) == ["ws-skill"]
 
@@ -447,13 +443,11 @@ def test_empty_allowlist_autoloads_workspace_skills(tmp_path: Path) -> None:
     _write_skill(workspace_skills, "auto", "Auto-loaded workspace skill")
 
     config = _base_config([])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "global"],
     )
     assert _skill_names(skills) == ["auto"]
 
@@ -465,13 +459,11 @@ def test_omitted_allowlist_autoloads_workspace_skills(tmp_path: Path) -> None:
     workspace_skills.mkdir(parents=True)
     _write_skill(workspace_skills, "auto", "Auto-loaded workspace skill")
 
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config_with_omitted_skills(),
         _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "global"],
     )
     assert _skill_names(skills) == ["auto"]
 
@@ -482,13 +474,11 @@ def test_empty_allowlist_does_not_load_global_skills(tmp_path: Path) -> None:
     global_root.mkdir()
     _write_skill(global_root, "global", "Configured global skill")
 
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config([]),
         _runtime_paths(tmp_path / "storage"),
-        skill_roots=[global_root],
-        env_vars={},
-        credential_keys=set(),
+        roots=[global_root],
     )
     assert _skill_names(skills) == []
 
@@ -505,12 +495,10 @@ def test_workspace_skills_override_default_roots(tmp_path: Path, monkeypatch: py
     workspace_skills.mkdir(parents=True)
     _write_skill(workspace_skills, "alpha", "Workspace alpha")
 
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config(["alpha"]),
         _runtime_paths(storage),
-        env_vars={},
-        credential_keys=set(),
     )
     assert skills is not None
     assert _skill_names(skills) == ["alpha"]
@@ -525,13 +513,11 @@ def test_malformed_workspace_skill_is_skipped(tmp_path: Path) -> None:
     _write_skill(workspace_skills, "bad", "Bad metadata", "{openclaw:")
     _write_skill(workspace_skills, "good", "Good metadata")
 
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config([]),
         _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "global"],
     )
     assert _skill_names(skills) == ["good"]
 
@@ -544,13 +530,11 @@ def _workspace_skills(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _load_workspace_only(tmp_path: Path, storage: Path) -> SkillsToolkit | None:
-    return build_skills_toolkit(
+    return _build_skills(
         "code",
         _base_config([]),
         _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "global"],
     )
 
 
@@ -617,13 +601,11 @@ def test_workspace_skills_created_after_a_build_load_on_the_next_build(tmp_path:
     config = _base_config(["later"])
 
     def build() -> SkillsToolkit | None:
-        return build_skills_toolkit(
+        return _build_skills(
             "code",
             config,
             _runtime_paths(storage),
-            skill_roots=[tmp_path / "empty"],
-            env_vars={},
-            credential_keys=set(),
+            roots=[tmp_path / "empty"],
         )
 
     assert _skill_names(build()) == []
@@ -670,13 +652,11 @@ def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp
     (skill_dir / "SKILL.md").write_text("# MindRoom Dev\n\nJust markdown, no frontmatter.\n")
 
     config = _base_config(["mindroom-dev"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(skills) == ["mindroom-dev"]
     skill = _skill(skills, "mindroom-dev")
@@ -692,13 +672,11 @@ def test_skill_with_mindroom_prefix_loads(tmp_path: Path) -> None:
     _write_skill(tmp_path, "mindroom-helper", "MindRoom helper skill")
 
     config = _base_config(["mindroom-helper"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(skills) == ["mindroom-helper"]
 
@@ -709,13 +687,11 @@ def test_skill_with_empty_scripts_dir_loads(tmp_path: Path) -> None:
     (tmp_path / "empty-scripts" / "scripts").mkdir()
 
     config = _base_config(["empty-scripts"])
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         config,
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path],
     )
     assert _skill_names(skills) == ["empty-scripts"]
 
@@ -729,13 +705,11 @@ def test_skill_tools_accept_mindroom_output_path(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
 
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config(["demo"]),
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path / "skills"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "skills"],
         output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root),
     )
     assert skills is not None
@@ -771,13 +745,11 @@ def test_skill_tools_without_policy_stay_unwrapped(tmp_path: Path) -> None:
     """Without an output-file policy skill tools keep their original entrypoints."""
     _write_skill(tmp_path / "skills", "demo", "Demo skill")
 
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config(["demo"]),
         _runtime_paths(tmp_path),
-        skill_roots=[tmp_path / "skills"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "skills"],
     )
     assert skills is not None
     assert _call(skills, "get_skill_instructions", "demo")["skill_name"] == "demo"
@@ -983,13 +955,11 @@ def test_refused_workspace_skills_are_reported_with_why(tmp_path: Path, frontmat
     )
     refused: list[RefusedWorkspaceSkill] = []
 
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config([]),
         _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "global"],
         refused=refused,
     )
 
@@ -1005,13 +975,11 @@ def test_a_workspace_skills_directory_that_is_one_refused_skill_is_reported(tmp_
     (workspace_skills / "SKILL.md").write_text("---\n- not a mapping\n---\n\n# Body\n", encoding="utf-8")
     refused: list[RefusedWorkspaceSkill] = []
 
-    skills = build_skills_toolkit(
+    skills = _build_skills(
         "code",
         _base_config([]),
         _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "global"],
         refused=refused,
     )
 
@@ -1031,13 +999,11 @@ def test_refusal_reasons_cannot_bloat_the_prompt(tmp_path: Path) -> None:
     )
     refused: list[RefusedWorkspaceSkill] = []
 
-    build_skills_toolkit(
+    _build_skills(
         "code",
         _base_config([]),
         _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
+        roots=[tmp_path / "global"],
         refused=refused,
     )
 
