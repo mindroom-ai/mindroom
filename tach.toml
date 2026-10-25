@@ -3654,6 +3654,7 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.embeddings.errors",
     "mindroom.knowledge.file_memory_knowledge",
+    "mindroom.knowledge.read_protocol",
     "mindroom.logging_config",
     "mindroom.memory._shared",
     "mindroom.timing",
@@ -6103,6 +6104,7 @@ depends_on = [
     "mindroom.knowledge.collection_lifetime",
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.read_protocol",
     "mindroom.logging_config",
 ]
 visibility = ["mindroom.knowledge.manager"]

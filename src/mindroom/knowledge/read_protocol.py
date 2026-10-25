@@ -8,6 +8,8 @@ from typing import Any
 from pydantic import TypeAdapter
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
+#: The stored chunk metadata key, and so the hit ``meta_data`` key, naming the chunk's source file relative to its base.
+SOURCE_PATH_KEY = "source_path"
 
 
 @dataclass(frozen=True)
