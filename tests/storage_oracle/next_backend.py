@@ -15,7 +15,7 @@ from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
@@ -75,7 +75,9 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
+    from tests.storage_oracle.actions import Action, ScenarioKind
     from tests.storage_oracle.backend import FoldInput
+    from tests.storage_oracle.determinism import Determinism
 
 
 @dataclass(frozen=True)
@@ -294,10 +296,60 @@ def open_v2_store(database: Path) -> ConversationStore:
     return ConversationStore(database)
 
 
+def replay_view(messages: Sequence[dict[str, Any]], status: str, folded: Collection[str]) -> list[dict[str, Any]]:
+    """Return the replay view rule 5 of spec v4 3.6 stores for a run saved with ``messages`` and ``status``.
+
+    History copies are never stored, system messages only while the run is paused, and what a fold took never
+    replays.
+    """
+    return [
+        message
+        for message in messages
+        if not message.get("from_history")
+        and (status == RunStatus.paused.value or message["role"] != "system")
+        and message["id"] not in folded
+    ]
+
+
 class NextBackend(Driver):
-    """The oracle's backend for the storage v2 store."""
+    """The oracle's backend for the storage v2 store.
+
+    It keeps what each run's writes stored, so a test can check what the store shows against it: the last message
+    list a full save or a message rewrite stored, with the status rule 5 applied (``saved``), the messages each run's
+    folds took (``folded``), and each fold row's input (``folds``).
+    """
 
     store: ConversationStore
+
+    def __init__(self, root: Path, kind: ScenarioKind, determinism: Determinism) -> None:
+        self.saved: dict[str, tuple[list[dict[str, Any]], str]] = {}
+        self.folded: dict[str, set[str]] = {}
+        self.folds: dict[int, FoldInput] = {}
+        super().__init__(root, kind, determinism)
+
+    def expected_view(self, run_id: str) -> list[dict[str, Any]] | None:
+        """Return the replay view run ``run_id``'s writes leave, or None when this backend wrote none of it."""
+        if run_id not in self.saved:
+            return None
+        messages, status = self.saved[run_id]
+        return replay_view(messages, status, self.folded.get(run_id, set()))
+
+    def stored_runs(self) -> dict[str, tuple[str | None, str, int]]:
+        """Return every stored run's team run, status, and ``seq``."""
+        with closing(connect_conversation_database(self.store.path)) as connection:
+            rows = connection.execute(
+                f"SELECT run_id, parent_run_id, status, seq FROM {quote_identifier(self.names.log_runs)}",  # noqa: S608
+            ).fetchall()
+        return {run_id: (parent, status, seq) for run_id, parent, status, seq in rows}
+
+    @override
+    def apply(self, action: Action) -> object:
+        outcome = super().apply(action)
+        stored = self.stored_runs()
+        for held in (self.saved, self.folded):
+            for run_id in [run_id for run_id in held if run_id not in stored]:
+                del held[run_id]
+        return outcome
 
     @override
     def open_store(self) -> None:
@@ -315,7 +367,10 @@ class NextBackend(Driver):
         usage: bool,
         state: dict[str, object] | None,
     ) -> list[str]:
-        return [self.store.save_run(session, deepcopy(record), record_usage=usage, state=state)]
+        outcome = self.store.save_run(session, deepcopy(record), record_usage=usage, state=state)
+        if outcome == "written":
+            self.saved[record.run_id] = ([message.to_dict() for message in record.messages], record.status.value)
+        return [outcome]
 
     @override
     def save_terminal(self, session: ConversationSession, record: AnyRunRecord) -> object:
@@ -347,12 +402,18 @@ class NextBackend(Driver):
     def _rewrite(self, edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]]) -> list[AnyRunRecord]:
         """Rewrite the loaded runs' messages with ``edit`` (P3); return the runs the edit changed."""
         changed: list[AnyRunRecord] = []
+        statuses: dict[str, str] = {}
 
         def recorded(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
+            statuses.update((run.run_id, run.status.value) for run in runs)
             changed.extend(edit(runs))
             return changed
 
         self.store.rewrite_run_messages(SESSION_ID, self.kind, recorded)
+        for run in changed:
+            # Only the loaded runs store, each under its stored status.
+            if run.run_id in statuses:
+                self.saved[run.run_id] = ([message.to_dict() for message in run.messages], statuses[run.run_id])
         return changed
 
     @override
@@ -377,8 +438,19 @@ class NextBackend(Driver):
 
     @override
     def persist_delegation(self, session: ConversationSession, record: AnyRunRecord, state: DelegationState) -> object:
-        persist_delegation_state(self.store, session, record, state)
+        self._persist_delegation(session, record, state)
         return None
+
+    def _persist_delegation(
+        self,
+        session: ConversationSession,
+        record: AnyRunRecord,
+        state: DelegationState,
+    ) -> SaveOutcome | bool:
+        result = persist_delegation_state(self.store, session, record, state)
+        if result == "written":
+            self.saved[record.run_id] = ([message.to_dict() for message in record.messages], record.status.value)
+        return result
 
     @override
     def save_interrupted(
@@ -388,8 +460,26 @@ class NextBackend(Driver):
         snapshot: InterruptedReplaySnapshot,
         state: dict[str, object] | None,
     ) -> object:
-        persist_interrupted_replay_snapshot(self.store, session=session, run_id=run_id, snapshot=snapshot, state=state)
+        self._save_interrupted(session, run_id, snapshot, state)
         return None
+
+    def _save_interrupted(
+        self,
+        session: ConversationSession,
+        run_id: str,
+        snapshot: InterruptedReplaySnapshot,
+        state: dict[str, object] | None,
+    ) -> tuple[AnyRunRecord, str]:
+        record, outcome = persist_interrupted_replay_snapshot(
+            self.store,
+            session=session,
+            run_id=run_id,
+            snapshot=snapshot,
+            state=state,
+        )
+        if outcome == "written":
+            self.saved[run_id] = ([message.to_dict() for message in record.messages], record.status.value)
+        return record, outcome
 
     @override
     def discard_run(self, session: ConversationSession, run_id: str) -> object:
@@ -440,6 +530,8 @@ class NextBackend(Driver):
     def append_fold(self, session: ConversationSession, basis: FoldBasisView, summary: str, fold: FoldInput) -> bool:
         handle = basis.handle
         assert isinstance(handle, _Basis)
+        run_id = fold.record.run_id
+        had_row = run_id in self.stored_runs()
         row_id = append_summary(
             self.store,
             session_id=session.session_id,
@@ -454,7 +546,14 @@ class NextBackend(Driver):
             ),
             session=session,
         )
-        return row_id is not None
+        if row_id is None:
+            return False
+        self.folds[row_id] = fold
+        self.folded.setdefault(run_id, set()).update(message.id for message in fold.messages)
+        if not had_row:
+            # The fold stored the running run as a cancelled row holding only what it took.
+            self.saved[run_id] = ([message.to_dict() for message in fold.messages], RunStatus.cancelled.value)
+        return True
 
     @override
     def cut_edit(self, event_id: str) -> object:

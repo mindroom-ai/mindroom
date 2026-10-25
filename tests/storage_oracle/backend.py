@@ -154,6 +154,10 @@ def _assert_unique_message_ids(record: AnyRunRecord) -> None:
 class Driver(ABC):
     """Interpret the action vocabulary over one conversation, calling the backend's storage primitives."""
 
+    # Whether a fold may follow a member's pause in the same attempt. Real team runs never do: their loop sends no
+    # request after a member pauses. The recordings were made with it, so a backend replaying them keeps it.
+    folds_after_member_pause = True
+
     def __init__(self, root: Path, kind: ScenarioKind, determinism: Determinism) -> None:
         self.root = root
         self.kind = kind
@@ -829,8 +833,12 @@ class Driver(ABC):
             return "gone"
         if turn.stopped:
             return "stopped"
+        if turn.paused_member is not None and not self.folds_after_member_pause:
+            return "member-paused"
         self._exchange(turn)
         self._exchange(turn, member_paused=action.index % 7 == 5 and turn.paused_member is None)
+        if turn.paused_member is not None and not self.folds_after_member_pause:
+            return "member-paused"
         return self._fold_turn(turn, racing=action.count == 3)
 
     def _fold_turn(self, turn: _Turn, *, racing: bool, summary_accepted: bool = True) -> object:

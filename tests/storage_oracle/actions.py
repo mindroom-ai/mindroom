@@ -36,7 +36,7 @@ _SHARED_WEIGHTS = {
     "redact": 2,
     "reopen": 1,
 }
-_KIND_WEIGHTS: dict[ScenarioKind, dict[str, int]] = {
+KIND_WEIGHTS: dict[ScenarioKind, dict[str, int]] = {
     "agent": {**_SHARED_WEIGHTS, "checkpoint": 2, "cli_delegate": 1},
     "team": {**_SHARED_WEIGHTS, "member_late": 1, "team_pause_advanced": 1},
 }
@@ -86,7 +86,7 @@ def generate(seed: int, length: int) -> Scenario:
     """Return ``length`` actions drawn with ``random.Random(seed)``; every third seed is a team conversation."""
     rng = random.Random(seed)  # noqa: S311 - a reproducible sequence, not a secret
     kind: ScenarioKind = "team" if seed % 3 == 2 else "agent"
-    weights = _KIND_WEIGHTS[kind]
+    weights = KIND_WEIGHTS[kind]
     kinds = [name for name, weight in weights.items() for _ in range(weight)]
     actions: list[Action] = []
     opening = rng.random()

@@ -7,9 +7,9 @@ they compare with the recording digest for digest. A change whose effect reaches
 run the other refuses) cannot be undone that way; its mask asserts the new behavior and ends the comparison of that
 sequence (``Diverged``).
 
-To undo message differences, the backend keeps two small models of every run it saves: the message list the v2 store
-holds (rule 5 of spec v4 section 3.6), which it asserts against what v2 shows, and the one the Agno-layout store
-held, which keeps history copies and the messages a fold took until a whole-run rewrite of a loaded copy.
+To undo message differences, the backend checks every run the v2 store shows against what its writes left
+(``NextBackend.expected_view``), and keeps the message list the Agno-layout store held of each run, which kept history
+copies, and the messages a fold took until a whole-run rewrite of a loaded copy.
 """
 
 from __future__ import annotations
@@ -36,8 +36,6 @@ from tests.storage_oracle.backend import SESSION_ID
 from tests.storage_oracle.next_backend import (
     NextBackend,
     edit_cut,
-    persist_delegation_state,
-    persist_interrupted_replay_snapshot,
     redaction_cut,
 )
 
@@ -129,15 +127,6 @@ def _old_kept(messages: Sequence[dict[str, Any]], status: str) -> list[dict[str,
     return [message for message in messages if status == RunStatus.paused.value or message["role"] != "system"]
 
 
-def _v2_kept(messages: Sequence[dict[str, Any]], status: str, folded: set[str]) -> list[dict[str, Any]]:
-    """Return a run's replay view in the v2 store: rule 5 of spec v4 3.6, without the messages a fold took."""
-    return [
-        message
-        for message in _old_kept(messages, status)
-        if not message.get("from_history") and message["id"] not in folded
-    ]
-
-
 def _dicts(record: AnyRunRecord) -> list[dict[str, Any]]:
     return [message.to_dict() for message in record.messages]
 
@@ -177,10 +166,8 @@ class MaskedBackend(NextBackend):
     def __init__(self, root: Path, kind: ScenarioKind, determinism: Determinism) -> None:
         self.used: set[str] = set()
         self.diverged: Diverged | None = None
-        # The message lists each store holds of a run, and the messages its folds took.
-        self.v2_messages: dict[str, tuple[list[dict[str, Any]], str]] = {}
+        # The message list the old store held of each run.
         self.old_messages: dict[str, list[dict[str, Any]]] = {}
-        self.folded: dict[str, set[str]] = {}
         # A paused team run's members as the Agno-layout store embedded them at the team run's save.
         self.embedded: dict[str, list[dict[str, Any]]] = {}
         # Runs whose only row is the one their fold created, and fold-created runs the old store placed later.
@@ -191,8 +178,6 @@ class MaskedBackend(NextBackend):
         self.link_only: set[str] = set()
         self.delegation_only: dict[str, object] = {}
         self.replaced_covered: dict[str, dict[str, Any]] = {}
-        # Each fold row's running run and the calls the old store's segment named.
-        self.fold_calls: dict[int, tuple[str, frozenset[str]]] = {}
         super().__init__(root, kind, determinism)
 
     # What the masks read of the v2 store.
@@ -254,7 +239,6 @@ class MaskedBackend(NextBackend):
     def _wrote(self, record: AnyRunRecord, status: str | None = None) -> None:
         """Record a full save the v2 store wrote; the old store wrote it too unless the caller says otherwise."""
         run_id, stored_status = record.run_id, status or record.status.value
-        self.v2_messages[run_id] = (_dicts(record), stored_status)
         self.old_messages[run_id] = _old_kept(_dicts(record), stored_status)
         if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
             self.embedded[run_id] = [member.to_dict() for member in record.member_responses]
@@ -274,9 +258,7 @@ class MaskedBackend(NextBackend):
         """Forget what the models hold of runs the v2 store no longer has, and check the paused teams' members."""
         rows = self._rows()
         for held in (
-            self.v2_messages,
             self.old_messages,
-            self.folded,
             self.embedded,
             self.placed,
             self.delegation_only,
@@ -379,20 +361,6 @@ class MaskedBackend(NextBackend):
         self.link_only.discard(run_id)
         return ["written"]
 
-    @override
-    def _rewrite(self, edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]]) -> list[AnyRunRecord]:
-        statuses: dict[str, str] = {}
-
-        def recorded(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-            statuses.update({run.run_id: run.status.value for run in runs})
-            return edit(runs)
-
-        changed = super()._rewrite(recorded)
-        for run in changed:
-            if run.run_id in statuses:
-                self.v2_messages[run.run_id] = (_dicts(run), statuses[run.run_id])
-        return changed
-
     def _old_rewrite(self, changed: Sequence[AnyRunRecord]) -> object:
         """Record the old store's whole-run saves of the loaded copies a notice edit changed; return its outcome."""
         for run in changed:
@@ -424,7 +392,7 @@ class MaskedBackend(NextBackend):
         stored = self.store.get_run(run_id)
         key_before = (stored.metadata or {}).get(DELEGATION_STATE_KEY, _MISSING) if stored is not None else _MISSING
         covered, fenced = self._covered(run_id), self._fenced(record)
-        result = persist_delegation_state(self.store, session, record, state)
+        result = self._persist_delegation(session, record, state)
         if result == "written":
             self._wrote(record)
             return None
@@ -474,13 +442,7 @@ class MaskedBackend(NextBackend):
         retained = {tool.tool_call_id for tool in (*snapshot.completed_tools, *snapshot.interrupted_tools)}
         old_folded = retained & self._old_folded_calls(run_id)
         v2_folded = retained & folded_tool_call_ids(self.store, session_id=session.session_id, run_id=run_id)
-        record, outcome = persist_interrupted_replay_snapshot(
-            self.store,
-            session=session,
-            run_id=run_id,
-            snapshot=snapshot,
-            state=state,
-        )
+        record, outcome = self._save_interrupted(session, run_id, snapshot, state)
         if outcome != "written":
             return None
         old_messages = self.old_messages.get(run_id)
@@ -516,21 +478,13 @@ class MaskedBackend(NextBackend):
         run_id = fold.record.run_id
         had_row = run_id in self._rows()
         appended = super().append_fold(session, basis, summary, fold)
-        if not appended:
-            return appended
-        row = latest_row(self.store, session_id=SESSION_ID, scope_key=self.scope.key)
-        assert row is not None
-        assert row.fold_run_id == run_id
-        self.fold_calls[row.id] = (run_id, _segment_call_ids(fold))
-        self.folded.setdefault(run_id, set()).update(message.id for message in fold.messages)
-        if not had_row:
+        if appended and not had_row:
             stored = self.store.get_run(run_id)
             assert stored is not None
             assert stored.status is RunStatus.cancelled
             assert (stored.messages, stored.tools, stored.requirements) == ([], None, None)
             assert stored.metadata == fold.record.metadata
             self.fold_rows.add(run_id)
-            self.v2_messages[run_id] = ([message.to_dict() for message in fold.messages], RunStatus.cancelled.value)
             self.used.add("fold_stores_cancelled_row")
         return appended
 
@@ -613,19 +567,22 @@ class MaskedBackend(NextBackend):
     # Observables as the old store showed them.
 
     def _old_folded_calls(self, run_id: str) -> frozenset[str]:
+        """Return the calls the old store's segments of ``run_id`` named, from the fold rows that still exist."""
         rows = self._fold_row_ids()
         return frozenset().union(
-            *(calls for row_id, (owner, calls) in self.fold_calls.items() if owner == run_id and row_id in rows),
+            *(
+                _segment_call_ids(fold)
+                for row_id, fold in self.folds.items()
+                if fold.record.run_id == run_id and row_id in rows
+            ),
         )
 
     def _old_run(self, data: dict[str, Any], *, loaded: bool) -> dict[str, Any]:
         """Return one run dict the v2 store shows as the old store showed it, after checking its v2 messages."""
         run_id = data["run_id"]
         folded = self.folded.get(run_id, set())
-        if run_id in self.v2_messages:
-            messages, status = self.v2_messages[run_id]
-            expected = _v2_kept(messages, status, folded)
-            assert data["messages"] == expected, f"v2 messages of {run_id}: {data['messages']} != {expected}"
+        expected = self.expected_view(run_id)
+        assert expected is None or data["messages"] == expected, f"v2 messages of {run_id}: {data['messages']}"
         data = deepcopy(self.replaced_covered.get(run_id, data))
         if run_id in self.old_messages:
             held = self.old_messages[run_id]
