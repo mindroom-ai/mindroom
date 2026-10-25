@@ -119,14 +119,11 @@ class _Counts:
 def _add_counts(target: _Counts, source: _Counts) -> None:
     """Add the token counters and any cost of ``source`` into ``target`` in place."""
     target.tokens = target.tokens + source.tokens
-    if source.cost is not None:
-        target.cost = (target.cost or 0) + source.cost
+    target.cost = _sum_optional(target.cost, source.cost)
 
 
 def _sum_optional(left: float | None, right: float | None) -> float | None:
-    # TODO(simplify): costs sum two ways: ``__add__`` by this rule and ``_add_counts`` with a 0.0 total read as unset,
-    # so sums differ in int or float type and a zero's sign. Sum every cost one way.
-    # Stored data would notice only in those edge cases.
+    """Add two amounts a usage report may leave unset, such as costs and durations; None when neither is set."""
     if left is None:
         return right
     if right is None:
@@ -222,7 +219,6 @@ class RunMetrics(_Counts):
     time_to_first_token: float | None = None
     duration: float | None = None
     details: dict[str, list[ModelMetrics]] | None = None
-    additional_metrics: dict[str, Any] | None = None
 
     def add(self, usage: MessageMetrics, *, model_id: str, provider: str) -> None:
         """Count one request's usage under ``details["model"]`` for ``(provider, model_id)`` and in the totals.
@@ -277,10 +273,6 @@ class RunMetrics(_Counts):
                     totals = result.details.setdefault(model_type, [])
                     for entry in entries:
                         _count_model(totals, entry)
-        if self.additional_metrics is not None or other.additional_metrics is not None:
-            additional: dict[str, Any] = dict(self.additional_metrics or {})
-            _merge_numeric(additional, other.additional_metrics)
-            result.additional_metrics = additional
         return result
 
 
@@ -289,12 +281,11 @@ class SessionMetrics(_Counts):
     """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row.
 
     ``count_run`` adds a run's token counters, in total and per model, which is the usage the session's ledger records;
-    the run's cost, timing, and provider metrics are not counted, and a cost or additional metrics that stored totals
-    already hold are kept as they are.
+    the run's cost, timing, and provider metrics are not counted, and a cost that stored totals already hold is kept as
+    it is.
     """
 
     details: dict[str, list[ModelMetrics]] | None = None
-    additional_metrics: dict[str, Any] | None = None
 
     def count_run(self, metrics: RunMetrics, *, replacing: RunMetrics | None) -> None:
         """Add one run's token counters, first taking back ``replacing``, what an earlier save of the same run added."""
