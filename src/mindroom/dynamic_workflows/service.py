@@ -53,8 +53,9 @@ class DynamicWorkflowService:
         """Start and complete one workflow run on the current event loop.
 
         Store file work runs on threads, and each call finishes before the run continues or handles a
-        cancellation, so the loop stays free, the run's records are written in order, and a cancelled run
-        ends cancelled.
+        cancellation, so the loop stays free and the run's records are written in order.
+        A run cancelled before its final record is written ends cancelled; one cancelled while that record
+        is written keeps it.
         """
         preparing = asyncio.create_task(
             asyncio.to_thread(
@@ -130,11 +131,7 @@ class DynamicWorkflowService:
         )
         try:
             done, _pending = await asyncio.wait({execution_task}, timeout=timeout_seconds)
-            if not done:
-                execution_task.cancel()
-                execution_task.add_done_callback(_discard_late_task_result)
-                return await self._fail(run, _workflow_timeout_message(timeout_seconds))
-            execution = execution_task.result()
+            execution = execution_task.result() if done else None
         except asyncio.CancelledError:
             execution_task.cancel()
             execution_task.add_done_callback(_discard_late_task_result)
@@ -142,6 +139,10 @@ class DynamicWorkflowService:
             raise
         except Exception as exc:
             return await self._fail(run, failure_text(exc))
+        if not done:
+            execution_task.cancel()
+            execution_task.add_done_callback(_discard_late_task_result)
+            return await self._fail(run, _workflow_timeout_message(timeout_seconds))
         return await run_blocking_until_complete(self._complete_or_fail, run, execution)
 
     async def _fail(self, run: DynamicWorkflowRun, error: str) -> DynamicWorkflowRun:
