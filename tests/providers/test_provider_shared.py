@@ -211,7 +211,7 @@ def test_unknown_extra_kwargs_fail_with_the_accepted_keys() -> None:
     """Unknown keys fail at construction and the message lists what the settings type takes."""
     with pytest.raises(
         ValueError,
-        match=r"Unsupported extra_kwargs for provider 'test': retries, zzz\. Accepted keys: ",
+        match=r"Unsupported extra_kwargs for provider 'test': retries, zzz; remove them\. Accepted keys: ",
     ) as info:
         settings_from_extra_kwargs(_Settings, {"zzz": 1, "retries": 2, "timeout": 3}, provider="test")
 

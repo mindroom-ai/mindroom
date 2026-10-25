@@ -125,7 +125,7 @@ def test_gemini_rejects_unknown_extra_kwargs(tmp_path: Path) -> None:
 
     with pytest.raises(
         ValueError,
-        match=r"Unsupported extra_kwargs for provider 'google': url_contxt\. Accepted keys: ",
+        match=r"Unsupported extra_kwargs for provider 'google': url_contxt; remove them\. Accepted keys: ",
     ):
         gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
 

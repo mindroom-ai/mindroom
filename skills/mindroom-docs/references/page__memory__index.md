@@ -368,5 +368,5 @@ Save from the Memory page to write the changes to `config.yaml`.
 
 ## Agno Learning
 
-Agno Learning is retired: configs that still set `learning` or `learning_mode` load with a warning and the values are ignored.
+Agno Learning is retired: a config that sets `learning` or `learning_mode` on an agent or in `defaults` fails validation with `Unknown key`, so remove them.
 Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.

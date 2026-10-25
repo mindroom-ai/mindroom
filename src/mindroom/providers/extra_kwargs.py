@@ -53,7 +53,7 @@ def settings_from_extra_kwargs[T: DataclassInstance](
     allowed = declared if accepted is None else declared & set(accepted)
     if unknown := sorted(values.keys() - allowed):
         msg = (
-            f"Unsupported extra_kwargs for provider {provider!r}: {', '.join(unknown)}. "
+            f"Unsupported extra_kwargs for provider {provider!r}: {', '.join(unknown)}; remove them. "
             f"Accepted keys: {', '.join(sorted(allowed))}"
         )
         raise ValueError(msg)

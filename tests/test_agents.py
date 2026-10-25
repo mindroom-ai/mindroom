@@ -37,7 +37,6 @@ from mindroom.agents import (
     create_agent,
 )
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
-from mindroom.config import legacy_fields
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -46,7 +45,7 @@ from mindroom.config.agent import (
 )
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
@@ -4505,66 +4504,21 @@ def test_config_rejects_retired_auto_resume_after_restart() -> None:
         )
 
 
-def _agent_from_config_with_retired_field(
-    tmp_path: Path,
-    field: str,
-    value: object,
-) -> tuple[Config, list[Path], list[dict[str, object]]]:
-    """Load a config that sets a retired field in defaults and on two agents, build one, and list its databases."""
-    legacy_fields._warn_retired_field.cache_clear()
-    with capture_logs() as logs:
-        config = Config.model_validate(
+@pytest.mark.parametrize("field", ["learning", "learning_mode", "compress_tool_results"])
+def test_config_rejects_retired_agno_fields_and_says_to_remove_them(field: str) -> None:
+    """A retired Agno field in defaults or on an agent fails validation with a message naming it and saying to remove it."""
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(
             {
-                "defaults": {"tools": [], field: value},
-                "agents": {
-                    "general": {"display_name": "GeneralAgent", field: value},
-                    "summary": {"display_name": "SummaryAgent", field: value},
-                },
-                "models": {"default": {"provider": "openai", "id": "gpt-6-luna"}},
+                "defaults": {field: True},
+                "agents": {"general": {"display_name": "GeneralAgent", field: True}},
             },
         )
-        config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-        _create_agent_for_test("general", config=config)
-    db_files = sorted(agent_state_root_path(tmp_path, "general").rglob("*.db"))
-    warnings = [log for log in logs if log["log_level"] == "warning" and log.get("field") == field]
-    return config, db_files, warnings
 
-
-def test_config_ignores_retired_learning_with_one_warning(tmp_path: Path) -> None:
-    """A config that still enables Agno Learning loads with one warning, and its agents open no learning database."""
-    config, db_files, warnings = _agent_from_config_with_retired_field(tmp_path, "learning", value=True)
-
-    assert len(warnings) == 1
-    assert "learning" not in config.authored_model_dump()["defaults"]
-    assert "learning" not in config.authored_model_dump()["agents"]["general"]
-    assert db_files == [agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"]
-
-
-def test_config_ignores_retired_learning_mode_with_one_warning(tmp_path: Path) -> None:
-    """A config that still picks a Learning mode loads with one warning, and its agents run without Learning."""
-    config, db_files, warnings = _agent_from_config_with_retired_field(
-        tmp_path,
-        "learning_mode",
-        value="agentic",
-    )
-
-    assert len(warnings) == 1
-    assert "learning_mode" not in config.authored_model_dump()["defaults"]
-    assert "learning_mode" not in config.authored_model_dump()["agents"]["general"]
-    assert db_files == [agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"]
-
-
-def test_config_ignores_retired_compress_tool_results_with_one_warning(tmp_path: Path) -> None:
-    """A config that still compresses tool results loads with one warning, and the field leaves the authored config."""
-    config, _, warnings = _agent_from_config_with_retired_field(
-        tmp_path,
-        "compress_tool_results",
-        value=True,
-    )
-
-    assert len(warnings) == 1
-    assert "compress_tool_results" not in config.authored_model_dump()["defaults"]
-    assert "compress_tool_results" not in config.authored_model_dump()["agents"]["general"]
+    assert sorted(iter_config_validation_messages(exc_info.value)) == [
+        (f"agents → general → {field}", f"Unknown key '{field}'; remove it"),
+        (f"defaults → {field}", f"Unknown key '{field}'; remove it"),
+    ]
 
 
 def test_config_rejects_legacy_agent_toolkit_fields_with_bundle_safe_hint() -> None:

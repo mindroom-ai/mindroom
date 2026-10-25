@@ -209,7 +209,13 @@ def iter_config_validation_messages(
 ) -> list[tuple[str, str]]:
     """Return user-facing validation messages from one config validation exception."""
     if isinstance(exc, ValidationError):
-        return [(" → ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
+        return [
+            (
+                " → ".join(str(x) for x in error["loc"]),
+                f"Unknown key '{error['loc'][-1]}'; remove it" if error["type"] == "extra_forbidden" else error["msg"],
+            )
+            for error in exc.errors(include_context=False)
+        ]
     if isinstance(exc, ConfigRuntimeValidationError):
         return [("config", str(exc))]
     if isinstance(exc, ConfigIncludeError):
