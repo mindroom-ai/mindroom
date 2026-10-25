@@ -117,7 +117,7 @@ Stop MindRoom before editing it by hand; a file MindRoom cannot read fails confi
 MindRoom's own accounts and the internal `mindroom_user` never get an agent.
 
 The dashboard's Settings page edits `personal_agents` next to Personal rooms.
-Its `personal_rooms.agent` dropdown lists configured agents only, so type a template name in YAML, after which the dropdown shows it and saves it unchanged.
+Its `personal_rooms.agent` dropdown lists the configured agents and the `personal_agents` templates.
 
 ## Switching From a Single Personal-Room Agent
 

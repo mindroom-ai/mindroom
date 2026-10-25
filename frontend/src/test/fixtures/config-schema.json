@@ -3746,11 +3746,11 @@
       "description": "One private room per eligible human, managed by a selected agent.",
       "properties": {
         "agent": {
-          "description": "Agent that owns and answers in personal rooms",
+          "description": "Agent, or personal_agents template, that owns and answers in personal rooms",
           "title": "Agent",
           "type": "string",
           "x-mindroom": {
-            "reference": "agent"
+            "reference": "personal_room_agent"
           }
         },
         "onboarding_rooms": {

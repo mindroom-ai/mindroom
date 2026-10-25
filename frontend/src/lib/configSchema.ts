@@ -2,7 +2,8 @@
 // The backend emits Pydantic's model_json_schema(); this module normalizes its
 // nullable, $ref, and union shapes into one node kind per form widget.
 
-export type ReferenceKind = "model" | "agent" | "room" | "tool";
+export type ReferenceKind =
+  "model" | "agent" | "personal_room_agent" | "room" | "tool";
 
 export type ReferenceOptions = Record<ReferenceKind, string[]>;
 
