@@ -3986,32 +3986,6 @@ def test_create_agent_private_root_requires_execution_identity(
     assert not (tmp_path / "mind_data").exists()
 
 
-def test_create_agent_disabled_tool_names_omit_resolved_tools(
-    tmp_path: Path,
-) -> None:
-    """Call-scoped agent construction can omit mutating tools from borrowed agents."""
-    config = _test_config()
-    config.agents["general"].tools = ["memory", "calculator"]
-    runtime_paths = _runtime_paths(tmp_path)
-    config = _bind_runtime_paths(config, runtime_paths)
-    built_tools: list[str] = []
-
-    def fake_build_agent_toolkit(tool_name: str, **_kwargs: object) -> None:
-        built_tools.append(tool_name)
-
-    with patch("mindroom.agents.build_agent_toolkit", side_effect=fake_build_agent_toolkit):
-        create_agent(
-            "general",
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=None,
-            disabled_tool_names=frozenset({"memory"}),
-        )
-
-    assert "calculator" in built_tools
-    assert "memory" not in built_tools
-
-
 def test_tool_function_filter_prunes_resolved_functions() -> None:
     """Channel policies filter actual functions without dropping a safe toolkit peer."""
     safe = Function(name="safe", entrypoint=lambda: "safe")

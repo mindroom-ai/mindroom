@@ -58,6 +58,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message
 from tests.fakes.scripted_model import ScriptedModel
@@ -645,6 +646,38 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
 
 
 @pytest.mark.asyncio
+async def test_prepare_agent_execution_context_sizes_history_against_the_model_the_turn_runs_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History budgets come from the turn's own model and window, not from the agent's configured default."""
+    config, runtime_paths = _bound_agent_config(tmp_path, tools=())
+    build = _build(config, runtime_paths)
+    prepare_scope_history = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+
+    await prepare_agent_execution_context(
+        make_turn_context("test_agent"),
+        scope_context=None,
+        build=build,
+        system_message=prompt_for_turn(build),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=ResolvedRuntimeModel(model_name="large", context_window=48_000),
+    )
+
+    resolved_inputs = prepare_scope_history.await_args.kwargs["resolved_inputs"]
+    assert (resolved_inputs.active_model_name, resolved_inputs.active_context_window) == ("large", 48_000)
+
+
+@pytest.mark.asyncio
 async def test_prepare_agent_execution_context_sizes_history_by_the_requests_static_cost(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -680,6 +713,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
         runtime_paths=runtime_paths,
         config=config,
         current_sender_id="@alice:localhost",
+        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
     )
 
     tools = prepare_run_tools(build.spec).specs()
@@ -794,6 +828,7 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
         runtime_paths=runtime_paths,
         config=config,
         current_sender_id="@alice:localhost",
+        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
     )
 
     assert [message.content for message in prepared.turn.context] == [
@@ -820,6 +855,8 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         max_message_length=200,
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -898,6 +935,8 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
             history,
             response_sender_id="@mindroom_code:localhost",
             config=_config(),
+            estimate_static_tokens_fn=estimate_text_tokens,
+            render_messages_text_fn=render_prepared_messages_text,
         ).in_request_order(),
     )
     messages = _build_thread_history_messages(
@@ -950,6 +989,8 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
         current_event_id="$current",
         member_display_names={"@alice:localhost": "Banana Man"},
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -1092,6 +1133,8 @@ def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_p
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert len(messages) == 3
@@ -1141,6 +1184,8 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1188,6 +1233,8 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1216,6 +1263,8 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
         ],
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1252,6 +1301,8 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1286,6 +1337,8 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1335,6 +1388,8 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1373,6 +1428,8 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1403,6 +1460,8 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1423,6 +1482,8 @@ def test_fallback_thread_history_drops_marker_only_messages_from_context() -> No
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert len(messages) == 1
@@ -1442,6 +1503,8 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1469,6 +1532,8 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1769,6 +1834,8 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
         [reply, _hook_message("deep_research done · confident · 2 rounds", "$done")],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
+        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [

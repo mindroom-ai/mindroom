@@ -47,7 +47,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
-from tests.conftest import install_model_providers
+from tests.conftest import install_model_providers, prepare_agent_and_prompt_for_test
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     ScriptedProvider,
@@ -548,7 +548,7 @@ async def test_prepared_minimal_prompt_moves_optional_enrichment_to_context(
         ),
         system_enrichment_items=(EnrichmentItem(key="system_plugin", text="optional system " * 100),),
     )
-    prepared = await ai._prepare_agent_and_prompt(
+    prepared = await prepare_agent_and_prompt_for_test(
         ctx,
         prompt="actual current user request",
         runtime_paths=runtime.runtime_paths,

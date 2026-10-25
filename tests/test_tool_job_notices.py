@@ -517,6 +517,9 @@ async def test_only_a_standard_reply_opens_with_the_job_note(
                 refresh_scheduler=None,
                 turn_recorder=None,
                 pipeline_timing=None,
+                eager_deferred_tools=False,
+                supports_native_tool_approval=False,
+                reusable_build=None,
             )
         assert ("background_jobs" in seen[0]) is (agent_mode == "standard")
     finally:

@@ -219,8 +219,8 @@ def test_persona_with_tools_hides_generated_functions_from_the_agent() -> None:
     owned = Function(name="read_file")
     owned.owning_toolkit = "file"
 
-    configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None, frozenset())
-    authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None, frozenset())
+    configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None)
+    authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None)
 
     assert configured_filter is None
     assert authored_filter is not None

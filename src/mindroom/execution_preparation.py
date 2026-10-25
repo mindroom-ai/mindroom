@@ -445,8 +445,8 @@ def _build_thread_history_messages(
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
     static_token_budget: int | None = None,
-    estimate_static_tokens_fn: Callable[[str], int] | None = None,
-    render_messages_text_fn: Callable[[Sequence[Message]], str] | None = None,
+    estimate_static_tokens_fn: Callable[[str], int],
+    render_messages_text_fn: Callable[[Sequence[Message]], str],
     attachment_context: _ThreadAttachmentContext | None = None,
 ) -> TurnMessages:
     """Return the canonical turn for fallback full-thread replay."""
@@ -475,11 +475,7 @@ def _build_thread_history_messages(
         attachment_context=attachment_context,
         member_display_names=member_display_names,
     )
-    if (
-        static_token_budget is not None
-        and estimate_static_tokens_fn is not None
-        and render_messages_text_fn is not None
-    ):
+    if static_token_budget is not None:
         return _messages_with_capped_context(
             with_context,
             context_messages,
@@ -839,7 +835,7 @@ async def prepare_agent_execution_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
-    resolved_runtime_model: ResolvedRuntimeModel | None = None,
+    resolved_runtime_model: ResolvedRuntimeModel,
     compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
@@ -850,19 +846,14 @@ async def prepare_agent_execution_context(
 ) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call.
 
-    ``system_message`` is the turn's rendered system message, which sizes the static part of every request.
+    ``system_message`` is the turn's rendered system message, which sizes the static part of every request, and
+    ``resolved_runtime_model`` the model the turn runs on, whose window bounds its history.
     """
     agent_name = ctx.entity_label
     response_sender = None
     if not include_openai_compat_guidance:
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
-    runtime_model = resolved_runtime_model or config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        runtime_paths=runtime_paths,
-    )
     static_token_estimator = build_static_token_estimator(
         system_message,
         prepare_run_tools(build.spec).specs(),
@@ -877,8 +868,8 @@ async def prepare_agent_execution_context(
             config=config,
             entity_name=agent_name,
             history_settings=build.history_settings,
-            active_model_name=runtime_model.model_name,
-            active_context_window=runtime_model.context_window,
+            active_model_name=resolved_runtime_model.model_name,
+            active_context_window=resolved_runtime_model.context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
         )
         return await prepare_scope_history(
@@ -910,7 +901,7 @@ async def prepare_agent_execution_context(
         estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=_fallback_static_token_budget(
-            context_window=runtime_model.context_window,
+            context_window=resolved_runtime_model.context_window,
             replay_window_tokens=compaction_config.replay_window_tokens,
             reserve_tokens=compaction_config.reserve_tokens,
         ),

@@ -18,7 +18,7 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent
-from mindroom.ai import _prepare_agent_and_prompt, ai_response
+from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
@@ -43,7 +43,13 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
-from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message, seed_session
+from tests.conftest import (
+    bind_runtime_paths,
+    make_turn_context,
+    make_visible_message,
+    prepare_agent_and_prompt_for_test,
+    seed_session,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
@@ -192,7 +198,7 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
     ]
 
     with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
-        prepared = await _prepare_agent_and_prompt(
+        prepared = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -234,7 +240,7 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
     monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
-        await _prepare_agent_and_prompt(
+        await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", room_id="!room:localhost"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -274,7 +280,7 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
     )
 
     with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
-        prepared = await _prepare_agent_and_prompt(
+        prepared = await prepare_agent_and_prompt_for_test(
             turn,
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -305,7 +311,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=memory)),
         _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -358,7 +364,7 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
         patch("mindroom.execution_preparation.build_static_token_estimator", _TextOnlyEstimator),
         _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -392,7 +398,7 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
     ]
 
     with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context(
                 "test_agent",
                 reply_to_event_id="$current",
@@ -438,7 +444,7 @@ async def test_prepare_agent_and_prompt_trims_oversized_full_thread_fallback(
     ]
 
     with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -474,7 +480,7 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
         execution_identity=None,
     )
     with _no_memory():
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", session_id="session-1"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -497,7 +503,7 @@ async def test_prepare_agent_and_prompt_keeps_matrix_current_sender_when_persist
     config, runtime_paths = _make_config(tmp_path)
 
     with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=True, native_history=None)):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", requester_id="@alice:localhost"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -524,7 +530,7 @@ async def test_prepare_agent_and_prompt_reports_no_compaction_when_none_occurred
         _no_memory(),
         patch("mindroom.ai.prepare_agent_execution_context", new=AsyncMock(return_value=prepared_execution)),
     ):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -595,7 +601,7 @@ async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_pa
     )
     assert scope_context is not None
     with _no_memory(), patch("mindroom.execution_preparation.read_scope_seen_event_ids", new=recording_read):
-        await _prepare_agent_and_prompt(
+        await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", reply_to_event_id="event-2"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -632,7 +638,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     )
     assert scope_context is not None
     with _no_memory():
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", reply_to_event_id="event-3"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,

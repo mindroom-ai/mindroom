@@ -99,7 +99,7 @@ def test_empty_tool_list_means_no_tools() -> None:
     persona = inline_persona("P", [], None, None)
     assert persona.tools == ()
     assert not persona_allows((), "file", "read_file")
-    _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None, frozenset())
+    _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None)
     assert disabled == frozenset({"file", "shell", "dynamic_tools"})
 
 
@@ -397,7 +397,6 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
         ("gmail.search_emails", "file"),
         lambda: ["file", "gmail", "shell"],
         caller_filter,
-        frozenset({"memory"}),
     )
 
     assert visible is not None
@@ -405,8 +404,8 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
     assert not visible(_function("write_file", "file"))
     assert not visible(_function("generated", None))
     assert visible(_function("get_skill_instructions", None))
-    assert disabled == frozenset({"memory", "shell", "dynamic_tools"})
-    assert persona_tool_policy(None, lambda: ["file"], caller_filter, frozenset()) == (caller_filter, frozenset())
+    assert disabled == frozenset({"shell", "dynamic_tools"})
+    assert persona_tool_policy(None, lambda: ["file"], caller_filter) == (caller_filter, frozenset())
 
 
 def test_function_level_cap_admits_only_named_functions() -> None:
@@ -669,7 +668,7 @@ def test_profile_cannot_combine_with_inline_knowledge(tmp_path: Path) -> None:
 
 def test_persona_tool_policy_keeps_knowledge_search() -> None:
     """An explicit tool list still offers knowledge search, which loads only when the persona keeps a base."""
-    visible, _disabled = persona_tool_policy(("file",), lambda: ["file"], None, frozenset())
+    visible, _disabled = persona_tool_policy(("file",), lambda: ["file"], None)
 
     assert visible is not None
     assert visible(_function("search_knowledge_base", None))

@@ -63,6 +63,7 @@ import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
 import mindroom.scheduling.tasks as scheduling_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
+from mindroom import ai as mindroom_ai
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import ResponseTurnContext
 from mindroom.authorization import _ReplyAuthorizationDecision
@@ -501,6 +502,47 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
 RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
+
+
+async def prepare_agent_and_prompt_for_test(
+    ctx: ResponseTurnContext,
+    *,
+    prompt: str,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    **options: Any,  # noqa: ANN401
+) -> Any:  # noqa: ANN401
+    """Prepare one agent turn through ``ai._prepare_agent_and_prompt`` with a plain top-level turn's options.
+
+    ``options`` names the turn options a test sets; every other one takes the value a fresh Matrix reply passes.
+    """
+    turn_options: dict[str, Any] = {
+        "scope_context": None,
+        "thread_history": None,
+        "knowledge": None,
+        "include_interactive_questions": True,
+        "tool_function_filter": None,
+        "execution_identity": None,
+        "compaction_lifecycle": None,
+        "delegation_depth": 0,
+        "refresh_scheduler": None,
+        "include_openai_compat_guidance": False,
+        "model_prompt": None,
+        "current_timestamp_ms": None,
+        "current_event_id": None,
+        "current_prompt_is_structured": False,
+        "pipeline_timing": None,
+        "eager_deferred_tools": False,
+        "supports_native_tool_approval": False,
+        "reusable_build": None,
+    }
+    return await mindroom_ai._prepare_agent_and_prompt(
+        ctx,
+        prompt=prompt,
+        runtime_paths=runtime_paths,
+        config=config,
+        **(turn_options | options),
+    )
 
 
 async def prepare_history_for_run_for_test(
