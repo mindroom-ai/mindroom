@@ -1105,6 +1105,37 @@ async def test_script_broker_reports_why_a_call_failed(
 
 
 @pytest.mark.asyncio
+async def test_script_broker_names_a_textless_rejection_by_its_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit that rejects its arguments without text fails the call with the exception's type name."""
+
+    class RejectingToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            raise ValueError
+
+        def close(self) -> None:
+            pass
+
+        def add(self, a: int, b: int) -> int:
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, RejectingToolkit)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(call_id="rejected"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {"kind": "call_rejected", "message": "ValueError", "retryable": False}
+
+
+@pytest.mark.asyncio
 async def test_cancelled_sync_connect_closes_only_after_connect_returns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

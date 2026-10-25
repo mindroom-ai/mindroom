@@ -560,7 +560,11 @@ class ScriptToolBroker:
             return await self._publish_async(
                 call,
                 state=ScriptCallState.FAILED,
-                error={"kind": "call_rejected", "message": sanitize_failure_text(str(exc)), "retryable": False},
+                error={
+                    "kind": "call_rejected",
+                    "message": sanitize_failure_text(failure_text(exc)),
+                    "retryable": False,
+                },
             )
         except BaseException as exc:
             state = ScriptCallState.INDETERMINATE if execution_started else ScriptCallState.FAILED

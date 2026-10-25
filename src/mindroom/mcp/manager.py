@@ -1972,10 +1972,8 @@ class MCPServerManager:
     @classmethod
     def _runtime_exception_message(cls, exc: BaseException) -> str:
         if isinstance(exc, BaseExceptionGroup):
-            nested_messages = [cls._runtime_exception_message(nested) for nested in exc.exceptions]
-            nested_text = "; ".join(message for message in nested_messages if message)
-            if nested_text:
-                return f"{exc.message}: {nested_text}"
+            nested_text = "; ".join(cls._runtime_exception_message(nested) for nested in exc.exceptions)
+            return f"{exc.message}: {nested_text}"
         return failure_text(exc)
 
     async def _oauth_transport_rejection(

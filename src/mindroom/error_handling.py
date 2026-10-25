@@ -169,7 +169,7 @@ def _provider_error_message(error: ProviderError, safe_error: str, runtime_paths
 
 
 def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: RuntimePaths | None) -> str:
-    error_str = str(error).lower()
+    error_str = failure_text(error).lower()
     if _MISSING_PROVIDER_KEY_PATTERN.search(error_str):
         return _missing_provider_key_message(runtime_paths)
     provider = _extract_provider_from_error(error)
