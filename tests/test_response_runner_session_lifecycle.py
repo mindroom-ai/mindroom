@@ -205,7 +205,13 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
         )
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
             async with response_span(coordinator, request, placeholder_event_id="$thinking"):
-                await coordinator._process_and_respond(request, run_id="run-1")
+                await coordinator._process_and_respond(
+                    request,
+                    run_id="run-1",
+                    on_delivery_started=None,
+                    attempt_run_id_collector=None,
+                    runtime=await coordinator.prepare_response_runtime(request),
+                )
 
     coordinator._persist_interrupted_recorder.assert_called()
 
@@ -375,9 +381,21 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
 
         await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            ),
         )
         await coordinator._process_and_respond(
             _response_request(prompt="Hello again", user_id="@alice:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello again", user_id="@alice:localhost", thread_id="$thread-root"),
+            ),
         )
 
     assert sequence == [
@@ -449,6 +467,12 @@ async def test_process_and_respond_applies_session_started_agent_and_room_scopes
 
         await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            ),
         )
 
     assert sequence == ["ai", "agent:general:general:!test:localhost:$thread-root"]
@@ -500,6 +524,12 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
 
         await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            ),
         )
 
     assert sequence == ["ai"]
@@ -638,6 +668,12 @@ async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> N
 
         await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            ),
         )
 
     assert sequence == ["ai", "slow", "fast:$thread-root"]
@@ -705,6 +741,12 @@ async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path
 
         await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            ),
         )
 
     assert sequence == ["ai", "failed", "fast:$thread-root", "deliver"]
@@ -780,6 +822,12 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
         generation = await coordinator._process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            ),
         )
 
     assert generation.delivery.event_id == "$terminal"
@@ -841,6 +889,12 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 
         generation = await coordinator._process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            ),
         )
 
     assert generation.delivery.event_id == "$terminal"
@@ -898,7 +952,13 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
             coordinator,
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         ) as request:
-            generation = await coordinator._process_and_respond_streaming(request, run_id="run-1")
+            generation = await coordinator._process_and_respond_streaming(
+                request,
+                run_id="run-1",
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(request),
+            )
 
     assert generation.delivery.event_id == "$streamed"
     persisted_run = _persisted_run(storage)
@@ -986,6 +1046,12 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
 
         generation = await coordinator._process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            ),
         )
 
     assert generation.delivery.event_id == "$terminal"
@@ -1061,7 +1127,13 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
             existing_event_id="$thinking",
         )
         async with response_span(coordinator, request, placeholder_event_id="$thinking"):
-            generation = await coordinator._process_and_respond(request)
+            generation = await coordinator._process_and_respond(
+                request,
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(request),
+            )
 
     assert generation.delivery.terminal_status == "cancelled"
     assert sequence == [
@@ -1135,6 +1207,15 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
                 replace(
                     _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
                     existing_event_id="$thinking",
+                ),
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(
+                    replace(
+                        _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+                        existing_event_id="$thinking",
+                    ),
                 ),
             )
 
@@ -1758,7 +1839,13 @@ async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_contex
             base_request,
             response_envelope=replace(base_request.response_envelope, target=target),
         )
-        await coordinator._process_and_respond(request)
+        await coordinator._process_and_respond(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(request),
+        )
 
 
 @pytest.mark.asyncio
@@ -1795,7 +1882,13 @@ async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logg
             base_request,
             response_envelope=replace(base_request.response_envelope, target=target),
         )
-        await coordinator._process_and_respond_streaming(request)
+        await coordinator._process_and_respond_streaming(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(request),
+        )
 
 
 @pytest.mark.asyncio
@@ -1832,6 +1925,17 @@ async def test_process_and_respond_passes_current_and_model_prompt_to_ai(
                 model_prompt="Hello with context",
                 user_id="@alice:localhost",
                 thread_id="$thread-root",
+            ),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(
+                    prompt="Hello",
+                    model_prompt="Hello with context",
+                    user_id="@alice:localhost",
+                    thread_id="$thread-root",
+                ),
             ),
         )
 
@@ -1871,6 +1975,17 @@ async def test_process_and_respond_streaming_passes_current_and_model_prompt_to_
                 model_prompt="Hello with context",
                 user_id="@alice:localhost",
                 thread_id="$thread-root",
+            ),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(
+                _response_request(
+                    prompt="Hello",
+                    model_prompt="Hello with context",
+                    user_id="@alice:localhost",
+                    thread_id="$thread-root",
+                ),
             ),
         )
 

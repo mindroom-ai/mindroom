@@ -5056,7 +5056,13 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond(_plain_request(_target()))
+        generation = await coordinator._process_and_respond(
+            _plain_request(_target()),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+        )
 
     assert generation.delivery.event_id == "$response"
     deliver_final.assert_awaited_once()
@@ -5107,7 +5113,13 @@ async def test_non_streaming_final_delivery_exposes_fixed_shutdown_phase(tmp_pat
                 source_event_id=request.response_envelope.source_event_id,
                 room_id=request.room_id,
             ):
-                await coordinator._process_and_respond(request)
+                await coordinator._process_and_respond(
+                    request,
+                    run_id=None,
+                    on_delivery_started=None,
+                    attempt_run_id_collector=None,
+                    runtime=await coordinator.prepare_response_runtime(request),
+                )
 
         response_task = coordinator.track_inbox_response(
             respond_in_span(),
@@ -5162,7 +5174,13 @@ async def test_process_shutdown_skips_non_streaming_replay_persistence(
         ) as persist,
     ):
         task = asyncio.create_task(
-            coordinator._process_and_respond(_plain_request(_target())),
+            coordinator._process_and_respond(
+                _plain_request(_target()),
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+            ),
         )
         await generation_started.wait()
         request_task_cancel(task, process_shutdown=True)
@@ -5247,7 +5265,13 @@ async def test_non_streaming_approval_pause_is_not_logged_as_response_error(tmp_
         ),
         pytest.raises(ResponsePausedForApproval) as raised,
     ):
-        await coordinator._process_and_respond(_plain_request(_target()))
+        await coordinator._process_and_respond(
+            _plain_request(_target()),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+        )
 
     assert raised.value is pause
     coordinator.deps.logger.exception.assert_not_called()
@@ -5289,7 +5313,13 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator._process_and_respond(request, runtime=runtime)
+        await coordinator._process_and_respond(
+            request,
+            runtime=runtime,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+        )
 
     assert active_models == ["large"]
 
@@ -5341,7 +5371,13 @@ async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Pa
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator._process_and_respond(_plain_request(_target()))
+        await coordinator._process_and_respond(
+            _plain_request(_target()),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+        )
 
     assert found == [{"$older": None}]
 
@@ -5413,7 +5449,13 @@ async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond(request)
+        generation = await coordinator._process_and_respond(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(request),
+        )
 
     assert generation.delivery is delivery
     assert timing.metadata["first_visible_kind"] == "placeholder"
@@ -5448,7 +5490,13 @@ async def test_non_streaming_failed_edit_preserving_old_body_does_not_mark_subst
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond(request)
+        generation = await coordinator._process_and_respond(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(request),
+        )
 
     assert generation.delivery is delivery
     assert "first_substantive_reply" not in timing.marks
@@ -5480,7 +5528,13 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond_streaming(_plain_request(_target()))
+        generation = await coordinator._process_and_respond_streaming(
+            _plain_request(_target()),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+        )
 
     assert generation.delivery.event_id == "$stream"
     deliver_stream.assert_awaited_once()
@@ -5552,6 +5606,10 @@ async def test_process_shutdown_unwraps_streaming_cancellation_without_persisten
         task = asyncio.create_task(
             coordinator._process_and_respond_streaming(
                 _plain_request(_target()),
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
             ),
         )
         await generation_started.wait()
@@ -5591,7 +5649,13 @@ async def test_process_shutdown_exposes_retained_streaming_response_phase(
         new=AsyncMock(side_effect=retained_stream),
     ):
         response_task = coordinator.track_inbox_response(
-            coordinator._process_and_respond_streaming(_plain_request(_target())),
+            coordinator._process_and_respond_streaming(
+                _plain_request(_target()),
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+            ),
             name="test_retained_streaming_response_phase",
             recovery_proof_ready=lambda: True,
             room_id=_target().room_id,
@@ -5650,7 +5714,13 @@ async def test_process_shutdown_exposes_retained_final_delivery_phase(
         ),
     ):
         response_task = coordinator.track_inbox_response(
-            coordinator._process_and_respond_streaming(_plain_request(_target())),
+            coordinator._process_and_respond_streaming(
+                _plain_request(_target()),
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+            ),
             name="test_retained_final_delivery_phase",
             recovery_proof_ready=lambda: True,
             room_id=_target().room_id,
@@ -5713,6 +5783,10 @@ async def test_process_shutdown_skips_stream_terminalization_after_cancelled_gen
         task = asyncio.create_task(
             coordinator._process_and_respond_streaming(
                 _plain_request(_target()),
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
             ),
         )
         await generation_started.wait()
@@ -5825,7 +5899,13 @@ async def test_streaming_response_reuses_prepared_room_model_after_override_chan
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator._process_and_respond_streaming(request, runtime=runtime)
+        await coordinator._process_and_respond_streaming(
+            request,
+            runtime=runtime,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+        )
 
     assert active_models == [expected_model]
 
@@ -5862,6 +5942,9 @@ async def test_streaming_approval_pause_reaches_outer_lifecycle(tmp_path: Path) 
         await coordinator._process_and_respond_streaming(
             _plain_request(_target()),
             on_delivery_started=visible_events.append,
+            run_id=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
         )
 
     assert raised.value is pause
@@ -5922,7 +6005,13 @@ async def test_streaming_placeholder_only_delivery_does_not_mark_substantive_rep
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond_streaming(request)
+        generation = await coordinator._process_and_respond_streaming(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(request),
+        )
 
     assert generation.delivery is delivery
     assert timing.metadata["first_visible_kind"] == "placeholder"
@@ -5979,7 +6068,13 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
             _plain_request(_target()),
             model_prompt="hello\n\n<mindroom_message_context>persist me</mindroom_message_context>",
         )
-        generation = await coordinator._process_and_respond_streaming(request)
+        generation = await coordinator._process_and_respond_streaming(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(request),
+        )
 
     # The failure does not propagate: it is logged and becomes a finalized error outcome.
     assert generation.delivery is error_outcome
@@ -6055,7 +6150,13 @@ async def test_streaming_midstream_failure_persists_partial_off_event_loop(
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator._process_and_respond_streaming(_plain_request(_target()))
+        await coordinator._process_and_respond_streaming(
+            _plain_request(_target()),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+        )
 
 
 @pytest.mark.asyncio

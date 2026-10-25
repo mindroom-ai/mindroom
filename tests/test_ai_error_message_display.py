@@ -160,7 +160,13 @@ async def _respond_in_span(
     """Respond in the request's reply span, then end the span as the locked turn does, so any note lands."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     async with response_span(runner, request, placeholder_event_id=placeholder_event_id) as handle:
-        generation = await runner._process_and_respond(request)
+        generation = await runner._process_and_respond(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await runner.prepare_response_runtime(request),
+        )
         if not handle.exited:
             await runner._end_span_after_outcome(
                 handle,
@@ -275,6 +281,12 @@ class TestAIErrorDisplay:
                 # Call the method with an existing_event_id
                 await bot._response_runner._process_and_respond_streaming(
                     _response_request(existing_event_id="$thinking_msg"),
+                    run_id=None,
+                    on_delivery_started=None,
+                    attempt_run_id_collector=None,
+                    runtime=await bot._response_runner.prepare_response_runtime(
+                        _response_request(existing_event_id="$thinking_msg"),
+                    ),
                 )
 
                 # Verify the delivery gateway was asked to stream the response.
@@ -319,7 +331,13 @@ class TestAIErrorDisplay:
 
             runner = unwrap_extracted_collaborator(bot._response_runner)
             async with _claimed_reply_span(runner, _response_request()) as request:
-                outcome = await runner._process_and_respond(request)
+                outcome = await runner._process_and_respond(
+                    request,
+                    run_id=None,
+                    on_delivery_started=None,
+                    attempt_run_id_collector=None,
+                    runtime=await runner.prepare_response_runtime(request),
+                )
 
         assert outcome.delivery.terminal_status == "cancelled"
         assert outcome.delivery.failure_reason == "cancelled_by_user"
@@ -342,7 +360,13 @@ class TestAIErrorDisplay:
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
         async with _claimed_reply_span(runner, _response_request()) as request:
-            outcome = await runner._process_and_respond(request)
+            outcome = await runner._process_and_respond(
+                request,
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await runner.prepare_response_runtime(request),
+            )
 
         assert outcome.delivery.terminal_status == "cancelled"
         assert outcome.delivery.failure_reason == "cancelled_by_user"
@@ -362,7 +386,13 @@ class TestAIErrorDisplay:
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
         async with _claimed_reply_span(runner, _response_request()) as request:
-            outcome = await runner._process_and_respond_streaming(request)
+            outcome = await runner._process_and_respond_streaming(
+                request,
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await runner.prepare_response_runtime(request),
+            )
 
         assert bot.client.room_send.await_args.kwargs["content"]["body"] == "Partial answer"
         assert outcome.delivery.terminal_status == "cancelled"

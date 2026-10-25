@@ -2818,7 +2818,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity | None,
         run_id: str | None,
         is_team: bool,
-        response_event_id: str | None = None,
+        response_event_id: str | None,
     ) -> None:
         """Persist one recorder's interrupted snapshot once, first marking a still-pending recorder interrupted."""
         if recorder.outcome == "pending":
@@ -2846,7 +2846,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity | None,
         run_id: str | None,
         is_team: bool,
-        response_event_id: str | None = None,
+        response_event_id: str | None,
     ) -> None:
         """Persist interrupted replay state without blocking the event loop."""
         offload = create_background_task(
@@ -5050,10 +5050,10 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
-        existing_event_id: str | None = None,
-        user_id: str | None = None,
-        on_cancelled: Callable[[str], None] | None = None,
-        show_stop_button: bool = True,
+        existing_event_id: str | None,
+        user_id: str | None,
+        on_cancelled: Callable[[str], None] | None,
+        show_stop_button: bool,
     ) -> None:
         """Run one response-generation attempt with cancellation support."""
         await ResponseAttemptRunner(
@@ -5372,23 +5372,17 @@ class ResponseRunner:
             )
             raise
 
-    async def _process_and_respond(  # noqa: C901, PLR0912
+    async def _process_and_respond(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
-        run_id: str | None = None,
+        run_id: str | None,
+        on_delivery_started: Callable[[str | None], None] | None,
+        attempt_run_id_collector: list[str] | None,
+        runtime: _PreparedResponseRuntime,
         response_kind: str = "ai",
-        on_delivery_started: Callable[[str | None], None] | None = None,
-        attempt_run_id_collector: list[str] | None = None,
-        runtime: _PreparedResponseRuntime | None = None,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a response without streaming."""
-        if runtime is None:
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("response_runtime_start")
-            runtime = await self.prepare_response_runtime(request)
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
         response_identity = self._response_identity(request, response_kind=response_kind)
         lifecycle = self._build_lifecycle(
@@ -5508,19 +5502,13 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        run_id: str | None = None,
+        run_id: str | None,
+        on_delivery_started: Callable[[str | None], None] | None,
+        attempt_run_id_collector: list[str] | None,
+        runtime: _PreparedResponseRuntime,
         response_kind: str = "ai",
-        on_delivery_started: Callable[[str | None], None] | None = None,
-        attempt_run_id_collector: list[str] | None = None,
-        runtime: _PreparedResponseRuntime | None = None,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a streamed response."""
-        if runtime is None:
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("response_runtime_start")
-            runtime = await self.prepare_response_runtime(request)
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
         response_identity = self._response_identity(request, response_kind=response_kind)
         lifecycle = self._build_lifecycle(

@@ -732,6 +732,12 @@ class TestUserIdPassthrough:
 
             await coordinator._process_and_respond(
                 _response_request(prompt="Hello", user_id="@alice:localhost"),
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(
+                    _response_request(prompt="Hello", user_id="@alice:localhost"),
+                ),
             )
 
             mock_ai.assert_called_once()
@@ -784,6 +790,12 @@ class TestUserIdPassthrough:
 
             await coordinator._process_and_respond_streaming(
                 _response_request(prompt="Hello", user_id="@bob:localhost"),
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await coordinator.prepare_response_runtime(
+                    _response_request(prompt="Hello", user_id="@bob:localhost"),
+                ),
             )
 
             mock_stream.assert_called_once()

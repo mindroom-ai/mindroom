@@ -140,10 +140,16 @@ async def _in_span(
     placeholder_event_id: str | None = None,
     **kwargs: object,
 ) -> _ResponseGenerationOutcome:
-    """Run one response call in the request's reply span, as the locked turn runs it."""
+    """Run one response call in the request's reply span, as the locked turn runs it, with its prepared runtime.
+
+    ``kwargs`` names the delivery options a test sets; the others are those of a reply nobody watches.
+    """
     runner = unwrap_extracted_collaborator(bot._response_runner)
     async with response_span(runner, request, placeholder_event_id=placeholder_event_id):
-        return await respond(request, **kwargs)
+        options: dict[str, object] = {"run_id": None, "on_delivery_started": None, "attempt_run_id_collector": None}
+        if "runtime" not in kwargs:
+            options["runtime"] = await runner.prepare_response_runtime(request)
+        return await respond(request, **(options | kwargs))
 
 
 @pytest.fixture

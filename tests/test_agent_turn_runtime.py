@@ -1256,7 +1256,13 @@ async def _respond_through_runner(
     run_ids: list[str] = []
     respond = runner._process_and_respond_streaming if streaming else runner._process_and_respond
     async with response_span(runner, request):
-        outcome = await respond(request, attempt_run_id_collector=run_ids)
+        outcome = await respond(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=run_ids,
+            runtime=await runner.prepare_response_runtime(request),
+        )
     return outcome, run_ids
 
 

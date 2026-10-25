@@ -496,6 +496,27 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
                 ),
                 system_enrichment_items=system_items,
             ),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await bot._response_runner.prepare_response_runtime(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
+                    thread_history=[],
+                    prompt="Please reply",
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!room:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Please reply",
+                        user_id="@user:localhost",
+                    ),
+                    system_enrichment_items=system_items,
+                ),
+            ),
         )
 
     assert generation.delivery.event_id == "$response"
@@ -553,7 +574,13 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         ),
     ):
         async with response_span(runner, request):
-            generation = await runner._process_and_respond_streaming(request)
+            generation = await runner._process_and_respond_streaming(
+                request,
+                run_id=None,
+                on_delivery_started=None,
+                attempt_run_id_collector=None,
+                runtime=await runner.prepare_response_runtime(request),
+            )
 
     assert generation.delivery.event_id == "$response"
     assert generation.delivery.response_text == "stream chunk"

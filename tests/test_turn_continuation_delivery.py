@@ -188,7 +188,13 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
         patch.object(DeliveryGateway, "deliver_final", new=spy_deliver_final),
         patch_response_runner_module(ai_response=fake_ai_response, typing_indicator=_noop_typing),
     ):
-        generation = await coordinator._process_and_respond(_plain_request(_target()))
+        generation = await coordinator._process_and_respond(
+            _plain_request(_target()),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+        )
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
@@ -285,7 +291,13 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
         patch.object(DeliveryGateway, "finalize_streamed_response", new=spy_finalize),
         patch_response_runner_module(stream_agent_response=fake_stream_agent_response, typing_indicator=_noop_typing),
     ):
-        generation = await coordinator._process_and_respond_streaming(_plain_request(_target()))
+        generation = await coordinator._process_and_respond_streaming(
+            _plain_request(_target()),
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
+        )
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
