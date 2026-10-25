@@ -495,9 +495,16 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fails", [False, True])
-async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, fails: bool) -> None:
-    """Generator output and failures settle before their execution resources close."""
+@pytest.mark.parametrize(
+    ("failure", "error_text"),
+    [(None, None), ("text", "iteration failed"), ("no text", "TimeoutError")],
+)
+async def test_generator_result_finishes_inside_owned_operation(
+    tmp_path: Path,
+    failure: str | None,
+    error_text: str | None,
+) -> None:
+    """Generator output and failures settle before their execution resources close; a failure without text names its type."""
     started, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def generated() -> AsyncIterator[ToolResult | str]:
@@ -505,9 +512,11 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
             yield "event text"
             started.set()
             await release.wait()
-            if fails:
+            if failure == "text":
                 msg = "iteration failed"
                 raise ValueError(msg)
+            if failure == "no text":
+                raise TimeoutError
             yield ToolResult(content="picture", images=[AgnoImage(content=b"image")])
         finally:
             closed.set()
@@ -534,11 +543,11 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
             signal.clear()
             result = await runtime.wait(job_id, owner=owner, depth=0)
             assert closed.is_set()
-            assert result.job.status == ("failed" if fails else "completed")
+            assert result.job.status == ("failed" if failure else "completed")
             payload = await read_result_payload(runtime, result.job)
-            if fails:
-                assert payload.error == "iteration failed"
-                assert result.job.result == "iteration failed"
+            if failure:
+                assert payload.error == error_text
+                assert result.job.result == error_text
             else:
                 assert isinstance(payload.value, ToolValue)
                 assert payload.value.content == "event textpicture"

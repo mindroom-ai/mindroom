@@ -263,6 +263,11 @@ async def run_tool_call(
         _CURRENT_CALL.reset(token)
 
 
+def failure_text(error: BaseException) -> str:
+    """Return what the model reads of a failed call: the exception's text, or its type name when it has none."""
+    return str(error) or type(error).__name__
+
+
 async def execute_tool_call(
     function: ToolFunction,
     arguments: Mapping[str, Any] | None,
@@ -272,15 +277,15 @@ async def execute_tool_call(
 ) -> ToolOutcome:
     """Run one tool call as ``run_tool_call`` does and return what the model should read.
 
-    Any exception other than cancellation becomes a failed outcome whose content is the exception's text, or its type
-    name when it has none, as ``TimeoutError`` has none. The run stops after the call when the function always stops
-    it, or when this call returned an outcome that does, as minimal mode's Bash does after a control tool it ran.
+    Any exception other than cancellation becomes a failed outcome whose content is its ``failure_text``. The run
+    stops after the call when the function always stops it, or when this call returned an outcome that does, as
+    minimal mode's Bash does after a control tool it ran.
     """
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
         return ToolOutcome(
-            content=str(error) or type(error).__name__,
+            content=failure_text(error),
             stop_after_call=function.stop_after_call,
             is_error=True,
         )
@@ -363,6 +368,7 @@ __all__ = [
     "ToolOutcome",
     "current_tool_call",
     "execute_tool_call",
+    "failure_text",
     "parse_tool_arguments",
     "run_tool_call",
 ]
