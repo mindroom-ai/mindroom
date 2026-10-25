@@ -68,7 +68,7 @@ def _refuse_network(*_args: object, **_kwargs: object) -> None:
 
 
 @contextmanager
-def _offline() -> Iterator[None]:
+def offline() -> Iterator[None]:
     """Refuse every connection, and keep Google's SDKs from probing for cloud credentials or a metadata server."""
     with (
         tempfile.TemporaryDirectory(prefix="golden-gcloud-") as gcloud_config,
@@ -203,7 +203,7 @@ def main() -> None:
     structlog.configure(processors=[], logger_factory=structlog.ReturnLoggerFactory())
     logging.disable(logging.CRITICAL)
     warnings.simplefilter("ignore")
-    with _offline():
+    with offline():
         changed = regenerate()
     root = Path.cwd()
     for path in changed:

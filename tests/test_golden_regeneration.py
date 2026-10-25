@@ -7,13 +7,21 @@ Rebuilding every registered tool takes too long for the suite, so the tool schem
 
 from __future__ import annotations
 
+import socket
 from typing import TYPE_CHECKING
 
 import pytest
 
 from tests.agno_parity import regenerate_goldens
 from tests.agno_parity.golden_files import render, write
-from tests.providers.golden_support import FIXTURE_ROOT, golden_id, hide_provider_environment
+from tests.providers.golden_support import (
+    FIXTURE_ROOT,
+    golden_id,
+    golden_request,
+    hide_provider_environment,
+    load_golden,
+    output_schema_from_golden,
+)
 from tests.tool_system.agno_parity_support import ARGUMENTS_PATH
 
 if TYPE_CHECKING:
@@ -69,3 +77,47 @@ def test_the_knowledge_and_event_goldens_regenerate_byte_for_byte(family: Callab
     """Each file the family writes holds exactly what it regenerates."""
     for path, golden in family().items():
         assert render(golden) == path.read_text(encoding="utf-8"), path
+
+
+def test_regenerating_writes_every_family_and_lists_the_files_it_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every family's goldens are written, and only the files whose text changed are listed."""
+    unchanged = tmp_path / "unchanged.json"
+    unchanged.write_text(render({"same": True}), encoding="utf-8")
+    families = ("provider_goldens", "prompt_goldens", "tool_goldens", "knowledge_goldens", "event_goldens")
+    for name in families:
+        monkeypatch.setattr(regenerate_goldens, name, lambda name=name: {tmp_path / f"{name}.json": {"family": name}})
+    monkeypatch.setattr(regenerate_goldens, "event_goldens", lambda: {unchanged: {"same": True}})
+
+    changed = regenerate_goldens.regenerate()
+
+    assert changed == [tmp_path / f"{name}.json" for name in families[:-1]]
+    assert [(tmp_path / f"{name}.json").read_text(encoding="utf-8") for name in families[:-1]] == [
+        render({"family": name}) for name in families[:-1]
+    ]
+
+
+def test_nothing_connects_while_the_goldens_regenerate() -> None:
+    """Every connection and name lookup is refused, so no provider or service is reached."""
+    with regenerate_goldens.offline(), socket.socket() as connection:
+        with pytest.raises(OSError, match="refuses network connections"):
+            connection.connect(("127.0.0.1", 9))
+        with pytest.raises(OSError, match="refuses network connections"):
+            socket.getaddrinfo("example.org", 443)
+
+
+def test_a_golden_input_message_with_a_storage_flag_is_refused() -> None:
+    """Input messages are turns, so a storage-only key such as ``from_history`` fails before anything is sent."""
+    golden = load_golden(FIXTURE_ROOT / "anthropic" / "system_history.json")
+    golden["input"]["messages"][1]["from_history"] = True
+
+    with pytest.raises(AssertionError, match="storage-only keys"):
+        golden_request(golden["input"])
+
+
+def test_an_output_schema_that_changed_since_its_golden_is_refused() -> None:
+    """A golden's recorded JSON schema must still be its class's, so a changed schema fails instead of replaying."""
+    with pytest.raises(AssertionError, match="no longer matches"):
+        output_schema_from_golden({"model": "mindroom.routing:_RoutingSuggestion", "json_schema": {}})
