@@ -1,10 +1,11 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Responses API request bodies and event parsing for the OpenAI and Codex routes.
 
-Stored responses continue with ``previous_response_id`` while the request's system text is the one the chain holds;
-``store: false`` responses, portable replay, and a changed system text send the history explicitly, with ordered
-output items and encrypted reasoning so a later request can replay a tool loop exactly. A streamed turn counts only
-when ``response.completed`` arrives.
+Stored responses continue with ``previous_response_id`` while the request's system text is the one the chain holds.
+``store: false`` responses and portable replay send the history explicitly, with ordered output items and encrypted
+reasoning so a later request can replay a tool loop exactly. A changed system text on a stored route without
+portable replay resends the history rebuilt from its text and calls, without reasoning, because those responses
+record neither ordered output nor reasoning. A streamed turn counts only when ``response.completed`` arrives.
 """
 
 from __future__ import annotations
@@ -143,7 +144,7 @@ def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> 
     # Legacy format: a stored Responses reply, an assistant message whose ``provider_data`` records a ``response_id``
     # but no ``mindroom_system_sha256`` and whose ``mindroom_response_stored`` is not false. An unstored reply records
     # no digest by design and is not legacy.
-    # Last legacy release: v2026.10.499; replacement: unreleased, which records the digest on every stored response.
+    # Last legacy release: v2026.10.501; replacement: unreleased, which records the digest on every stored response.
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once, with the current system text, and continues the response it stores from then on.
     # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_system_digest_replays_once
@@ -160,7 +161,9 @@ def responses_replay(
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
     Portable replay, an unstored request, and a history whose latest response was not stored or holds other system
-    text send the history explicitly with its reasoning; a stored request without a stored response sends it without.
+    text send the history explicitly, each reply with the ordered output and reasoning it recorded; a stored reply
+    recorded neither, so it is rebuilt without reasoning. A stored request without a stored response sends the
+    history without reasoning.
     """
     route = native_compaction.route if native_compaction is not None else None
     history = native_replay_messages(messages, route)
