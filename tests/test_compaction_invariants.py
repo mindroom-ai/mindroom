@@ -427,6 +427,7 @@ async def test_generate_compaction_summary_sends_the_prompt_and_input_as_one_req
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
         timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        on_usage=None,
     )
 
     assert summary == "recorded summary"
@@ -458,6 +459,7 @@ async def test_generate_compaction_summary_refuses_a_summary_that_did_not_finish
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            on_usage=None,
         )
 
 
@@ -470,6 +472,7 @@ async def test_generate_compaction_summary_accepts_a_finished_summary(stop_reaso
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
         timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        on_usage=None,
     )
 
     assert summary == "durable summary ended cleanly."
@@ -1010,6 +1013,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            on_usage=None,
         )
 
 

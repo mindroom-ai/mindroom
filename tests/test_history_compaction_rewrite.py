@@ -213,6 +213,7 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
         compacted_runs=runs,
         max_input_tokens=1_000_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
     assert len(full_runs) == len(runs)
 
@@ -222,6 +223,7 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
         compacted_runs=runs,
         max_input_tokens=tight_budget,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert 0 < len(included_runs) < len(runs)
@@ -250,6 +252,7 @@ def test_build_summary_input_leaves_the_stored_runs_unchanged() -> None:
         compacted_runs=[run],
         max_input_tokens=1_000_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert run.messages == stored
@@ -1112,6 +1115,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1121,6 +1125,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1866,6 +1871,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
                 compacted_runs=list(working_session.runs or []),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1874,6 +1880,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
+            token_estimator=estimate_compaction_input_tokens,
         )[1]
         == []
     )
@@ -1961,6 +1968,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
                 compacted_runs=list(session.runs or []),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1969,6 +1977,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
+            token_estimator=estimate_compaction_input_tokens,
         )[1]
         == []
     )
@@ -2036,6 +2045,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
         session=working_session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     summary_input_budget = next(
         budget
@@ -2046,6 +2056,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -2055,6 +2066,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1

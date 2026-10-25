@@ -51,8 +51,8 @@ def estimate_prompt_visible_history_tokens(
     session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
+    replay_estimator: PortableReplayEstimator | None,
     native_route: str | None = None,
-    replay_estimator: PortableReplayEstimator | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run.
 
@@ -217,7 +217,7 @@ def plan_replay_that_fits(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
-    replay_estimator: PortableReplayEstimator | None = None,
+    replay_estimator: PortableReplayEstimator | None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
     summary_tokens = estimate_summary_tokens(session)
@@ -283,7 +283,7 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
-    replay_estimator: PortableReplayEstimator | None = None,
+    replay_estimator: PortableReplayEstimator | None,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0

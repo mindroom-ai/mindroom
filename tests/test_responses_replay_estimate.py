@@ -128,6 +128,8 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
             plan=resolved.execution_plan,
             force_compact_before_next_run=False,
             current_history_tokens=tokens,
+            allow_native_compaction=True,
+            summary_tokens=0,
         )
         assert decision.mode == "none", (tokens, decision.reason)
         assert 77 < tokens < 2000
@@ -480,12 +482,14 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> 
         scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
+        replay_estimator=None,
     )
     with_summary = estimate_prompt_visible_history_tokens(
         session=_session("session", runs=runs, summary=ScopeSummary(text="S" * 400, updated_at=datetime.now(UTC))),
         scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
+        replay_estimator=None,
     )
 
     assert with_summary == without_summary
@@ -548,6 +552,7 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         session=session,
         scope=_SCOPE,
         history_settings=inputs.history_settings,
+        replay_estimator=None,
     )
 
     prepared = await prepare_scope_history(
@@ -558,6 +563,8 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         config=config,
         scope_context=ScopeSessionContext(scope=_SCOPE, storage=storage, session=session, session_id="session-1"),
         allow_native_compaction=False,
+        compaction_lifecycle=None,
+        pipeline_timing=None,
     )
     final = finalize_history_preparation(prepared_scope_history=prepared, config=config, static_prompt_tokens=0)
 

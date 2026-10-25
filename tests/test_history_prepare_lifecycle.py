@@ -56,6 +56,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
@@ -576,6 +577,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
 
@@ -594,12 +596,14 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         session=after_first_session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     assert (
         estimate_prompt_visible_history_tokens(
             session=session,
             scope=scope,
             history_settings=history_settings,
+            replay_estimator=None,
         )
         > replay_budget
     )
@@ -714,6 +718,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
 
@@ -860,6 +865,8 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
 
     assert prepared.compaction_decision.mode == "none"
@@ -910,6 +917,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         session=session,
         scope=scope,
         history_settings=_ALL_HISTORY_SETTINGS,
+        replay_estimator=None,
     )
     trigger_budget = history_tokens // 2
     hard_budget = history_tokens * 2
@@ -951,6 +959,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
             allow_native_compaction=allow_native_compaction,
+            pipeline_timing=None,
         )
 
     persisted = storage.load_session("session-1", "agent")
@@ -976,6 +985,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
             session=persisted,
             scope=scope,
             history_settings=_ALL_HISTORY_SETTINGS,
+            replay_estimator=None,
         )
         <= trigger_budget
     )
@@ -1025,6 +1035,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
                 max_input_tokens=budget,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 9
@@ -1038,11 +1049,13 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         session=after_first_session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     assert before_tokens > replay_budget
 
@@ -1128,6 +1141,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
             session=current_run_session,
             scope=scope,
             history_settings=history_settings,
+            replay_estimator=None,
         )
         > summary_only_tokens
     )
@@ -1195,6 +1209,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
 
@@ -1213,6 +1228,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         session=after_first_session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
@@ -1322,6 +1338,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1331,6 +1348,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs[1:],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1913,6 +1931,7 @@ async def _prepare_with_reported_usage(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
@@ -1949,6 +1968,8 @@ async def _prepare_with_reported_usage(
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
     return prepared, estimate, lifecycle
 

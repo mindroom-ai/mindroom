@@ -178,10 +178,10 @@ async def prepare_scope_history(
     non_prompt_tokens: int,
     runtime_paths: RuntimePaths,
     config: Config,
-    scope_context: ScopeSessionContext | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-    allow_native_compaction: bool = True,
+    scope_context: ScopeSessionContext | None,
+    compaction_lifecycle: CompactionLifecycle | None,
+    pipeline_timing: DispatchPipelineTiming | None,
+    allow_native_compaction: bool,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning.
 

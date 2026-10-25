@@ -150,6 +150,7 @@ def test_compaction_policy_classifies_every_branch(
         force_compact_before_next_run=force,
         current_history_tokens=history_tokens,
         allow_native_compaction=allow_native,
+        summary_tokens=0,
     )
 
     assert (decision.mode, decision.reason, decision.fitted_replay_tokens) == expected
@@ -206,6 +207,8 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
             plan=_make_execution_plan(),
             force_compact_before_next_run=False,
             current_history_tokens=12_001,
+            allow_native_compaction=True,
+            summary_tokens=0,
         ),
         compaction_reply_outcome="none",
         replay_plan=ResolvedReplayPlan(

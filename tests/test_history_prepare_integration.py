@@ -41,7 +41,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens, stable_serialize
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import (
     bind_runtime_paths,
@@ -826,6 +826,7 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
         compacted_runs=persisted.runs,
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
     assert included_runs == persisted.runs
     assert "turn context" not in summary_input

@@ -601,6 +601,8 @@ async def prepare_history_for_run_for_test(
         "runtime_paths": runtime_paths,
         "config": config,
         "compaction_lifecycle": compaction_lifecycle,
+        "pipeline_timing": None,
+        "allow_native_compaction": True,
     }
     if storage is not None and session_id is not None:
         persisted_session = session

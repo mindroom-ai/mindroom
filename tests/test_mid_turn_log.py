@@ -502,5 +502,10 @@ def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: 
     assert is_scope_summary(built[0])
     assert built[1].content == "Task B"
     assert [message.content for message in built[-3:]] == ["Task A", "A done", "Task C"]
-    planned = estimate_prompt_visible_history_tokens(session=session, scope=_SCOPE, history_settings=_ALL_HISTORY)
+    planned = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=_SCOPE,
+        history_settings=_ALL_HISTORY,
+        replay_estimator=None,
+    )
     assert estimate_request_messages_tokens([m for m in built if m.from_history], replay_estimator=None) == planned

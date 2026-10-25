@@ -91,8 +91,8 @@ def classify_compaction_decision(  # noqa: PLR0911
     plan: ResolvedHistoryExecutionPlan,
     force_compact_before_next_run: bool,
     current_history_tokens: int | None,
-    allow_native_compaction: bool = True,
-    summary_tokens: int = 0,
+    allow_native_compaction: bool,
+    summary_tokens: int,
 ) -> CompactionDecision:
     """Classify compaction as none or required before the next reply.
 

@@ -100,6 +100,7 @@ def test_a_summary_only_plan_replays_the_summary_without_runs() -> None:
         session=_owned_session(_SUMMARY, runs=False),
         scope=_AGENT_SCOPE,
         history_settings=_ALL_HISTORY,
+        replay_estimator=None,
     )
 
     plan = plan_replay_that_fits(
@@ -108,6 +109,7 @@ def test_a_summary_only_plan_replays_the_summary_without_runs() -> None:
         history_settings=_ALL_HISTORY,
         available_history_budget=summary_tokens,
         current_history_tokens=summary_tokens + 1_000,
+        replay_estimator=None,
     )
     history = scope_history_messages(
         session.runs,
@@ -130,11 +132,13 @@ def test_replay_estimate_counts_the_rendered_summary_once() -> None:
         session=_owned_session(None),
         scope=_AGENT_SCOPE,
         history_settings=_ALL_HISTORY,
+        replay_estimator=None,
     )
     with_summary = estimate_prompt_visible_history_tokens(
         session=_owned_session(_SUMMARY),
         scope=_AGENT_SCOPE,
         history_settings=_ALL_HISTORY,
+        replay_estimator=None,
     )
 
     rendered = str(compaction_summary_message(_SUMMARY, run_local=False).content)
@@ -163,6 +167,7 @@ def test_request_estimate_matches_the_replay_estimate_for_the_same_messages() ->
         session=session,
         scope=_AGENT_SCOPE,
         history_settings=_ALL_HISTORY,
+        replay_estimator=None,
     )
 
 

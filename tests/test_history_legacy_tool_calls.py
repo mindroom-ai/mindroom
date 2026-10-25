@@ -18,6 +18,7 @@ from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistoryS
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.codec import run_from_row
+from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.agent_loop.helpers import collect, context, gated, spec
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 
@@ -163,6 +164,7 @@ def test_the_summary_input_leaves_out_placeholders_and_their_results() -> None:
         compacted_runs=[_compacted_run()],
         max_input_tokens=100_000,
         history_settings=settings,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert len(included) == 1

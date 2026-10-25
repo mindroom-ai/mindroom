@@ -142,6 +142,9 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -197,6 +200,7 @@ def test_portable_replay_follows_each_plans_replay_budget(tmp_path: Path) -> Non
             history_settings=resolved.history_settings,
             session=None,
             allowed=False,
+            runs=(),
         )
         sent = _sent(model, messages, native)
         if budget is None:
@@ -285,6 +289,9 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -346,6 +353,9 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -431,6 +441,8 @@ async def test_native_activation_respects_history_policy(
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
         allow_native_compaction=case != "scheduled",
+        compaction_lifecycle=None,
+        pipeline_timing=None,
     )
 
     native = prepared.native_history
@@ -459,6 +471,9 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
     assert prepared.native_history is not None
     assert prepared.native_history.native_compaction is not None
@@ -550,6 +565,9 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
 
     assert session.summary is not None
@@ -560,6 +578,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         history_settings=resolved.history_settings,
         session=session,
         allowed=True,
+        runs=(),
     )
     assert expected is not None
     assert expected.native_compaction is not None
@@ -724,6 +743,7 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
         history_settings=resolved.history_settings,
         session=session,
         allowed=True,
+        runs=(),
     )
 
     def route_for(history_generation: str) -> str:
@@ -795,6 +815,7 @@ def test_history_reads_the_routes_native_settings_through_the_request_pipeline(t
             history_settings=resolved.history_settings,
             session=None,
             allowed=True,
+            runs=(),
         )
 
     provider = build_model_provider(config, paths, "default")
