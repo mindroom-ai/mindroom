@@ -92,11 +92,6 @@
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [],
-        "urls": []
-      },
       "content": "I can look that up.",
       "from_history": false,
       "provider_data": {

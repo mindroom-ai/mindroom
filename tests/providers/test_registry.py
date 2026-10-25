@@ -42,7 +42,6 @@ from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
     encoded_response,
-    expected_parsed,
     expected_stop_reason,
     golden_request,
     hide_provider_environment,
@@ -664,7 +663,7 @@ async def test_a_golden_of_every_family_replays_through_the_registry(
     assert ordered_json(request["body"]) == ordered_json(golden["request"]["body"])
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
-    assert normalized_parsed(completed.message) == expected_parsed(golden)
+    assert normalized_parsed(completed.message) == golden["parsed"]
     assert completed.stop_reason == expected_stop_reason(golden)
 
 

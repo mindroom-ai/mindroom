@@ -128,11 +128,6 @@
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [],
-        "urls": []
-      },
       "content": "Add a warm layer.",
       "from_history": false,
       "provider_data": {

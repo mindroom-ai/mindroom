@@ -316,19 +316,6 @@ def normalized_parsed(message: Message) -> dict[str, Any]:
     return scrub_generated_ids(_json_roundtrip(parsed))
 
 
-def expected_parsed(golden: dict[str, Any]) -> dict[str, Any]:
-    """Return a golden's parsed reply as the owned message type stores it.
-
-    Agno's ``Message.citations`` was a view ``Message.to_dict()`` never stored, and the owned message has no such
-    field (``mindroom.llm.messages``), so the key is left out of the comparison. Claude's raw citations still
-    compare inside ``provider_data.content_blocks``; Gemini's grounding sources lived only in that view and in
-    the run's ``citations``, which nothing reads and the owned run records drop (``mindroom.llm.runs``).
-    """
-    parsed = deepcopy(golden["parsed"])
-    parsed["message"].pop("citations", None)
-    return parsed
-
-
 def expected_body(golden: dict[str, Any], sent: dict[str, Any]) -> dict[str, Any]:
     """Return a golden's request body in the key order to compare ``sent`` with.
 
@@ -347,12 +334,8 @@ def expected_body(golden: dict[str, Any], sent: dict[str, Any]) -> dict[str, Any
 def _as_captured(golden: dict[str, Any], regenerated: dict[str, Any]) -> dict[str, Any]:
     """Keep what the capture recorded where the owned replay produces no counterpart, which no comparison reads.
 
-    That is Agno's ``citations`` view (``expected_parsed``) and a dict response format's key order
-    (``expected_body``).
+    That is a dict response format's key order (``expected_body``).
     """
-    if "citations" in golden["parsed"]["message"]:
-        regenerated["parsed"]["message"]["citations"] = golden["parsed"]["message"]["citations"]
-        regenerated["parsed"] = sorted_keys(regenerated["parsed"])
     body = regenerated["request"]["body"]
     if body is not None and "response_format" in body:
         captured = golden["request"]["body"]["response_format"]

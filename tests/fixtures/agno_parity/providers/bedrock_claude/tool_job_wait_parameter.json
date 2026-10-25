@@ -83,11 +83,6 @@
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [],
-        "urls": []
-      },
       "from_history": false,
       "provider_data": {
         "content_blocks": [

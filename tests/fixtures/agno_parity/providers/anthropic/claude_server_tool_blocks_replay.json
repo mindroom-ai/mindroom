@@ -194,11 +194,6 @@
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [],
-        "urls": []
-      },
       "content": "Order A-1001 has shipped.",
       "from_history": false,
       "provider_data": {

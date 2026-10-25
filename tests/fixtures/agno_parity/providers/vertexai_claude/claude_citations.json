@@ -36,21 +36,6 @@
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [
-          {
-            "cited_text": "Packing list: umbrella, scarf, walking shoes.",
-            "document_index": 0,
-            "document_title": "packing.txt",
-            "end_char_index": 45,
-            "file_id": null,
-            "start_char_index": 0,
-            "type": "char_location"
-          }
-        ],
-        "urls": []
-      },
       "content": "Your list says to bring an umbrella.",
       "from_history": false,
       "provider_data": {
