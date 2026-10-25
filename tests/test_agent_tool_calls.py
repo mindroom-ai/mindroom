@@ -378,6 +378,8 @@ async def test_catalog_keeps_qualified_names_and_rejects_collisions(tmp_path: Pa
     assert (await _events(catalog, "two", "other"))[-1].call.result == "other"
     with pytest.raises(UnknownToolError):
         await catalog.bind(ToolKey("two", "action"))
+    with pytest.raises(ValueError, match=r"^Duplicate qualified tool: one\.action$"):
+        await catalog.prepare([_toolkit("one", action)])
     with pytest.raises(ValueError, match="reserved"):
         await _catalog(tmp_path, [_toolkit("agent", action)])
     with pytest.raises(ValueError, match="reserved"):

@@ -220,7 +220,7 @@ class PreparedAgentToolCatalog:
                 raise ValueError(msg)
             key = ToolKey(namespace or function.toolkit or "agent", function.name)
             if key in bindings or key in self._bindings:
-                msg = f"Duplicate qualified tool: {namespace}.{function.name}"
+                msg = f"Duplicate qualified tool: {key.toolkit}.{key.function}"
                 raise ValueError(msg)
             bindings[key] = PreparedAgentToolBinding(key, function, self, instructions)
         # Nothing is recorded until every function is bound, so a refused toolkit leaves the catalog unchanged.
