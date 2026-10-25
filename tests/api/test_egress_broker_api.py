@@ -36,7 +36,6 @@ from tests.api.test_egress_credentials_api import (
     _oauth_block,
     _oauth_services,
     _use_fake_oauth_providers,
-    require_concurrent_calls,
     track_concurrent_calls,
 )
 
@@ -1107,11 +1106,11 @@ def test_key_status_is_read_off_the_event_loop(
 
 def test_services_load_every_status_at_once(oauth_broker_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Like the personal listing, the panel loads its services concurrently instead of one hop after another."""
-    started = require_concurrent_calls(monkeypatch, egress_broker_api, "egress_service_status", expected=4)
+    counts = track_concurrent_calls(monkeypatch, egress_broker_api, "egress_service_status", limit=4, total=4)
     response = oauth_broker_client.get("/api/egress-broker/services")
     assert response.status_code == 200, response.text
     assert [service["name"] for service in response.json()["services"]] == ["drive", "gh", "ghost", "github"]
-    assert sorted(started) == ["drive", "gh", "ghost", "github"]
+    assert counts == [0, 4]
 
 
 def test_services_load_at_most_the_status_load_limit_at_once(
