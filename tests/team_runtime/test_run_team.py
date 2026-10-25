@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 import pytest
@@ -48,8 +48,6 @@ from tests.team_runtime.squad import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
-
-    from agno.run import RunContext as AgnoRunContext
 
     from mindroom.llm.usage import MessageMetrics
     from mindroom.teams.runtime import TeamRunEvent
@@ -152,7 +150,13 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
     assert isinstance(events[-1], RunFinished)
 
 
-def room_of_the_turn(run_context: AgnoRunContext) -> str:
+class _RunMetadata(Protocol):
+    """The part of the run context a tool receives that ``room_of_the_turn`` reads."""
+
+    metadata: dict[str, Any] | None
+
+
+def room_of_the_turn(run_context: _RunMetadata) -> str:
     """Return the room the turn's run metadata names.
 
     Args:
