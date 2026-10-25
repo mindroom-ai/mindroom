@@ -68,7 +68,7 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeReso
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
+from mindroom.llm.provider import ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
@@ -4465,7 +4465,7 @@ class TestTeamCompletion:
             "member-model": 44,
         }
 
-    def test_a_claude_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
+    def test_a_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
         self,
         team_app_client: TestClient,
     ) -> None:
@@ -4481,10 +4481,9 @@ class TestTeamCompletion:
             answer("I will split the work."),
             members=[("general", "GeneralAgent", member)],
         )
-        leader = replace(built.spec.leader.model, capabilities=Capabilities(claude_family=True))
-        team = replace(built, spec=replace(built.spec, leader=replace(built.spec.leader, model=leader)))
+        leader = built.spec.leader.model
 
-        with patch("mindroom.api.openai_compat._build_team", return_value=team):
+        with patch("mindroom.api.openai_compat._build_team", return_value=built):
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={"model": "team/super_team", "messages": [{"role": "user", "content": "Write it all"}]},
