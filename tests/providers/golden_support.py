@@ -1,10 +1,12 @@
 """What every family's provider-golden harness shares: loading, the owned request, the pipeline, normalization.
 
 A golden (``tests/fixtures/agno_parity/providers/<family>/<scenario>.json``, format in the README beside them)
-pins one request as the Agno-backed provider layer sent it and the assistant message it parsed. Each family
+pins one request the owned adapter sends and the assistant message it parses, first captured from the Agno-backed
+provider layer and now regenerated from the owned one (``tests.agno_parity.regenerate_goldens``). Each family
 builds its own adapter from the golden's model config and answers its HTTP traffic with the canned reply; this
 module turns the golden input into the owned ``ModelRequest``, runs it through the production pipeline stages
-(portable tool search, media fallback, retry, request log), and normalizes what came out the way C1 recorded it.
+(portable tool search, media fallback, retry, request log), and records what came out as the goldens hold it: the
+wire request, and the reply as a provider-neutral turn (``regenerated_golden``).
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """The prompt-golden scenarios: MindRoom's production entry points driven against a recording model.
 
 Each scenario builds its agents, teams, or helper agents through the production builders and runs one turn; the
-recorder keeps every request the model received: messages, tools, tool choice, and response format.
+recorder keeps every request the model received: messages, tools, tool choice, and output schema.
 Requests are recorded below the request pipeline, where the provider adapter would receive them.
 A scenario that starts with a Matrix reply also exposes that reply as an ``AgentTurn``, so the agent it builds can
 be compared with the golden before the reply itself runs on the owned loop.
