@@ -79,13 +79,6 @@ def classified_embedder_error(exc: BaseException) -> str | None:
 
 _UNAUTHORIZED_STATUS = 401
 _FORBIDDEN_STATUS = 403
-_TRANSIENT_STATUS_CODES = frozenset({408, 429})
-_MIN_TRANSIENT_SERVER_STATUS = 500
-_MAX_HTTP_STATUS = 599
-
-
-def _status_code_is_transient(status_code: int) -> bool:
-    return status_code in _TRANSIENT_STATUS_CODES or (_MIN_TRANSIENT_SERVER_STATUS <= status_code <= _MAX_HTTP_STATUS)
 
 
 def embedder_request_error(
@@ -99,9 +92,9 @@ def embedder_request_error(
     ``failure`` is the typed provider error the embedder's SDK mapping made of
     ``error``, or None when the mapping did not recognize it, which makes the
     failure final. The detail names only the HTTP status, an unreachable
-    endpoint, or ``error``'s type, never provider text. A failure without a
-    status is retried when its type is retryable, such as a refused connection
-    or a timeout, and one with a status when it is 408, 429, or a 5xx.
+    endpoint, or ``error``'s type, never provider text, and ``failure``'s type
+    alone decides whether the request is retried, by the rule model requests
+    follow.
     """
     status_code = failure.status_code if failure is not None else None
     if status_code == _UNAUTHORIZED_STATUS:
@@ -114,12 +107,7 @@ def embedder_request_error(
         detail = EMBEDDER_UNREACHABLE_DETAIL
     else:
         detail = f"embedder request failed ({type(error).__name__})"
-    if failure is None:
-        retryable = False
-    elif status_code is None:
-        retryable = failure.retryable
-    else:
-        retryable = _status_code_is_transient(status_code)
+    retryable = failure is not None and failure.retryable
     return EmbedderRequestError(detail, retryable=retryable, retry_after_seconds=retry_after_seconds)
 
 
