@@ -774,8 +774,9 @@ def _join_covering_row(
 ) -> None:
     """Add a visible run's event ids to the summary row that covers it, so redacting a reply linked later still cuts it.
 
-    The covering row is the scope's first whose ``through`` reaches the run's ``seq``. A run behind the latest barrier
-    is retired, and ``through`` never decreases in ``id`` order, so it joins none.
+    The covering row is the scope's first row by ``id`` whose ``through`` reaches the run's ``seq``. A run at or behind
+    the latest barrier's ``through`` is retired and joins none; for any other run, since ``through`` never decreases in
+    ``id`` order, that row comes after the latest barrier and has text.
     """
     summaries = quote_identifier(names.log_summaries)
     covering = connection.execute(
@@ -973,8 +974,8 @@ def store_fold(
     """Store what fold summary ``summary_id`` took out of ``run``, the live running record, in the caller's transaction.
 
     The run takes the next ``seq``, so it sorts after the summary; one without a row gets a cancelled one with its live
-    scalars and metadata, which a crash leaves as a run that does not replay. The folded ``messages`` and the run's
-    member runs ``member_run_ids`` names are flagged with the summary, a stored message keeping its data, so none
+    scalars and metadata, which a crash leaves as a run that does not replay. The folded ``messages``, and the run's
+    member runs that ``member_run_ids`` names, are flagged with the summary, a stored message keeping its data, so none
     replays again. The caller creates the session row (``ensure_session_row``) before it inserts the summary row.
     """
     runs, now, seq = quote_identifier(names.log_runs), int(time()), next_seq(connection, names)
