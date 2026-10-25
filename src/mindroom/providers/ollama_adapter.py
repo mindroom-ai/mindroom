@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
 
-from ollama import AsyncClient, ResponseError
+from ollama import AsyncClient
 
 from mindroom.credentials.sync import get_ollama_host
-from mindroom.llm.errors import InvalidRequest, ProviderError
+from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import (
     Capabilities,
@@ -35,8 +35,8 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
-from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
+from mindroom.providers.ollama_errors import provider_error
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import provider_tools_disabled
 
@@ -123,7 +123,10 @@ class OllamaProvider:
                 if "<think>" in reply.content:
                     reply.reasoning, reply.content = split_thinking(reply.content)
         except Exception as error:
-            raise _provider_error(error, provider=self.identity.provider_name) from error
+            # Any exception that is not a provider failure propagates as it is.
+            if (failure := provider_error(error, provider=self.identity.provider_name)) is None:
+                raise
+            raise failure from error
         if request.stream and not reply.done:
             # The stream ended before its done chunk, so the turn did not finish.
             return
@@ -172,17 +175,6 @@ class OllamaProvider:
         if settings.api_key:
             params["headers"] = {"authorization": f"Bearer {settings.api_key}"}
         return {**params, **(settings.client_params or {})}
-
-
-def _provider_error(error: Exception, *, provider: str) -> ProviderError:
-    """Return the normalized error for one failed request; any other exception propagates as it is."""
-    if (failure := provider_failure(error, provider=provider)) is not None:
-        return failure
-    if isinstance(error, ResponseError):
-        # The SDK reports an error the server streams after a 200 response with status -1.
-        status_code = error.status_code if error.status_code > 0 else None
-        return classify_provider_error(str(error), provider=provider, status_code=status_code)
-    raise error
 
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:

@@ -8,10 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ollama import AsyncClient, Client, ResponseError
+from ollama import AsyncClient, Client
 
 from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, EmbedderRequestError, embedder_request_error
-from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.providers.ollama_errors import provider_error
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -31,14 +31,6 @@ def _vector(response: EmbedResponse) -> list[float]:
     if not response.embeddings or not response.embeddings[0]:
         raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)
     return [float(value) for value in response.embeddings[0]]
-
-
-def _request_error(error: Exception) -> EmbedderRequestError:
-    """Return the classified error of one failed request; a server that cannot be reached reads as unreachable."""
-    failure = provider_failure(error, provider=_PROVIDER)
-    if failure is None and isinstance(error, ResponseError):
-        failure = classify_provider_error(str(error), provider=_PROVIDER, status_code=error.status_code)
-    return embedder_request_error(error, failure)
 
 
 @dataclass
@@ -73,7 +65,7 @@ class OllamaEmbedder:
             try:
                 response = self._sync_client().embed(model=self.model, input=text, dimensions=_REQUESTED_DIMENSIONS)
             except Exception as exc:
-                raise _request_error(exc) from exc
+                raise embedder_request_error(exc, provider_error(exc, provider=_PROVIDER)) from exc
             vectors.append(_vector(response))
         return vectors
 
@@ -89,6 +81,6 @@ class OllamaEmbedder:
                     dimensions=_REQUESTED_DIMENSIONS,
                 )
             except Exception as exc:
-                raise _request_error(exc) from exc
+                raise embedder_request_error(exc, provider_error(exc, provider=_PROVIDER)) from exc
             vectors.append(_vector(response))
         return vectors
