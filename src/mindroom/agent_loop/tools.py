@@ -132,31 +132,36 @@ def plan_tool_batch(
         name = function_data.get("name")
         function = functions.get(name) if isinstance(name, str) else None
         if function is None:
-            messages.append(_failed_answer(call_id, name, MISSING_TOOL_ERROR_TEXT))
+            messages.append(failed_answer(call_id, name, MISSING_TOOL_ERROR_TEXT))
             continue
         arguments = parse_tool_arguments(function_data.get("arguments"), function)
         if isinstance(arguments, ToolArgumentError):
-            messages.append(_failed_answer(call_id, name, arguments.error_text))
+            messages.append(failed_answer(call_id, name, arguments.error_text))
             continue
         if max_tool_calls_per_turn is not None:
             count += 1
             if count > max_tool_calls_per_turn:
                 limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
-                refused.append(_failed_answer(call_id, function.name, limit_text, tool_args=arguments))
+                refused.append(failed_answer(call_id, function.name, limit_text, tool_args=arguments))
                 continue
         execution = function.planned_execution(call_id, arguments)
         planned.append(PlannedCall(function=function, execution=execution))
     return ToolBatch(planned=tuple(planned), refused=tuple(refused))
 
 
-def _failed_answer(
+def failed_answer(
     call_id: str | None,
     name: str | None,
     content: str,
     *,
     tool_args: dict[str, Any] | None = None,
+    stop_after_tool_call: bool = False,
 ) -> Message:
-    """Return the tool message that answers a call the batch did not run, marked failed so every wire says so."""
+    """Return the tool message that answers a call the loop did not run, marked failed so every wire says so.
+
+    The loop answers this way a call to a tool it does not offer, one whose arguments cannot be decoded, one past the
+    per-turn limit, one the output limit cut off, and one whose approval was denied.
+    """
     return Message(
         role="tool",
         tool_call_id=call_id,
@@ -164,6 +169,7 @@ def _failed_answer(
         content=content,
         tool_args=tool_args,
         tool_call_error=True,
+        stop_after_tool_call=stop_after_tool_call,
     )
 
 
@@ -258,6 +264,7 @@ __all__ = [
     "PreparedTools",
     "ToolBatch",
     "dispatch_tool_calls",
+    "failed_answer",
     "media_follow_up",
     "offered_functions",
     "plan_tool_batch",
