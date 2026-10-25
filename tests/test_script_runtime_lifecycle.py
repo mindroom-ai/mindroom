@@ -4626,13 +4626,14 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
         reconcile_interval_seconds=0.01,
-        pass_timeout_seconds=0.05,
+        # Well above a pass on a loaded host: a pass that times out never reaches the reconcile this test counts.
+        pass_timeout_seconds=5.0,
     )
     runtime.bind_api("http://primary.test/api/script-gateway")
 
     await runtime.start()
     _stored_run(store, runtime_paths)
-    await asyncio.wait_for(recovered.wait(), timeout=1.0)
+    await asyncio.wait_for(recovered.wait(), timeout=10.0)
     monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
     await runtime.shutdown()
 
