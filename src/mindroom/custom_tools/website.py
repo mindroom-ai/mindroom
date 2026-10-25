@@ -187,7 +187,8 @@ def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
 
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 # The crawl budget, the fetch timeout, the breadth-first queue, the 1-3 second pause between fetches, and the
-# 5000-character page documents follow Agno's WebsiteReader, so the tool returns what it always has.
+# 5000-character page documents come from Agno's WebsiteReader: they bound how hard one crawl loads its host and how
+# much text each returned document carries.
 _MAX_DEPTH = 3
 _MAX_LINKS = 10
 _FETCH_TIMEOUT_SECONDS = 10
