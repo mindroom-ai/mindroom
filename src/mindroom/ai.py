@@ -493,14 +493,8 @@ def _attach_blocking_pause_presentation(
         track_hidden_tools=True,
     )
     presentation.append_text(_extract_response_content(record, show_tool_calls=False))
-    pending_by_id: dict[str, ToolExecution] = {}
-    for tool in paused.tools:
-        if tool.tool_call_id in pending_by_id:
-            msg = "Paused approval tools share a tool-call ID"
-            raise RuntimeError(msg)
-        pending_by_id[tool.tool_call_id] = tool
-
-    # A delegation still waits for its child, or for its turn after a sibling's, until the driver answers it.
+    # A paused call stays started: a call waiting for approval, or a delegation that still waits for its child,
+    # or for its turn after a sibling's, until the driver answers it.
     answered = answered_delegation_calls(record)
     seen_ids: set[str] = set()
     for tool in (*tuple(record.tools or ()), *paused.tools):
@@ -511,7 +505,7 @@ def _attach_blocking_pause_presentation(
         seen_ids.add(call_id)
         presentation.start_tool(call)
         # An agent's own calls name no member.
-        if call_id not in pending_by_id and (not tool.is_paused or (None, call_id) in answered):
+        if not tool.is_paused or (None, call_id) in answered:
             presentation.complete_tool(call)
 
     return replace(
