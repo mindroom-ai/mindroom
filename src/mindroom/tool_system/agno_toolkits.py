@@ -328,15 +328,16 @@ def _media_id(media_id: str | None) -> dict[str, str]:
     return {"id": media_id} if media_id is not None else {}
 
 
-def _filepath(filepath: object) -> str | None:
-    return None if filepath is None else str(filepath)
+def _filepath(filepath: object, content: object) -> str | None:
+    # Bytes the tool returned stand, so a path that worker code can later swap for a link is never read in their place.
+    return None if filepath is None or content is not None else str(filepath)
 
 
 def _owned_image(image: AgnoImage) -> Image:
     return Image(
         **_media_id(image.id),
         url=image.url,
-        filepath=_filepath(image.filepath),
+        filepath=_filepath(image.filepath, image.content),
         content=image.content,
         format=image.format,
         mime_type=image.mime_type,
@@ -352,7 +353,7 @@ def _owned_audio(audio: AgnoAudio) -> Audio:
     return Audio(
         **_media_id(audio.id),
         url=audio.url,
-        filepath=_filepath(audio.filepath),
+        filepath=_filepath(audio.filepath, audio.content),
         content=audio.content,
         format=audio.format,
         mime_type=audio.mime_type,
@@ -369,7 +370,7 @@ def _owned_video(video: AgnoVideo) -> Video:
     return Video(
         **_media_id(video.id),
         url=video.url,
-        filepath=_filepath(video.filepath),
+        filepath=_filepath(video.filepath, video.content),
         content=video.content,
         format=video.format,
         mime_type=video.mime_type,
@@ -389,7 +390,7 @@ def _owned_file(file: AgnoFile) -> File:
     return File(
         **_media_id(file.id),
         url=file.url,
-        filepath=_filepath(file.filepath),
+        filepath=_filepath(file.filepath, content),
         content=content,
         mime_type=file.mime_type,
         file_type=file.file_type,
