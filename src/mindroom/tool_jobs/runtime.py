@@ -820,7 +820,7 @@ class ToolJobRuntime:
         except Exception as error:
             return BackgroundOutcome(
                 "failed",
-                f"Job cleanup failed; external side effects may still be active: {error}",
+                f"Job cleanup failed; external side effects may still be active: {failure_text(error)}",
             )
         return outcome
 

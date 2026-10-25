@@ -1826,8 +1826,17 @@ async def test_repeated_human_followups_release_each_wait_until_their_reply_star
 
 
 @pytest.mark.asyncio
-async def test_failed_cancellation_cleanup_settles_without_claiming_side_effects_stopped(tmp_path: Path) -> None:
-    """Cleanup failure must release ownership and retain an honest durable failure outcome."""
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("remote cleanup unavailable"), "remote cleanup unavailable"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_failed_cancellation_cleanup_settles_without_claiming_side_effects_stopped(
+    tmp_path: Path,
+    error: Exception,
+    text: str,
+) -> None:
+    """Cleanup failure must release ownership and retain an honest durable failure outcome that names the failure."""
     runtime = await tool_job_runtime(tmp_path)
     started = asyncio.Event()
 
@@ -1837,8 +1846,7 @@ async def test_failed_cancellation_cleanup_settles_without_claiming_side_effects
         raise AssertionError
 
     async def cleanup(_job: runtime_module.BackgroundJob) -> None:
-        msg = "remote cleanup unavailable"
-        raise RuntimeError(msg)
+        raise error
 
     try:
         job = await start_job(
@@ -1853,9 +1861,10 @@ async def test_failed_cancellation_cleanup_settles_without_claiming_side_effects
         )
         await started.wait()
         result = await cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0)
-        assert result.status == "failed"
-        assert "remote cleanup unavailable" in (result.result or "")
-        assert "may still" in (result.result or "")
+        assert (result.status, result.result) == (
+            "failed",
+            f"Job cleanup failed; external side effects may still be active: {text}",
+        )
         assert (await lookup(runtime, job.job_id, owner=job_owner(), depth=0)).status == "failed"
     finally:
         await runtime.shutdown()
