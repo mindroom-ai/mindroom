@@ -25,7 +25,7 @@ from mindroom.config.access import (
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.cold_cache import ColdCacheConfig  # noqa: TC001
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
-from mindroom.config.legacy_fields import drop_retired_fields, reject_legacy_agent_fields
+from mindroom.config.legacy_fields import reject_legacy_agent_fields
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
 from mindroom.config.mid_turn import MidTurnConfig  # noqa: TC001
 from mindroom.config.models import (
@@ -47,8 +47,9 @@ _PrivateWorkerScope = Literal["user", "user_agent"]
 # the private workspace, so it must never be, or contain, one of these.
 # LEGACY_COMPAT: Agno Learning databases left in private state roots.
 # Legacy format: `learning/<agent>.db` holding requester profiles and memories, written while Learning was enabled.
-# Last legacy release: v2026.10.498; replacement: unreleased.
-# Handling: Keep `learning` reserved, so a worker never mounts a leftover learning database as a private workspace.
+# Last legacy release: v2026.10.498; replacement: v2026.10.499 retired Learning and writes no learning databases.
+# Handling: Nothing reads or removes these databases, so `learning` stays reserved and a worker never mounts a leftover
+#   learning database as a private workspace.
 # Coverage: tests/test_private_root_reservations.py::test_primary_state_written_beside_a_private_workspace_is_reserved.
 _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset(
     {
@@ -455,8 +456,8 @@ class AgentConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_agent_fields(cls, data: object) -> object:
-        """Ignore retired fields with a warning, then reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_agent_fields(drop_retired_fields(data))
+        """Reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_agent_fields(data)
 
     @field_validator("thread_exports", mode="before")
     @classmethod

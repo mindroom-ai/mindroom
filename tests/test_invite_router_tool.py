@@ -116,6 +116,8 @@ def test_matrix_agents_get_zero_argument_invite_router_in_standard_tool_environm
         config,
         runtime_paths_for(config),
         execution_identity=identity,
+        knowledge=None,
+        active_model_name=None,
     )
 
     [toolkit] = [toolkit for toolkit in agent.spec.toolkits if toolkit.name == "invite_router"]
@@ -162,6 +164,8 @@ def test_matrix_runtime_ignores_authored_invite_router_function_filters(tmp_path
         config,
         runtime_paths_for(config),
         execution_identity=identity,
+        knowledge=None,
+        active_model_name=None,
     )
 
     [toolkit] = [toolkit for toolkit in agent.spec.toolkits if toolkit.name == "invite_router"]
@@ -192,6 +196,8 @@ def test_invite_router_stays_hidden_without_matrix_room_context(tmp_path: Path) 
         config,
         runtime_paths_for(config),
         execution_identity=identity,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert "invite_router" not in {toolkit.name for toolkit in agent.spec.toolkits}
@@ -248,6 +254,8 @@ def test_matrix_agents_reject_local_invite_router_function_collisions(
             config,
             runtime_paths_for(config),
             execution_identity=identity,
+            knowledge=None,
+            active_model_name=None,
         )
 
 

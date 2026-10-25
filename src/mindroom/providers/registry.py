@@ -10,15 +10,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast, get_args
 
 from mindroom.logging_config import get_logger
+from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
-from mindroom.providers.anthropic.settings import ClaudeRouteKind
+from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings
 from mindroom.providers.credentials import dashboard_api_key
+from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
+from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.names import provider_route
+from mindroom.providers.ollama.settings import OllamaSettings
 from mindroom.providers.openai.build import ENDPOINT_VARIABLES as OPENAI_ENDPOINT_VARIABLES
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
+from mindroom.providers.openai.build import accepted_extra_kwargs as openai_accepted_extra_kwargs
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
+from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 
 if TYPE_CHECKING:
@@ -28,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import Capabilities, ModelProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["build_model_provider", "model_capabilities", "stream_idle_timeout_seconds"]
+__all__ = ["build_model_provider", "check_extra_kwargs", "model_capabilities", "stream_idle_timeout_seconds"]
 
 logger = get_logger(__name__)
 
@@ -39,6 +45,12 @@ _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
 _LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
 # The runtime env variable each route reads its endpoint from when its config sets none, as the builders declare it.
 _ENDPOINT_VARIABLES: dict[str, str] = {**OPENAI_ENDPOINT_VARIABLES, **CLAUDE_ENDPOINT_VARIABLES}
+# The ``extra_kwargs`` keys of each provider whose one settings type takes every key it declares.
+_SETTINGS_KEYS = {
+    "google": settings_keys(GeminiSettings),
+    "ollama": settings_keys(OllamaSettings),
+    "synthetic": settings_keys(SyntheticSettings),
+}
 
 
 def _configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
@@ -82,7 +94,7 @@ def _build_adapter(
 
         return build_gemini_provider(model_config, runtime_paths)
     if provider == "ollama":
-        from mindroom.providers.ollama_adapter import (  # noqa: PLC0415 - keep the ollama SDK out of import time
+        from mindroom.providers.ollama.adapter import (  # noqa: PLC0415 - keep the ollama SDK out of import time
             build_provider as build_ollama_provider,
         )
 
@@ -152,6 +164,24 @@ def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: Runtim
     if (variable := _ENDPOINT_VARIABLES.get(provider)) and runtime_paths.env_value(variable):
         return None
     return _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+
+
+def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -> None:
+    """Raise ``ValueError`` for an ``extra_kwargs`` key the route that serves ``model_config`` does not accept.
+
+    Config load calls this so such a key fails before any model is built; it reads only the routes' key tables,
+    so no provider SDK loads. A provider no route serves is left to ``build_model_provider``.
+    """
+    provider = provider_route(model_config.provider)
+    if provider in OPENAI_FAMILY_PROVIDERS:
+        allowed = openai_accepted_extra_kwargs(model_config, runtime_paths)
+    elif provider in _CLAUDE_PROVIDERS:
+        allowed = settings_keys(ClaudeSettings, CLAUDE_ACCEPTED_KEYS[cast("ClaudeRouteKind", provider)])
+    elif provider in _SETTINGS_KEYS:
+        allowed = _SETTINGS_KEYS[provider]
+    else:
+        return
+    reject_unsupported_extra_kwargs(model_config.extra_kwargs, allowed, provider=model_config.provider)
 
 
 def model_capabilities(config: Config, runtime_paths: RuntimePaths, model_name: str) -> Capabilities:

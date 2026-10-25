@@ -71,6 +71,11 @@ class DeferredAgentToolkit:
     materialize: Callable[[], Awaitable[AdaptedToolkit]]
 
 
+def _eager_toolkit(function: ToolFunction) -> str:
+    """Return the toolkit an eager ``function`` is reached under: its authored toolkit, or ``agent`` if generated."""
+    return function.toolkit or "agent"
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedAgentToolBinding:
     """A prepared function, the catalog owning its exact live agent turn, and its toolkit's instructions."""
@@ -79,6 +84,15 @@ class PreparedAgentToolBinding:
     function: ToolFunction
     catalog: PreparedAgentToolCatalog = field(repr=False)
     instructions: tuple[str, ...]
+
+    @property
+    def approval_toolkit(self) -> str:
+        """Return the toolkit an approval of this function's calls names: its authored toolkit, ``agent`` if generated.
+
+        A resumed approval rebuilds the agent with that toolkit attached, so it reaches the function under this name
+        even when this binding reached it under a deferred toolkit's registered name, which differs for an implied tool.
+        """
+        return _eager_toolkit(self.function)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +232,7 @@ class PreparedAgentToolCatalog:
             if namespace is None and function.toolkit == "agent":
                 msg = "The agent toolkit namespace is reserved for generated functions"
                 raise ValueError(msg)
-            key = ToolKey(namespace or function.toolkit or "agent", function.name)
+            key = ToolKey(namespace or _eager_toolkit(function), function.name)
             if key in bindings or key in self._bindings:
                 msg = f"Duplicate qualified tool: {key.toolkit}.{key.function}"
                 raise ValueError(msg)
@@ -259,7 +273,8 @@ class PreparedAgentToolCatalog:
                     toolkit = await deferred.materialize()
                 await connect_toolkits((toolkit,), self._closes)
                 # Every function a deferred toolkit materializes is reached under the deferred toolkit's registered
-                # name, not the function's authored ``toolkit``, which differs for an implied tool.
+                # name, not the function's authored ``toolkit``, which differs for an implied tool; an approval of
+                # one names the authored toolkit (``approval_toolkit``).
                 self._prepare(toolkit, toolkit.functions, deferred.name)
                 del self._deferred[key.toolkit]
             binding = self._bindings.get(key)

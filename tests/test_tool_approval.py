@@ -24,7 +24,6 @@ from mindroom.approval.manager import (
     _ApprovalStartupSweep,
     _build_event_arguments,
     get_approval_store,
-    initialize_approval_store,
 )
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import (
@@ -71,7 +70,12 @@ from mindroom.response_sources import ResponseSources
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from mindroom.tools import config_manager as _config_manager  # noqa: F401 - registers the approval exemptions
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    handle_card_response_for_test,
+    initialize_approval_store_for_test,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
@@ -107,7 +111,7 @@ async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tm
     cards = MagicMock()
     cards.pending_approval_card = AsyncMock(return_value=None)
     cards.is_terminal_approval_card = AsyncMock(return_value=True)
-    initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    initialize_approval_store_for_test(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
     before_consume = AsyncMock()
 
     result = await handle_matrix_approval_action(
@@ -132,7 +136,7 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
     cards = MagicMock()
     cards.pending_approval_card = AsyncMock(return_value=MagicMock(resolution={"status": "approved"}))
     cards.is_terminal_approval_card = AsyncMock()
-    manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    manager = initialize_approval_store_for_test(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
     before_consume = AsyncMock()
 
     try:
@@ -282,12 +286,12 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
     before_consume = AsyncMock()
 
     try:
-        result = await manager.handle_card_response(
+        result = await handle_card_response_for_test(
+            manager,
             room_id="!room:localhost",
             sender_id="@approver:localhost",
             card_event_id="$approval",
             status="approved",
-            reason=None,
             authorize_responder=lambda _entity_name: True,
             before_consume=before_consume,
         )
@@ -460,12 +464,12 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
 
     try:
         with patch("mindroom.approval.manager.logger.warning") as warning:
-            result = await manager.handle_card_response(
+            result = await handle_card_response_for_test(
+                manager,
                 room_id="!room:localhost",
                 sender_id="@approver:localhost",
                 card_event_id="$approval",
                 status="approved",
-                reason=None,
                 authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
@@ -515,12 +519,12 @@ async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path
             patch("mindroom.approval.manager.logger.warning") as warning,
             pytest.raises(ToolApprovalTransportError, match="not ready"),
         ):
-            await manager.handle_card_response(
+            await handle_card_response_for_test(
+                manager,
                 room_id="!room:localhost",
                 sender_id="@approver:localhost",
                 card_event_id="$approval",
                 status="approved",
-                reason=None,
                 authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
@@ -566,7 +570,8 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
 
     try:
         with patch("mindroom.approval.manager.logger.warning") as warning:
-            result = await manager.handle_card_response(
+            result = await handle_card_response_for_test(
+                manager,
                 room_id="!room:localhost",
                 sender_id="@approver:localhost",
                 card_event_id="$approval",
@@ -629,12 +634,12 @@ async def test_legacy_action_retries_a_transient_transport_failure(tmp_path: Pat
             patch("mindroom.approval.manager.logger.warning") as warning,
             pytest.raises(ToolApprovalTransportError, match="could not verify"),
         ):
-            await manager.handle_card_response(
+            await handle_card_response_for_test(
+                manager,
                 room_id="!room:localhost",
                 sender_id="@approver:localhost",
                 card_event_id="$approval",
                 status="approved",
-                reason=None,
                 authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
@@ -745,12 +750,12 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
     )
     authorize_responder = MagicMock(return_value=True)
     try:
-        result = await manager.handle_card_response(
+        result = await handle_card_response_for_test(
+            manager,
             room_id=room_id,
             sender_id="@approver:localhost",
             card_event_id=card_event_id,
             status="approved",
-            reason=None,
             authorize_responder=authorize_responder,
         )
 
@@ -2272,7 +2277,7 @@ async def test_evaluate_tool_approval_script_error_is_sanitized(tmp_path: Path) 
 def test_get_approval_store_returns_initialized_store(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
 
-    store = initialize_approval_store(runtime_paths)
+    store = initialize_approval_store_for_test(runtime_paths)
 
     assert get_approval_store() is store
 

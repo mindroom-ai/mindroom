@@ -15,11 +15,9 @@
       },
       {
         "content": "Where is order A-1001?",
-        "from_history": true,
         "role": "user"
       },
       {
-        "from_history": true,
         "metrics": {
           "input_tokens": 42,
           "output_tokens": 12,
@@ -32,7 +30,6 @@
           }
         },
         "role": "assistant",
-        "stop_after_tool_call": false,
         "tool_calls": [
           {
             "function": {
@@ -46,7 +43,6 @@
       },
       {
         "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
-        "from_history": true,
         "role": "tool",
         "tool_args": {
           "order_id": "A-1001"
@@ -61,12 +57,13 @@
       "id": "gpt-oss-120b",
       "provider": "cerebras"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -90,9 +87,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
         "external_execution": false,
         "name": "tool_search",
@@ -110,9 +109,11 @@
           "required": [],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
         "external_execution": false,
         "name": "call_tool",
@@ -132,9 +133,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Look up one order by id.",
         "external_execution": false,
         "name": "lookup_order",
@@ -149,9 +152,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Email the invoice for one order.",
         "external_execution": false,
         "name": "send_invoice",
@@ -166,29 +171,28 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
       "content": "Order A-1001 has shipped.",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-oss-120b",
           "provider": "Cerebras"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {

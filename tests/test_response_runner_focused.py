@@ -33,7 +33,6 @@ from mindroom.agent_cli import cli_approval_waits
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
 from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, TurnToolRegistry
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt_readers as approval_receipt
 from mindroom.approval.auto_approve_windows import start_auto_approve
@@ -165,7 +164,7 @@ from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
 from tests.approval_continuation_helpers import (
     advance_continuation,
@@ -178,10 +177,12 @@ from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     install_model_providers,
+    live_turn_tools_for_test,
     make_matrix_client_mock,
     make_visible_message,
     message_origin,
     patch_response_runner_module,
+    process_and_respond_for_test,
     replace_response_runner_deps,
     request_envelope,
     seed_session,
@@ -2343,15 +2344,15 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
                 expires_at_ns=9_000_000_000_000_000_000,
             ),
         ),
-        execution_identity={
-            "channel": "matrix",
-            "agent_name": "general",
-            "requester_id": "@user:localhost",
-            "room_id": "!room:localhost",
-            "thread_id": "$thread",
-            "resolved_thread_id": "$thread",
-            "session_id": "session-1",
-        },
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        ),
         sources=ResponseSources(
             (request.response_envelope.source_event_id,),
             (request.response_envelope.source_event_id,),
@@ -2815,7 +2816,6 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
 
     continuation = approval_continuation(
         approval_id="approval-live-config",
-        execution_identity={},
         state="claimed",
     )
     identity = ToolExecutionIdentity(
@@ -3691,11 +3691,9 @@ async def _resumed_streamable_approval(
         runtime_model_name="default",
         team_member_names=("general",) if entity_kind == "team" else (),
         team_mode="coordinate" if entity_kind == "team" else None,
-        execution_identity=serialize_tool_execution_identity(
-            runner.deps.tool_runtime.build_execution_identity(
-                target=_target(thread_id="$thread", reply_to_event_id="$source"),
-                user_id="@user:localhost",
-            ),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            user_id="@user:localhost",
         ),
     )
     assert await paused_for_approval(store, continuation) is not None
@@ -4293,7 +4291,6 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
                 decision=ApprovalDecision.APPROVED,
             ),
         ),
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -4343,7 +4340,6 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-semantic",
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -4401,7 +4397,6 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-failure-final",
-        execution_identity={},
         state="failing",
         failure_reason="Tool approval continuation failed safely.",
     )
@@ -4438,7 +4433,6 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-oversized-final",
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -4494,7 +4488,6 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-cancelled-return",
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) is not None
 
@@ -4540,7 +4533,6 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-late-cancel",
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) is not None
     await bot._reply_runtime.start()
@@ -4592,7 +4584,6 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
                 decision=ApprovalDecision.APPROVED,
             ),
         ),
-        execution_identity={},
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -4630,29 +4621,6 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_continuation_rejects_missing_persisted_execution_identity(tmp_path: Path) -> None:
-    """Malformed durable identity must fail explicitly even when Python assertions are disabled."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    continuation = approval_continuation(
-        approval_id="approval-missing-identity",
-        execution_identity={},
-        state="claimed",
-    )
-
-    with (
-        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=None),
-        pytest.raises(RuntimeError, match=r"approval-missing-identity.*execution identity"),
-    ):
-        await runner._continue_entity_call(
-            continuation,
-            request=_plain_request(_target()),
-            target=_target(),
-            tool_trace_collector=[],
-            progress=None,
-        )
-
-
-@pytest.mark.asyncio
 async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Path) -> None:
     """A resumed team must rebuild members from the turn's pinned aliases."""
     bot = _bot(tmp_path)
@@ -4674,7 +4642,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         entity_kind="team",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
-        execution_identity={},
+        execution_identity=identity,
         runtime_model_name="large",
         team_member_names=("general",),
         team_member_model_names=(("general", "large"),),
@@ -4687,7 +4655,6 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
     )
 
     with (
-        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
         patch.object(
             runner.deps.tool_runtime,
             "build_dispatch_context",
@@ -4703,6 +4670,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
                 target=target,
                 tool_trace_collector=[],
                 progress=None,
+                cli_approval_handler=None,
             )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -4779,7 +4747,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
                 human_approval_required=True,
             ),
         ),
-        execution_identity={},
+        execution_identity=identity,
         correlation_id="correlation-original",
     )
     assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
@@ -4809,13 +4777,11 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         projected = messages_with_approval_receipt(
             [LoopMessage(role="system", content="base rules"), LoopMessage(role="tool", content="published")],
             build_approval_receipt(receipt.readers[continuation.run_id]),
-            after_response_id=False,
         )
         model_messages.extend((message.role, message.content) for message in projected)
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with (
-        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
         patch.object(runner.deps.tool_runtime, "build_dispatch_context", side_effect=build_dispatch_context),
         patch(
             "mindroom.approval.execution.AgentApprovalExecution.continue_run",
@@ -4829,6 +4795,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
                 target=request.response_envelope.target,
                 tool_trace_collector=[],
                 progress=progress,
+                cli_approval_handler=None,
             )
 
     assert observed == ["correlation-original"]
@@ -4880,7 +4847,7 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
     first = approval_continuation(
         approval_id="approval-chain",
         calls=(approved("call-1", "save_file", human_approval_required=True),),
-        execution_identity={},
+        execution_identity=identity,
     )
     assert await paused_for_approval(store, first) is not None
     claimed = await claim_continuation(
@@ -4909,13 +4876,12 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
     receipts: list[str] = []
 
     async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
-        receipt_calls = take_unsent_receipt(second.run_id)
+        receipt_calls = take_unsent_receipt(second.run_id, lambda call_id: call_id)
         assert receipt_calls is not None
         receipts.append(build_approval_receipt(receipt_calls))
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with (
-        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
         patch.object(
             runner.deps.tool_runtime,
             "build_dispatch_context",
@@ -4930,6 +4896,7 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
                 target=request.response_envelope.target,
                 tool_trace_collector=[],
                 progress=None,
+                cli_approval_handler=None,
             )
 
     granted = (
@@ -5191,7 +5158,7 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond(_plain_request(_target()))
+        generation = await process_and_respond_for_test(coordinator, _plain_request(_target()))
 
     assert generation.delivery.event_id == "$response"
     deliver_final.assert_awaited_once()
@@ -5242,7 +5209,7 @@ async def test_non_streaming_final_delivery_exposes_fixed_shutdown_phase(tmp_pat
                 source_event_id=request.response_envelope.source_event_id,
                 room_id=request.room_id,
             ):
-                await coordinator._process_and_respond(request)
+                await process_and_respond_for_test(coordinator, request)
 
         response_task = coordinator.track_inbox_response(
             respond_in_span(),
@@ -5297,7 +5264,7 @@ async def test_process_shutdown_skips_non_streaming_replay_persistence(
         ) as persist,
     ):
         task = asyncio.create_task(
-            coordinator._process_and_respond(_plain_request(_target())),
+            process_and_respond_for_test(coordinator, _plain_request(_target())),
         )
         await generation_started.wait()
         request_task_cancel(task, process_shutdown=True)
@@ -5382,7 +5349,7 @@ async def test_non_streaming_approval_pause_is_not_logged_as_response_error(tmp_
         ),
         pytest.raises(ResponsePausedForApproval) as raised,
     ):
-        await coordinator._process_and_respond(_plain_request(_target()))
+        await process_and_respond_for_test(coordinator, _plain_request(_target()))
 
     assert raised.value is pause
     coordinator.deps.logger.exception.assert_not_called()
@@ -5424,7 +5391,7 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator._process_and_respond(request, runtime=runtime)
+        await process_and_respond_for_test(coordinator, request, runtime=runtime)
 
     assert active_models == ["large"]
 
@@ -5476,7 +5443,7 @@ async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Pa
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator._process_and_respond(_plain_request(_target()))
+        await process_and_respond_for_test(coordinator, _plain_request(_target()))
 
     assert found == [{"$older": None}]
 
@@ -5548,7 +5515,7 @@ async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond(request)
+        generation = await process_and_respond_for_test(coordinator, request)
 
     assert generation.delivery is delivery
     assert timing.metadata["first_visible_kind"] == "placeholder"
@@ -5583,7 +5550,7 @@ async def test_non_streaming_failed_edit_preserving_old_body_does_not_mark_subst
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond(request)
+        generation = await process_and_respond_for_test(coordinator, request)
 
     assert generation.delivery is delivery
     assert "first_substantive_reply" not in timing.marks
@@ -5615,7 +5582,7 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond_streaming(_plain_request(_target()))
+        generation = await process_and_respond_for_test(coordinator, _plain_request(_target()), streaming=True)
 
     assert generation.delivery.event_id == "$stream"
     deliver_stream.assert_awaited_once()
@@ -5625,6 +5592,69 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
     assert finalize_request.stream_transport_outcome is transport
     assert finalize_request.initial_delivery_kind == "sent"
     assert finalize_request.identity.response_kind == "ai"
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_reply_reports_its_delivery_start_before_delivering_it(tmp_path: Path) -> None:
+    """A blocking reply reports that delivery began, naming the event it edits, before it delivers the answer."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    steps: list[str] = []
+
+    async def deliver_final(*_args: object, **_kwargs: object) -> FinalDeliveryOutcome:
+        steps.append("deliver")
+        return _completed_outcome("$existing", body="final text")
+
+    with (
+        patch.object(DeliveryGateway, "deliver_final", new=deliver_final),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="final text"),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await process_and_respond_for_test(
+            coordinator,
+            replace(_plain_request(_target()), existing_event_id="$existing"),
+            on_delivery_started=lambda event_id: steps.append(f"started {event_id}"),
+        )
+
+    assert steps == ["started $existing", "deliver"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_reply_reports_its_delivery_start_before_finalizing_it(tmp_path: Path) -> None:
+    """A streamed reply reports that delivery began, naming its last stream event, before it finalizes the answer."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    steps: list[str] = []
+    transport = StreamTransportOutcome(
+        last_physical_stream_event_id="$stream",
+        terminal_status="completed",
+        rendered_body="streamed body",
+        visible_body_state="visible_body",
+    )
+
+    async def finalize(*_args: object, **_kwargs: object) -> FinalDeliveryOutcome:
+        steps.append("finalize")
+        return _completed_outcome("$stream", body="streamed body")
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "chunk"
+
+    with (
+        patch.object(DeliveryGateway, "deliver_stream", new=AsyncMock(return_value=transport)),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
+        patch_response_runner_module(
+            stream_agent_response=fake_stream,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await process_and_respond_for_test(
+            coordinator,
+            _plain_request(_target()),
+            streaming=True,
+            on_delivery_started=lambda event_id: steps.append(f"started {event_id}"),
+        )
+
+    assert steps == ["started $stream", "finalize"]
 
 
 @pytest.mark.asyncio
@@ -5685,9 +5715,7 @@ async def test_process_shutdown_unwraps_streaming_cancellation_without_persisten
         ),
     ):
         task = asyncio.create_task(
-            coordinator._process_and_respond_streaming(
-                _plain_request(_target()),
-            ),
+            process_and_respond_for_test(coordinator, _plain_request(_target()), streaming=True),
         )
         await generation_started.wait()
         request_task_cancel(task, process_shutdown=True)
@@ -5726,7 +5754,7 @@ async def test_process_shutdown_exposes_retained_streaming_response_phase(
         new=AsyncMock(side_effect=retained_stream),
     ):
         response_task = coordinator.track_inbox_response(
-            coordinator._process_and_respond_streaming(_plain_request(_target())),
+            process_and_respond_for_test(coordinator, _plain_request(_target()), streaming=True),
             name="test_retained_streaming_response_phase",
             recovery_proof_ready=lambda: True,
             room_id=_target().room_id,
@@ -5785,7 +5813,7 @@ async def test_process_shutdown_exposes_retained_final_delivery_phase(
         ),
     ):
         response_task = coordinator.track_inbox_response(
-            coordinator._process_and_respond_streaming(_plain_request(_target())),
+            process_and_respond_for_test(coordinator, _plain_request(_target()), streaming=True),
             name="test_retained_final_delivery_phase",
             recovery_proof_ready=lambda: True,
             room_id=_target().room_id,
@@ -5846,9 +5874,7 @@ async def test_process_shutdown_skips_stream_terminalization_after_cancelled_gen
         ),
     ):
         task = asyncio.create_task(
-            coordinator._process_and_respond_streaming(
-                _plain_request(_target()),
-            ),
+            process_and_respond_for_test(coordinator, _plain_request(_target()), streaming=True),
         )
         await generation_started.wait()
         request_task_cancel(task, process_shutdown=True)
@@ -5960,7 +5986,7 @@ async def test_streaming_response_reuses_prepared_room_model_after_override_chan
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator._process_and_respond_streaming(request, runtime=runtime)
+        await process_and_respond_for_test(coordinator, request, streaming=True, runtime=runtime)
 
     assert active_models == [expected_model]
 
@@ -5994,8 +6020,10 @@ async def test_streaming_approval_pause_reaches_outer_lifecycle(tmp_path: Path) 
         patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
         pytest.raises(ResponsePausedForApproval) as raised,
     ):
-        await coordinator._process_and_respond_streaming(
+        await process_and_respond_for_test(
+            coordinator,
             _plain_request(_target()),
+            streaming=True,
             on_delivery_started=visible_events.append,
         )
 
@@ -6057,7 +6085,7 @@ async def test_streaming_placeholder_only_delivery_does_not_mark_substantive_rep
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator._process_and_respond_streaming(request)
+        generation = await process_and_respond_for_test(coordinator, request, streaming=True)
 
     assert generation.delivery is delivery
     assert timing.metadata["first_visible_kind"] == "placeholder"
@@ -6114,7 +6142,7 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
             _plain_request(_target()),
             model_prompt="hello\n\n<mindroom_message_context>persist me</mindroom_message_context>",
         )
-        generation = await coordinator._process_and_respond_streaming(request)
+        generation = await process_and_respond_for_test(coordinator, request, streaming=True)
 
     # The failure does not propagate: it is logged and becomes a finalized error outcome.
     assert generation.delivery is error_outcome
@@ -6190,7 +6218,7 @@ async def test_streaming_midstream_failure_persists_partial_off_event_loop(
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator._process_and_respond_streaming(_plain_request(_target()))
+        await process_and_respond_for_test(coordinator, _plain_request(_target()), streaming=True)
 
 
 @pytest.mark.asyncio
@@ -8196,7 +8224,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
             async with response_cli_lifetime() as lifetime:
                 lifetime.grant_expires_at_ns = clock.now + 86400 * 10**9 if live else 1
                 catalog = await _catalog(tmp_path / "owner", [])
-                owner = LiveTurnTools(
+                owner = live_turn_tools_for_test(
                     CliTurnOwner(
                         build_execution_identity_from_runtime_context(catalog.runtime_context),
                         "turn",
@@ -8392,7 +8420,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         thread_id=target.resolved_thread_id,
         requester_id=request.user_id,
         sources=request.sources,
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
         cli_call={"kind": "agent_cli"},
         show_tool_calls=False,
     )
@@ -8575,7 +8603,6 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     continuation = approval_continuation(
         approval_id="approval-context",
         thread_id="$root",
-        execution_identity={},
         sources=ResponseSources(("$resume",), ("$resume",)),
     )
     target = _target(thread_id="$root", reply_to_event_id="$resume")
@@ -8941,7 +8968,7 @@ def test_a_finished_approval_continuation_tells_automations_its_source_events(tm
         response_event_id="$response",
         sources=ResponseSources(("$prompt",), ("$prompt",)),
         state="running",
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
     )
 
     deps = coordinator._approval_post_response_deps(continuation)
@@ -8976,7 +9003,7 @@ async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_r
     continuation = approval_continuation(
         entity_kind=entity_kind,
         history_scope=scope,
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
     )
     storage = coordinator.deps.state_writer.create_storage(identity, scope=scope)
     session = new_scope_session(session_id="session-1", scope_id=scope.scope_id, is_team=is_team)

@@ -397,6 +397,8 @@ def test_selection_checks_effective_shell_permissions(
         paths,
         identity,
         persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
     )
     shell_functions = {
         function.name

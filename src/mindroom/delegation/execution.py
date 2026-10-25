@@ -25,7 +25,6 @@ from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
-    child_execution_identity,
     child_run_context,
     child_tool_runtime_context,
     finish_child_turn,
@@ -59,6 +58,7 @@ from mindroom.delegation.state import (
     DelegationState,
     child_call_id,
     child_card_id,
+    child_execution_identity,
     delegation_card_id,
     member_call_id,
 )
@@ -645,7 +645,7 @@ async def _background_child_outcome(
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    output_request: ToolOutputFileRequest | None = None,
+    output_request: ToolOutputFileRequest | None,
 ) -> BackgroundOutcome:
     """Keep child execution, approvals, liveness and settlement owned by its background job."""
 
@@ -999,12 +999,12 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-    delegation_depth: int = 0,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    decisions: dict[str, bool] | None = None,
-    denial_reasons: dict[str, str | None] | None = None,
-    approval_calls: Sequence[ApprovalCall] = (),
-    on_event: ResumeEvents | None = None,
+    delegation_depth: int,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    decisions: dict[str, bool] | None,
+    denial_reasons: dict[str, str | None] | None,
+    approval_calls: Sequence[ApprovalCall],
+    on_event: ResumeEvents | None,
     background: ToolJobRuntime | None = None,
     tag_call_event: _CallEventTag = _untagged,
 ) -> str | None:

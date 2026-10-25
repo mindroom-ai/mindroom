@@ -32,12 +32,17 @@ def _mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     return _normalize_namespace(runtime_mindroom_namespace(runtime_paths))
 
 
-def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> str:
-    """Build the Matrix username localpart for an agent-like entity."""
+def namespaced_username_localpart(localpart: str, runtime_paths: RuntimePaths) -> str:
+    """Append the installation namespace, when one is set, to a Matrix username localpart."""
     namespace = _mindroom_namespace(runtime_paths)
     if namespace:
-        return f"{_AGENT_USERNAME_PREFIX}{agent_name}_{namespace}"
-    return f"{_AGENT_USERNAME_PREFIX}{agent_name}"
+        return f"{localpart}_{namespace}"
+    return localpart
+
+
+def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> str:
+    """Build the Matrix username localpart for an agent-like entity."""
+    return namespaced_username_localpart(f"{_AGENT_USERNAME_PREFIX}{agent_name}", runtime_paths)
 
 
 def unnamespaced_agent_name_from_username_localpart(username_localpart: str) -> str | None:

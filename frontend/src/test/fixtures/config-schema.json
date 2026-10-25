@@ -3504,7 +3504,7 @@
             }
           ],
           "default": null,
-          "description": "Additional provider-specific parameters passed directly to the model; may include api_key",
+          "description": "Additional provider-specific parameters the model's provider accepts; config load rejects any other key; may include api_key",
           "title": "Extra Kwargs",
           "x-mindroom": {
             "secret": true
@@ -3709,16 +3709,67 @@
       "title": "ParticipationConfig",
       "type": "object"
     },
+    "PersonalAgentTemplateConfig": {
+      "additionalProperties": false,
+      "description": "Defaults for the agent that every onboarded user gets of their own.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Agent key pattern with one {username}; defaults to '<template key>_{username}'",
+          "title": "Name"
+        },
+        "matrix_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Matrix localpart pattern with one {username} and at least one other character; defaults to the usual mindroom_<agent key> account",
+          "title": "Matrix Username"
+        },
+        "agent": {
+          "$ref": "#/$defs/AgentConfig",
+          "description": "Agent fields shared by every user's agent"
+        },
+        "users": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "default": {},
+          "description": "Per-user agent field overrides keyed by concrete Matrix user ID; each replaces the template field",
+          "title": "Users",
+          "type": "object"
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "title": "PersonalAgentTemplateConfig",
+      "type": "object"
+    },
     "PersonalRoomsConfig": {
       "additionalProperties": false,
       "description": "One private room per eligible human, managed by a selected agent.",
       "properties": {
         "agent": {
-          "description": "Agent that owns and answers in personal rooms",
+          "description": "Agent, or personal_agents template, that owns and answers in personal rooms",
           "title": "Agent",
           "type": "string",
           "x-mindroom": {
-            "reference": "agent"
+            "reference": "personal_room_agent"
           }
         },
         "onboarding_rooms": {
@@ -5392,6 +5443,15 @@
         "access": null
       },
       "description": "Router configuration"
+    },
+    "personal_agents": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PersonalAgentTemplateConfig"
+      },
+      "default": {},
+      "description": "Templates that give every onboarded user their own agent",
+      "title": "Personal Agents",
+      "type": "object"
     },
     "personal_rooms": {
       "anyOf": [

@@ -1,7 +1,7 @@
 """Forming a team from one Matrix turn: who was asked, who is eligible, and in which mode the team works.
 
-Team formation is pure policy over mentions, thread history, room membership, and configured access; only the
-execution-time mode choice for an ad hoc team asks a model.
+Team formation is pure policy over mentions, thread history, the room's responders the sender may see, and configured
+access; only the execution-time mode choice for an ad hoc team asks a model.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Literal, cast
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
-from mindroom.authorization import get_available_responders_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import record_system_usage
@@ -22,8 +21,6 @@ from mindroom.providers import registry as provider_registry
 from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
-    import nio
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
@@ -54,7 +51,6 @@ class TeamMemberStatus(str, Enum):
     """Eligibility of one requested team member."""
 
     ELIGIBLE = "eligible"
-    NOT_IN_ROOM = "not_in_room"
     HIDDEN_FROM_SENDER = "hidden_from_sender"
     UNSUPPORTED_FOR_TEAM = "unsupported_for_team"
     NOT_MATERIALIZABLE = "not_materializable"
@@ -222,28 +218,26 @@ def decide_team_formation(
     tagged_agents: list[MatrixID],
     agents_in_thread: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
-    room: nio.MatrixRoom | None,
     runtime_paths: RuntimePaths,
     config: Config,
-    is_dm_room: bool = False,
-    is_thread: bool = False,
-    available_responders_in_room: list[MatrixID] | None = None,
-    materializable_agent_names: set[str] | None = None,
-    allow_explicit_private_agents: bool = False,
+    *,
+    is_dm_room: bool,
+    is_thread: bool,
+    available_responders_in_room: list[MatrixID],
+    materializable_agent_names: set[str] | None,
 ) -> TeamResolution:
     """Determine if a team should form, purely from mention, thread, and room context.
 
     ``available_responders_in_room`` are the room's responders the sender may see and ``materializable_agent_names``
-    the live agents that can answer now, each when known; ``allow_explicit_private_agents`` lets explicitly tagged
-    requester-private agents join. A team carries a heuristic provisional mode: COORDINATE when agents are explicitly
-    tagged (they likely have different roles), COLLABORATE when agents come from thread history (likely discussing the
-    same topic). The execution layer may refine it with ``select_ad_hoc_team_mode``.
+    the live agents that can answer now, when known; explicitly tagged requester-private agents may join. A team
+    carries a heuristic provisional mode: COORDINATE when agents are explicitly tagged (they likely have different
+    roles), COLLABORATE when agents come from thread history (likely discussing the same topic). The execution layer
+    may refine it with ``select_ad_hoc_team_mode``.
     """
     team_request = _select_team_request(
         tagged_agents,
         all_mentioned_in_thread,
         agents_in_thread,
-        room,
         config,
         runtime_paths,
         is_dm_room=is_dm_room,
@@ -253,7 +247,7 @@ def decide_team_formation(
     if team_request is None:
         return TeamResolution.none()
 
-    allow_direct_private_agents = allow_explicit_private_agents and team_request.intent is TeamIntent.EXPLICIT_MEMBERS
+    allow_direct_private_agents = team_request.intent is TeamIntent.EXPLICIT_MEMBERS
     materializable_agent_names = resolve_team_materializable_agent_names(
         config,
         materializable_agent_names,
@@ -263,7 +257,6 @@ def decide_team_formation(
         team_request.requested_members,
         config,
         runtime_paths,
-        room=room,
         sender_visible_responders=available_responders_in_room,
         materializable_agent_names=materializable_agent_names,
         allow_direct_private_agents=allow_direct_private_agents,
@@ -274,9 +267,7 @@ def decide_team_formation(
         member_statuses=member_statuses,
         config=config,
         reason_prefix="Team request",
-        # TODO(simplify): The provisional mode counts raw tags, so a thread team whose message tags two entities that
-        # cannot join coordinates. Coordinate exactly when the intent is EXPLICIT_MEMBERS. Models would notice.
-        mode=TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE,
+        mode=TeamMode.COORDINATE if team_request.intent is TeamIntent.EXPLICIT_MEMBERS else TeamMode.COLLABORATE,
     )
 
 
@@ -329,13 +320,12 @@ def _select_team_request(
     tagged_agents: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
     agents_in_thread: list[MatrixID],
-    room: nio.MatrixRoom | None,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     is_dm_room: bool,
     is_thread: bool,
-    available_responders_in_room: list[MatrixID] | None,
+    available_responders_in_room: list[MatrixID],
 ) -> _SelectedTeamRequest | None:
     """Return the normalized team request implied by one message context, or None when it implies no team.
 
@@ -353,10 +343,8 @@ def _select_team_request(
         thread_members = _normalize_team_request_members(thread_agents, config, runtime_paths)
         if len(thread_members) > 1:
             return _requested_team(trigger, TeamIntent.IMPLICIT_THREAD_TEAM, thread_members)
-    if not is_dm_room or is_thread or room is None:
+    if not is_dm_room or is_thread:
         return None
-    if available_responders_in_room is None:
-        available_responders_in_room = get_available_responders_in_room(room, config, runtime_paths)
     responders = _normalize_team_request_members(available_responders_in_room, config, runtime_paths)
     if len(responders) <= 1:
         return None
@@ -370,7 +358,6 @@ def _requested_team(trigger: str, intent: TeamIntent, members: list[MatrixID]) -
 
 # How a rejection reads for one agent and for several, by the status that rejected them.
 _REJECTION_PHRASES: dict[TeamMemberStatus, tuple[str, str]] = {
-    TeamMemberStatus.NOT_IN_ROOM: ("is not available in this room", "are not available in this room"),
     TeamMemberStatus.HIDDEN_FROM_SENDER: (
         "is not available to you in this room",
         "are not available to you in this room",
@@ -401,22 +388,16 @@ def _evaluate_team_members(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    room: nio.MatrixRoom | None,
     sender_visible_responders: list[MatrixID] | None,
     materializable_agent_names: set[str] | None,
     allow_direct_private_agents: bool,
 ) -> list[TeamResolutionMember]:
     """Evaluate one status and response capability for each requested member, a teamable agent.
 
-    The sender's view of the room decides visibility when given, else the room's membership when known.
+    The sender's view of the room decides visibility when given; a configured team's members are all visible.
     """
     sender_visible_ids = (
         {agent_id.full_id for agent_id in sender_visible_responders} if sender_visible_responders is not None else None
-    )
-    room_visible_ids = (
-        {agent_id.full_id for agent_id in get_available_responders_in_room(room, config, runtime_paths)}
-        if sender_visible_ids is None and room is not None
-        else None
     )
     registry = entity_identity_registry(config, runtime_paths)
     agent_names = [registry.entity_name_or_username(agent_id) for agent_id in requested_members]
@@ -428,12 +409,9 @@ def _evaluate_team_members(
     member_statuses: list[TeamResolutionMember] = []
     for agent_id, agent_name in zip(requested_members, agent_names, strict=True):
         private_targets = unsupported_agents.get(agent_name)
-        is_room_visible = room_visible_ids is None or agent_id.full_id in room_visible_ids
         is_sender_visible = sender_visible_ids is None or agent_id.full_id in sender_visible_ids
         is_materializable = materializable_agent_names is None or agent_name in materializable_agent_names
-        if not is_room_visible:
-            status = TeamMemberStatus.NOT_IN_ROOM
-        elif not is_sender_visible:
+        if not is_sender_visible:
             status = TeamMemberStatus.HIDDEN_FROM_SENDER
         elif agent_name in unsupported_agents:
             status = TeamMemberStatus.UNSUPPORTED_FOR_TEAM
@@ -568,7 +546,6 @@ def resolve_configured_team(
         requested_members,
         config,
         runtime_paths,
-        room=None,
         sender_visible_responders=None,
         materializable_agent_names=materializable_agent_names,
         allow_direct_private_agents=False,

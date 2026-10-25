@@ -18,7 +18,6 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRequirement, ToolExecution
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
@@ -46,12 +45,11 @@ async def advance_cli_delegation(
     *,
     parent_bash_call_id: str,
     delegation_depth: int,
-    run_child: ChildResponseRunner | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    decisions: dict[str, bool] | None = None,
-    denial_reasons: dict[str, str | None] | None = None,
-    approval_calls: Sequence[ApprovalCall] = (),
-    on_event: Callable[[object], None] | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    decisions: dict[str, bool] | None,
+    denial_reasons: dict[str, str | None] | None,
+    approval_calls: Sequence[ApprovalCall],
+    on_event: Callable[[object], None],
 ) -> PausedAttempt | ToolExecution:
     """Advance one child, persisting state on the real parent run without resuming it."""
     from mindroom.ai import run_delegated_child_response  # noqa: PLC0415 - envelope creation cycle
@@ -94,7 +92,7 @@ async def advance_cli_delegation(
             previous_state=previous,
             persist=persist,
             agent_name=context.agent_name,
-            run_child=run_child or run_delegated_child_response,
+            run_child=run_delegated_child_response,
             config=config,
             runtime_paths=context.runtime_paths,
             execution_identity=build_execution_identity_from_runtime_context(context),
@@ -112,7 +110,7 @@ async def advance_cli_delegation(
     view.status = RunStatus.paused
     paused = paused_attempt_from_response(
         view,
-        toolkit_owners={(context.agent_name, binding.key.function): binding.key.toolkit},
+        toolkit_owners={(context.agent_name, binding.key.function): binding.approval_toolkit},
     )
     if paused is None:
         msg = "Delegated child paused without supported exact approval requirements"
@@ -121,7 +119,7 @@ async def advance_cli_delegation(
         paused,
         runtime_model_name=catalog.run.model_name,
         cli_call=CliApprovalCall(
-            toolkit=binding.key.toolkit,
+            toolkit=binding.approval_toolkit,
             function=binding.key.function,
             arguments=deepcopy(tool.tool_args or {}),
             call_id=tool.tool_call_id,

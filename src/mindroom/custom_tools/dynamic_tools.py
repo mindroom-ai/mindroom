@@ -175,7 +175,7 @@ def _match(deferred: DeferredToolkit, definition: dict[str, Any]) -> dict[str, A
 
 
 def _function_definitions(deferred: DeferredToolkit) -> list[dict[str, Any]]:
-    return [tool_definition(function) for function in deferred.functions]
+    return [tool_definition(function.definition()) for function in deferred.functions]
 
 
 def _search_score(

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom.authorization import get_available_responders_in_room
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -504,7 +505,9 @@ class TestRouterTeamFormation:
             runtime_paths=runtime_paths_for(config),
             config=config,
             is_dm_room=True,  # This is a DM room
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         # Should form a team with both agents
@@ -522,7 +525,9 @@ class TestRouterTeamFormation:
             runtime_paths=runtime_paths_for(config),
             config=config,
             is_dm_room=True,
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         # Should not form a team with single agent
@@ -567,14 +572,15 @@ class TestRouterTeamFormation:
             config=config,
             is_dm_room=True,
             is_thread=True,
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
-        """DM fallback should degrade to the remaining supported single agent."""
+        """A DM room's auto team leaves out a private agent and degrades to the one supported agent left."""
         from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -606,7 +612,9 @@ class TestRouterTeamFormation:
             runtime_paths=runtime_paths_for(config),
             config=config,
             is_dm_room=True,
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -642,8 +650,10 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
             is_thread=True,
+            is_dm_room=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -695,8 +705,10 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
             is_thread=True,
+            is_dm_room=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.TEAM
@@ -741,8 +753,10 @@ class TestRouterTeamFormation:
             ],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
             is_thread=True,
+            is_dm_room=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -751,7 +765,7 @@ class TestRouterTeamFormation:
 
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_the_entire_team_request(self) -> None:
-        """Explicit team requests must reject members that are not available in the room."""
+        """An explicit team request rejects a member the room does not hold, which the sender cannot reach there."""
         from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -778,21 +792,24 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.REJECT
         assert result.intent is TeamIntent.EXPLICIT_MEMBERS
         assert _agent_names(result.eligible_members, config) == ["calculator"]
-        assert result.reason == "Team request includes agent 'general' that is not available in this room."
+        assert result.reason == "Team request includes agent 'general' that is not available to you in this room."
         assert {member.name: member.status for member in result.member_statuses} == {
             "calculator": TeamMemberStatus.ELIGIBLE,
-            "general": TeamMemberStatus.NOT_IN_ROOM,
+            "general": TeamMemberStatus.HIDDEN_FROM_SENDER,
         }
 
     @pytest.mark.asyncio
     async def test_tagged_agents_reject_when_sender_can_talk_to_zero_agents(self) -> None:
-        """Explicit sender visibility of [] must not fall back to room-visible agents."""
+        """A sender who can reach no responder in the room has every tagged agent rejected, named in one reason."""
         from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -803,14 +820,6 @@ class TestRouterTeamFormation:
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
-        )
-
-        room = _matrix_room(
-            "!room:localhost",
-            [
-                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
-                entity_ids(config, runtime_paths_for(config))["general"].full_id,
-            ],
         )
 
         result = decide_team_formation(
@@ -822,8 +831,10 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
             available_responders_in_room=[],
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -831,45 +842,6 @@ class TestRouterTeamFormation:
         assert result.reason == (
             "Team request includes agents 'calculator', 'general' that are not available to you in this room."
         )
-
-    @pytest.mark.asyncio
-    async def test_tagged_agents_use_supplied_responder_boundary_over_room_cache(self) -> None:
-        """Supplied responder candidates are authoritative for explicit team requests."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
-                    "general": AgentConfig(display_name="General", role="General"),
-                },
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-            ),
-        )
-        runtime_paths = runtime_paths_for(config)
-
-        room = _matrix_room("!room:localhost", [entity_ids(config, runtime_paths)["calculator"].full_id])
-
-        result = decide_team_formation(
-            tagged_agents=[
-                entity_ids(config, runtime_paths)["calculator"],
-                entity_ids(config, runtime_paths)["general"],
-            ],
-            agents_in_thread=[],
-            all_mentioned_in_thread=[],
-            runtime_paths=runtime_paths,
-            config=config,
-            room=room,
-            available_responders_in_room=[
-                entity_ids(config, runtime_paths)["calculator"],
-                entity_ids(config, runtime_paths)["general"],
-            ],
-            materializable_agent_names={"calculator", "general"},
-        )
-
-        assert result.outcome is TeamOutcome.TEAM
-        assert result.intent is TeamIntent.EXPLICIT_MEMBERS
-        assert _agent_names(result.eligible_members, config) == ["calculator", "general"]
 
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:
@@ -887,11 +859,6 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = _matrix_room(
-            "!room:localhost",
-            [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
-        )
-
         result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["general"],
@@ -901,9 +868,10 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
             available_responders_in_room=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             materializable_agent_names={"calculator"},
+            is_dm_room=False,
+            is_thread=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -953,8 +921,10 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
-            allow_explicit_private_agents=True,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.TEAM
@@ -974,23 +944,16 @@ class TestRouterTeamFormation:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "alpha": AgentConfig(
-                        display_name="Alpha",
+                    "alpha": AgentConfig(display_name="Alpha", role="Assistant", delegate_to=["vault"]),
+                    "vault": AgentConfig(
+                        display_name="Vault",
                         role="Private assistant",
-                        private=AgentPrivateConfig(per="user", root="alpha_data"),
+                        private=AgentPrivateConfig(per="user", root="vault_data"),
                     ),
                     "calculator": AgentConfig(display_name="Calculator", role="Math"),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
-        )
-
-        room = _matrix_room(
-            "!room:localhost",
-            [
-                entity_ids(config, runtime_paths_for(config))["alpha"].full_id,
-                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
-            ],
         )
 
         result = decide_team_formation(
@@ -1002,12 +965,13 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
             available_responders_in_room=[
                 entity_ids(config, runtime_paths_for(config))["alpha"],
                 entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             materializable_agent_names={"calculator"},
+            is_dm_room=False,
+            is_thread=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -1025,25 +989,17 @@ class TestRouterTeamFormation:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "alpha": AgentConfig(
-                        display_name="Alpha",
+                    "alpha": AgentConfig(display_name="Alpha", role="Assistant", delegate_to=["vault"]),
+                    "vault": AgentConfig(
+                        display_name="Vault",
                         role="Private assistant",
-                        private=AgentPrivateConfig(per="user", root="alpha_data"),
+                        private=AgentPrivateConfig(per="user", root="vault_data"),
                     ),
                     "general": AgentConfig(display_name="General", role="General"),
                     "calculator": AgentConfig(display_name="Calculator", role="Math"),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
-        )
-
-        room = _matrix_room(
-            "!room:localhost",
-            [
-                entity_ids(config, runtime_paths_for(config))["alpha"].full_id,
-                entity_ids(config, runtime_paths_for(config))["general"].full_id,
-                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
-            ],
         )
 
         result = decide_team_formation(
@@ -1055,19 +1011,20 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
             available_responders_in_room=[
                 entity_ids(config, runtime_paths_for(config))["alpha"],
                 entity_ids(config, runtime_paths_for(config))["general"],
                 entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             materializable_agent_names={"alpha", "calculator"},
+            is_dm_room=False,
+            is_thread=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT
         assert result.reason == (
             "Team request cannot be satisfied: "
-            "agent 'alpha' is private and can only join explicit Matrix ad hoc teams with requester identity; "
+            "agent 'alpha' reaches private agent 'vault' via delegation and private delegation is not supported for teams; "
             "agent 'general' could not be materialized for this request"
         )
 
@@ -1117,7 +1074,10 @@ class TestRouterTeamFormation:
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
-            room=room,
+            available_responders_in_room=get_available_responders_in_room(room, config, runtime_paths_for(config)),
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -1137,18 +1097,24 @@ def _decide(
     mentioned_in_thread: Sequence[str] = (),
     sender_visible: Sequence[str] | None = None,
 ) -> TeamResolution:
-    """Decide formation in a room whose members are ``room_members``, by agent name."""
+    """Decide formation in a room whose members are ``room_members``, by agent name, all of whom the sender sees.
+
+    ``sender_visible`` narrows the sender's view of the room's responders.
+    """
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
     return decide_team_formation(
         tagged_agents=[ids[name] for name in tagged],
         agents_in_thread=[],
         all_mentioned_in_thread=[ids[name] for name in mentioned_in_thread],
-        room=_matrix_room("!room:localhost", [ids[name].full_id for name in room_members]),
         runtime_paths=runtime_paths,
         config=config,
         is_thread=bool(mentioned_in_thread),
-        available_responders_in_room=None if sender_visible is None else [ids[name] for name in sender_visible],
+        available_responders_in_room=[
+            ids[name] for name in (room_members if sender_visible is None else sender_visible)
+        ],
+        is_dm_room=False,
+        materializable_agent_names=None,
     )
 
 
@@ -1178,7 +1144,9 @@ def test_a_team_request_names_every_agent_missing_from_the_room() -> None:
     result = _decide(config, room_members=["calculator"], tagged=["calculator", "general", "research"])
 
     assert result.outcome is TeamOutcome.REJECT
-    assert result.reason == "Team request includes agents 'general', 'research' that are not available in this room."
+    assert result.reason == (
+        "Team request includes agents 'general', 'research' that are not available to you in this room."
+    )
 
 
 @pytest.mark.parametrize(
@@ -1190,7 +1158,7 @@ def test_a_team_request_names_every_agent_missing_from_the_room() -> None:
             None,
             "Team request cannot be satisfied: "
             "agent 'code' reaches private agent 'research' via delegation and private delegation is not supported for "
-            "teams; agent 'general' is not available in this room",
+            "teams; agent 'general' is not available to you in this room",
         ),
         (
             ["research", "vault"],
@@ -1208,7 +1176,7 @@ def test_a_mixed_reject_explains_private_delegation_and_unavailability_per_membe
     sender_visible: list[str] | None,
     expected_reason: str,
 ) -> None:
-    """A member that delegates to private agents and one the room or the sender lacks each get their own reason."""
+    """A member that delegates to private agents and one the sender cannot reach in the room each get their own reason."""
     config = _formation_config(
         code=AgentConfig(display_name="Code", role="Coder", delegate_to=private_targets),
         general=AgentConfig(display_name="General", role="General"),
@@ -1242,6 +1210,6 @@ def test_an_implicit_thread_team_whose_members_all_left_the_room_forms_no_team()
     assert result.intent is TeamIntent.IMPLICIT_THREAD_TEAM
     assert result.eligible_members == []
     assert {member.name: member.status for member in result.member_statuses} == {
-        "calculator": TeamMemberStatus.NOT_IN_ROOM,
-        "general": TeamMemberStatus.NOT_IN_ROOM,
+        "calculator": TeamMemberStatus.HIDDEN_FROM_SENDER,
+        "general": TeamMemberStatus.HIDDEN_FROM_SENDER,
     }

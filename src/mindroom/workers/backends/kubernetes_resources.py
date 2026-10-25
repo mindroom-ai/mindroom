@@ -1174,7 +1174,7 @@ class KubernetesResourceManager:
             kubernetes_client = importlib.import_module("kubernetes.client")
             kubernetes_exceptions = importlib.import_module("kubernetes.client.exceptions")
         except ModuleNotFoundError as exc:
-            msg = "The 'kubernetes' package is required for the Kubernetes worker backend."
+            msg = "The Kubernetes worker backend needs the 'kubernetes' package: install mindroom[kubernetes]."
             raise WorkerBackendError(msg) from exc
 
         try:

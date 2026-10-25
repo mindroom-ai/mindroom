@@ -88,6 +88,7 @@ from tests.conftest import (
     make_turn_context,
     make_visible_message,
     message_origin,
+    process_and_respond_for_test,
     seed_session,
     test_runtime_paths,
 )
@@ -917,7 +918,6 @@ async def test_a_turn_that_reads_the_approval_receipt_sends_it_with_its_first_re
     assert probe.calls == ["a"]
     first, *later = reply.model.requests
     assert str(first.messages[0].content).endswith(RECEIPT_TEXT)
-    assert first.messages[0].provider_data == {"mindroom_approval_receipt": True}
     assert len(later) == 2
     assert all(RECEIPT_TEXT not in str(message.content) for request in later for message in request.messages)
     session = reply.storage.load_session(SESSION_ID, "agent")
@@ -1251,9 +1251,13 @@ async def _respond_through_runner(
 ) -> tuple[Any, list[str]]:
     """Run one reply through the runner's turn, in its reply span, and return the outcome and the attempt run ids."""
     run_ids: list[str] = []
-    respond = runner._process_and_respond_streaming if streaming else runner._process_and_respond
     async with response_span(runner, request):
-        outcome = await respond(request, attempt_run_id_collector=run_ids)
+        outcome = await process_and_respond_for_test(
+            runner,
+            request,
+            streaming=streaming,
+            attempt_run_id_collector=run_ids,
+        )
     return outcome, run_ids
 
 

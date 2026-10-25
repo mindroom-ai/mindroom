@@ -221,10 +221,7 @@ async def apply_post_response_effects(
             terminal_status=final_delivery_outcome.terminal_status,
             final_visible_body_is_none=final_delivery_outcome.final_visible_body is None,
             suppressed=final_delivery_outcome.suppressed,
-            # TODO(simplify): option_map_empty and options_list_empty log the same value, whether metadata is missing.
-            # Log it once, as interactive_metadata_is_none. Operators reading this warning would notice.
-            option_map_empty=not bool(final_delivery_outcome.interactive_metadata),
-            options_list_empty=not bool(final_delivery_outcome.interactive_metadata),
+            interactive_metadata_is_none=final_delivery_outcome.interactive_metadata is None,
         )
 
     if (

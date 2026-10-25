@@ -98,6 +98,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     FakeCredentialsManager,
+    call_proxy_sync_for_test,
     make_conversation_reader_mock,
     make_relation_lookup,
     requires_linux,
@@ -3557,7 +3558,7 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
         ),
     )
 
-    result = sandbox_proxy_module._call_proxy_sync(
+    result = call_proxy_sync_for_test(
         runtime_paths=runtime_paths,
         tool_name="calculator",
         function_name="add",
@@ -3661,7 +3662,7 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
     )
 
     with pytest.raises(RuntimeError, match="boom"):
-        sandbox_proxy_module._call_proxy_sync(
+        call_proxy_sync_for_test(
             runtime_paths=runtime_paths,
             tool_name="calculator",
             function_name="add",
@@ -5730,7 +5731,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
     )
 
     with tool_runtime_context(runtime_context):
-        result = sandbox_proxy_module._call_proxy_sync(
+        result = call_proxy_sync_for_test(
             runtime_paths=runtime_paths,
             tool_name="calculator",
             function_name="add",
@@ -5773,7 +5774,7 @@ def _live_primary_config(runtime_paths: RuntimePaths) -> Config:
                     "provider": "openai",
                     "id": "gpt-6-astra",
                     "api_key": "sk-live-model-key",
-                    "extra_kwargs": {"aws_secret_access_key": "live-model-extra-kwarg-secret"},
+                    "extra_kwargs": {"default_headers": {"X-Upstream-Key": "live-model-extra-kwarg-secret"}},
                 },
             },
             "router": {"model": "default"},
@@ -5875,7 +5876,7 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
 
     with tool_runtime_context(_mind_tool_runtime_context(runtime_paths, live_config)):
-        sandbox_proxy_module._call_proxy_sync(
+        call_proxy_sync_for_test(
             runtime_paths=runtime_paths,
             tool_name="calculator",
             function_name="add",
@@ -7933,7 +7934,7 @@ def test_proxy_composition_decodes_typed_media_for_every_tool(
     monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", lambda **_kwargs: envelope)
 
     def call() -> object:
-        return sandbox_proxy_module._call_proxy_sync(
+        return call_proxy_sync_for_test(
             runtime_paths=paths,
             tool_name=tool_name,
             function_name="browser_take_screenshot",

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import weakref
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -24,6 +25,10 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolkitClose, ToolkitConnect
 
 logger = get_logger(__name__)
+
+# The latest cleanup of each toolkit's connect that a cancelled run stopped waiting for; once done, it closed what it
+# connected.
+_pending_cleanups: weakref.WeakKeyDictionary[Toolkit, asyncio.Task[None]] = weakref.WeakKeyDictionary()
 
 
 class _McpToolkit(Protocol):
@@ -112,6 +117,9 @@ async def _connect_mcp(toolkit: Toolkit) -> ToolkitClose | None:
 
 
 async def _connect(toolkit: Toolkit) -> ToolkitClose | None:
+    if (cleanup := _pending_cleanups.get(toolkit)) is not None and not cleanup.done():
+        # That cleanup closes the toolkit instance, so connecting first would let it close this run's connection.
+        await asyncio.wait({cleanup})
     try:
         if inspect.iscoroutinefunction(toolkit.connect):
             # An async session may have to close in the task that opened it, so it connects in the run's own task.
@@ -128,14 +136,12 @@ async def _connect_on_thread(toolkit: Toolkit) -> None:
     """Connect ``toolkit`` on a thread; a caller cancelled meanwhile stops waiting, and the connection closes once made."""
 
     def close_once_connected(connecting: asyncio.Task[None]) -> None:
-        create_background_task(_close_once_connected(toolkit, connecting), name="toolkit-connect-cleanup")
+        cleanup = create_background_task(_close_once_connected(toolkit, connecting), name="toolkit-connect-cleanup")
+        _pending_cleanups[toolkit] = cleanup
 
     await shielded_lifecycle(run_toolkit_lifecycle(toolkit.connect), retain=close_once_connected)
 
 
-# TODO(simplify): This cleanup closes the toolkit instance, so after a slow connect is cancelled, it can close a
-# later run's reconnect of the same toolkit. A reconnect should wait for its toolkit's pending cleanup first.
-# Users would notice a tool call failing on a connection closed mid-run (#3075).
 async def _close_once_connected(toolkit: Toolkit, connecting: asyncio.Task[None]) -> None:
     try:
         await connecting

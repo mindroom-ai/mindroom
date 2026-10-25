@@ -67,7 +67,14 @@ def _agent_request(
     )
     persist_entity_accounts(config, runtime_paths)
     with patch("mindroom.agents.render_date_context", return_value=f"Current date: {date}"):
-        build = create_agent("writer", config, runtime_paths, execution_identity=None)
+        build = create_agent(
+            "writer",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            knowledge=None,
+            active_model_name=None,
+        )
     system = prompt_for_turn(build, system_enrichment)
     messages = [
         system,

@@ -65,7 +65,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/spotify",
+    docs_url="https://docs.mindroom.chat/tools/media-and-content/#spotify",
     helper_text="Get an access token from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)",
     function_names=(
         "add_tracks_to_playlist",

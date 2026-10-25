@@ -18,8 +18,8 @@
       "id": "gpt-6-astra",
       "provider": "openai"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tool_jobs": {
@@ -29,6 +29,7 @@
     },
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -52,9 +53,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -74,13 +77,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6-astra",
@@ -89,10 +92,10 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
+        "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
         "response_id": "resp_parity"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "call_id": "call_parity_weather",
@@ -110,7 +113,7 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {

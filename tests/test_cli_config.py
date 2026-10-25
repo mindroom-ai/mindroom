@@ -1478,7 +1478,10 @@ class TestConfigInit:
         env_content = (tmp_path / ".env").read_text()
         assert "AZURE_OPENAI_API_KEY=your-azure-openai-key-here" in env_content
         assert "AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com" in env_content
-        assert "# AZURE_OPENAI_API_VERSION=2024-10-21" in env_content
+        assert (
+            "# Optional: override the default Azure OpenAI API version.\n# AZURE_OPENAI_API_VERSION=2024-10-21"
+            in env_content
+        )
         assert "\nAZURE_OPENAI_API_VERSION=" not in env_content
         assert "\nOPENAI_API_KEY=" not in env_content
         assert "\nANTHROPIC_API_KEY=" not in env_content
@@ -1533,7 +1536,7 @@ class TestConfigInit:
             lambda provider: "OPENAI_API_KEY" if provider == "openrouter" else None,
         )
 
-        env_content = config_cli._provider_env_template("openrouter")
+        env_content = config_cli._provider_env_template("openrouter", None)
 
         assert "\nOPENAI_API_KEY=your-openai-key-here" in f"\n{env_content}"
         assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in f"\n{env_content}"
@@ -1675,7 +1678,6 @@ agents:
     role: Personal assistant with persistent file-based identity and memory
     model: default
     include_default_tools: false
-    learning: false
     memory_backend: file
     rooms:
       - personal

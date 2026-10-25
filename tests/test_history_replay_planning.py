@@ -22,6 +22,7 @@ from mindroom.history.policy import (
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
     estimate_prompt_visible_history_tokens,
+    estimate_request_messages_tokens,
     plan_replay_that_fits,
 )
 from mindroom.history.storage import (
@@ -62,13 +63,28 @@ def _viewed_image_message(index: int) -> Message:
     )
 
 
+def test_a_native_route_without_a_checkpoint_estimates_text_as_a_plain_request_does() -> None:
+    """One history gets one estimate: a native route rounds its canonical text the way a plain request does."""
+    messages = [Message(role="user", content="a") for _ in range(4)]
+
+    assert estimate_request_messages_tokens(messages, replay_estimator=None, native_route="native-route") == 1
+    assert estimate_request_messages_tokens(messages, replay_estimator=None) == 1
+
+
+def test_an_empty_media_list_adds_nothing_to_a_message_estimate() -> None:
+    """A message estimates by its text and tool calls; an empty media list carries neither."""
+    with_empty_media = Message(role="user", content="abcdefg", images=[], files=[])
+
+    assert estimate_request_messages_tokens([with_empty_media], replay_estimator=None) == 1
+
+
 @pytest.mark.parametrize("native_route", [None, "native-route"])
 def test_history_estimate_projects_bounded_viewed_images_without_mutating_session(native_route: str | None) -> None:
     """The planner and provider estimator see the same bounded newest-first media replay."""
     messages = [_viewed_image_message(index) for index in range(6)]
     session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
     before = deepcopy(session)
-    replay_model = ReplayEstimate(100, uses_visual_tokens=True)
+    replay_estimator = ReplayEstimate(100, uses_visual_tokens=True)
 
     estimate_prompt_visible_history_tokens(
         session=session,
@@ -77,13 +93,13 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
             policy=HistoryPolicy(mode="all"),
             max_tool_calls_from_history=None,
         ),
-        replay_model=replay_model,
+        replay_estimator=replay_estimator,
         native_route=native_route,
     )
 
-    replayed_ids = [image.id for message in replay_model.messages for image in message.images or []]
+    replayed_ids = [image.id for message in replay_estimator.messages for image in message.images or []]
     assert replayed_ids == ["mindroom_viewed_2", "mindroom_viewed_3", "mindroom_viewed_4", "mindroom_viewed_5"]
-    assert sum("omitted from replay" in str(message.content) for message in replay_model.messages) == 2
+    assert sum("omitted from replay" in str(message.content) for message in replay_estimator.messages) == 2
     assert session == before
 
 
@@ -111,12 +127,14 @@ def test_history_estimate_charges_conservative_visual_cost_without_provider_esti
         scope=scope,
         history_settings=settings,
         native_route=native_route,
+        replay_estimator=None,
     )
     visual_tokens = estimate_prompt_visible_history_tokens(
         session=with_image,
         scope=scope,
         history_settings=settings,
         native_route=native_route,
+        replay_estimator=None,
     )
 
     assert 5_000 <= visual_tokens - text_tokens < 5_100
@@ -134,7 +152,7 @@ def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavail
             policy=HistoryPolicy(mode="all"),
             max_tool_calls_from_history=None,
         ),
-        replay_model=ReplayEstimate(None, uses_visual_tokens=True),
+        replay_estimator=ReplayEstimate(None, uses_visual_tokens=True),
         native_route=native_route,
     )
 
@@ -156,25 +174,25 @@ def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_esti
         "with-image",
         runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
     )
-    replay_model = ReplayEstimate(12_000)
+    replay_estimator = ReplayEstimate(12_000)
 
     text_tokens = estimate_prompt_visible_history_tokens(
         session=without_image,
         scope=scope,
         history_settings=settings,
         native_route=native_route,
-        replay_model=replay_model,
+        replay_estimator=replay_estimator,
     )
     visual_tokens = estimate_prompt_visible_history_tokens(
         session=with_image,
         scope=scope,
         history_settings=settings,
         native_route=native_route,
-        replay_model=replay_model,
+        replay_estimator=replay_estimator,
     )
 
     assert visual_tokens - text_tokens >= 5_000
-    assert replay_model.messages[0].images is None
+    assert replay_estimator.messages[0].images is None
 
 
 @pytest.mark.asyncio
@@ -984,6 +1002,8 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
         plan=execution_plan,
         force_compact_before_next_run=False,
         current_history_tokens=8_001,
+        allow_native_compaction=True,
+        summary_tokens=0,
     )
     assert decision.mode == "required"
     assert decision.reason == "history_exceeds_hard_budget"
@@ -1192,6 +1212,8 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
         plan=execution_plan,
         force_compact_before_next_run=False,
         current_history_tokens=hard_replay_budget + 1,
+        allow_native_compaction=True,
+        summary_tokens=0,
     )
     assert decision.mode == "required"
     assert decision.reason == "history_exceeds_hard_budget"
@@ -1216,7 +1238,9 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=True,
-        current_history_tokens=None,
+        current_history_tokens=5_000,
+        allow_native_compaction=True,
+        summary_tokens=0,
     )
 
     assert decision.mode == "required"
@@ -1263,6 +1287,7 @@ def test_classify_compaction_decision_compacts_at_trigger_only_without_native_co
         force_compact_before_next_run=False,
         current_history_tokens=current_history_tokens,
         allow_native_compaction=allow_native_compaction,
+        summary_tokens=0,
     )
 
     assert decision.mode == expected_mode
@@ -1306,7 +1331,9 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
             session=session,
             scope=scope,
             history_settings=history_settings,
+            replay_estimator=None,
         ),
+        replay_estimator=None,
     )
 
     assert replay_plan.mode == "limited"
@@ -1389,6 +1416,7 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
                 policy=HistoryPolicy(mode="runs", limit=2),
                 max_tool_calls_from_history=None,
             ),
+            replay_estimator=None,
         ),
         add_history_to_context=True,
         num_history_runs=2,
@@ -1519,7 +1547,12 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
     session.summary = summary
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-    size = estimate_prompt_visible_history_tokens(session=session, scope=scope, history_settings=settings)
+    size = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=settings,
+        replay_estimator=None,
+    )
 
     with pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"):
         plan_replay_that_fits(
@@ -1528,6 +1561,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
             history_settings=settings,
             available_history_budget=500,
             current_history_tokens=size,
+            replay_estimator=None,
         )
 
     assert session.summary is summary
@@ -1540,6 +1574,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
         history_settings=settings,
         available_history_budget=10_000,
         current_history_tokens=size,
+        replay_estimator=None,
     )
     assert recovered.mode == "configured"
     assert recovered.estimated_tokens <= 10_000
@@ -1563,7 +1598,9 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
             session=session,
             scope=scope,
             history_settings=settings,
+            replay_estimator=None,
         ),
+        replay_estimator=None,
     )
     assert plan.mode == "disabled"
     assert 0 < plan.estimated_tokens <= 100
@@ -1599,7 +1636,9 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
             session=session,
             scope=scope,
             history_settings=history_settings,
+            replay_estimator=None,
         ),
+        replay_estimator=None,
     )
 
     assert replay_plan.mode == "disabled"

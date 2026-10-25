@@ -696,9 +696,9 @@ async def dispatch_external_tool_hooks(
 def build_tool_hook_middleware(
     hook_registry: HookRegistry,
     agent_name: str | None,
-    dispatch_context: ToolDispatchContext | None = None,
-    config: Config | None = None,
-    runtime_paths: RuntimePaths | None = None,
+    dispatch_context: ToolDispatchContext | None,
+    config: Config | None,
+    runtime_paths: RuntimePaths | None,
     origin: BackgroundScriptToolOrigin | None = None,
     approval_gate: _ToolApprovalGate | None = None,
 ) -> ToolMiddleware:

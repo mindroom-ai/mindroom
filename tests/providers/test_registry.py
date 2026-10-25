@@ -31,25 +31,23 @@ from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageRe
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.gemini.adapter import GeminiProvider
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.ollama_adapter import OllamaProvider
+from mindroom.providers.ollama.adapter import OllamaProvider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.registry import build_model_provider, model_capabilities, stream_idle_timeout_seconds
 from mindroom.providers.synthetic_adapter import SyntheticProvider
+from tests.agno_parity.golden_files import render
 from tests.providers.bare_adapter import bare_adapter
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
     encoded_response,
-    expected_parsed,
-    expected_stop_reason,
     golden_request,
     hide_provider_environment,
     load_golden,
-    normalized_parsed,
     normalized_request,
-    ordered_json,
+    parsed_turn,
     sse_response,
 )
 from tests.providers.openai_family_support import write_cli_logins
@@ -661,11 +659,10 @@ async def test_a_golden_of_every_family_replays_through_the_registry(
     await wire.requests[0].aread()
     request = normalized_request(wire.requests[0])
     assert request == golden["request"]
-    assert ordered_json(request["body"]) == ordered_json(golden["request"]["body"])
+    assert render(request["body"]) == render(golden["request"]["body"])
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
-    assert normalized_parsed(completed.message) == expected_parsed(golden)
-    assert completed.stop_reason == expected_stop_reason(golden)
+    assert parsed_turn(completed) == golden["parsed"]
 
 
 @pytest.mark.asyncio

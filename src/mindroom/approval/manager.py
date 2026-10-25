@@ -290,7 +290,7 @@ class ApprovalManager:
         continuation_id: str,
         continuation_generation: int,
         entity_name: str,
-        response_event_id: str | None,
+        response_event_id: str,
         tool_call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
@@ -298,9 +298,9 @@ class ApprovalManager:
         requester_id: str,
         approver_user_id: str,
         expires_at_ns: int,
-        agent_name: str | None = None,
-        thread_id: str | None = None,
-        grant_operation: ApprovalOperation | None = None,
+        agent_name: str,
+        thread_id: str | None,
+        grant_operation: ApprovalOperation | None,
     ) -> ApprovalCardReservation | None:
         """Prepare one exact frozen payload without creating delivery debt."""
         return await self._prepare_approval_card(
@@ -707,10 +707,10 @@ class ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
         authorize_responder: Callable[[str], bool],
-        before_consume: Callable[[], Awaitable[None]] | None = None,
-        auto_approve_seconds: int | None = None,
-        current_binding: str | None = None,
-        scheduled_scope: str | None = None,
+        before_consume: Callable[[], Awaitable[None]] | None,
+        auto_approve_seconds: int | None,
+        current_binding: str | None,
+        scheduled_scope: str | None,
     ) -> ApprovalActionResult:
         """Atomically choose the exact-call winner and enqueue its terminal edit."""
         if self.has_active_in_memory_approval_card(card_event_id):
@@ -866,7 +866,7 @@ class ApprovalManager:
         card_event_id: str,
         grant_id: str,
         authorize_responder: Callable[[str], bool],
-        before_consume: Callable[[], Awaitable[None]] | None = None,
+        before_consume: Callable[[], Awaitable[None]] | None,
     ) -> ApprovalActionResult:
         """Authenticate a retained grant and deliver its durable revocation edit."""
         if self.cards is None:
@@ -1300,16 +1300,16 @@ def get_approval_store() -> ApprovalManager | None:
 def initialize_approval_store(
     runtime_paths: RuntimePaths,
     *,
-    prepare_event: _MatrixEventPreparer | None = None,
-    send_delivery: _MatrixDeliverySender | None = None,
-    resolve_delivery: _MatrixDeliveryResolver | None = None,
-    resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None,
-    cards: ApprovalDeliveryView | None = None,
-    transport_sender: _TransportSenderProvider | None = None,
-    sending_device: _SendingDeviceProvider | None = None,
-    continuation_ready: _ContinuationReadyHandler | None = None,
-    recovery: ApprovalRecovery | None = None,
-    responder_principal: _ResponderPrincipalProvider | None = None,
+    prepare_event: _MatrixEventPreparer | None,
+    send_delivery: _MatrixDeliverySender | None,
+    resolve_delivery: _MatrixDeliveryResolver | None,
+    resolve_action_delivery: _ApprovalActionDeliveryResolver | None,
+    cards: ApprovalDeliveryView | None,
+    transport_sender: _TransportSenderProvider | None,
+    sending_device: _SendingDeviceProvider | None,
+    continuation_ready: _ContinuationReadyHandler | None,
+    recovery: ApprovalRecovery | None,
+    responder_principal: _ResponderPrincipalProvider | None,
 ) -> ApprovalManager:
     """Initialize the module-level approval domain for one runtime context."""
     global _MANAGER

@@ -8,16 +8,21 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.delegation.hooks import after_delegation
-from mindroom.delegation.lifecycle import child_execution_identity, finish_child_turn, settle_child_response
+from mindroom.delegation.lifecycle import finish_child_turn, settle_child_response
 from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
-from mindroom.delegation.state import DELEGATION_STATE_KEY, TERMINAL_CHILD_STATUSES, DelegationChild, DelegationState
+from mindroom.delegation.state import (
+    DELEGATION_STATE_KEY,
+    TERMINAL_CHILD_STATUSES,
+    DelegationChild,
+    DelegationState,
+    child_execution_identity,
+)
 from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.session_context import load_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -172,7 +177,7 @@ async def _cancel_delegations(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    reason: str = "Delegation cancelled.",
+    reason: str,
 ) -> None:
     """Cancel retained descendants without running any of their pending tools."""
     state = DelegationState.from_metadata(response.metadata)
@@ -205,15 +210,7 @@ async def cancel_approval_delegations(
     reason: str,
 ) -> None:
     """Read the frozen root scope and settle its retained child waits on failure."""
-    if not continuation.execution_identity:
-        return
     config = delegation_storage_config(config, continuation.delegation_storage_bindings)
-    # TODO(simplify): this decodes the continuation's identity under the generic error prefix, the response runner
-    # under the approval prefix. Decode it once, typed, when the continuation loads. Operators would see one
-    # malformed-identity message.
-    identity = parse_tool_execution_identity_payload(continuation.execution_identity, strict=True)
-    if identity is None:
-        return
     scope = continuation.history_scope
     if scope is None:
         if continuation.entity_kind == "team":
@@ -227,7 +224,7 @@ async def cancel_approval_delegations(
         session_id=continuation.session_id,
         runtime_paths=runtime_paths,
         config=config,
-        execution_identity=identity,
+        execution_identity=continuation.execution_identity,
     )
     # A named scope and session always load a context.
     assert context is not None

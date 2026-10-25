@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,6 +48,7 @@ from mindroom.orchestration.plugin_watch import (
 )
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.response_admission import ResponseAdmissionGate, ResponseAdmissionRefusedError
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
@@ -65,6 +67,8 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
+from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -1166,6 +1170,34 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
 
 
 @pytest.mark.asyncio
+async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tmp_path: Path) -> None:
+    """A roster entry changes no authored byte, but its generated agent still needs the reload."""
+    paths = test_runtime_paths(tmp_path)
+    current_config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    _append_personal_agent_roster_entry(paths, personal_agent_entry())
+    new_config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    assert current_config.authored_model_dump() == new_config.authored_model_dump()
+    orchestrator = _MultiAgentOrchestrator(paths)
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock()}
+    orchestrator.running = True
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(
+            orchestrator,
+            "_prepare_entity_accounts",
+            new=AsyncMock(side_effect=PermanentStartupError("stop")),
+        ) as prepare,
+        pytest.raises(PermanentStartupError, match="stop"),
+    ):
+        await orchestrator.config_reload._update_config()
+
+    assert orchestrator.config is current_config
+    prepare.assert_awaited_once_with(new_config, {"mind_alice_smith"})
+
+
+@pytest.mark.asyncio
 async def test_update_config_keeps_current_config_when_restarted_entity_account_check_fails(tmp_path: Path) -> None:
     """Hot reload should not publish config until restarted entity accounts validate."""
     current_config = _runtime_bound_config(
@@ -1319,6 +1351,77 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
     assert calls == [ROUTER_AGENT_NAME, ROUTER_AGENT_NAME, "general"]
     assert users[ROUTER_AGENT_NAME].user_id == "@actual_router:localhost"
     assert users["general"].user_id == "@actual_general:localhost"
+
+
+@pytest.mark.asyncio
+async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path) -> None:
+    """A generated agent's first sync lets the router onboard its owner at once instead of after a retry delay."""
+    paths = test_runtime_paths(tmp_path)
+    _append_personal_agent_roster_entry(paths, personal_agent_entry())
+    data = deepcopy(PERSONAL_AGENTS_BASE) | {"agents": {"general": {"display_name": "General"}}}
+    orchestrator = _MultiAgentOrchestrator(paths)
+    orchestrator.config = Config.validate_with_runtime(data, paths)
+    router = MagicMock(spec=AgentBot)
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router}
+
+    await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="general"))
+    router.personal_room_target_ready.assert_not_called()
+    await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="mind_alice_smith"))
+    router.personal_room_target_ready.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path: Path) -> None:
+    """A generated agent's stored Matrix username is requested, so a wiped matrix_state recreates the same ID."""
+    paths = test_runtime_paths(tmp_path)
+    _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
+    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    orchestrator = _MultiAgentOrchestrator(paths)
+    requested: dict[str, str | None] = {}
+
+    async def record_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        *,
+        runtime_paths: object,
+        username: str | None = None,
+    ) -> AgentMatrixUser:
+        del runtime_paths
+        requested[entity_name] = username
+        actual_username = username or f"actual_{entity_name}"
+        state = MatrixState.load(runtime_paths=paths)
+        state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
+        state.save(runtime_paths=paths)
+        return AgentMatrixUser(
+            agent_name=entity_name,
+            user_id=f"@{actual_username}:localhost",
+            display_name=display_name,
+            password=TEST_PASSWORD,
+        )
+
+    with patch("mindroom.orchestrator.create_agent_user", new=record_user):
+        await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "mind_alice_smith"])
+
+    assert requested == {ROUTER_AGENT_NAME: None, "mind_alice_smith": "alice.mind"}
+
+
+def test_preflight_account_provisioning_checks_personal_agent_username(tmp_path: Path) -> None:
+    """The localpart collision check uses a generated agent's stored Matrix username."""
+    paths = test_runtime_paths(tmp_path)
+    _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
+    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    state = MatrixState.load(runtime_paths=paths)
+    state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")
+    state.save(runtime_paths=paths)
+    orchestrator = _MultiAgentOrchestrator(paths)
+
+    with pytest.raises(PermanentStartupError, match=r"'alice\.mind'"):
+        orchestrator._preflight_account_provisioning(
+            config,
+            entity_names=["mind_alice_smith"],
+            include_internal_user=False,
+        )
 
 
 @pytest.mark.asyncio

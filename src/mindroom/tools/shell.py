@@ -329,7 +329,7 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
     ],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=[],
-    docs_url="https://docs.agno.com/tools/toolkits/local/shell",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#shell",
     function_names=("run_shell_command",),
 )
 def shell_tools() -> type[Toolkit]:  # noqa: C901
