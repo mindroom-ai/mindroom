@@ -335,15 +335,14 @@ class TeamStreamPresentation:
 
     def complete_tool(self, scope_key: str, call: ReportedCall) -> None:
         """Complete only the pending slot identified by this tool event."""
-        tool_name, result, pending_tool, completed_trace = self.tool_tracker.complete(call, scope_key=scope_key)
+        pending_tool, completed_trace = self.tool_tracker.complete(call, scope_key=scope_key)
         if pending_tool is None or pending_tool.visible_tool_index is None:
             return
         completed_trace.scope_key = scope_key
         if self.show_tool_calls:
-            updated_text, _ = complete_pending_tool_block(
+            updated_text = complete_pending_tool_block(
                 self._slot_text(scope_key),
-                tool_name,
-                result,
+                call.tool_name,
                 tool_index=pending_tool.visible_tool_index,
             )
             self._set_slot_text(scope_key, updated_text)

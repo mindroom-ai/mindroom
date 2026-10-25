@@ -623,21 +623,20 @@ def _track_stream_tool_completed(
     agent_name: str,
 ) -> None:
     """Track completed tool-call metadata for streaming output."""
-    tool_name, result, pending_tool, _ = state.tool_tracker.complete(event.call, origin=event.origin)
+    pending_tool, _ = state.tool_tracker.complete(event.call, origin=event.origin)
     if not show_tool_calls:
         return
 
     if pending_tool is None or pending_tool.visible_tool_index is None:
         logger.warning(
             "Missing pending tool start in AI stream; skipping completion marker",
-            tool_name=tool_name,
+            tool_name=event.call.tool_name,
             agent=agent_name,
         )
         return
-    state.full_response, _ = complete_pending_tool_block(
+    state.full_response = complete_pending_tool_block(
         state.full_response,
-        tool_name,
-        result,
+        event.call.tool_name,
         tool_index=pending_tool.visible_tool_index,
     )
 

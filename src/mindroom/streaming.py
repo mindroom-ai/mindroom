@@ -1779,7 +1779,8 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             )
             continue
         elif isinstance(chunk, ToolCompleted):
-            tool_name, result, pending_tool, completed_trace = tool_tracker.complete(chunk.call, origin=chunk.origin)
+            tool_name = chunk.call.tool_name
+            pending_tool, completed_trace = tool_tracker.complete(chunk.call, origin=chunk.origin)
             if not streaming.show_tool_calls:
                 _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
@@ -1793,10 +1794,9 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             tool_index = pending_tool.visible_tool_index
             prior_delta_at = streaming.last_delta_at
             previous_text = streaming.accumulated_text
-            streaming.accumulated_text, _ = complete_pending_tool_block(
+            streaming.accumulated_text = complete_pending_tool_block(
                 streaming.accumulated_text,
                 tool_name,
-                result,
                 tool_index=tool_index,
             )
             text_changed = streaming.accumulated_text != previous_text

@@ -106,13 +106,13 @@ class StreamingToolTracker:
         *,
         scope_key: str = "",
         origin: ToolCallOrigin | None = None,
-    ) -> tuple[str, object | None, _PendingStreamingTool | None, ToolTraceEntry]:
-        """Record one completed tool call and return the matched pending state."""
+    ) -> tuple[_PendingStreamingTool | None, ToolTraceEntry]:
+        """Record one completed tool call; return the pending slot it completes, if any, and its completed trace."""
         pending_pos = self._find_pending_tool_index(scope_key=scope_key, call=call)
         pending_tool = self.pending_tools.pop(pending_pos) if pending_pos is not None else None
-        _, completed_trace = format_tool_completed_event(call, origin=origin)
+        completed_trace = format_tool_completed_event(call, origin=origin)
         self.completed_tools.append(completed_trace)
-        return completed_trace.tool_name, call.result, pending_tool, completed_trace
+        return pending_tool, completed_trace
 
     def update_visible_trace_entry(
         self,
@@ -221,19 +221,14 @@ class CollectedStreamPresentation:
         """Complete the exact pending slot represented by a provider event."""
         if not self.show_tool_calls and not self.track_hidden_tools:
             return
-        tool_name, result, pending_tool, completed_trace = self.tool_tracker.complete(
-            call,
-            scope_key=scope_key,
-            origin=origin,
-        )
+        pending_tool, completed_trace = self.tool_tracker.complete(call, scope_key=scope_key, origin=origin)
         if pending_tool is None or pending_tool.visible_tool_index is None:
             return
         completed_trace.scope_key = scope_key or pending_tool.scope_key or None
         if self.show_tool_calls:
-            self.response_text, _ = complete_pending_tool_block(
+            self.response_text = complete_pending_tool_block(
                 self.response_text,
-                tool_name,
-                result,
+                call.tool_name,
                 tool_index=pending_tool.visible_tool_index,
             )
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
@@ -750,41 +745,22 @@ def format_tool_combined(
     return _format_tool_marker(tool_name, tool_index, pending=False), trace
 
 
-def complete_pending_tool_block(
-    accumulated_text: str,
-    tool_name: str,
-    result: object | None,
-    tool_index: int,
-) -> tuple[str, ToolTraceEntry]:
-    """Find a pending tool marker by index and mark it completed by removing the hourglass.
+def complete_pending_tool_block(accumulated_text: str, tool_name: str, tool_index: int) -> str:
+    """Return ``accumulated_text`` with the pending marker of tool ``tool_index`` marked completed.
 
-    Returns (updated_text, trace_entry).
-    If no pending block is found, leaves text unchanged.
+    The hourglass is removed; text without that pending marker is returned unchanged.
     """
     if tool_index < 1:
         msg = "tool_index must be >= 1 for v2 tool markers"
         raise ValueError(msg)
 
-    result_display = ""
-    truncated = False
-    if result is not None and result != "":
-        result_display, truncated = _format_tool_result_preview(result)
-
-    updated = accumulated_text
     pending_line = _tool_marker_line(tool_name, tool_index, pending=True)
     completed_line = _tool_marker_line(tool_name, tool_index, pending=False)
-    pending_pos = updated.rfind(pending_line)
+    pending_pos = accumulated_text.rfind(pending_line)
     # A duplicate completion finds no pending marker and leaves the text unchanged.
-    if pending_pos >= 0:
-        updated = updated[:pending_pos] + completed_line + updated[pending_pos + len(pending_line) :]
-
-    trace = ToolTraceEntry(
-        type="tool_call_completed",
-        tool_name=tool_name,
-        result_preview=result_display or None,
-        truncated=truncated,
-    )
-    return updated, trace
+    if pending_pos < 0:
+        return accumulated_text
+    return accumulated_text[:pending_pos] + completed_line + accumulated_text[pending_pos + len(pending_line) :]
 
 
 def _tool_args(call: ReportedCall) -> dict[str, object]:
@@ -811,15 +787,10 @@ def format_tool_started_event(
     return text, _identified(trace, call, origin)
 
 
-def format_tool_completed_event(
-    call: ReportedCall,
-    tool_index: int | None = None,
-    *,
-    origin: ToolCallOrigin | None = None,
-) -> tuple[str, ToolTraceEntry]:
-    """Format a tool-call completion into display text and trace metadata."""
-    text, trace = format_tool_combined(call.tool_name, _tool_args(call), call.result, tool_index=tool_index)
-    return text, _identified(trace, call, origin)
+def format_tool_completed_event(call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> ToolTraceEntry:
+    """Return a tool-call completion's trace metadata."""
+    _, trace = format_tool_combined(call.tool_name, _tool_args(call), call.result)
+    return _identified(trace, call, origin)
 
 
 def serialize_tool_trace(
