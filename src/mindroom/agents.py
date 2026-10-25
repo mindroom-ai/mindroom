@@ -2058,7 +2058,7 @@ def create_agent(
         tool_instructions=tool_assembly.instructions,
         turn_context=render_session_context(
             render_date_context(
-                config.timezone,
+                config.get_entity_timezone(agent_name),
                 datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
             ),
         ),

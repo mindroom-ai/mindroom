@@ -560,6 +560,7 @@ def _timestamp_thread_history_user_turns(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    timezone: str,
 ) -> list[ResolvedVisibleMessage]:
     """Add local timestamps to user-authored thread history entries."""
     timestamped_history: list[ResolvedVisibleMessage] = []
@@ -575,7 +576,7 @@ def _timestamp_thread_history_user_turns(
 
         timestamped_body = prefix_user_turn_time(
             message.body,
-            timezone=config.timezone,
+            timezone=timezone,
             timestamp_ms=message.timestamp,
         )
         timestamped_history.append(replace_visible_message(message, body=timestamped_body))
@@ -588,6 +589,7 @@ def _prepare_memory_and_model_context(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    timezone: str,
     model_prompt: str | None = None,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
     """Return raw memory inputs alongside timestamped model-facing context."""
@@ -609,6 +611,7 @@ def _prepare_memory_and_model_context(
         thread_history,
         config=config,
         runtime_paths=runtime_paths,
+        timezone=timezone,
     )
     return prompt, thread_history, model_prompt_content, model_thread_history
 
@@ -4614,6 +4617,7 @@ class ResponseRunner:
             request.thread_history,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
+            timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
             model_prompt=request.model_prompt,
         )
         assert turn_models is not None
@@ -5844,6 +5848,7 @@ class ResponseRunner:
                 request.thread_history,
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
+                timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
                 model_prompt=request.model_prompt,
             )
         )

@@ -85,6 +85,7 @@ from mindroom.config.runtime_overlays import (
 )
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
+from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
     ConfigIncludeError,
@@ -511,9 +512,9 @@ class Config(BaseModel):
         default_factory=MatrixSyncConfig,
         description="Matrix event sync transport configuration",
     )
-    timezone: str = Field(
+    timezone: TimezoneName = Field(
         default="UTC",
-        description="Timezone for interpreting scheduling requests and displaying scheduled tasks (e.g., 'America/New_York')",
+        description="IANA timezone for dates, times, and schedules (e.g., 'America/New_York'); agents can override it",
     )
     scheduler_catch_up_grace_seconds: int = Field(
         default=3600,
@@ -2180,6 +2181,13 @@ class Config(BaseModel):
                 msg = f"Unknown skill_learning model for agent {agent_name!r}: {review_model!r}"
                 raise ValueError(msg)
         return self
+
+    def get_entity_timezone(self, entity_name: str | None) -> str:
+        """Return an agent's own timezone, else the global one, which teams, the router, and room jobs use."""
+        agent = self.agents.get(entity_name) if entity_name is not None else None
+        if agent is not None and agent.timezone is not None:
+            return agent.timezone
+        return self.timezone
 
     def get_agent_cheap_model(self, agent_name: str) -> str | None:
         """Return the agent's cheap model, ignoring an inherited default the agent already runs."""

@@ -2523,9 +2523,10 @@ class TestAgentBot(AgentBotTestBase):
             *,
             config: Config,
             runtime_paths: RuntimePaths,
+            timezone: str,
             model_prompt: str | None = None,
         ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
-            _ = config, runtime_paths
+            _ = config, runtime_paths, timezone
             return prompt, thread_history, model_prompt or prompt, list(thread_history)
 
         stale_history = [

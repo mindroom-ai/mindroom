@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -112,6 +112,22 @@ def test_agent_prompt_includes_datetime(monkeypatch: pytest.MonkeyPatch) -> None
     assert "Timezone: America/Los_Angeles (PDT)" in message.content
     assert "The current time is" not in message.content
     assert message.content.index("General assistant") < message.content.index("## Current Date and Time")
+
+
+def test_agent_timezone_overrides_the_global_timezone_in_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent with its own timezone sees its own date, even when the install's timezone is still on the day before."""
+    config = _datetime_test_config()
+    config.timezone = "America/Los_Angeles"
+    config.agents["general"].timezone = "Europe/Amsterdam"
+    instant = datetime(2026, 3, 20, 23, 30, tzinfo=UTC)
+
+    with patch("mindroom.system_prompt.datetime") as mock_datetime:
+        mock_datetime.now.side_effect = instant.astimezone
+        build = _build(config, monkeypatch)
+
+    assert build.prompt.turn_context is not None
+    assert "Today is Saturday, March 21, 2026." in build.prompt.turn_context
+    assert "Timezone: Europe/Amsterdam (CET)" in build.prompt.turn_context
 
 
 def test_agent_prompt_datetime_changes_with_timezone(monkeypatch: pytest.MonkeyPatch) -> None:

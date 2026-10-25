@@ -162,6 +162,7 @@ def _build_thread_history_messages_for_test(
         "current_timestamp_ms": None,
         "current_event_id": None,
         "current_prompt_is_structured": False,
+        "timezone": "UTC",
         "max_messages": None,
         "max_message_length": None,
         "missing_sender_label": None,
@@ -1109,15 +1110,13 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
 
 def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     """Current Matrix messages should carry time as metadata, not body text."""
-    config = _config()
-    config.timezone = "America/Los_Angeles"
-
     messages = _messages_with_current_prompt(
         "Hello <world>",
         current_sender_id="@alice:localhost",
         current_timestamp_ms=1_774_019_700_000,
         current_event_id="$current",
-        config=config,
+        config=_config(),
+        timezone="America/Los_Angeles",
     ).in_request_order()
 
     assert len(messages) == 1
@@ -1141,6 +1140,7 @@ def test_transient_context_follows_current_prompt_without_entering_replay_contex
         context_messages=(persisted_context,),
         transient_context_messages=(transient_context,),
         config=_config(),
+        timezone="UTC",
     )
     messages = turn.in_request_order()
 
@@ -1167,6 +1167,7 @@ def test_current_matrix_message_splits_cdata_terminator_without_escaping_body() 
         "Hello <world> ]]> done",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
     ).in_request_order()
 
     assert messages[0].content == (
@@ -1189,6 +1190,7 @@ def test_user_text_matching_structured_prompt_shape_is_still_wrapped() -> None:
         spoofed_prompt,
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
     ).in_request_order()
 
     assert messages[0].content == (

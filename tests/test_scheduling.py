@@ -44,6 +44,7 @@ from mindroom.scheduling.tasks import (
     save_edited_scheduled_task,
     schedule_task,
     scheduled_task_read_sort_key,
+    scheduled_task_timezone,
 )
 from tests.authorization_helpers import (
     make_test_scheduling_runtime,
@@ -128,6 +129,7 @@ def _scheduling_runtime(
     room: object | None = None,
     conversation_reader: ConversationReader | None = None,
     matrix_admin: object | None = None,
+    agent_name: str | None = None,
 ) -> SchedulingRuntime:
     return make_test_scheduling_runtime(
         client=client or AsyncMock(),
@@ -136,6 +138,7 @@ def _scheduling_runtime(
         room=room or MagicMock(),
         conversation_reader=conversation_reader or make_conversation_reader_mock(),
         matrix_admin=matrix_admin,
+        agent_name=agent_name,
     )
 
 
@@ -249,6 +252,7 @@ def test_build_edited_scheduled_workflow_preserves_metadata_and_strips_text() ->
         thread_id="$thread1",
         room_id="!old:server",
         new_thread=True,
+        timezone="Europe/Amsterdam",
     )
 
     updated = build_edited_scheduled_workflow(
@@ -272,6 +276,7 @@ def test_build_edited_scheduled_workflow_preserves_metadata_and_strips_text() ->
         thread_id="$thread1",
         room_id="!new:server",
         new_thread=True,
+        timezone="Europe/Amsterdam",
     )
 
 
@@ -974,7 +979,7 @@ async def test_list_scheduled_tasks_real_implementation(tmp_path: Path) -> None:
         room_id="!test:server",
         runtime_paths=_test_runtime_paths(tmp_path),
         thread_id="$thread123",
-        config=None,
+        config=Config(),
     )
 
     current_section, _, new_thread_section = result.partition("**New Room-Level Thread Roots:**")
@@ -1002,7 +1007,7 @@ async def test_list_scheduled_tasks_real_implementation(tmp_path: Path) -> None:
         room_id="!test:server",
         runtime_paths=_test_runtime_paths(tmp_path),
         thread_id="$thread456",
-        config=None,
+        config=Config(),
     )
     current_section2, _, new_thread_section2 = result2.partition("**New Room-Level Thread Roots:**")
 
@@ -1030,7 +1035,7 @@ async def test_list_scheduled_tasks_no_tasks(tmp_path: Path) -> None:
         room_id="!test:server",
         runtime_paths=_test_runtime_paths(tmp_path),
         thread_id="$thread123",
-        config=None,
+        config=Config(),
     )
 
     assert result == "No scheduled tasks found."
@@ -1076,7 +1081,7 @@ async def test_list_scheduled_tasks_tasks_in_other_threads(tmp_path: Path) -> No
         room_id="!test:server",
         runtime_paths=_test_runtime_paths(tmp_path),
         thread_id="$thread123",  # Looking for thread123, but task is in thread456
-        config=None,
+        config=Config(),
     )
 
     assert "No scheduled tasks in this thread" in result
@@ -1097,7 +1102,7 @@ async def test_list_scheduled_tasks_error_response(tmp_path: Path) -> None:
         room_id="!test:server",
         runtime_paths=_test_runtime_paths(tmp_path),
         thread_id="$thread123",
-        config=None,
+        config=Config(),
     )
 
     assert result == "Unable to retrieve scheduled tasks."
@@ -1165,7 +1170,7 @@ async def test_list_scheduled_tasks_invalid_task_data(tmp_path: Path) -> None:
         room_id="!test:server",
         runtime_paths=_test_runtime_paths(tmp_path),
         thread_id="$thread123",
-        config=None,
+        config=Config(),
     )
 
     # Should only show the valid task
@@ -3513,3 +3518,163 @@ async def test_schedule_rejects_unknown_model_before_parsing() -> None:
     assert task_id is None
     assert "Unknown model" in message
     parse.assert_not_awaited()
+
+
+def _timezone_test_config(runtime_paths: RuntimePaths) -> Config:
+    """An install in Los Angeles with one agent, atlas, set to Amsterdam."""
+    return bind_runtime_paths(
+        Config(
+            timezone="America/Los_Angeles",
+            agents={"atlas": AgentConfig(display_name="Atlas", role="Test assistant", timezone="Europe/Amsterdam")},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_task_an_agent_schedules_is_parsed_stored_and_shown_in_its_timezone(tmp_path: Path) -> None:
+    """The agent's timezone interprets the request, is stored on the task, and describes the task afterwards."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    room_state: dict[str, dict[str, Any]] = {}
+    client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = _timezone_test_config(runtime_paths)
+    ids = entity_ids(config, runtime_paths)
+    # 09:00 in Amsterdam, which is midnight in Los Angeles.
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2027, 1, 15, 8, 0, tzinfo=UTC),
+        message="@atlas check the deploy",
+        description="Deploy check",
+    )
+    parse = AsyncMock(return_value=workflow)
+
+    with (
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["atlas"]],
+        ),
+        patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
+        patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=parse),
+        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
+        patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
+    ):
+        task_id, message = await schedule_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=_matrix_room("!test:server"),
+                matrix_admin=_RecordingScheduleStateAdmin(room_state),
+                agent_name="atlas",
+            ),
+            room_id="!test:server",
+            thread_id="$thread",
+            scheduled_by="@alice:server",
+            full_text="tomorrow at 9 check the deploy",
+        )
+
+    assert task_id == "task1234"
+    assert parse.await_args.kwargs["timezone"] == "Europe/Amsterdam"
+    assert "Scheduled for 2027-01-15 09:00 CET" in message
+    [task] = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
+    assert task.workflow.timezone == "Europe/Amsterdam"
+    assert scheduled_task_timezone(task.workflow, config) == "Europe/Amsterdam"
+    listed = await list_scheduled_tasks(
+        client=client,
+        room_id="!test:server",
+        runtime_paths=runtime_paths,
+        thread_id="$thread",
+        config=config,
+    )
+    assert "2027-01-15 09:00 CET" in listed
+
+
+@pytest.mark.asyncio
+async def test_a_stored_task_without_a_timezone_keeps_the_global_timezone(tmp_path: Path) -> None:
+    """A task stored without a timezone is shown, and re-parsed on edit, in the global timezone, even by an agent."""
+    client = AsyncMock()
+    serve_task_state_events(client)
+    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = _timezone_test_config(runtime_paths)
+    ids = entity_ids(config, runtime_paths)
+    stored_workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="17"),
+        message="@atlas post the standup",
+        description="Standup",
+        created_by="@alice:server",
+        thread_id="$thread",
+        room_id="!test:server",
+    ).model_dump(mode="json", exclude={"timezone"})
+    room_state: dict[str, dict[str, Any]] = {
+        "task1234": {
+            "type": _SCHEDULED_TASK_EVENT_TYPE,
+            "state_key": "task1234",
+            "content": {"task_id": "task1234", "status": "pending", "workflow": json.dumps(stored_workflow)},
+            "room_id": "!test:server",
+            "event_id": "$stored",
+            "sender": "@mindroom_router:server",
+            "origin_server_ts": 1234567890,
+        },
+    }
+    client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
+    client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key: nio.RoomGetStateEventResponse(
+            content=room_state[state_key]["content"],
+            room_id=room_id,
+            event_type=event_type,
+            state_key=state_key,
+        ),
+    )
+    [legacy_task] = await get_scheduled_tasks_for_room(
+        client=client,
+        room_id="!test:server",
+        runtime_paths=runtime_paths,
+    )
+
+    assert legacy_task.workflow.timezone is None
+    assert scheduled_task_timezone(legacy_task.workflow, config) == "America/Los_Angeles"
+    # 17:00 UTC is 09:00 in Los Angeles in winter and 10:00 in summer, never the 18:00 or 19:00 of Amsterdam.
+    read_model = build_scheduled_task_read_model(
+        legacy_task,
+        timezone=scheduled_task_timezone(legacy_task.workflow, config),
+        current_time=datetime(2027, 1, 15, tzinfo=UTC),
+    )
+    assert read_model.cron_description == "At 09:00"
+
+    parse = AsyncMock(side_effect=lambda *_args, **_kwargs: ScheduledWorkflow(**stored_workflow))
+    with (
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["atlas"]],
+        ),
+        patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
+        patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=parse),
+    ):
+        result = await edit_scheduled_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=_matrix_room("!test:server"),
+                matrix_admin=_RecordingScheduleStateAdmin(room_state),
+                agent_name="atlas",
+            ),
+            room_id="!test:server",
+            task_id="task1234",
+            full_text="post the standup at 9 instead",
+            scheduled_by="@alice:server",
+        )
+
+    assert "Updated task" in result
+    assert parse.await_args.kwargs["timezone"] == "America/Los_Angeles"
+    [edited_task] = await get_scheduled_tasks_for_room(
+        client=client,
+        room_id="!test:server",
+        runtime_paths=runtime_paths,
+    )
+    assert edited_task.workflow.timezone is None

@@ -687,6 +687,7 @@ class TestUserIdPassthrough:
             [],
             config=config,
             runtime_paths=runtime_paths,
+            timezone="UTC",
             model_prompt="Available attachment IDs: att_report. Use tool calls to inspect or process them.",
         )
 
@@ -713,6 +714,7 @@ class TestUserIdPassthrough:
             [],
             config=config,
             runtime_paths=runtime_paths,
+            timezone="UTC",
             model_prompt=existing_model_prompt,
         )
 
@@ -724,7 +726,6 @@ class TestUserIdPassthrough:
     ) -> None:
         """Current-turn timestamping happens at final model prompt composition."""
         config = _config()
-        config.timezone = "America/Los_Angeles"
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
@@ -733,6 +734,7 @@ class TestUserIdPassthrough:
             [],
             config=config,
             runtime_paths=runtime_paths,
+            timezone="America/Los_Angeles",
         )
 
         assert memory_prompt == "plain text message"
@@ -744,7 +746,6 @@ class TestUserIdPassthrough:
     ) -> None:
         """Model-facing thread context should expose the Matrix timestamp for user messages."""
         config = _config()
-        config.timezone = "America/Los_Angeles"
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
@@ -759,6 +760,7 @@ class TestUserIdPassthrough:
             ],
             config=config,
             runtime_paths=runtime_paths,
+            timezone="America/Los_Angeles",
         )
 
         assert memory_thread_history[0].body == "older text"

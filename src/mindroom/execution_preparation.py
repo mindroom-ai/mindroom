@@ -331,6 +331,7 @@ def _messages_with_current_prompt(
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
+    timezone: str,
     member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
 ) -> TurnMessages:
     """Return the canonical live turn: its context messages, the current user prompt, and its transient context."""
@@ -343,7 +344,7 @@ def _messages_with_current_prompt(
                 sender=current_sender_id,
                 body=prompt,
                 event_id=current_event_id,
-                ts=format_timestamp_ms(current_timestamp_ms, timezone=config.timezone),
+                ts=format_timestamp_ms(current_timestamp_ms, timezone=timezone),
                 display_name=member_display_names.get(current_sender_id),
             )
         )
@@ -386,6 +387,7 @@ def _build_unseen_context_messages(
     prompt_event_id: str | None,
     current_prompt_is_structured: bool,
     config: Config,
+    timezone: str,
     attachment_context: _ThreadAttachmentContext | None,
 ) -> tuple[TurnMessages, list[str]]:
     """Return the canonical turn for unseen thread context plus the current prompt, and the unseen event ids."""
@@ -419,6 +421,7 @@ def _build_unseen_context_messages(
             current_event_id=prompt_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            timezone=timezone,
             member_display_names=member_display_names,
         ),
         _get_unseen_event_ids_for_metadata(
@@ -440,6 +443,7 @@ def _build_thread_history_messages(
     current_event_id: str | None,
     current_prompt_is_structured: bool,
     config: Config,
+    timezone: str,
     max_messages: int | None,
     max_message_length: int | None,
     missing_sender_label: str | None,
@@ -460,6 +464,7 @@ def _build_thread_history_messages(
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            timezone=timezone,
             member_display_names=member_display_names,
         )
 
@@ -715,6 +720,7 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
+    timezone = config.get_entity_timezone(ctx.entity_label)
     # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
     seen_event_ids = await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
     scheduled_history_budget = ctx.scheduled_history_budget
@@ -737,6 +743,7 @@ async def _prepare_execution_context_common(
                 current_event_id=current_event_id,
                 current_prompt_is_structured=current_prompt_is_structured,
                 config=config,
+                timezone=timezone,
                 member_display_names=member_display_names,
             ), []
         return _build_unseen_context_messages(
@@ -752,6 +759,7 @@ async def _prepare_execution_context_common(
             prompt_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            timezone=timezone,
             attachment_context=attachment_context,
             member_display_names=member_display_names,
         )
@@ -799,6 +807,7 @@ async def _prepare_execution_context_common(
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            timezone=timezone,
             max_messages=render_limits.max_messages,
             max_message_length=render_limits.max_message_length,
             missing_sender_label=render_limits.missing_sender_label,

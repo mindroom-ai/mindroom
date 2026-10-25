@@ -85,7 +85,7 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
         responders = [MatrixID(username="helper", domain="localhost")]
 
         async def invoke() -> object:
-            return await scheduling._parse_workflow_schedule("Daily at 9", config, paths, responders)
+            return await scheduling._parse_workflow_schedule("Daily at 9", config, paths, responders, timezone="UTC")
 
     elif caller == "topic":
 

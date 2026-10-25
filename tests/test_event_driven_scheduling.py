@@ -85,6 +85,7 @@ class TestEventDrivenScheduling:
             mock_config,
             runtime_paths,
             available_responders=[_mid("email_assistant"), _mid("phone_agent")],
+            timezone="UTC",
         )
 
         # Verify the result is a workflow (not an error)
@@ -122,6 +123,7 @@ class TestEventDrivenScheduling:
             mock_config,
             runtime_paths,
             available_responders=[_mid("crypto_agent"), _mid("notification_agent")],
+            timezone="UTC",
         )
 
         # Verify
@@ -152,6 +154,7 @@ class TestEventDrivenScheduling:
             mock_config,
             runtime_paths,
             available_responders=[_mid("monitoring_agent"), _mid("ops_agent")],
+            timezone="UTC",
         )
 
         # Verify
@@ -182,6 +185,7 @@ class TestEventDrivenScheduling:
             mock_config,
             runtime_paths,
             available_responders=[_mid("ci_agent"), _mid("ticket_agent")],
+            timezone="UTC",
         )
 
         # Verify
@@ -212,6 +216,7 @@ class TestEventDrivenScheduling:
             mock_config,
             runtime_paths,
             available_responders=[_mid("reddit_agent"), _mid("analyst")],
+            timezone="UTC",
         )
 
         # Verify
@@ -242,6 +247,7 @@ class TestEventDrivenScheduling:
             mock_config,
             runtime_paths,
             available_responders=[_mid("email_assistant"), _mid("notification_agent")],
+            timezone="UTC",
         )
 
         # Verify
@@ -272,6 +278,7 @@ class TestEventDrivenScheduling:
             mock_config,
             runtime_paths,
             available_responders=[_mid("test_agent")],
+            timezone="UTC",
         )
 
         # Verify the prompt contains generic event-driven guidance
@@ -318,6 +325,7 @@ async def test_a_parser_call_that_raises_reports_why(
         mock_config,
         runtime_paths,
         available_responders=[_mid("ops_agent")],
+        timezone="UTC",
     )
 
     assert isinstance(result, _WorkflowParseError)
