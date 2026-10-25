@@ -354,7 +354,7 @@ async def test_a_blocking_team_reply_renders_each_finished_member_run_then_the_c
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_reply_sends_non_streaming_requests_and_renders_the_member_and_consensus_document(
+async def test_a_blocking_team_reply_renders_the_member_and_consensus_document(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -368,7 +368,6 @@ async def test_a_blocking_team_reply_sends_non_streaming_requests_and_renders_th
     text = await team.respond(show_tool_calls=False)
 
     assert text == f"{HEADER}**Checker**: Checked.\n\n\n**Team Consensus**:\n\nAll good."
-    assert all(not request.stream for request in team.models["default"].requests)
     record, members = team.stored_runs()
     assert record.status is RunStatus.completed
     assert [member.agent_id for member in members] == ["checker"]
@@ -1667,11 +1666,11 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_continues_after_a_member_s_delegation_with_streamed_leader_requests(
+async def test_a_blocking_team_continues_after_a_member_s_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The team's continuation after a member's delegation streams even in a blocking turn, as Agno's did."""
+    """A blocking team turn continues its leader once a member's own delegation finished."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -1683,7 +1682,7 @@ async def test_a_blocking_team_continues_after_a_member_s_delegation_with_stream
     text = await team.respond(show_tool_calls=False)
 
     assert text.endswith("**Team Consensus**:\n\nConsensus.")
-    assert [request.stream for request in team.models["default"].requests] == [False, True]
+    assert len(team.models["default"].requests) == 2
 
 
 @pytest.mark.asyncio

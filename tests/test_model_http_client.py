@@ -8,7 +8,7 @@ import json
 import os
 import socket
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -31,27 +31,59 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelProvider
 
-# A finished reply of each API, and an empty page every other request accepts.
-_CHAT_COMPLETION = {
-    "id": "chatcmpl-1",
-    "object": "chat.completion",
-    "created": 1,
+# A finished streamed reply of each API, as server-sent events, and an empty page every other request accepts.
+# The OpenAI models use the Responses API: the SDK reads a Responses stream to its end, so its connection returns to
+# the pool, while it closes a Chat Completions stream at its ``[DONE]`` sentinel before the body ends.
+_RESPONSE = {
+    "id": "resp_1",
+    "object": "response",
+    "created_at": 1,
     "model": "test-model",
-    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
-    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    "status": "completed",
+    "output": [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+        },
+    ],
+    "parallel_tool_calls": True,
+    "tool_choice": "auto",
+    "tools": [],
+    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
 }
+_RESPONSES_STREAM = [{"type": "response.completed", "sequence_number": 0, "response": _RESPONSE}]
 _CLAUDE_MESSAGE = {
     "id": "msg_1",
     "type": "message",
     "role": "assistant",
     "model": "test-model",
-    "content": [{"type": "text", "text": "ok"}],
-    "stop_reason": "end_turn",
+    "content": [],
+    "stop_reason": None,
     "stop_sequence": None,
     "usage": {"input_tokens": 1, "output_tokens": 1},
 }
+_CLAUDE_STREAM = [
+    {"type": "message_start", "message": _CLAUDE_MESSAGE},
+    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+    {"type": "content_block_stop", "index": 0},
+    {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": 1},
+    },
+    {"type": "message_stop"},
+]
 _EMPTY_PAGE = {"object": "list", "data": [], "has_more": False, "first_id": None, "last_id": None}
-_REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")], stream=False)
+_REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")])
+
+
+def _sse(events: list[dict[str, Any]]) -> bytes:
+    """Return ``events`` as a server-sent event body, each named by its type."""
+    return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events).encode()
 
 
 class _ModelsServer:
@@ -73,16 +105,13 @@ class _ModelsServer:
                 headers = dict(line.lower().split(": ", 1) for line in header_lines if ": " in line)
                 await reader.readexactly(int(headers.get("content-length", "0")))
                 path = request_line.split(" ")[1]
-                reply = (
-                    _CHAT_COMPLETION
-                    if path.endswith("/chat/completions")
-                    else _CLAUDE_MESSAGE
-                    if path.endswith("/messages")
-                    else _EMPTY_PAGE
-                )
-                body = json.dumps(reply).encode()
-                status = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n"
-                writer.write(status % len(body) + body)
+                if path.endswith(("/responses", "/messages")):
+                    stream = _RESPONSES_STREAM if path.endswith("/responses") else _CLAUDE_STREAM
+                    content_type, body = "text/event-stream", _sse(stream)
+                else:
+                    content_type, body = "application/json", json.dumps(_EMPTY_PAGE).encode()
+                status = f"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\n\r\n"
+                writer.write(status.encode() + body)
                 await writer.drain()
         except asyncio.IncompleteReadError:
             self.closed.set()
@@ -105,7 +134,8 @@ def _provider(tmp_path: Path, provider: str, base_url: str) -> ModelProvider:
     runtime_paths = test_runtime_paths(tmp_path)
     client_params = {"base_url": f"{base_url}/v1" if provider == "openai" else base_url, "max_retries": 0}
     extra_kwargs = {"api_key": "test", "client_params": client_params}
-    model = ModelConfig(provider=provider, id="test-model", extra_kwargs=extra_kwargs)
+    api = "responses" if provider == "openai" else None
+    model = ModelConfig(provider=provider, id="test-model", api=api, extra_kwargs=extra_kwargs)
     config = bind_runtime_paths(Config(models={"default": model}), runtime_paths)
     return build_model_provider(config, runtime_paths)
 

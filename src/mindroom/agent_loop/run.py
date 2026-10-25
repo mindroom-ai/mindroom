@@ -126,8 +126,7 @@ def resume_agent(
     an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
     ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
     events; denied calls answer with their reason, or the default note when it is None or empty; external results
-    answer as they are. The requests stream (``resume_request_template``). The returned stream ends as
-    ``run_agent``'s does.
+    answer as they are. The returned stream ends as ``run_agent``'s does.
     """
     plan = plan_resume(spec, paused, approved=approved, denied=denied, external_results=external_results)
     return resume_planned(
@@ -179,7 +178,7 @@ def resume_planned(
 ) -> AsyncIterator[RunEvent]:
     """Run a planned resume: answer the decided calls, then continue the loop over ``messages``.
 
-    The run's context is ``context`` of the planned record's run id. The requests stream (``resume_request_template``).
+    The run's context is ``context`` of the planned record's run id.
     """
     return drive_run(
         spec,
@@ -188,21 +187,9 @@ def resume_planned(
         ctx=context(plan.record.run_id),
         hooks=hooks,
         persist=persist,
-        template=resume_request_template(request_template),
+        template=request_template,
         resumed=plan.decided,
     )
-
-
-def resume_request_template(template: ModelRequest) -> ModelRequest:
-    """Return the template a resume's requests use: ``template``, streaming.
-
-    ``resume_planned`` and the team runtime's ``continue_team`` apply it, so every resume of an agent, a team, or a
-    team member streams, an approval's and a delegation's continuation alike.
-    """
-    # TODO(simplify): a resume streams even when the run it continues did not. Resume with the run's own template,
-    # which removes this function. Models and providers would notice: such a resume would send non-streaming
-    # requests and hand a team leader its members' results as a non-streaming run does.
-    return replace(template, stream=True)
 
 
 def check_approved_tools_offered(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> None:
@@ -447,7 +434,6 @@ __all__ = [
     "plan_resume",
     "resume_agent",
     "resume_planned",
-    "resume_request_template",
     "resumed_record",
     "run_agent",
 ]

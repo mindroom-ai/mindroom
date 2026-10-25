@@ -44,7 +44,6 @@
     },
     "portable_replay": null,
     "response_format": null,
-    "stream": true,
     "tool_choice": null,
     "tools": []
   },

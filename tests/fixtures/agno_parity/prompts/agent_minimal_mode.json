@@ -49,7 +49,6 @@
         "id": "claude-sonnet-5-5",
         "provider": "Anthropic"
       },
-      "stream": true,
       "messages": [
         {
           "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help.\nToolkits callable through mindroom-agent: calculator, scheduler, shell\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\nPrefer read-only commands.",

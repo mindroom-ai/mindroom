@@ -53,7 +53,6 @@ __all__ = [
     "ResponsesStream",
     "ResponsesTurnParts",
     "ResponsesWire",
-    "parse_response",
     "request_store",
     "responses_input",
     "responses_replay",
@@ -441,7 +440,7 @@ def _read_ended_response(
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
 ) -> None:
-    """Record what a response that ended says about its turn, the same whether it streamed or arrived whole.
+    """Record what a response that ended says about its turn.
 
     A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
     status and the incomplete reason. Both record the response id, its storage provenance, and, when unstored, its
@@ -483,8 +482,7 @@ class ResponsesStream:
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
     its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
-    event order with any summary text, kept as main behaves. ``provider`` is the metrics provider name a failed
-    response's error carries.
+    event order with any summary text. ``provider`` is the metrics provider name a failed response's error carries.
     """
 
     provider: str
@@ -536,7 +534,7 @@ class ResponsesStream:
             if self.store is False or self.portable_replay:
                 self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
         elif event.type in _ENDED_EVENT_TYPES:
-            # A call the response ended in the middle of is kept, as a blocking response keeps every call it lists.
+            # A call the response ended in the middle of is kept, as the ended response lists it too.
             events.extend(self._ready_call())
             self._end(current.response)
         return events
@@ -584,54 +582,3 @@ def usage_report(event: ResponseStreamEvent) -> UsageReported | None:
     if event.type not in _TERMINAL_EVENT_TYPES or not (usage := cast("Any", event).response.usage):
         return None
     return UsageReported(_usage(usage), final=False)
-
-
-def _reasoning_summary(response: Response) -> str:
-    """Return the reasoning summary text a response carries, which a stream delivers as reasoning deltas."""
-    return "".join(
-        item.text
-        for output in cast("list[Any]", response.output)
-        if output.type == "reasoning"
-        for item in output.summary
-        if item.text
-    )
-
-
-def parse_response(
-    response: Response,
-    *,
-    provider: str,
-    store: bool | None,
-    portable_replay: bool,
-    native_compaction: NativeCompactionReplay | None,
-    text_as_reasoning: bool,
-) -> ResponsesTurnParts:
-    """Read one non-streamed response into a finished turn; ``provider`` is the metrics provider name of its error.
-
-    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary, kept as
-    main behaves.
-    """
-    if response.error:
-        raise _response_error(response.error.code, response.error.message, provider=provider)
-    parts = ResponsesTurnParts()
-    # The SDK's output union does not narrow on ``type``.
-    for output in cast("list[Any]", response.output):
-        if output.type == "message":
-            parts.content = response.output_text
-        elif output.type == "function_call":
-            parts.tool_calls.append(_function_call(output))
-    parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
-    # TODO(simplify): Only a blocking response stores response_status and incomplete_reason in provider_data, and
-    # nothing reads them. Store them on neither path. Stored data.
-    parts.provider_data["response_status"] = response.status
-    parts.provider_data["incomplete_reason"] = _incomplete_reason(response)
-    _record_tool_search_items(parts, response.output)
-    _read_ended_response(
-        parts,
-        response,
-        [item.model_dump(mode="json", exclude_none=True) for item in response.output],
-        store=store,
-        portable_replay=portable_replay,
-        native_compaction=native_compaction,
-    )
-    return parts

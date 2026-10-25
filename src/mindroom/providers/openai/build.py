@@ -527,7 +527,6 @@ def _build_responses(
         # prompt. Derive this from `store is not False`. Models on store-false routes would see the receipt move.
         continues_stored_responses=True,
         provider_default_sampling=_provider_default_sampling(model_id),
-        streams_only=route_key == "codex",
     )
     wire = ResponsesWire(
         route=route_key,

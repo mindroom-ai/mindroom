@@ -199,7 +199,6 @@
       "model": "mindroom.scheduling.tasks:ScheduledWorkflow",
       "type": "pydantic"
     },
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },

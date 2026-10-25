@@ -560,7 +560,7 @@ MindRoom ends a streamed request when the provider sends no event for `stream_id
 If nothing was streamed yet, MindRoom sends the request once more, unless a provider-hosted tool such as web search or code execution had started, since resending would run that tool again.
 A second silent attempt, or a stall after text appeared or such a tool started, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 The limit measures the gap between provider events, so long replies and slow tool calls are unaffected.
-It applies only to streamed responses (`defaults.enable_streaming: true`, the default).
+It applies to every model request, also when `defaults.enable_streaming` is off, except compaction summaries, which their own [`timeout_seconds`](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) bounds.
 
 By default the limit is 300 seconds for hosted providers on their built-in endpoint.
 Local servers can stay silent for minutes while a request waits in a queue or a model loads, so `ollama`, `llama_cpp`, and any model with a configured endpoint get no limit unless you set one.

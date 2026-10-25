@@ -257,12 +257,16 @@ async def prepare_materialized_team_execution(
 
 @dataclass(frozen=True)
 class _LeaderRun:
-    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata."""
+    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata.
+
+    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
+    """
 
     spec: TeamSpec
     storage: RunStorage | None
     hooks: LoopHooks
     request_template: ModelRequest
+    stream: bool
     model_name: str
     metadata: dict[str, Any] | None
 
@@ -290,6 +294,7 @@ class _LeaderRun:
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
             request_template=self.request_template,
+            stream=self.stream,
         )
 
 
@@ -324,7 +329,8 @@ def _leader_run(
             ),
             entity_name=configured_team_name,
         ),
-        request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
+        request_template=with_native_history(ModelRequest(messages=()), history.native_history),
+        stream=stream,
         model_name=prepared.runtime_model_name,
         metadata=prepared.run_metadata,
     )

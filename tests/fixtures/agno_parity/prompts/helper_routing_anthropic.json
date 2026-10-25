@@ -50,7 +50,6 @@
         "id": "claude-sonnet-5-5",
         "provider": "Anthropic"
       },
-      "stream": false,
       "messages": [
         {
           "content": "<your_role>\nRoute messages to appropriate agents or teams\n</your_role>",

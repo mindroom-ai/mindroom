@@ -35,6 +35,7 @@ from mindroom.llm.provider import (
     RequestOverrides,
     TextDelta,
     ToolSpec,
+    TurnCompleted,
     UsageReported,
     complete,
 )
@@ -217,59 +218,69 @@ async def test_chat_finish_reason_maps_to_stop_reason(tmp_path: Path, finish_rea
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_splits_think_tags_and_records_finish_reason(tmp_path: Path) -> None:
-    completion = {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "m",
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {"role": "assistant", "content": "<think>Rain.</think>Pack a coat."},
-            },
-        ],
-        "usage": _USAGE,
-    }
-    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply(completion))
+async def test_a_chat_stream_moves_a_leading_think_block_to_reasoning(tmp_path: Path) -> None:
+    """A server without a reasoning parser streams a model's reasoning inside ``<think>``; it never shows as text."""
+    reply = _chat_reply(
+        _chunk({"content": "<thi"}),
+        _chunk({"content": "nk>Rain.</th"}),
+        _chunk({"content": "ink>\n\nPack"}),
+        _chunk({"content": " a coat."}, finish_reason="stop"),
+    )
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, reply)
 
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
+    events = [event async for event in built.provider.stream(ModelRequest(messages=[_user()]))]
 
-    assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain.")
-    assert turn.message.provider_data["finish_reason"] == "stop"
-    assert "stream" not in built.body()
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.message.content, completed.message.reasoning_content) == ("Pack a coat.", "Rain.")
+    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Pack a coat."
+    assert "".join(event.text for event in events if isinstance(event, ReasoningDelta)) == "Rain."
+    assert "finish_reason" not in (completed.message.provider_data or {})
+    assert built.body()["stream"] is True
     assert built.requests[0].headers["authorization"] == "Bearer not-provided"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("content", "expected"),
+    ("provider", "content", "expected"),
     [
-        ("<think>\n\n</think>Pack a coat.", ("<think>\n\n</think>Pack a coat.", None)),
-        ("Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
+        ("llama_cpp", "\n<think>Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
+        ("llama_cpp", "<think>\n\n</think>Pack a coat.", ("Pack a coat.", None)),
+        ("llama_cpp", "Rain.</think>Pack a coat.", ("Rain.</think>Pack a coat.", None)),
+        ("llama_cpp", "Pack a coat. <think>Rain.</think>", ("Pack a coat. <think>Rain.</think>", None)),
+        ("llama_cpp", "<think>Rain, cut off at </th", (None, "Rain, cut off at </th")),
+        ("groq", "<think>Rain.</think>Pack a coat.", ("<think>Rain.</think>Pack a coat.", None)),
     ],
-    ids=["empty-reasoning-kept", "no-opening-tag-split"],
+    ids=[
+        "leading-whitespace",
+        "empty-reasoning-dropped",
+        "no-opening-tag-kept",
+        "later-tag-kept",
+        "unclosed-reasoning",
+        "groq-keeps-the-tags",
+    ],
 )
-async def test_chat_completion_splits_think_tags_as_agno_did(
+async def test_a_chat_stream_splits_only_a_think_block_that_opens_the_reply(
     tmp_path: Path,
+    provider: str,
     content: str,
-    expected: tuple[str, str | None],
+    expected: tuple[str | None, str | None],
 ) -> None:
-    """Agno's Chat split at a closing tag alone but kept a reply whose reasoning was empty unchanged."""
-    completion = {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "m",
-        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
-        "usage": _USAGE,
-    }
-    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply(completion))
+    """Only a reply that opens with ``<think>`` streams reasoning, and a block the reply never closes is all reasoning.
 
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
+    Groq and Cerebras replies keep the tags as text.
+    """
+    reply = _chat_reply(_chunk({"content": content}, finish_reason="stop"))
+    built = _Built(tmp_path, {"provider": provider, "id": "qwen", "api_key": "k"}, reply)
 
-    assert (turn.content, turn.message.reasoning_content) == expected
+    events = [event async for event in built.provider.stream(ModelRequest(messages=[_user()]))]
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.message.content, completed.message.reasoning_content) == expected
+    text = "".join(event.text for event in events if isinstance(event, TextDelta))
+    reasoning = "".join(event.text for event in events if isinstance(event, ReasoningDelta))
+    assert (text or None, reasoning or None) == expected
 
 
 @pytest.mark.asyncio
@@ -337,52 +348,6 @@ async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fiel
     assert turn.message.reasoning_content == "Rain is likely this afternoon."
     assert turn.message.provider_data["reasoning_details"] == first + second
     assert turn.message.provider_data["model_extra"] == {"provider": "Anthropic"}
-
-
-def _completion(message: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "m",
-        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", **message}}],
-        "usage": _USAGE,
-    }
-
-
-_REASONING_DETAILS = [{"type": "reasoning.text", "text": "Rain is likely."}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("model_config", "reasoning_fields", "reasoning_details"),
-    [
-        (
-            {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k"},
-            {"reasoning_content": "Rain is likely."},
-            None,
-        ),
-        (
-            {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"},
-            {"reasoning": "Rain is likely.", "reasoning_details": _REASONING_DETAILS},
-            _REASONING_DETAILS,
-        ),
-    ],
-    ids=["deepseek", "openrouter"],
-)
-async def test_a_non_streamed_chat_reply_keeps_its_reasoning(
-    tmp_path: Path,
-    model_config: dict[str, Any],
-    reasoning_fields: dict[str, Any],
-    reasoning_details: list[dict[str, str]] | None,
-) -> None:
-    """Helper and decision requests do not stream; the reasoning those replies carry is kept like a streamed one."""
-    built = _Built(tmp_path, model_config, _json_reply(_completion({"content": "Pack a coat.", **reasoning_fields})))
-
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
-
-    assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
-    assert turn.message.provider_data.get("reasoning_details") == reasoning_details
 
 
 @pytest.mark.asyncio
@@ -504,7 +469,7 @@ async def test_http_errors_map_to_typed_provider_errors(
 ) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _json_reply(body, status=status))
     # A caller that retries the request itself turns the SDK's retries off, so the adapter's own error arrives at once.
-    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(caller_retries=True))
+    request = ModelRequest(messages=[_user()], overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(ProviderError) as info:
         await _turn(built, request)
@@ -600,7 +565,7 @@ async def test_a_context_window_error_inside_a_stream_is_typed(tmp_path: Path) -
 async def test_an_error_body_without_a_message_reports_the_response_text(tmp_path: Path) -> None:
     """Servers that answer outside the OpenAI error shape still surface what they said."""
     built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply({"detail": "Not Found"}, status=404))
-    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(caller_retries=True))
+    request = ModelRequest(messages=[_user()], overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(InvalidRequest) as info:
         await _turn(built, request)
@@ -748,36 +713,6 @@ async def test_failed_response_reports_its_usage_before_raising(tmp_path: Path) 
 
 
 _REASONING_ITEM = {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Rain is likely."}]}
-_MESSAGE_ITEM = {
-    "id": "msg_1",
-    "type": "message",
-    "role": "assistant",
-    "status": "completed",
-    "content": [{"type": "output_text", "text": "Pack a coat.", "annotations": []}],
-}
-
-
-@pytest.mark.asyncio
-async def test_a_non_streamed_response_keeps_its_reasoning_summary(tmp_path: Path) -> None:
-    """A helper call on the Responses route reads the reasoning summary; a stored response needs no reasoning copy."""
-    built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(_response(output=[_REASONING_ITEM, _MESSAGE_ITEM])))
-
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
-
-    assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
-    assert turn.message.provider_data["response_id"] == "resp_1"
-    assert "reasoning_output" not in turn.message.provider_data
-
-
-@pytest.mark.asyncio
-async def test_a_non_streamed_failed_response_raises_its_error(tmp_path: Path) -> None:
-    failed = _response("failed", error={"code": "server_error", "message": "The server had an error."})
-    built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(failed))
-
-    with pytest.raises(ProviderUnavailable, match="The server had an error") as info:
-        await _adapter_turn(built, ModelRequest(messages=[_user()], stream=False))
-
-    assert (info.value.status_code, info.value.code, info.value.provider) == (None, "server_error", "OpenAI Responses")
 
 
 @pytest.mark.asyncio
@@ -1331,56 +1266,37 @@ _PACK_SUMMARY_DELTA = {
 }
 
 
-def _reasoning_reply(*, stream: bool, summary: bool) -> dict[str, Any]:
+def _reasoning_reply(*, summary: bool) -> dict[str, Any]:
     output = [_PACK_REASONING, _PACK_MESSAGE] if summary else [_PACK_MESSAGE]
-    if not stream:
-        return _json_reply(_response(output=output))
     created, text = _text_events(_PACK)
     return _responses_reply(created, *([_PACK_SUMMARY_DELTA] if summary else []), text, _completed(output))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stream", "extra_kwargs", "summary", "stored"),
+    ("extra_kwargs", "summary", "stored"),
     [
-        (True, {}, False, None),
-        (True, {"reasoning": {"effort": "low"}}, False, _PACK),
-        (True, {"reasoning": {"effort": "low", "summary": "auto"}}, True, f"Think. {_PACK}"),
-        (True, {"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
-        (False, {}, False, None),
-        (False, {"reasoning": {"effort": "low"}}, False, _PACK),
-        (False, {"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
+        ({}, False, None),
+        ({"reasoning": {"effort": "low"}}, False, _PACK),
+        ({"reasoning": {"effort": "low", "summary": "auto"}}, True, f"Think. {_PACK}"),
+        ({"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
     ],
-    ids=[
-        "streamed-unset",
-        "streamed-authored",
-        "streamed-authored-summary-in-reasoning",
-        "streamed-reasoning-summary",
-        "blocking-unset",
-        "blocking-authored",
-        "blocking-with-summary",
-    ],
+    ids=["unset", "authored", "authored-summary-in-reasoning", "reasoning-summary"],
 )
-async def test_authored_reasoning_stores_the_output_text_as_agno_did(
+async def test_authored_reasoning_stores_the_output_text_as_reasoning_without_a_reasoning_summary(
     tmp_path: Path,
     *,
-    stream: bool,
     extra_kwargs: dict[str, Any],
     summary: bool,
     stored: str | None,
 ) -> None:
-    """With ``reasoning`` authored, Agno stored the output text as reasoning unless a summary took its place.
+    """With ``reasoning`` authored, the output text is also stored as reasoning unless ``reasoning_summary`` is set.
 
-    A stream copied every text delta, after any summary text, unless ``reasoning_summary`` was set; a blocking
-    response stored its summary when it had one and its output text otherwise.
+    The copy follows any summary text, in event order.
     """
-    built = _Built(
-        tmp_path,
-        {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs},
-        _reasoning_reply(stream=stream, summary=summary),
-    )
+    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs}, _reasoning_reply(summary=summary))
 
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=stream))
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
 
     assert (turn.content, turn.message.reasoning_content) == (_PACK, stored)
 
@@ -1394,7 +1310,7 @@ async def test_the_stored_copy_of_the_output_text_never_streams_as_reasoning(
 ) -> None:
     """With ``reasoning`` authored, only a reasoning summary streams as reasoning; the text's stored copy does not."""
     config = {**_OPENAI_RESPONSES, "extra_kwargs": {"reasoning": {"effort": "low"}}}
-    built = _Built(tmp_path, config, _reasoning_reply(stream=True, summary=summary))
+    built = _Built(tmp_path, config, _reasoning_reply(summary=summary))
 
     events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
 

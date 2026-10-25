@@ -20,7 +20,7 @@ from mindroom.llm.errors import TRANSPORT_TIMEOUT, ProviderError, ProviderUnavai
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.openai.build import build_provider
-from tests.providers.golden_support import pipeline_provider
+from tests.providers.golden_support import pipeline_provider, sse_response
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
@@ -61,58 +61,63 @@ def _response(
     complete: bool = False,
     reason: str = "length",
     output_tokens: int = 1,
+    model: str = "gpt-6-astra",
 ) -> httpx.Response:
+    """Return the route's streamed summary reply "Project facts", cut off for ``reason`` unless ``complete``."""
     if route == "chat":
-        return httpx.Response(
-            200,
-            json={
-                "id": "chatcmpl-summary",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "gpt-6-astra",
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "stop" if complete else reason,
-                        "message": {"role": "assistant", "content": "Project facts"},
-                    },
-                ],
-                "usage": {"prompt_tokens": 10, "completion_tokens": output_tokens, "total_tokens": 10 + output_tokens},
-            },
-        )
-    return httpx.Response(
-        200,
-        json={
-            "id": "resp_summary",
-            "object": "response",
-            "created_at": 1,
-            "model": "gpt-6-astra",
-            "status": "completed" if complete else "incomplete",
-            "incomplete_details": None
-            if complete
-            else {"reason": "max_output_tokens" if reason == "length" else reason},
-            "error": None,
-            "output": [
-                {
-                    "id": "msg_summary",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed" if complete else "incomplete",
-                    "content": [{"type": "output_text", "text": "Project facts", "annotations": []}],
-                },
+        chunk = {"id": "chatcmpl-summary", "object": "chat.completion.chunk", "created": 1, "model": model}
+        usage = {"prompt_tokens": 10, "completion_tokens": output_tokens, "total_tokens": 10 + output_tokens}
+        return sse_response(
+            [
+                {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Project facts"}}]},
+                {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop" if complete else reason}]},
+                {**chunk, "choices": [], "usage": usage},
+                "[DONE]",
             ],
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": output_tokens,
-                "total_tokens": 10 + output_tokens,
-                "input_tokens_details": {"cached_tokens": 0},
-                "output_tokens_details": {"reasoning_tokens": 0},
+        )
+    response = {
+        "id": "resp_summary",
+        "object": "response",
+        "created_at": 1,
+        "model": model,
+        "status": "completed" if complete else "incomplete",
+        "incomplete_details": None if complete else {"reason": "max_output_tokens" if reason == "length" else reason},
+        "error": None,
+        "output": [
+            {
+                "id": "msg_summary",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed" if complete else "incomplete",
+                "content": [{"type": "output_text", "text": "Project facts", "annotations": []}],
             },
+        ],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": output_tokens,
+            "total_tokens": 10 + output_tokens,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
         },
-    )
+    }
+    text = {
+        "type": "response.output_text.delta",
+        "sequence_number": 1,
+        "item_id": "msg_summary",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "Project facts",
+        "logprobs": [],
+    }
+    ended = {
+        "type": "response.completed" if complete else "response.incomplete",
+        "sequence_number": 2,
+        "response": response,
+    }
+    return sse_response([text, ended], named=True)
 
 
 @pytest.mark.parametrize("route", ["chat", "responses"])
@@ -133,7 +138,6 @@ async def test_summary_rejects_explicit_output_limit_below_usage_cap(route: _Rou
         )
     assert len(requests) == 1
     assert requests[0]["max_completion_tokens" if route == "chat" else "max_output_tokens"] == 4
-    assert requests[0].get("stream") is not True
 
 
 @pytest.mark.parametrize("route", ["chat", "responses"])
@@ -214,8 +218,7 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
 
     def respond(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
-        response = _response("chat", complete=True)
-        return httpx.Response(200, json={**json.loads(response.content), "model": "anthropic/claude-sonnet-5"})
+        return _response("chat", complete=True, model="anthropic/claude-sonnet-5")
 
     config = ModelConfig(
         provider="openrouter",
@@ -229,7 +232,7 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
     model = pipeline_provider(build_provider(config, runtime))
     messages = (Message(role="system", content="Summarize"), Message(role="user", content="Conversation"))
 
-    await complete(model, ModelRequest(messages=messages, stream=False))
+    await complete(model, ModelRequest(messages=messages))
     summary = await generate_compaction_summary(
         model=model,
         summary_input="Conversation",

@@ -90,7 +90,6 @@
     },
     "portable_replay": true,
     "response_format": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {

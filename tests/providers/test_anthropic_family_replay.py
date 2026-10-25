@@ -24,7 +24,6 @@ from mindroom.providers.anthropic.native_compaction import native_replay_message
 from tests.history_helpers import _completed_run, _session, record_native_checkpoint
 from tests.providers.anthropic_family_support import (
     claude_turn,
-    json_reply,
     native_settings,
     route_provider,
     sse_reply,
@@ -65,8 +64,8 @@ def _notes(blocks: list[dict[str, Any]]) -> list[str]:
 
 
 async def _sent(provider: ClaudeProvider, wire: Wire, messages: list[Message], **request: Any) -> dict[str, Any]:  # noqa: ANN401
-    """Send one request, without streaming unless asked, and return its wire body."""
-    await claude_turn(provider, ModelRequest(messages=messages, **{"stream": False, **request}))
+    """Send one request and return its wire body."""
+    await claude_turn(provider, ModelRequest(messages=messages, **request))
     return wire.body()
 
 
@@ -98,7 +97,7 @@ def _attachment_turn(tmp_path: Path) -> Message:
 @pytest.mark.parametrize("route", _CLAUDE_ROUTES)
 async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tmp_path: Path, route: str) -> None:
     """Office and archive uploads never reach Claude as base64 documents."""
-    wire = Wire(json_reply([{"type": "text", "text": "Read."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
 
     body = await _sent(route_provider(route, tmp_path, wire), wire, [_attachment_turn(tmp_path)])
 
@@ -137,7 +136,7 @@ async def test_images_are_typed_by_their_bytes_when_claude_does_not_name_their_t
         ],
         files=[File(id="att_report", filepath=str(tmp_path / "sha256_gone.pdf"), mime_type="application/pdf")],
     )
-    wire = Wire(json_reply([{"type": "text", "text": "Three images."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Three images."}]))
 
     with capture_logs() as logs:
         blocks = _user_blocks(await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn]))
@@ -175,7 +174,7 @@ async def test_inline_media_past_the_request_size_budget_becomes_a_text_note(
             File(content=large_pdf, mime_type="application/pdf", filename="large.pdf"),
         ],
     )
-    wire = Wire(json_reply([{"type": "text", "text": "Read."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
 
     blocks = _user_blocks(await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn]))
 
@@ -202,7 +201,7 @@ async def test_text_documents_count_toward_the_request_size_budget(
             File(content=b"a,b\n" * 450, mime_type="text/csv", filename="export.csv"),
         ],
     )
-    wire = Wire(json_reply([{"type": "text", "text": "Read."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
 
     blocks = _user_blocks(await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn]))
 
@@ -228,7 +227,7 @@ async def test_bedrock_uses_a_smaller_inline_media_budget_than_vertex(tmp_path: 
 
     bodies = {}
     for route in ("bedrock_claude", "vertexai_claude"):
-        wire = Wire(json_reply([{"type": "text", "text": "Read."}]))
+        wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
         bodies[route] = _user_blocks(await _sent(route_provider(route, tmp_path, wire), wire, [turn()]))
 
     assert not [block for block in bodies["bedrock_claude"] if block["type"] == "document"]
@@ -256,7 +255,7 @@ async def test_image_over_the_per_image_limit_becomes_a_text_note_on_bedrock_and
 
     bodies = {}
     for route in _CLAUDE_ROUTES:
-        wire = Wire(json_reply([{"type": "text", "text": "Read."}]))
+        wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
         bodies[route] = _user_blocks(await _sent(route_provider(route, tmp_path, wire), wire, [turn()]))
 
     assert [base64.b64decode(block["source"]["data"]) for block in bodies["anthropic"] if block["type"] == "image"] == [
@@ -342,7 +341,7 @@ def _cited_history(citation: dict[str, Any]) -> list[Message]:
 @pytest.mark.parametrize("citation", _STORED_CITATIONS.values(), ids=_STORED_CITATIONS.keys())
 async def test_cited_answers_replay_as_plain_text(tmp_path: Path, route: str, citation: dict[str, Any]) -> None:
     """A stored cited answer replays as its text, because the cited document is not resent; history stays intact."""
-    wire = Wire(json_reply([{"type": "text", "text": "Blue."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Blue."}]))
     messages = _cited_history(citation)
     stored = copy.deepcopy(messages[1].provider_data)
 
@@ -383,7 +382,7 @@ async def test_a_turn_stored_without_content_blocks_replays_its_server_tool_bloc
         provider_data={"signature": "sig-1", "server_tool_blocks": [search_use, search_result]},
         from_history=True,
     )
-    wire = Wire(json_reply([{"type": "text", "text": "Still sunny."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Still sunny."}]))
     messages = [
         Message(role="user", content="Weather in Paris?", from_history=True),
         answer,
@@ -435,7 +434,7 @@ def _thread_with_media_between_results() -> list[Message]:
 @pytest.mark.parametrize("route", _CLAUDE_ROUTES)
 async def test_tool_results_lead_the_user_turn_after_their_calls(tmp_path: Path, route: str) -> None:
     """Anthropic pairs only the tool results that open the next user turn, so stored media follow-ups move after them."""
-    wire = Wire(json_reply([{"type": "text", "text": "Next steps."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Next steps."}]))
     messages = _thread_with_media_between_results()
 
     body = await _sent(route_provider(route, tmp_path, wire), wire, messages)
@@ -473,7 +472,7 @@ async def test_vertex_strips_provider_level_strict_but_keeps_a_schema_property_n
         external_execution=None,
         approval_type=None,
     )
-    wire = Wire(json_reply([{"type": "text", "text": "Done."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
 
     body = await _sent(
         route_provider("vertexai_claude", tmp_path, wire, extra_kwargs={"cache_system_prompt": False}),
@@ -518,7 +517,7 @@ async def test_reasoning_without_an_anthropic_signature_never_becomes_a_thinking
         own,
         Message(role="user", content="Current question"),
     ]
-    wire = Wire(json_reply([{"type": "text", "text": "Done."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
 
     body = await _sent(route_provider("vertexai_claude", tmp_path, wire), wire, messages)
 
@@ -555,9 +554,8 @@ _COMPACTION_USAGE = {
 }
 
 
-def _compacted(blocks: list[dict[str, Any]], *, stream: bool = False, stop_reason: str = "end_turn") -> Any:  # noqa: ANN401
-    reply = sse_reply if stream else json_reply
-    return reply([dict(block) for block in blocks], stop_reason=stop_reason, usage=_COMPACTION_USAGE)
+def _compacted(blocks: list[dict[str, Any]], *, stop_reason: str = "end_turn") -> Any:  # noqa: ANN401
+    return sse_reply([dict(block) for block in blocks], stop_reason=stop_reason, usage=_COMPACTION_USAGE)
 
 
 def _assistant(turn: Any) -> Message:  # noqa: ANN401 - the TurnCompleted of one request
@@ -567,19 +565,13 @@ def _assistant(turn: Any) -> Message:  # noqa: ANN401 - the TurnCompleted of one
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["anthropic", "vertexai_claude"])
-@pytest.mark.parametrize("stream", [False, True])
-async def test_a_native_checkpoint_replays_in_place_of_the_prefix_it_summarized(
-    tmp_path: Path,
-    route: str,
-    *,
-    stream: bool,
-) -> None:
+async def test_a_native_checkpoint_replays_in_place_of_the_prefix_it_summarized(tmp_path: Path, route: str) -> None:
     """The edit asks for compaction; the next request starts at the checkpoint; without native replay all is canonical."""
     thinking = {"type": "thinking", "thinking": "Recall the port", "signature": "checkpoint-bound"}
     wire = Wire(
-        _compacted([_CHECKPOINT, _TEXT], stream=stream),
-        _compacted([thinking, _TEXT], stream=stream),
-        _compacted([_TEXT], stream=stream),
+        _compacted([_CHECKPOINT, _TEXT]),
+        _compacted([thinking, _TEXT]),
+        _compacted([_TEXT]),
     )
     provider = route_provider(route, tmp_path, wire, extra_kwargs={"max_tokens": 4096})
     replay = native_settings(provider)
@@ -588,11 +580,11 @@ async def test_a_native_checkpoint_replays_in_place_of_the_prefix_it_summarized(
     for index, prompt in enumerate(("What port?", "Repeat the port.")):
         turn = await claude_turn(
             provider,
-            ModelRequest(messages=messages, native_compaction=replay, stream=stream),
+            ModelRequest(messages=messages, native_compaction=replay),
         )
         messages = [*messages, _assistant(turn), Message(role="user", content=prompt)]
         if index == 1:
-            await claude_turn(provider, ModelRequest(messages=messages, stream=stream))
+            await claude_turn(provider, ModelRequest(messages=messages))
 
     edit = wire.body(0)["context_management"]["edits"][0]
     assert (edit["type"], edit["trigger"]) == ("compact_20260112", {"type": "input_tokens", "value": 60000})
@@ -614,7 +606,7 @@ async def test_compaction_iterations_are_billed_and_the_last_one_is_the_context(
     provider = route_provider("anthropic", tmp_path, wire)
     native = native_settings(provider)
 
-    turn = await claude_turn(provider, ModelRequest(messages=[_user("Hi")], native_compaction=native, stream=False))
+    turn = await claude_turn(provider, ModelRequest(messages=[_user("Hi")], native_compaction=native))
 
     metrics = turn.message.metrics
     assert (metrics.tokens.input_tokens, metrics.tokens.output_tokens, metrics.tokens.total_tokens) == (
@@ -643,9 +635,9 @@ async def _recorded_reply(
     stop_reason: str = "end_turn",
 ) -> Message:
     """Return the stored assistant message of one reply with ``blocks``, recorded under ``threshold``'s route."""
-    wire.replies[:] = [json_reply(blocks, stop_reason=stop_reason, usage=_COMPACTION_USAGE)]
+    wire.replies[:] = [sse_reply(blocks, stop_reason=stop_reason, usage=_COMPACTION_USAGE)]
     replay = native_settings(provider, threshold=threshold) if threshold is not None else None
-    request = ModelRequest(messages=[_user("Hi")], native_compaction=replay, stream=False)
+    request = ModelRequest(messages=[_user("Hi")], native_compaction=replay)
     return _assistant(await claude_turn(provider, request))
 
 
@@ -653,7 +645,7 @@ async def _recorded_reply(
 @pytest.mark.parametrize("content", [None, ""])
 async def test_an_empty_summary_keeps_the_canonical_history(tmp_path: Path, content: str | None) -> None:
     """An unsuccessful summary cannot replace the original conversation."""
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     provider = route_provider("anthropic", tmp_path, wire)
     reply = await _recorded_reply(provider, wire, [{**_CHECKPOINT, "content": content}, _TEXT])
     replay = native_settings(provider)
@@ -675,12 +667,12 @@ async def test_an_empty_summary_keeps_the_tool_turn_thinking(tmp_path: Path, *, 
     """A no-op summary leaves the thinking prefix unchanged, so the tool turn keeps its signed thinking."""
     thinking = {"type": "thinking", "thinking": "Need a lookup.", "signature": "unchanged-prefix"}
     tool_use = {"type": "tool_use", "id": "toolu_lookup", "name": "lookup", "input": {}}
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
     blocks = [*([{**_CHECKPOINT, "content": None}] if no_op else []), thinking, tool_use]
     reply = await _recorded_reply(provider, wire, blocks, stop_reason="tool_use")
     messages = [_user("Look up the status."), reply, Message(role="tool", tool_call_id="toolu_lookup", content="Found")]
-    wire.replies[:] = [json_reply([_TEXT])]
+    wire.replies[:] = [sse_reply([_TEXT])]
 
     replay = native_settings(provider) if native else None
     body = await _sent(provider, wire, messages, native_compaction=replay)
@@ -694,11 +686,11 @@ async def test_checkpoint_replay_drops_the_unsigned_thinking_after_the_checkpoin
     signed = {"type": "thinking", "thinking": "", "signature": "complete"}
     unsigned = {"type": "thinking", "thinking": "", "signature": ""}
     tool_use = {"type": "tool_use", "id": "toolu_lookup", "name": "lookup", "input": {}}
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
     reply = await _recorded_reply(provider, wire, [_CHECKPOINT, signed, tool_use, unsigned], stop_reason="tool_use")
     messages = [_user("Look it up."), reply, Message(role="tool", tool_call_id="toolu_lookup", content="Found it")]
-    wire.replies[:] = [json_reply([_TEXT])]
+    wire.replies[:] = [sse_reply([_TEXT])]
 
     body = await _sent(
         provider,
@@ -720,23 +712,23 @@ async def test_native_reactivation_discards_only_mismatched_thinking(tmp_path: P
     canonical_thinking = {"type": "thinking", "thinking": "", "signature": "canonical-prefix"}
     resumed_thinking = {"type": "thinking", "thinking": "", "signature": "resumed-native-prefix"}
     wire = Wire(
-        json_reply([_CHECKPOINT, native_thinking, _TEXT], usage=_COMPACTION_USAGE),
-        json_reply([canonical_thinking, _TEXT]),
-        json_reply([resumed_thinking, _TEXT]),
-        json_reply([_TEXT]),
+        sse_reply([_CHECKPOINT, native_thinking, _TEXT], usage=_COMPACTION_USAGE),
+        sse_reply([canonical_thinking, _TEXT]),
+        sse_reply([resumed_thinking, _TEXT]),
+        sse_reply([_TEXT]),
     )
     provider = route_provider("anthropic", tmp_path, wire, id="claude-fable-5-1")
     native = native_settings(provider)
     messages = [_user("Original facts.")]
-    anchor = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native, stream=False))
+    anchor = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native))
     messages = [*messages, _assistant(anchor), _user("Continue.")]
-    canonical = await claude_turn(provider, ModelRequest(messages=messages, stream=False))
+    canonical = await claude_turn(provider, ModelRequest(messages=messages))
     messages = [*messages, _assistant(canonical), _user("Continue again.")]
 
-    resumed = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native, stream=False))
+    resumed = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native))
     native_body = wire.body()
     messages = [*messages, _assistant(resumed), _user("Finish.")]
-    await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native, stream=False))
+    await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native))
 
     assert native_thinking in native_body["messages"][0]["content"]
     assert canonical_thinking not in [block for message in native_body["messages"] for block in message["content"]]
@@ -747,11 +739,11 @@ async def test_native_reactivation_discards_only_mismatched_thinking(tmp_path: P
 @pytest.mark.asyncio
 async def test_switching_the_claude_model_restores_the_canonical_history(tmp_path: Path) -> None:
     """A checkpoint belongs to its model's route, so another model replays the original conversation."""
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     sonnet = route_provider("anthropic", tmp_path, wire)
     reply = await _recorded_reply(sonnet, wire, [_CHECKPOINT, _TEXT])
     opus = route_provider("anthropic", tmp_path, wire, id="claude-opus-5-5")
-    wire.replies[:] = [json_reply([_TEXT])]
+    wire.replies[:] = [sse_reply([_TEXT])]
 
     body = await _sent(
         opus,
@@ -777,7 +769,7 @@ async def test_canonical_fallback_removes_the_thinking_bound_to_the_checkpoint(
     """Discarding a checkpoint must not send its signed thinking against the restored prefix."""
     thinking = {"type": "thinking", "thinking": "Internal reasoning.", "signature": "checkpoint-bound"}
     redacted = {"type": "redacted_thinking", "data": "opaque-thinking"}
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     provider = route_provider(route, tmp_path, wire, id="claude-fable-5-1")
     anchor = await _recorded_reply(provider, wire, [_CHECKPOINT, thinking, _TEXT])
     messages = [
@@ -801,7 +793,7 @@ async def test_canonical_fallback_removes_the_thinking_bound_to_the_checkpoint(
         _user("Finish."),
     ]
     original = [message.to_dict() for message in messages]
-    wire.replies[:] = [json_reply([_TEXT])]
+    wire.replies[:] = [sse_reply([_TEXT])]
 
     replay = native_settings(provider) if native else None
     body = await _sent(provider, wire, messages, native_compaction=replay)
@@ -831,7 +823,7 @@ async def test_a_raw_context_management_override_owns_the_compaction_policy(
 ) -> None:
     """An SDK body override turns MindRoom's own trigger off and cannot bypass the pause validation."""
     policy = {"edits": [{"type": "compact_20260112", "pause_after_compaction": pause}]}
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     provider = route_provider(
         route,
         tmp_path,
@@ -855,7 +847,7 @@ async def test_a_raw_context_management_override_owns_the_compaction_policy(
 @pytest.mark.parametrize("region", ["global", "us", "eu", "us-central1"])
 def test_a_vertex_checkpoint_route_is_stable_for_its_endpoint(tmp_path: Path, region: str) -> None:
     """Two builds of the same Vertex model and region label their checkpoints alike, so a rebuild still replays them."""
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     routes = [
         native_settings(route_provider("vertexai_claude", tmp_path, wire, extra_kwargs={"region": region}))
         for _ in range(2)
@@ -877,7 +869,7 @@ async def test_an_authored_checkpoint_replays_after_a_rebuild_without_a_foreign_
     raw: bool,
 ) -> None:
     """A model with its own compaction policy replays its checkpoint and never another model's."""
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     foreign = route_provider(route, tmp_path, wire, id="claude-opus-5-5")
     foreign_block = {"type": "compaction", "content": "Foreign model summary"}
     old = await _recorded_reply(foreign, wire, [foreign_block, _TEXT])
@@ -890,12 +882,12 @@ async def test_an_authored_checkpoint_replays_after_a_rebuild_without_a_foreign_
     assert replay is not None
     assert replay.threshold is None
     messages = [_user("Original facts"), old, _user("Continue")]
-    wire.replies[:] = [json_reply([_CHECKPOINT, _TEXT], usage=_COMPACTION_USAGE)]
-    first = await claude_turn(model, ModelRequest(messages=messages, native_compaction=replay, stream=False))
+    wire.replies[:] = [sse_reply([_CHECKPOINT, _TEXT], usage=_COMPACTION_USAGE)]
+    first = await claude_turn(model, ModelRequest(messages=messages, native_compaction=replay))
     first_body = wire.body()
     rebuilt = route_provider(route, tmp_path, wire, extra_kwargs=authored)
     rebuilt_replay = native_settings(rebuilt, threshold=None, allow_authored=True)
-    wire.replies[:] = [json_reply([_TEXT])]
+    wire.replies[:] = [sse_reply([_TEXT])]
 
     second = await _sent(
         rebuilt,
@@ -915,7 +907,7 @@ async def test_an_authored_checkpoint_replays_after_a_rebuild_without_a_foreign_
 @pytest.mark.parametrize("change", ["none", "model", "summary", "missing_threshold", "openai"])
 def test_an_authored_approval_restore_requires_a_compatible_saved_policy(tmp_path: Path, change: str) -> None:
     """A saved authored policy survives a pause without enabling automatic or foreign replay."""
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     authored = {"context_management": _POLICY}
     paused = route_provider("anthropic", tmp_path, wire, extra_kwargs=authored)
     saved = native_settings(paused, threshold=None, allow_authored=True)
@@ -963,14 +955,11 @@ _MANUAL = {"type": "enabled", "budget_tokens": 1024}
 @pytest.mark.parametrize("model_id", ["claude-sonnet-4-6", "claude-opus-4-6"])
 @pytest.mark.parametrize("route", ["anthropic", "vertexai_claude"])
 @pytest.mark.parametrize("source", ["typed", "top", "raw"])
-@pytest.mark.parametrize("stream", [False, True])
 async def test_manual_thinking_survives_a_checkpoint_fallback(
     tmp_path: Path,
     model_id: str,
     route: str,
     source: str,
-    *,
-    stream: bool,
 ) -> None:
     """Manual thinking must stay unchanged inside a tool turn, so a fallback to canonical history keeps it."""
     thinking = {"type": "thinking", "thinking": "Need a lookup.", "signature": "original-signature"}
@@ -983,23 +972,23 @@ async def test_manual_thinking_survives_a_checkpoint_fallback(
         settings["request_params"] = {"extra_body": {"thinking": _MANUAL}}
     elif source == "top":
         settings["request_params"] = {"thinking": _MANUAL}
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     provider = route_provider(route, tmp_path, wire, id=model_id, extra_kwargs=settings)
     anchor = await _recorded_reply(provider, wire, [_CHECKPOINT, _TEXT])
     messages = [_user("Original launch facts."), anchor, _user("Look up the status.")]
-    wire.replies[:] = [json_reply([thinking, tool_use], stop_reason="tool_use")]
+    wire.replies[:] = [sse_reply([thinking, tool_use], stop_reason="tool_use")]
     native = native_settings(provider)
-    lookup = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native, stream=False))
+    lookup = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native))
     messages = [
         *messages,
         _assistant(lookup),
         Message(role="tool", tool_call_id="toolu_lookup", content="Found it. " * 5000),
     ]
     original = [message.to_dict() for message in messages]
-    wire.replies[:] = [sse_reply([_TEXT]) if stream else json_reply([_TEXT])]
+    wire.replies[:] = [sse_reply([_TEXT])]
 
     # Mid-turn compaction turns native replay off when a checkpoint cannot keep the request in its window.
-    body = await _sent(provider, wire, messages, stream=stream)
+    body = await _sent(provider, wire, messages)
 
     effective = body.get("thinking", body.get("extra_body", {}).get("thinking"))
     assert effective == _MANUAL
@@ -1032,7 +1021,7 @@ async def test_thinking_overrides_align_the_replay_with_the_effective_mode(
 ) -> None:
     """The raw request overrides decide the thinking mode, and with it whether stale thinking may replay."""
     redacted = {"type": "redacted_thinking", "data": "unchanged-redacted-thinking"}
-    wire = Wire(json_reply([_TEXT]))
+    wire = Wire(sse_reply([_TEXT]))
     provider = route_provider(
         "vertexai_claude",
         tmp_path,

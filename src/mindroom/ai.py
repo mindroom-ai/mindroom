@@ -757,7 +757,6 @@ async def _start_agent_run(
     *,
     storage: RunStorage,
     terminal: TerminalRecord[RunRecord],
-    stream: bool,
 ) -> AsyncIterator[RunEvent]:
     """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
 
@@ -804,7 +803,7 @@ async def _start_agent_run(
         ctx=run,
         hooks=hooks,
         persist=persist_into(terminal, storage),
-        request_template=replace(run_context.request_template, stream=stream),
+        request_template=run_context.request_template,
     )
     driven = drive_delegation_stream(
         events,
@@ -882,7 +881,7 @@ async def _run_blocking_agent_attempt(
         on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
-    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
+    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal)
     async with closing_async_stream(events):
         async for event in events:
             terminal.collect(event)
@@ -1785,7 +1784,7 @@ async def _stream_agent_attempt_chunks(
         with bind_llm_request_log_context(**request_context):
             if pipeline_timing is not None:
                 pipeline_timing.mark_model_request()
-            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal, stream=True)
+            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal)
         events = stream_with_llm_request_log_context(run_events, request_context=request_context)
         chunks = _process_stream_events(
             events,

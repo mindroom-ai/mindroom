@@ -20,7 +20,6 @@
     },
     "portable_replay": null,
     "response_format": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -29,14 +28,12 @@
       "content": "Pack a light rain jacket and",
       "from_history": false,
       "provider_data": {
-        "incomplete_reason": "max_output_tokens",
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
         },
         "mindroom_response_stored": true,
-        "response_id": "resp_parity",
-        "response_status": "incomplete"
+        "response_id": "resp_parity"
       },
       "role": "assistant",
       "stop_after_tool_call": false
@@ -46,7 +43,7 @@
       "output_tokens": 8,
       "total_tokens": 50
     },
-    "stop_reason": "incomplete"
+    "stop_reason": null
   },
   "request": {
     "body": {
@@ -62,7 +59,8 @@
       ],
       "model": "gpt-6-astra",
       "reasoning": {},
-      "store": true
+      "store": true,
+      "stream": true
     },
     "headers": {
       "accept": "application/json",
@@ -73,45 +71,162 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "created_at": 1792540800,
-      "error": null,
-      "id": "resp_parity",
-      "incomplete_details": {
-        "reason": "max_output_tokens"
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
       },
-      "model": "gpt-6-astra",
-      "object": "response",
-      "output": [
-        {
-          "content": [
-            {
-              "annotations": [],
-              "text": "Pack a light rain jacket and",
-              "type": "output_text"
+      {
+        "data": {
+          "item": {
+            "content": [],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "in_progress",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "",
+            "type": "output_text"
+          },
+          "sequence_number": 2,
+          "type": "response.content_part.added"
+        },
+        "event": "response.content_part.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "delta": "Pack a light rain jacket and",
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 3,
+          "type": "response.output_text.delta"
+        },
+        "event": "response.output_text.delta"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 4,
+          "text": "Pack a light rain jacket and",
+          "type": "response.output_text.done"
+        },
+        "event": "response.output_text.done"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "Pack a light rain jacket and",
+            "type": "output_text"
+          },
+          "sequence_number": 5,
+          "type": "response.content_part.done"
+        },
+        "event": "response.content_part.done"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [
+              {
+                "annotations": [],
+                "text": "Pack a light rain jacket and",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "incomplete",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 6,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": {
+              "reason": "max_output_tokens"
+            },
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [
+              {
+                "content": [
+                  {
+                    "annotations": [],
+                    "text": "Pack a light rain jacket and",
+                    "type": "output_text"
+                  }
+                ],
+                "id": "msg_parity",
+                "role": "assistant",
+                "status": "incomplete",
+                "type": "message"
+              }
+            ],
+            "status": "incomplete",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 50
             }
-          ],
-          "id": "msg_parity",
-          "role": "assistant",
-          "status": "incomplete",
-          "type": "message"
-        }
-      ],
-      "status": "incomplete",
-      "usage": {
-        "input_tokens": 42,
-        "input_tokens_details": {
-          "cached_tokens": 0
+          },
+          "sequence_number": 7,
+          "type": "response.incomplete"
         },
-        "output_tokens": 8,
-        "output_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "total_tokens": 50
+        "event": "response.incomplete"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "output_limit_stop"

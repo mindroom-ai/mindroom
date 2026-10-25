@@ -191,17 +191,10 @@ def _fork(
         messages=[*request.messages, Message(role="user", content=_review_prompt(config, catalog, runnable))],
         definitions=tuple(request.tools),
         tools=functions,
-        settings=_review_settings(request),
+        # The loop sends its own messages and tools with the response's request settings.
+        settings=replace(request, messages=(), tools=()),
         forked=True,
     )
-
-
-def _review_settings(request: ModelRequest) -> ModelRequest:
-    """Return the settings every request of a review sends: the given request's, asking for whole replies.
-
-    The review reads only finished replies, so each of its requests asks for one non-streaming response.
-    """
-    return replace(request, messages=(), tools=(), stream=False)
 
 
 def _agent_skill_definitions(
@@ -295,7 +288,7 @@ async def _replay(
         messages=[Message(role="user", content=f"{evidence}\n\n{_review_prompt(config, catalog, runnable)}")],
         definitions=definitions,
         tools=functions,
-        settings=_review_settings(EMPTY_REQUEST),
+        settings=EMPTY_REQUEST,
         forked=False,
     )
 

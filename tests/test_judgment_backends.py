@@ -288,7 +288,7 @@ async def test_llm_decision_request_offers_no_tools_and_disables_provider_tools(
     assert disabled == [True]
     assert not provider_tools_disabled()
     [request] = judge.requests
-    assert (request.tools, request.tool_choice, request.stream) == ((), "none", False)
+    assert (request.tools, request.tool_choice) == ((), "none")
     assert [message.role for message in request.messages] == ["system", "user"]
 
 

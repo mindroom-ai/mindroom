@@ -19,7 +19,8 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 - `input.native_compaction` calls `configure_native_compaction` with its threshold and history generation, as history planning does when it enables native compaction.
 - `input.tool_jobs` installs `install_tool_job_execution` as agent construction does, and the harness answers the per-turn job checks (a background job runtime, execution resources, and which functions are managed calls), because `Function.from_dict` cannot carry the assembled toolkit those checks read.
 - `input.provider_tools_disabled` sends the request inside `without_provider_tools()`, as participation decisions and judgments do.
-- Streamed goldens call Agno's `aresponse_stream`, the run loop's entry point, and stop after the first request completes; goldens with `input.stream: false` call `aresponse`, the non-streaming path of structured output, compaction summaries, and decision requests.
+- Goldens call Agno's `aresponse_stream`, the run loop's entry point, and stop after the first request completes.
+  The `output_limit_stop`, `structured_output`, `structured_output_nested`, and `tool_choice_none` scenarios were captured through `aresponse`, Agno's non-streaming path, except on Codex; since every owned request streams, they hold the streamed request the owned adapter sends and the same reply as a stream, with the parsed reply regenerated from it.
 - Every SDK request is answered at the httpx transport layer with `response_raw`, so the SDK clients production builds (MindRoom's pooled client, Agno's shared client, SDK-built clients) are unchanged.
 - Each golden must produce exactly one provider request.
 
@@ -35,7 +36,6 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | `input.response_format` | `null`, `{"type": "dict", "value": ...}`, or `{"type": "pydantic", "model": "module:Class", "json_schema": ...}`; it is the value Agno's agent resolves for the model's structured-output support, and replay fails when the class's JSON schema no longer equals `json_schema`. |
 | `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
 | `input.portable_replay` | `null`, or the `configure_portable_replay` setting for Responses models. |
-| `input.stream` | `true` for `aresponse_stream`, `false` for `aresponse`. |
 | `input.provider_tools_disabled` | Present only as `true`, for a request sent inside `without_provider_tools()`. |
 | `input.tool_jobs` | Present only as `{"managed": [...]}`, the functions a turn that can start tool jobs offers as managed calls. |
 | `input.native_compaction` | Present only as `{"threshold", "history_generation"}`, the arguments of `configure_native_compaction`. |
@@ -90,12 +90,12 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `prompt_cache` | A system prompt with the session-context boundary plus the route's cache settings. |
 | `prompt_cache_disabled` | Claude with `cache_system_prompt` and `extended_cache_time` off. |
 | `deferred_tool_search`, `deferred_tool_search_replay` | Deferred tools offered natively or behind the production `dynamic_tools` functions `tool_search`/`call_tool`, then a deferred call replayed. |
-| `output_limit_stop` | A reply the output limit cut off mid-sentence, sent without streaming as a compaction summary is: Claude `max_tokens`, Chat and Ollama `length`, Gemini `MAX_TOKENS`, or an incomplete Responses response. |
+| `output_limit_stop` | A reply the output limit cut off mid-sentence, as a compaction summary can be: Claude `max_tokens`, Chat and Ollama `length`, Gemini `MAX_TOKENS`, or an incomplete Responses response. |
 | `output_limit_stop_tool_call` | A streamed reply the output limit cut off inside a tool call's arguments JSON. |
 | `approval_gated_tools` | A function the approval policy gates (`requires_confirmation`, `approval_type` `mindroom_policy`) and a `run_subagent` stand-in marked for external execution, both through `apply_tool_approval_capability`, beside an ungated function; the reply calls the gated one. |
 | `tool_job_wait_parameter` | A turn whose calls can become tool jobs: the managed function gains the optional `background_after` parameter, the other function keeps its schema, and the reply passes `background_after`. |
 | `native_compaction`, `native_compaction_replay` | Native compaction with a 60,000-token trigger: the request's `context_management`, a reply that carries a compaction checkpoint, then the checkpoint and its tail replayed in place of the turns before it. |
-| `tool_choice_none` | A decision request: `tool_choice` `"none"` with provider tools disabled and the tools still defined, sent without streaming. |
+| `tool_choice_none` | A decision request: `tool_choice` `"none"` with provider tools disabled and the tools still defined. |
 | `search_grounding` | Google Search grounding (`search: true`) on `gemini-3.1-pro-preview`, on Vertex AI at the `global` location: the search tool goes out in place of the two offered function tools, and the streamed reply carries grounding metadata, which the parsed message keeps only in `citations`, plus tool-use prompt tokens in its usage. |
 
 Skipped where the route has nothing to pin:
@@ -122,7 +122,7 @@ Each file has these keys:
 
 - `scenario` and `description` name what the file pins.
 - `input` records what the scenario ran: the authored `config.yaml` mapping, workspace files, the turn's prompt and thread history, and the entry point.
-- `requests` lists each request with the model `id` and `provider` string, whether it was a streaming call, its `messages`, its `tools`, its `tool_choice`, its `response_format`, and its `deferred_tool_names`.
+- `requests` lists each request with the model `id` and `provider` string, its `messages`, its `tools`, its `tool_choice`, its `response_format`, and its `deferred_tool_names`.
 - `exported` appears only where MindRoom hands model-visible values to a model outside its own loop: the realtime voice model's instructions and tool schemas, and the Live voice model's system prompt.
 
 The recorder replaces the provider call, so it sees every request hook MindRoom wraps around that call, such as portable tool search, but not the provider's own wire conversion, which the `providers/` goldens pin.

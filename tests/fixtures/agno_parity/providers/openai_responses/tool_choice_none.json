@@ -21,7 +21,6 @@
     "portable_replay": null,
     "provider_tools_disabled": true,
     "response_format": null,
-    "stream": false,
     "tool_choice": "none",
     "tools": [
       {
@@ -79,7 +78,6 @@
       "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
       "from_history": false,
       "provider_data": {
-        "incomplete_reason": null,
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
@@ -87,8 +85,7 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
-        "response_id": "resp_parity",
-        "response_status": "completed"
+        "response_id": "resp_parity"
       },
       "role": "assistant",
       "stop_after_tool_call": false
@@ -98,7 +95,7 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": "completed"
+    "stop_reason": null
   },
   "request": {
     "body": {
@@ -115,6 +112,7 @@
       "model": "gpt-6-astra",
       "reasoning": {},
       "store": true,
+      "stream": true,
       "tool_choice": "none",
       "tools": [
         {
@@ -178,43 +176,160 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "created_at": 1792540800,
-      "error": null,
-      "id": "resp_parity",
-      "incomplete_details": null,
-      "model": "gpt-6-astra",
-      "object": "response",
-      "output": [
-        {
-          "content": [
-            {
-              "annotations": [],
-              "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
-              "type": "output_text"
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "in_progress",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "",
+            "type": "output_text"
+          },
+          "sequence_number": 2,
+          "type": "response.content_part.added"
+        },
+        "event": "response.content_part.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "delta": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 3,
+          "type": "response.output_text.delta"
+        },
+        "event": "response.output_text.delta"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 4,
+          "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+          "type": "response.output_text.done"
+        },
+        "event": "response.output_text.done"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+            "type": "output_text"
+          },
+          "sequence_number": 5,
+          "type": "response.content_part.done"
+        },
+        "event": "response.content_part.done"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [
+              {
+                "annotations": [],
+                "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 6,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [
+              {
+                "content": [
+                  {
+                    "annotations": [],
+                    "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+                    "type": "output_text"
+                  }
+                ],
+                "id": "msg_parity",
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+              }
+            ],
+            "status": "completed",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 12,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 54
             }
-          ],
-          "id": "msg_parity",
-          "role": "assistant",
-          "status": "completed",
-          "type": "message"
-        }
-      ],
-      "status": "completed",
-      "usage": {
-        "input_tokens": 42,
-        "input_tokens_details": {
-          "cached_tokens": 0
+          },
+          "sequence_number": 7,
+          "type": "response.completed"
         },
-        "output_tokens": 12,
-        "output_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "total_tokens": 54
+        "event": "response.completed"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "tool_choice_none"

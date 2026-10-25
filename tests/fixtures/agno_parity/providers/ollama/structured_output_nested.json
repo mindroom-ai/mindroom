@@ -197,7 +197,6 @@
       "model": "mindroom.scheduling.tasks:ScheduledWorkflow",
       "type": "pydantic"
     },
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -230,7 +229,7 @@
   "request": {
     "body": {
       "model": "qwen3.8:27b",
-      "stream": false,
+      "stream": true,
       "format": {
         "$defs": {
           "CronSchedule": {
@@ -427,24 +426,26 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/x-ndjson"
     },
-    "json": {
-      "created_at": "2026-10-20T00:00:00.000000Z",
-      "done": true,
-      "done_reason": "stop",
-      "eval_count": 12,
-      "eval_duration": 640000000,
-      "load_duration": 21000000,
-      "message": {
-        "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
-        "role": "assistant"
-      },
-      "model": "qwen3.8:27b",
-      "prompt_eval_count": 42,
-      "prompt_eval_duration": 120000000,
-      "total_duration": 812000000
-    },
+    "ndjson": [
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": true,
+        "done_reason": "stop",
+        "eval_count": 12,
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "message": {
+          "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b",
+        "prompt_eval_count": 42,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      }
+    ],
     "status": 200
   },
   "scenario": "structured_output_nested"

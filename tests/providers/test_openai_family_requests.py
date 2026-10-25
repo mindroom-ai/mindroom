@@ -8,8 +8,8 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
-from openai.types.chat import ChatCompletion
-from openai.types.responses import Response, ResponseUsage
+from openai.types.chat import ChatCompletionChunk
+from openai.types.responses import Response, ResponseStreamEvent, ResponseUsage
 from openai.types.responses.response_input_item_param import ResponseInputItemParam
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
@@ -23,12 +23,12 @@ from mindroom.llm.provider import ModelRequest, RequestOverrides
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.openai.chat_wire import chat_request_kwargs, parse_chat_completion
+from mindroom.providers.openai.chat_wire import ChatStream, chat_request_kwargs
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
 from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
-    parse_response,
+    ResponsesStream,
     responses_input,
     responses_replay,
     responses_request_kwargs,
@@ -41,6 +41,10 @@ from tests.providers.openai_family_support import provider_runtime, responses_ad
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.llm.provider import NativeCompactionReplay
+    from mindroom.llm.usage import MessageMetrics
+    from mindroom.providers.openai.responses_wire import ResponsesTurnParts
 
 _CHECKPOINT = {"type": "compaction", "id": "cmp_latest", "encrypted_content": "opaque-checkpoint"}
 _ANSWER = {
@@ -102,19 +106,53 @@ def _response(output: list[dict[str, Any]], *, status: str = "completed") -> Res
     )
 
 
+_STREAM_EVENT = TypeAdapter(ResponseStreamEvent)
+
+
+def _streamed(
+    response: Response,
+    *,
+    store: bool | None,
+    portable_replay: bool = False,
+    native_compaction: NativeCompactionReplay | None = None,
+) -> ResponsesTurnParts:
+    """Return the finished turn of ``response`` streamed as the API streams it: each output item, then its end."""
+    stream = ResponsesStream(
+        provider="OpenAI Responses",
+        store=store,
+        portable_replay=portable_replay,
+        native_compaction=native_compaction,
+        text_as_reasoning=False,
+    )
+    events: list[dict[str, Any]] = []
+    for index, item in enumerate(response.output):
+        done = item.model_dump(mode="json", exclude_none=True)
+        added = {**done, "arguments": ""} if done["type"] == "function_call" else done
+        events.append({"type": "response.output_item.added", "output_index": index, "item": added})
+        if done["type"] == "function_call":
+            events.append({"type": "response.function_call_arguments.delta", "delta": done["arguments"]})
+        if done["type"] == "message":
+            events.extend({"type": "response.output_text.delta", "delta": part["text"]} for part in done["content"])
+        events.append({"type": "response.output_item.done", "output_index": index, "item": done})
+    ended = "response.completed" if response.status == "completed" else "response.incomplete"
+    events.append({"type": ended, "response": response.model_dump(mode="json")})
+    for number, event in enumerate(events):
+        common = {"sequence_number": number, "item_id": "item", "output_index": 0, "content_index": 0, "logprobs": []}
+        stream.add(_STREAM_EVENT.validate_python({**common, **event}))
+    assert stream.ended
+    return stream.finish()
+
+
 def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: Any) -> Message:  # noqa: ANN401
     """Return the stored assistant message of one response, parsed as the route parses it without native replay."""
-    parts = parse_response(
+    parts = _streamed(
         _response(output),
-        provider=adapter.identity.provider_name,
         store=adapter.wire.store,
-        portable_replay=False,
         native_compaction=adapter.native_compaction_settings(
             threshold=1024,
             history_generation="",
             allow_authored=False,
         ),
-        text_as_reasoning=False,
     )
     fields = {"content": parts.content, "tool_calls": parts.tool_calls or None, "provider_data": parts.provider_data}
     return Message(role="assistant", **{**fields, **message})
@@ -529,17 +567,9 @@ def test_an_authored_replay_policy_turns_native_compaction_off(tmp_path: Path, k
 
 @pytest.mark.parametrize("portable", [False, True])
 @pytest.mark.parametrize("status", ["completed", "incomplete"])
-def test_only_a_completed_response_records_its_replay_policy(tmp_path: Path, *, portable: bool, status: str) -> None:
+def test_only_a_completed_response_records_its_replay_policy(*, portable: bool, status: str) -> None:
     """An approval rebuild trusts the replay policy only from a response that completed."""
-    adapter = responses_adapter(tmp_path, store=True)
-    parts = parse_response(
-        _response([_ANSWER], status=status),
-        provider=adapter.identity.provider_name,
-        store=True,
-        portable_replay=portable,
-        native_compaction=None,
-        text_as_reasoning=False,
-    )
+    parts = _streamed(_response([_ANSWER], status=status), store=True, portable_replay=portable)
 
     if status == "completed":
         assert parts.provider_data["mindroom_portable_replay"] is portable
@@ -746,6 +776,16 @@ def test_the_strict_schema_keeps_closed_objects_and_open_maps() -> None:
 # --- Usage ----------------------------------------------------------------------------------------------------
 
 
+def _chat_usage(adapter: ChatAdapter, usage: dict[str, Any]) -> MessageMetrics | None:
+    """Return the usage a Chat stream reports in its usage chunk, where Groq streams it in its own extension."""
+    report = {"x_groq": {"usage": usage}} if adapter.wire.dialect == "groq" else {"usage": usage}
+    chunk = {"id": "chatcmpl_test", "object": "chat.completion.chunk", "created": 1, "model": "m", "choices": []}
+    stream = ChatStream(adapter.wire)
+    stream.add(ChatCompletionChunk.model_validate({**chunk, **report}))
+    stream.finish()
+    return stream.parts.usage
+
+
 @pytest.mark.parametrize("include_cache_write", [True, False], ids=["current", "older"])
 @pytest.mark.parametrize("route", ["responses", "chat"])
 def test_usage_keeps_every_input_counter_the_sdk_reports(
@@ -765,25 +805,16 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
             provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
         )
         assert isinstance(adapter, ChatAdapter)
-        completion = ChatCompletion.model_validate(
+        usage = _chat_usage(
+            adapter,
             {
-                "id": "chatcmpl_test",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "gpt-6-astra",
-                "choices": [
-                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Ready"}},
-                ],
-                "usage": {
-                    "prompt_tokens": 15_000,
-                    "completion_tokens": 50,
-                    "total_tokens": 15_050,
-                    "prompt_tokens_details": input_details,
-                    "completion_tokens_details": {"audio_tokens": 13, "reasoning_tokens": 7},
-                },
+                "prompt_tokens": 15_000,
+                "completion_tokens": 50,
+                "total_tokens": 15_050,
+                "prompt_tokens_details": input_details,
+                "completion_tokens_details": {"audio_tokens": 13, "reasoning_tokens": 7},
             },
         )
-        usage = parse_chat_completion(completion, adapter.wire, provider=adapter.identity.provider_name).usage
     else:
         response = _response([]).model_copy(
             update={
@@ -798,15 +829,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
                 ),
             },
         )
-        adapter = responses_adapter(tmp_path)
-        usage = parse_response(
-            response,
-            provider=adapter.identity.provider_name,
-            store=None,
-            portable_replay=False,
-            native_compaction=None,
-            text_as_reasoning=False,
-        ).usage
+        usage = _streamed(response, store=None).usage
 
     assert usage is not None
     assert (usage.tokens.input_tokens, usage.tokens.output_tokens, usage.tokens.total_tokens) == (15_000, 50, 15_050)
@@ -825,24 +848,17 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
         provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
     )
     assert isinstance(adapter, ChatAdapter)
-    completion = ChatCompletion.model_validate(
+
+    usage = _chat_usage(
+        adapter,
         {
-            "id": "chatcmpl_test",
-            "object": "chat.completion",
-            "created": 1,
-            "model": "gpt-oss-120b",
-            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Ready"}}],
-            "usage": {
-                "prompt_tokens": 5000,
-                "completion_tokens": 300,
-                "total_tokens": 5300,
-                "prompt_tokens_details": {"cached_tokens": 4608},
-                "completion_tokens_details": {"reasoning_tokens": 120},
-            },
+            "prompt_tokens": 5000,
+            "completion_tokens": 300,
+            "total_tokens": 5300,
+            "prompt_tokens_details": {"cached_tokens": 4608},
+            "completion_tokens_details": {"reasoning_tokens": 120},
         },
     )
-
-    usage = parse_chat_completion(completion, adapter.wire, provider=adapter.identity.provider_name).usage
 
     assert usage is not None
     assert (usage.tokens.input_tokens, usage.tokens.output_tokens, usage.tokens.total_tokens) == (5000, 300, 5300)
@@ -910,7 +926,6 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
         tool_choice=None,
         output_schema=None,
         structured_output=adapter.capabilities.structured_output,
-        stream=True,
         settings=adapter.settings,
         wire=adapter.wire,
     )

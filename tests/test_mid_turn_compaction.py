@@ -196,7 +196,6 @@ async def _run(
     agent: _Agent,
     prompt: Sequence[Message] | str,
     *,
-    stream: bool = False,
     session_id: str = "session-1",
     metadata: dict[str, Any] | None = None,
 ) -> RunRecord:
@@ -254,7 +253,7 @@ async def _run(
         ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), metadata=metadata),
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),
         persist=persist,
-        request_template=ModelRequest(messages=(), stream=stream, native_compaction=agent.native_compaction),
+        request_template=ModelRequest(messages=(), native_compaction=agent.native_compaction),
     )
     finished = [event async for event in events][-1]
     assert isinstance(finished, RunFinished)
@@ -297,17 +296,14 @@ def _summary_usage(storage: ConversationStore) -> list[tuple[str, dict[str, Any]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_run_local_tool_loop_compacts_and_finishes(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    *,
-    stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
 
-    output = await _run(_agent(model, config, paths), [Message(role="user", content="Do the task")], stream=stream)
+    output = await _run(_agent(model, config, paths), [Message(role="user", content="Do the task")])
 
     assert str(output.content).endswith("done")
     assert summary_calls.inputs
@@ -323,17 +319,14 @@ async def test_run_local_tool_loop_compacts_and_finishes(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_repeated_run_local_compaction_keeps_a_string_prompt(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    *,
-    stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=12)
 
-    output = await _run(_agent(model, config, paths), "Do the task", stream=stream)
+    output = await _run(_agent(model, config, paths), "Do the task")
 
     assert str(output.content).endswith("done")
     assert len(summary_calls.inputs) >= 2
@@ -671,13 +664,10 @@ async def test_rewritten_request_within_the_model_window_is_sent(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
     tmp_path: Path,
     summary_calls: SummaryCalls,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     # A Claude summarizer sizes its input by bytes, more conservatively than request estimates.
     install_model_providers(monkeypatch, {"summary": summary_model(model_id="claude-haiku-5-5", claude=True)})
@@ -689,7 +679,7 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
         """Return one tool result carrying a distinct fact."""
         return f"FACT-{next(facts):02d} " + "r" * 4_000
 
-    output = await _run(_agent(model, config, paths, tools=[probe]), "Do the task", stream=stream)
+    output = await _run(_agent(model, config, paths, tools=[probe]), "Do the task")
 
     assert str(output.content).endswith("done")
     compacted = _first_compacted(model)
@@ -1037,18 +1027,15 @@ async def test_the_loop_caps_a_request_before_compacting_it(tmp_path: Path, summ
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
-@pytest.mark.parametrize("stream", [False, True])
 async def test_long_single_turn_compacts_mid_turn_and_continues(
     tmp_path: Path,
-    *,
-    stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     model = ToolLoopModel(tool_rounds=5)
     agent = _scoped_agent(model, config, paths, storage)
 
-    output = await _run(agent, "Do the task", stream=stream)
+    output = await _run(agent, "Do the task")
 
     assert str(output.content).endswith("done")
     compacted = _first_compacted(model)

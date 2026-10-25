@@ -559,28 +559,21 @@ class GeminiReply:
         return self.finish_reason is not None or self.prompt_blocked
 
 
-def read_chunk(
-    reply: GeminiReply,
-    chunk: GenerateContentResponse,
-    *,
-    whole_response: bool = False,
-) -> list[StreamEvent]:
-    """Add one streamed chunk (or one ``whole_response`` from a non-streamed call) to ``reply`` and return its events.
+def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse) -> list[StreamEvent]:
+    """Add one streamed chunk to ``reply`` and return its events.
 
     Gemini repeats the reply's cumulative usage on every chunk, so each chunk that carries usage reports it first, as
-    a partial report that replaces the one before. Only a finished candidate's usage, the reply's total, counts toward
-    the reply's own usage, apart from a whole response without candidates (see the TODO below). A candidate that ended
-    in a malformed tool call reports its usage and nothing else; ``malformed_tool_call_error`` then ends the reply. A
-    chunk that shows Google Search grounding or code execution at work reports that hosted tool's start.
+    a partial report that replaces the one before. Only the usage of a finished candidate or of a blocked prompt, the
+    reply's total, counts toward the reply's own usage. A candidate that ended in a malformed tool call reports its
+    usage and nothing else; ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search
+    grounding or code execution at work reports that hosted tool's start.
     """
     if not chunk.candidates:
-        if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason is not None:
-            # A blocked prompt gets feedback instead of a candidate, which ends the reply.
-            reply.prompt_blocked = True
-        # TODO(simplify): a chunk without candidates counts its usage only when the reply arrives whole, blocked or
-        # not, so a streamed blocked prompt reports none. Also count a streamed chunk that blocks the prompt.
-        # Operators would see the usage of streamed blocked prompts.
-        if not whole_response or chunk.usage_metadata is None:
+        if chunk.prompt_feedback is None or chunk.prompt_feedback.block_reason is None:
+            return []
+        # A blocked prompt gets feedback instead of a candidate, which ends the reply.
+        reply.prompt_blocked = True
+        if chunk.usage_metadata is None:
             return []
         reply.usage = _usage_metrics(chunk.usage_metadata)
         return [UsageReported(reply.usage, final=False)]

@@ -164,7 +164,6 @@ class ModelCall:
     model_provider: str
     # Models in the order MindRoom built them, which is deterministic where concurrent calls are not.
     model_index: int
-    stream: bool
     messages: list[OwnedMessage]
     tools: list[dict[str, Any]] | None
     tool_choice: ToolChoice | None
@@ -202,7 +201,6 @@ class Recorder:
             model_id=adapter.identity.id,
             model_provider=adapter.identity.provider,
             model_index=index,
-            stream=request.stream,
             messages=deepcopy(list(request.messages)),
             # The goldens hold Agno's formatted tools; the owned definition formats the same way, None omitted.
             tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
@@ -334,7 +332,6 @@ def call_dict(call: ModelCall) -> dict[str, Any]:
     """Return one recorded request as the prompt goldens record it."""
     return {
         "model": {"id": call.model_id, "provider": call.model_provider},
-        "stream": call.stream,
         "messages": [message_dict(message) for message in call.messages],
         "tools": call.tools,
         "tool_choice": call.tool_choice,
@@ -1195,8 +1192,11 @@ _COMPACTION_SUMMARY_TEXT = "Alice asked the assistant to compact the conversatio
 
 
 def answer_compaction(call: ModelCall) -> OwnedMessage:
-    """Call compact_context on the first turn, summarize on the summary request, and answer the rest."""
-    if not call.stream:
+    """Call compact_context on the first turn, summarize on the summary request, and answer the rest.
+
+    The summary request is the only one that offers no tools.
+    """
+    if not call.tools:
         return OwnedMessage(role="assistant", content=_COMPACTION_SUMMARY_TEXT)
     if not _answers_tools(call) and _COMPACT_PROMPT in _last_user_text(call):
         return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_compact", "compact_context", {})])

@@ -50,7 +50,6 @@
         "id": "claude-sonnet-5-5",
         "provider": "Anthropic"
       },
-      "stream": false,
       "messages": [
         {
           "content": "<your_role>\nDetermine team mode\n</your_role>",

@@ -43,7 +43,6 @@
       "model": "mindroom.routing:_RoutingSuggestion",
       "type": "pydantic"
     },
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -76,7 +75,7 @@
   "request": {
     "body": {
       "model": "qwen3.8:27b",
-      "stream": false,
+      "stream": true,
       "format": {
         "description": "Structured output for routing decisions.",
         "properties": {
@@ -119,24 +118,26 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/x-ndjson"
     },
-    "json": {
-      "created_at": "2026-10-20T00:00:00.000000Z",
-      "done": true,
-      "done_reason": "stop",
-      "eval_count": 12,
-      "eval_duration": 640000000,
-      "load_duration": 21000000,
-      "message": {
-        "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-        "role": "assistant"
-      },
-      "model": "qwen3.8:27b",
-      "prompt_eval_count": 42,
-      "prompt_eval_duration": 120000000,
-      "total_duration": 812000000
-    },
+    "ndjson": [
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": true,
+        "done_reason": "stop",
+        "eval_count": 12,
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "message": {
+          "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b",
+        "prompt_eval_count": 42,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      }
+    ],
     "status": 200
   },
   "scenario": "structured_output"

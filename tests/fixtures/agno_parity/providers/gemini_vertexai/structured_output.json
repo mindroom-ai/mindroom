@@ -47,7 +47,6 @@
       "model": "mindroom.routing:_RoutingSuggestion",
       "type": "pydantic"
     },
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -125,38 +124,42 @@
       "content-type": "application/json"
     },
     "method": "POST",
-    "url": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/us-central1/publishers/google/models/gemini-3.8-flash:generateContent"
+    "url": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/us-central1/publishers/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "candidates": [
-        {
-          "content": {
-            "parts": [
-              {
-                "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The"
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The"
+                  },
+                  {
+                    "text": " message asks about packing for a trip.\"}"
+                  }
+                ],
+                "role": "model"
               },
-              {
-                "text": " message asks about packing for a trip.\"}"
-              }
-            ],
-            "role": "model"
-          },
-          "finishReason": "STOP",
-          "index": 0
+              "finishReason": "STOP",
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 12,
+            "promptTokenCount": 42,
+            "totalTokenCount": 54
+          }
         }
-      ],
-      "modelVersion": "gemini-3.8-flash",
-      "responseId": "parity-response",
-      "usageMetadata": {
-        "candidatesTokenCount": 12,
-        "promptTokenCount": 42,
-        "totalTokenCount": 54
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output"

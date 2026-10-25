@@ -2,7 +2,7 @@
 
 An agent that already took part in a thread decides whether to reply again. The decision is asked of the configured
 judgment backend first; when that backend abstains or the conversation holds more than room text, the reply's own
-model answers a non-streaming decision request: the reply's request with the decision prompt appended to its exact
+model answers a decision request: the reply's request with the decision prompt appended to its exact
 messages and tool selection disabled, so the decision carries the reply's tools and settings, such as deferred tool
 search and native compaction, and the provider's prompt cache serves the reply that follows.
 """
@@ -110,7 +110,6 @@ async def _request_decision(model: ModelProvider, gate: ParticipationGate, state
                     messages=decision_messages,
                     tools=state.tools,
                     tool_choice="none",
-                    stream=False,
                 ),
             )
         assert state.record.metrics is not None

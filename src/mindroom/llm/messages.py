@@ -217,7 +217,7 @@ class Message:
 
 
 def split_thinking(content: str) -> tuple[str | None, str]:
-    """Split ``<think>`` reasoning from a reply that arrived whole.
+    """Split ``<think>`` reasoning from a reply's complete text.
 
     A missing opening tag means the reasoning starts the reply. Without a closing tag, or when the reasoning is
     empty, the reply comes back unchanged with no reasoning, so an empty ``<think></think>`` block stays in the text.

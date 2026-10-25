@@ -3,7 +3,7 @@
 Each golden pins the request Agno 3.0.9 plus MindRoom's patches sent for ``anthropic``, ``vertexai_claude``,
 or ``bedrock_claude`` and the assistant message they parsed from the canned reply; the owned adapter must
 produce the same request (method, URL, kept headers, JSON body) and the same message, metrics, and stop reason,
-and its output events, streamed or whole, must add up to that message.
+and its output events must add up to that message.
 """
 
 from __future__ import annotations
@@ -51,16 +51,13 @@ async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", _FIXTURES, ids=golden_id)
 async def test_output_events_add_up_to_the_finished_message(path: Path, tmp_path: Path) -> None:
-    """A streamed reply's deltas and ready tool calls add up to its finished message; a whole reply yields none."""
+    """A reply's deltas and ready tool calls add up to its finished message."""
     golden = load_golden(path)
     replay = await run_golden(golden, tmp_path)
     completed = replay.events[-1]
     assert isinstance(completed, TurnCompleted)
     message = completed.message
     outputs = [event for event in replay.events if isinstance(event, TextDelta | ReasoningDelta | ToolCallReady)]
-    if not golden["input"]["stream"]:
-        assert outputs == []
-        return
     assert "".join(event.text for event in outputs if isinstance(event, TextDelta)) == (message.content or "")
     reasoning = "".join(event.text for event in outputs if isinstance(event, ReasoningDelta))
     assert reasoning == (message.reasoning_content or "")

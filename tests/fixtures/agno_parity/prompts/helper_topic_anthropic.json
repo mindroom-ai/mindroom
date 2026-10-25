@@ -50,7 +50,6 @@
         "id": "claude-sonnet-5-5",
         "provider": "Anthropic"
       },
-      "stream": false,
       "messages": [
         {
           "content": "<your_role>\nGenerate contextual room topics\n</your_role>",

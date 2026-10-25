@@ -11,22 +11,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from mindroom.llm.provider import (
-    StreamProgress,
-    ToolCallReady,
-    TurnCompleted,
-    UsageReported,
-)
+from mindroom.llm.provider import StreamProgress, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings
-from mindroom.providers.openai.chat_wire import (
-    ChatStream,
-    ChatWire,
-    chat_request_kwargs,
-    chat_stop_reason,
-    parse_chat_completion,
-)
+from mindroom.providers.openai.chat_wire import ChatStream, ChatWire, chat_request_kwargs, chat_stop_reason
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
 
@@ -65,7 +54,6 @@ class ChatAdapter:
             tool_choice=request.tool_choice,
             output_schema=request.output_schema,
             structured_output=self.capabilities.structured_output,
-            stream=request.stream,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
         )
@@ -85,29 +73,27 @@ class ChatAdapter:
         first_token: float | None = None
         # Reading and encoding attachments can be slow, so the body is built off the event loop.
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
+        accumulator = ChatStream(self.wire)
         try:
             client = await self.clients.client(request.overrides)
-            if request.stream:
-                accumulator = ChatStream(self.wire)
-                sdk_stream = await client.chat.completions.create(**kwargs)
-                try:
-                    async for chunk in sdk_stream:
-                        # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
-                        for event in accumulator.add(chunk) or [StreamProgress()]:
-                            first_token = output_started(first_token, event)
-                            yield event
-                finally:
-                    await sdk_stream.close()
-                parts = accumulator.finish()
-                # A stream assembles its tool calls from their pieces, so each is complete only now.
-                for call in parts.tool_calls:
-                    yield ToolCallReady(call)
-            else:
-                completion = await client.chat.completions.create(**kwargs)
-                parts = parse_chat_completion(completion, self.wire, provider=self.identity.provider_name)
-                first_token = time.monotonic()
+            sdk_stream = await client.chat.completions.create(**kwargs)
+            try:
+                async for chunk in sdk_stream:
+                    # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
+                    for event in accumulator.add(chunk) or [StreamProgress()]:
+                        first_token = output_started(first_token, event)
+                        yield event
+            finally:
+                await sdk_stream.close()
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
+        for event in accumulator.finish():
+            first_token = output_started(first_token, event)
+            yield event
+        parts = accumulator.parts
+        # A stream assembles its tool calls from their pieces, so each is complete only now.
+        for call in parts.tool_calls:
+            yield ToolCallReady(call)
         message = finished_assistant_message(
             self.identity,
             content=parts.content,

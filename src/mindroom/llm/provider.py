@@ -45,11 +45,7 @@ class ModelIdentity:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Capabilities:
-    """What a provider route supports, so policy code stops probing adapter classes.
-
-    ``streams_only`` marks a route whose endpoint only streams, so a non-streaming request is streamed too and gets
-    the stream retry and idle limit, unless its caller retries it itself.
-    """
+    """What a provider route supports, so policy code stops probing adapter classes."""
 
     structured_output: StructuredOutput = "json_mode"
     omitted_media: frozenset[MediaKind] = frozenset()
@@ -58,7 +54,6 @@ class Capabilities:
     continues_stored_responses: bool = False
     provider_default_sampling: bool = False
     claude_family: bool = False
-    streams_only: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -127,9 +122,6 @@ class NativeCompactionReplay:
 class ModelRequest:
     """One provider request.
 
-    ``stream=False`` asks for one non-streaming provider call where the route offers one; its usage and finished
-    turn still arrive through ``stream()`` after the response completes, without deltas, so callers read its output
-    from the finished turn. A route that only streams streams the request, deltas included.
     ``output_schema`` asks for an answer matching the pydantic class, in the wire format the adapter renders for it.
     ``deferred_tools`` are the tools kept out of the rendered prompt and how tool search reaches them.
     ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
@@ -141,7 +133,6 @@ class ModelRequest:
     tool_choice: ToolChoice | None = None
     output_schema: type[BaseModel] | None = None
     overrides: RequestOverrides = RequestOverrides()
-    stream: bool = True
     deferred_tools: DeferredTools = DeferredTools()
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None

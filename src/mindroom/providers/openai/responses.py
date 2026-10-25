@@ -1,8 +1,4 @@
-"""The Responses API adapter for the OpenAI and Codex routes.
-
-Codex only streams (its capabilities say ``streams_only``), so a non-streaming request on that route still streams
-and returns the drained turn.
-"""
+"""The Responses API adapter for the OpenAI and Codex routes."""
 
 from __future__ import annotations
 
@@ -24,7 +20,6 @@ from mindroom.providers.openai.replay_estimate import (
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
     ResponsesWire,
-    parse_response,
     request_store,
     responses_request_kwargs,
     responses_stop_reason,
@@ -147,42 +142,28 @@ class ResponsesAdapter:
         started = time.monotonic()
         first_token: float | None = None
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
-        store = request_store(self.wire, request)
-        # TODO(simplify): With `reasoning` authored, the reply text is also stored as its reasoning (streamed only
-        # without `reasoning_summary`, blocking only without a returned summary). Store only returned reasoning
-        # summaries. Stored data and anything that replays or shows reasoning.
+        # TODO(simplify): With `reasoning` authored and no `reasoning_summary`, the reply text is also stored as its
+        # reasoning. Store only returned reasoning summaries. Stored data and anything that replays or shows reasoning.
+        accumulator = ResponsesStream(
+            provider=self.identity.provider_name,
+            store=request_store(self.wire, request),
+            portable_replay=request.portable_replay,
+            native_compaction=request.native_compaction,
+            text_as_reasoning=self.settings.reasoning is not None and self.settings.reasoning_summary is None,
+        )
         try:
             client = await self.clients.client(request.overrides)
-            if request.stream or self.capabilities.streams_only:
-                accumulator = ResponsesStream(
-                    provider=self.identity.provider_name,
-                    store=store,
-                    portable_replay=request.portable_replay,
-                    native_compaction=request.native_compaction,
-                    text_as_reasoning=self.settings.reasoning is not None and self.settings.reasoning_summary is None,
-                )
-                events = self._streamed(client, kwargs, accumulator)
-                async with closing_async_stream(events):
-                    async for event in events:
-                        first_token = output_started(first_token, event)
-                        yield event
-                if not accumulator.ended:
-                    # The stream stopped before the response ended, so the turn did not finish.
-                    return
-                parts = accumulator.finish()
-            else:
-                response = await client.responses.create(**kwargs)
-                parts = parse_response(
-                    response,
-                    provider=self.identity.provider_name,
-                    store=store,
-                    portable_replay=request.portable_replay,
-                    native_compaction=request.native_compaction,
-                    text_as_reasoning=self.settings.reasoning is not None,
-                )
-                first_token = time.monotonic()
+            events = self._streamed(client, kwargs, accumulator)
+            async with closing_async_stream(events):
+                async for event in events:
+                    first_token = output_started(first_token, event)
+                    yield event
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
+        if not accumulator.ended:
+            # The stream stopped before the response ended, so the turn did not finish.
+            return
+        parts = accumulator.finish()
         message = finished_assistant_message(
             self.identity,
             content=parts.content,

@@ -16,7 +16,8 @@ import pytest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ToolCompleted, ToolStarted
-from mindroom.llm.provider import ModelRequest, TextDelta
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import TextDelta, TurnCompleted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
 from mindroom.teams.runtime import MemberEvent
@@ -47,7 +48,6 @@ if TYPE_CHECKING:
     from agno.run import RunContext as AgnoRunContext
 
     from mindroom.agent_loop.spec import RunContext
-    from mindroom.llm.messages import Message
 
 pytestmark = pytest.mark.asyncio
 
@@ -183,28 +183,37 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     assert checker_request.messages[-1].content == "Alice declined."
 
 
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking-template", "streaming-template"])
-async def test_a_team_resume_streams_the_leader_s_and_the_resumed_member_s_requests(stream: bool) -> None:
-    # Every continuation of the Agno-backed runtime streamed, and Agno continued each paused member with its team's.
+async def test_a_resumed_leader_reads_a_new_delegation_by_the_streamed_result_rules() -> None:
+    # The result rules still depend on the stream mode (``member_result_text``), and a resume uses the streamed ones,
+    # so a member with tools but no text hands over its tool results rather than ``null``.
     paused = _paused_team_approved()
-    leader = scripted("leader-model", answer("The checker found 42.", usage(1, 1)))
+    leader = scripted(
+        "leader-model",
+        calls(tool_call("delegate_task_to_member", "call-w2", member_id="writer", task="Echo x."), metrics=usage(1, 1)),
+        answer("Done.", usage(1, 1)),
+    )
+    writer = scripted(
+        "writer-model",
+        calls(tool_call("echo", "call-x", text="x")),
+        [TurnCompleted(message=Message(role="assistant", content=None), stop_reason="end")],
+    )
     checker = scripted("checker-model", answer("42", usage(1, 1)))
 
     _, record = await collect(
         resume_team(
-            squad(leader, scripted("writer-model"), checker),
+            squad(leader, writer, checker, writer_toolkits=(toolkit(echo),)),
             paused,
             _resume_request(paused),
             approved={
                 ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
             },
             context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
-            request_template=ModelRequest(messages=(), stream=stream),
         ),
     )
 
     assert record.status is RunStatus.completed
-    assert [request.stream for request in (*checker.requests, *leader.requests)] == [True, True]
+    delegated = leader.requests[1].messages[-1]
+    assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-w2", "x")
 
 
 async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_results_as_agno_did() -> None:
