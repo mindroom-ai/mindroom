@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 from agno.tools import Toolkit
 
-from mindroom import ai_runtime, loop_hooks, response_runner, response_turn
+from mindroom import agents, ai_runtime, loop_hooks, response_runner, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store, initialize_approval_store
 from mindroom.approval.receipt import build_approval_receipt
@@ -32,7 +32,7 @@ from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
-from mindroom.hooks import EnrichmentItem, MessageEnvelope
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
@@ -44,12 +44,16 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
+from mindroom.teams.members import _as_member
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
@@ -80,6 +84,7 @@ from tests.team_turn_helpers import (
     rendered,
     squad_turn,
 )
+from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -89,6 +94,7 @@ if TYPE_CHECKING:
     from mindroom.bot import TeamBot
     from mindroom.event_journal import MatrixDelivery
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 
@@ -529,6 +535,78 @@ async def test_a_member_s_calls_run_through_the_member_s_tool_call_policy(
         await team.stream()
 
     assert recorded == [("touch", {"label": "a"})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_job", [False, True], ids=["inline", "tool-job"])
+async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    as_job: bool,
+) -> None:
+    """A plugin's tool hook on a member's call sees the member's tool runtime context and the turn's Matrix bindings.
+
+    The hook runs inside the member's tool-call policy, inline or in the managed job a call becomes, so the whole
+    policy runs as the member, as the tool itself does.
+    """
+    seen: list[tuple[str, str | None, bool]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(context: ToolBeforeCallContext) -> None:
+        runtime = get_tool_runtime_context()
+        seen.append(
+            (
+                context.agent_name,
+                runtime.agent_name if runtime is not None else None,
+                context.room_state_querier is not None,
+            ),
+        )
+
+    monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: [_plugin("member-policy", [before])])
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Touch it"), answer("Touched.", usage(50, 5))],
+        writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Done.")],
+    )
+    if not as_job:
+        await team.stream()
+    else:
+        team.config.background_tool_jobs.enabled = True
+        pin_background_tool_jobs(team.config, team.runtime_paths)
+        runtime = await tool_job_runtime(team.runtime_paths.storage_root)
+        register_background_runtime(team.runtime_paths, runtime)
+        try:
+            async with execution_resources():
+                await team.stream()
+        finally:
+            await runtime.shutdown()
+        [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+        assert (job.tool_name, job.status, job.owner.agent_name) == ("touch", "completed", "writer")
+
+    assert ProbeToolkit.calls == ["a"]
+    assert seen == [("writer", "writer", True)]
+
+
+@pytest.mark.asyncio
+async def test_the_member_step_runs_a_call_as_it_is_outside_a_matrix_turn() -> None:
+    """Without a tool runtime context, as in an OpenAI-compatible API turn, a member's call runs without one."""
+    seen: list[ToolRuntimeContext | None] = []
+
+    async def probe() -> str:
+        seen.append(get_tool_runtime_context())
+        return "ran"
+
+    function = ToolFunction(name="probe", description=None, parameters={"type": "object"}, entrypoint=probe)
+
+    result = await run_tool_call(
+        function,
+        {},
+        ToolCallContext(run_id="run-1", session_id=SESSION_ID, user_id=None),
+        middleware=(_as_member("writer", "writer-model"),),
+    )
+
+    assert (result, seen) == ("ran", [None])
 
 
 @pytest.mark.asyncio
