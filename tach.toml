@@ -9485,7 +9485,6 @@ visibility = [
 path = "mindroom.history.legacy_summary_system_prompt"
 depends_on = []
 visibility = [
-    "mindroom.approval.receipt",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
