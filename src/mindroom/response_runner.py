@@ -5794,7 +5794,6 @@ class ResponseRunner:
         participation: ParticipationGate | None,
     ) -> str | None:
         """Prepare and generate one admitted response under its participation owner."""
-        placeholder_state = early_placeholder_state
         request = replace(request, participating_agent_names=(self.deps.agent_name,))
         history_scope = self.deps.state_writer.history_scope()
         execution_identity = self.deps.tool_runtime.build_execution_identity(
@@ -5834,7 +5833,7 @@ class ResponseRunner:
             placeholder_message=None
             if _is_silent_schedule_response(request) or request.participation is not None
             else "Thinking...",
-            early_placeholder_state=placeholder_state,
+            early_placeholder_state=early_placeholder_state,
         )
         if prepared_request is None:
             return None
@@ -5968,7 +5967,7 @@ class ResponseRunner:
                 thread_summary_entity_name=self.deps.agent_name,
             )
 
-        placeholder_state.settlement_started = True
+        early_placeholder_state.settlement_started = True
         async with self._cli_approval_scope(
             runtime,
             request=request,

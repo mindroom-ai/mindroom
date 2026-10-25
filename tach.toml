@@ -6205,6 +6205,7 @@ depends_on = [
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_outcome",
+    "mindroom.knowledge.read_protocol",
     "mindroom.knowledge.readers",
 ]
 
@@ -7794,7 +7795,6 @@ path = "mindroom.delegation.audit"
 depends_on = [
     "mindroom.delegation.records",
     "mindroom.delegation.state",
-    "mindroom.tool_system.worker_routing",
     "mindroom.llm",
 ]
 
@@ -8082,7 +8082,6 @@ depends_on = [
     "mindroom.delegation.storage",
     "mindroom.history.session_context",
     "mindroom.history.types",
-    "mindroom.tool_system.worker_routing",
     "mindroom.llm",
     "mindroom.history.storage",
 ]

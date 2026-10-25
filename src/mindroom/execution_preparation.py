@@ -198,6 +198,9 @@ def _context_body_from_visible_message(
     response_sender_id: str | None,
 ) -> str:
     """Return the model-facing body for one visible Matrix message, without marker lines known to be display chrome."""
+    # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
+    # Those markers are display chrome, not conversation content; if we replay
+    # them to the model it can continue the pattern as plain text with no trace.
     if has_tool_trace(message.content) or _is_own_reply(message, response_sender_id):
         return strip_visible_tool_markers(message.body)
     return message.body
