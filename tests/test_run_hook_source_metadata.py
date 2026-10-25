@@ -67,7 +67,7 @@ async def test_agent_turn_records_its_origin_in_run_metadata(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: Path, *, streaming: bool) -> None:
-    """The turn recorder starts with the turn's origin, so a turn interrupted while it prepares is stored with it."""
+    """A turn's recorder is built with the turn's origin before its run starts."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _request("automation/exploration", TurnIntent.JOB_FOLLOW_UP)
 
@@ -85,7 +85,7 @@ async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: P
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_a_turn_stopped_before_its_run_starts_keeps_its_room(tmp_path: Path, *, streaming: bool) -> None:
-    """The turn recorder starts with the turn's room and thread, so a turn that fails while it prepares names them."""
+    """A turn's recorder is built with the turn's room and thread before its run starts."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     build_recorder = runner._build_turn_recorder
     recorders = []

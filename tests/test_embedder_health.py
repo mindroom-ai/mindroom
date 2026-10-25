@@ -281,7 +281,7 @@ def test_probe_builds_its_embedder_with_the_callers_health_recorder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A probe's embedder records health for the generation its caller captured, or the current one by default."""
+    """A probe builds its embedder with the health recorder its caller passes, and with none when it passes none."""
     recorders: list[EmbedderHealthRecorder | None] = []
 
     def create(*_args: object, health_recorder: EmbedderHealthRecorder | None) -> _HealthyEmbedder:

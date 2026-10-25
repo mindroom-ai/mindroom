@@ -96,7 +96,7 @@ def test_config_rejects_unknown_prompt_override() -> None:
     ],
 )
 def test_config_rejects_overrides_of_headers_no_prompt_renders(name: str) -> None:
-    """Only prompts MindRoom renders can be overridden, so an override always changes what a model reads."""
+    """An override naming a header no prompt renders fails validation as an unknown prompt."""
     with pytest.raises(ValidationError, match=f"Unknown prompt override\\(s\\): {name}\\."):
         Config.model_validate({"prompts": {name: "Custom header."}})
 

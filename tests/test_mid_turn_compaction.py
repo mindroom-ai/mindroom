@@ -1404,7 +1404,7 @@ async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
 async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_its_fold(tmp_path: Path) -> None:
-    """The notice compares the request that triggered the fold with the request the fold left, in the same units."""
+    """The notice's after size is the size of the request the fold left, which is smaller than its before size."""
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     lifecycle = RecordingCompactionLifecycle()
@@ -1427,7 +1427,7 @@ async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_i
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
 async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The size the fold reports also decides whether the rewritten request fits, so it is estimated once."""
+    """A scoped fold estimates the request it rewrote once."""
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     model = ToolLoopModel(tool_rounds=5)

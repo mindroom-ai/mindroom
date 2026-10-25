@@ -354,7 +354,7 @@ async def test_semantic_memory_scores_each_hit_by_its_similarity(
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A semantic hit scores one minus its cosine distance, so merged keyword matches rank against its similarity."""
+    """A semantic hit scores its similarity, one minus its cosine distance."""
     root = storage_path / "memory-root"
     memory_file = root / "memory" / "notes.md"
     memory_file.parent.mkdir(parents=True)
