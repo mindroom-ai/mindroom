@@ -126,10 +126,10 @@ _OPENAI_WIRE_FLAGS = {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", ["openai_chat", "openai_responses", "cerebras", "gemini", "ollama"])
-async def test_each_wire_sends_only_the_tool_fields_it_takes(family: str, tmp_path: Path) -> None:
-    """Each wire sends only the tool fields it takes.
+async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family: str, tmp_path: Path) -> None:
+    """Each wire leaves a tool's unset fields out of its definition.
 
-    OpenAI's Chat and Responses wires carry ``strict`` and the approval flags when set; Cerebras and Ollama send
+    OpenAI's Chat and Responses wires still send ``strict`` and the approval flags when set; Cerebras and Ollama send
     only name, description, and parameters; every wire but Gemini leaves out an unset description, which Gemini
     sends empty.
     """

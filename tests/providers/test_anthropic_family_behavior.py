@@ -336,23 +336,6 @@ async def test_a_stream_stores_every_thinking_block_and_a_blocking_reply_only_th
 
 
 @pytest.mark.asyncio
-async def test_a_whole_reply_stores_its_last_thinking_block_where_a_stream_stores_them_all(tmp_path: Path) -> None:
-    """Agno's whole-response parser kept the last thinking block, while its stream summed every block's deltas."""
-    blocks = [
-        {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
-        {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
-        {"type": "text", "text": "Done."},
-    ]
-    reasoning = {}
-    for stream, reply in ((True, sse_reply(blocks)), (False, json_reply(blocks))):
-        provider = route_provider("anthropic", tmp_path, Wire(reply), extra_kwargs={"thinking": {"type": "adaptive"}})
-        turn = await claude_turn(provider, ModelRequest(messages=_user(), stream=stream))
-        reasoning[stream] = turn.message.reasoning_content
-
-    assert reasoning == {True: "First. Second.", False: "Second."}
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("cumulative", [False, True], ids=["output_only", "cumulative"])
 async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumulative: bool) -> None:
     """Input usage reported at the start is not counted again when the final delta repeats it."""
