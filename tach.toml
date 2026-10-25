@@ -64,7 +64,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.embeddings.ollama_embedder"
-depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama_errors"]
+depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors"]
 visibility = ["mindroom.embeddings.factory"]
 
 [[modules]]
@@ -3463,6 +3463,7 @@ depends_on = [
     "mindroom.config.schema_hints",
     "mindroom.config.knowledge_graph",
     "mindroom.config.egress_broker",
+    "mindroom.providers.registry",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -6169,6 +6170,7 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.dependencies",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -6270,6 +6272,7 @@ depends_on = [
     "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.registry",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.dependencies",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -7947,7 +7950,7 @@ visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.par
 [[modules]]
 path = "mindroom.providers.tool_policy"
 depends_on = []
-visibility = ["mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.providers.gemini", "mindroom.providers.ollama_adapter", "mindroom.providers.openai"]
+visibility = ["mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.providers.gemini", "mindroom.providers.ollama.adapter", "mindroom.providers.openai"]
 
 # Owned provider adapters (stream-only, over mindroom.llm); the provider registry wires them in.
 [[modules]]
@@ -7957,9 +7960,11 @@ depends_on = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.credentials",
+    "mindroom.providers.extra_kwargs",
     "mindroom.providers.gemini",
     "mindroom.providers.names",
-    "mindroom.providers.ollama_adapter",
+    "mindroom.providers.ollama.adapter",
+    "mindroom.providers.ollama.settings",
     "mindroom.providers.openai",
     "mindroom.providers.pipeline",
     "mindroom.providers.synthetic_adapter",
@@ -7997,7 +8002,11 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.providers.ollama_adapter"
+path = "mindroom.providers.ollama"
+depends_on = []
+
+[[modules]]
+path = "mindroom.providers.ollama.adapter"
 depends_on = [
     "mindroom.credentials.sync",
     "mindroom.llm",
@@ -8005,16 +8014,21 @@ depends_on = [
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
-    "mindroom.providers.ollama_errors",
+    "mindroom.providers.ollama.errors",
+    "mindroom.providers.ollama.settings",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
 
 # Importing this module loads the Ollama SDK, so only the two Ollama modules, each imported on first use, may import it.
 [[modules]]
-path = "mindroom.providers.ollama_errors"
+path = "mindroom.providers.ollama.errors"
 depends_on = ["mindroom.providers.errors"]
-visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.providers.ollama_adapter"]
+visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.providers.ollama.adapter"]
+
+[[modules]]
+path = "mindroom.providers.ollama.settings"
+depends_on = ["mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"

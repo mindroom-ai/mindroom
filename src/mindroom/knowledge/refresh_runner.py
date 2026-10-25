@@ -73,6 +73,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.logging_config import get_logger, setup_subprocess_logging, subprocess_logging_env
 from mindroom.runtime_resolution import resolve_knowledge_binding
+from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import (
     SerializedToolExecutionIdentity,
     ToolExecutionIdentity,
@@ -682,6 +683,11 @@ async def _save_refreshing_state(key: PublishedIndexKey) -> None:
         raise
 
 
+async def _ensure_chromadb(runtime_paths: RuntimePaths) -> None:
+    """Install Chroma, which the knowledge manager imports, on first use without blocking the event loop."""
+    await asyncio.to_thread(ensure_optional_deps, ["chromadb"], "chromadb", runtime_paths)
+
+
 async def _refresh_knowledge_binding_locked(
     key: PublishedIndexKey,
     *,
@@ -708,6 +714,7 @@ async def _refresh_knowledge_binding_locked(
             start_watchers=False,
             create=True,
         )
+        await _ensure_chromadb(runtime_paths)
         from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
 
         manager = KnowledgeManager(
@@ -846,6 +853,7 @@ async def _publish_file_mode_source_metadata_for_resolved(
         start_watchers=False,
         create=True,
     )
+    await _ensure_chromadb(runtime_paths)
     from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
 
     manager = KnowledgeManager(
@@ -874,6 +882,7 @@ async def _refresh_file_mode_binding_locked(
         start_watchers=False,
         create=True,
     )
+    await _ensure_chromadb(runtime_paths)
     from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
 
     manager = KnowledgeManager(

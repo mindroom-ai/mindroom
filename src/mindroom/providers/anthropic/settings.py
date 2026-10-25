@@ -1,7 +1,7 @@
 """Authored settings of one Claude route, parsed from ``ModelConfig.extra_kwargs``.
 
-The accepted keys keep the names existing configs use; a key the route does not accept fails at model
-construction with the accepted list.
+The accepted keys keep the names existing configs use; a key the route does not accept fails with the accepted
+list at config load and again when the model is built.
 """
 
 from __future__ import annotations
