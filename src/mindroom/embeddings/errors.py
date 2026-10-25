@@ -129,10 +129,10 @@ def openai_embedder_error(error: Exception) -> EmbedderRequestError:
 def embedder_failure_is_transient(exc: BaseException) -> bool:
     """Return whether an embedding failure is worth retrying.
 
-    Transport faults, timeouts, throttling and server-side errors are retried.
-    Credential rejections, invalid models, dimension mismatches and malformed
-    payloads are not: retrying them repeats the same rejected request, burns
-    the retry budget, and buries the real cause.
+    A failure is retried when its typed provider error says so, by the rule
+    model requests follow. Credential rejections, invalid models, dimension
+    mismatches and malformed payloads are not: retrying them repeats the same
+    rejected request, burns the retry budget, and buries the real cause.
     """
     error = as_embedder_error(exc)
     if error is not None:

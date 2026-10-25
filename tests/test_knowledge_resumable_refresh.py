@@ -856,7 +856,7 @@ def _classified(status_code: int | None = None, *, unreachable: bool = False) ->
 
 
 def test_embedding_failure_classification_splits_transient_from_permanent() -> None:
-    """Only retryable transport and throttling faults are classified transient, by the rule model requests follow."""
+    """An embedder failure is transient exactly when the rule model requests follow would retry it."""
     assert embedder_failure_is_transient(_classified(unreachable=True))
     assert embedder_failure_is_transient(_classified(429))
     assert embedder_failure_is_transient(_classified(408))
