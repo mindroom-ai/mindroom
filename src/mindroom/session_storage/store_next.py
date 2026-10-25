@@ -1,15 +1,13 @@
-"""The conversation store on storage v2: sessions, their runs and messages, summary rows, and the usage ledger.
+"""The storage v2 conversation store: sessions, their runs and message rows, summary rows, and the usage ledger.
 
 Every operation runs in one transaction on its own short-lived connection and leaves the journal mode alone, so
 databases keep SQLite's default rollback journal. A write takes the write lock before it reads anything its rules
-depend on, and a load reads the session row, its runs, and its summary from one snapshot. Opening a database creates
-every table it lacks, so no operation runs DDL.
+depend on, and a load reads from one snapshot. Opening a database creates every table it lacks, so no operation
+runs DDL.
 
-A run is one ``*_log_runs`` row plus one ``*_log_messages`` row per stored message. Every reader gets a run's replay
-view: its message rows that no mid-turn fold took, in order. A run's ``seq`` is its place in the log, handed out by
-the meta row's counter, which only grows, so a deleted run's number is never handed out again.
-
-It replaces the Agno-layout store in ``store.py`` at the cutover.
+A run is a ``*_log_runs`` row plus a ``*_log_messages`` row per stored message, and every reader gets its replay
+view: the message rows no mid-turn fold took, in order. ``seq`` places a run in the log; the meta row's counter hands
+it out and never goes back, so a deleted run's number is never reused.
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ import copy
 import json
 import sqlite3
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import astuple, dataclass, fields, replace
 from datetime import UTC, datetime
 from time import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
@@ -53,23 +51,16 @@ if TYPE_CHECKING:
 
 # How long an operation waits for another connection's write lock on the database, its migrations included.
 BUSY_TIMEOUT_SECONDS = 30.0
+_NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
-_RUN_COLUMNS = (
-    "run.run_id, run.session_id, run.parent_run_id, run.kind, run.scope_key, run.status, run.record, run.tools, "
-    "run.requirements, run.metadata"
-)
-# The run-row columns every full save writes; a first write also sets the ids and ``created_at``.
-_WRITTEN_COLUMNS = (
-    "parent_run_id",
-    "kind",
-    "scope_key",
-    "status",
-    "seq",
-    "updated_at",
-    "metadata",
-    "record",
-    "requirements",
-    "tools",
+# A run row's columns, ``RunColumns``' fields in their order, and the ones every full save writes.
+_COLUMNS = ("run_id", "session_id", "parent_run_id", *(field.name for field in fields(RunColumns)))
+_WRITTEN = ("parent_run_id", *(field.name for field in fields(RunColumns)), "seq", "updated_at")
+_SELECTED = ", ".join(f"run.{column}" for column in _COLUMNS)
+_UPSERT = (
+    f"INSERT INTO {{runs}} (run_id, session_id, created_at, {', '.join(_WRITTEN)}) "  # noqa: S608
+    f"VALUES ({', '.join('?' * (len(_WRITTEN) + 3))}) "
+    f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(f'{column} = excluded.{column}' for column in _WRITTEN)}"
 )
 
 # What a full save did: wrote the run, wrote nothing because a cut removed it, or wrote nothing because it is final.
@@ -250,29 +241,20 @@ class ConversationStore:
         record_usage: bool,
         state: dict[str, Any] | None = None,
     ) -> SaveOutcome:
-        """Save ``run`` of ``session`` whole, creating the session row if needed, unless a cut removed it or it is final.
+        """Save ``run`` of ``session`` whole, creating the session row if needed, unless it is removed or final.
 
-        A run a cut removed, or a member of one, writes nothing (``"removed"``). A run whose stored status is
-        visible, or a member whose team run's stored status is, is final and writes nothing (``"final"``): a stale
-        paused or cancelled copy never makes a finished run pending again. Otherwise the run's row and its replay
-        view become the record's (``"written"``); a new run, or a top-level run saved visible over its paused,
-        cancelled, or errored row, takes the next ``seq``, so it replays after the turns it waited for. The first
-        requester a written run names is stored on a session row that has none.
+        A run a cut removed, or a member of one, writes nothing (``"removed"``). A run whose stored status is visible,
+        or a member whose team run's is, writes nothing (``"final"``), so a stale copy never makes a finished run
+        pending again. Otherwise the run's row and replay view become the record's (``"written"``): a new run, or a
+        top-level run saved visible over its paused, cancelled, or errored row, takes the next ``seq``, so it replays
+        after the turns it waited for, and the first requester a written run names goes on a row that has none.
 
-        With ``record_usage``, the run's usage snapshot replaces its earlier one in the usage ledger, which outlives
-        removed runs, and the session totals move by the difference; a final run's usage is final and changes
-        neither. With ``state``, a ``session_state_snapshot`` of the state the run ran with, the run and the state
-        commit together, the state only when the row does not already hold it. Once the save commits,
-        ``session.runs`` holds the run as the store does (see ``_mirror``).
+        ``record_usage`` replaces the run's usage snapshot in the ledger, which outlives removed runs, and moves the
+        session totals by the difference; a final run's usage changes neither. ``state``, a
+        ``session_state_snapshot`` of the state the run ran with, commits with the run when the row does not hold it.
+        ``session.runs`` then holds the run as the store does (``_mirror``).
         """
-        return self._save(
-            session,
-            run.to_dict(),
-            run_type(run),
-            interrupted=False,
-            record_usage=record_usage,
-            state=state,
-        )
+        return self._save(session, run.to_dict(), run_type(run), record_usage=record_usage, state=state)
 
     def save_interrupted_record(
         self,
@@ -281,19 +263,13 @@ class ConversationStore:
         *,
         state: dict[str, Any] | None = None,
     ) -> Literal["written", "removed"]:
-        """Save an interrupted turn's record as ``save_run`` does, over a final run too, and without its usage.
+        """Save an interrupted turn's record as ``save_run`` does, over a final run too, without its usage.
 
-        It is what the user saw or heard of a turn whose failure followed its terminal save, so it replaces the
-        answer the run stored; a run that was visible keeps its ``seq``, so replay order does not change.
+        It is what the user saw or heard of a turn whose failure followed its terminal save, so it replaces the stored
+        answer; a visible run keeps its ``seq``, so replay order does not change.
         """
-        outcome = self._save(
-            session,
-            record.to_dict(),
-            run_type(record),
-            interrupted=True,
-            record_usage=False,
-            state=state,
-        )
+        kind = run_type(record)
+        outcome = self._save(session, record.to_dict(), kind, record_usage=False, state=state, interrupted=True)
         return cast("Literal['written', 'removed']", outcome)
 
     def _save(
@@ -302,9 +278,9 @@ class ConversationStore:
         data: dict[str, Any],
         kind: SessionKind,
         *,
-        interrupted: bool,
         record_usage: bool,
         state: dict[str, Any] | None,
+        interrupted: bool = False,
     ) -> SaveOutcome:
         """Save one run from its stored dict and ``state`` in one transaction, then mirror it in ``session``."""
         with self.transaction(write=True) as connection:
@@ -326,14 +302,15 @@ class ConversationStore:
         *,
         session: ConversationSession | None = None,
     ) -> bool:
-        """Set ``changes``' top-level keys in the metadata of stored run ``run_id``, final or not, and keep the rest.
+        """Set ``changes``' top-level keys in stored run ``run_id``'s metadata and keep the rest, a final run's too.
 
-        When the run is a visible top-level run a summary covers, the event ids its metadata now names join that
-        summary row's event sets, so redacting a reply linked after the summary still finds the summary. Returns
-        whether the run is stored. ``session``, when given, then holds a changed copy of the run in a new list; a
-        loaded run object is never changed in place, since loaded runs are shared.
+        A visible top-level run's event ids join the event sets of the summary row that covers it, the scope's first
+        whose ``through`` reaches its ``seq``, so redacting a reply linked after the summary still cuts it; a run
+        behind the latest barrier is retired, and ``through`` never decreases in ``id`` order, so it joins none.
+        Returns whether the run is stored. ``session``, when given, then holds a changed copy of the run in a new
+        list; loaded runs are shared, so none changes in place.
         """
-        runs = quote_identifier(self.names.log_runs)
+        runs, summaries = quote_identifier(self.names.log_runs), quote_identifier(self.names.log_summaries)
         with self.transaction(write=True) as connection:
             row = connection.execute(
                 f"SELECT parent_run_id, scope_key, status, seq, metadata FROM {runs} "  # noqa: S608
@@ -344,16 +321,30 @@ class ConversationStore:
                 return False
             parent_run_id, scope_key, status, seq, stored = row
             metadata = {**(decoded_mapping(stored) or {}), **changes}
-            encoded = json.dumps(metadata)
-            connection.execute(
-                f"UPDATE {runs} SET metadata = ?, updated_at = ? WHERE run_id = ?",  # noqa: S608
-                (encoded, int(time()), run_id),
+            update = f"UPDATE {runs} SET metadata = ?, updated_at = ? WHERE run_id = ?"  # noqa: S608
+            connection.execute(update, (json.dumps(metadata), int(time()), run_id))
+            visible = parent_run_id is None and status not in _NON_VISIBLE
+            covering = (
+                visible
+                and connection.execute(
+                    f"SELECT id, event_ids, seen_event_ids FROM {summaries} WHERE session_id = ?1 AND scope_key = ?2 "  # noqa: S608
+                    f"AND through >= ?3 AND ?3 > COALESCE((SELECT through FROM {summaries} WHERE session_id = ?1 "
+                    "AND scope_key = ?2 AND summary IS NULL ORDER BY id DESC LIMIT 1), 0) ORDER BY id LIMIT 1",
+                    (session_id, scope_key, seq),
+                ).fetchone()
             )
-            if parent_run_id is None and status not in NON_VISIBLE_RUN_STATUS_VALUES:
-                _join_covering_summary(connection, self.names, session_id, scope_key, seq, metadata)
+            if covering:
+                summary_id, event_ids, seen = covering
+                seen_ids = seen_event_ids(metadata)
+                joined = (
+                    sorted({*json.loads(event_ids), *seen_ids, *source_event_ids(metadata)}),
+                    sorted({*json.loads(seen), *seen_ids}),
+                )
+                update = f"UPDATE {summaries} SET event_ids = ?, seen_event_ids = ? WHERE id = ?"  # noqa: S608
+                connection.execute(update, (*map(json.dumps, joined), summary_id))
         if session is not None:
             session.runs = [
-                replace(run, metadata=json.loads(encoded)) if run.run_id == run_id else run for run in session.runs
+                replace(run, metadata=copy.deepcopy(metadata)) if run.run_id == run_id else run for run in session.runs
             ]
         return True
 
@@ -365,25 +356,20 @@ class ConversationStore:
         *,
         session: ConversationSession | None = None,
     ) -> None:
-        """Apply ``edit`` to the runs a load of the session returns, under the write lock, and store their messages.
+        """Apply ``edit`` to fresh copies of the runs a load returns, under the write lock, and store their messages.
 
-        ``edit`` gets fresh copies and returns the runs whose messages to store; only runs the load held store, and
-        only their messages, under the save's message rules, so no other writer's status, metadata, or messages are
-        lost and no run a summary covers changes. Once it commits, ``session``, when given, holds what a load returns.
+        Only messages store, under the save's message rules, and only for runs the load returned, so no other writer's
+        status, metadata, or messages are lost and no covered run changes. Once it commits, ``session``, when given,
+        holds what a load returns.
         """
         with self.log_transaction(session_id, session=session) as connection:
             loaded = self._read_load(connection, session_id, kind)
             runs = loaded.runs if loaded is not None else []
-            statuses = {run.run_id: run.status for run in runs}
+            statuses = {run.run_id: run.status.value for run in runs}
             for run in edit(runs):
-                if run.run_id in statuses:
-                    _set_visible_messages(
-                        connection,
-                        self.names,
-                        run.run_id,
-                        [message.to_dict() for message in run.messages],
-                        keep_system=statuses[run.run_id] is RunStatus.paused,
-                    )
+                if (status := statuses.get(run.run_id)) is not None:
+                    messages = [message.to_dict() for message in run.messages]
+                    _set_visible_messages(connection, self.names, run.run_id, messages, status)
 
     def delete_runs(
         self,
@@ -549,7 +535,7 @@ class _Saved:
 
 
 class _StoredRow(NamedTuple):
-    """What a save reads of a run's stored row, or of its team run's, before writing."""
+    """What a save reads of a run's stored row, or of its team run's."""
 
     parent_run_id: str | None
     status: str
@@ -607,18 +593,11 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
 
     async def persist(record: AnyRunRecord) -> None:
         data, kind = record.to_dict(), run_type(record)
-        await write_with_session_state(
-            store,
-            session,
-            lambda opened, state: opened._save(
-                session,
-                data,
-                kind,
-                interrupted=False,
-                record_usage=True,
-                state=state,
-            ),
-        )
+
+        def save(opened: ConversationStore, state: dict[str, Any]) -> SaveOutcome:
+            return opened._save(session, data, kind, record_usage=True, state=state)
+
+        await write_with_session_state(store, session, save)
 
     return persist
 
@@ -748,105 +727,41 @@ def _write_run(
     *,
     interrupted: bool,
 ) -> _Saved:
-    """Write one run from its stored dict (``record.to_dict()``) under the save rules (``ConversationStore.save_run``).
-
-    An interrupted record (``interrupted``) is never final.
-    """
-    run_id, parent_run_id = data["run_id"], data.get("parent_run_id")
-    runs = quote_identifier(names.log_runs)
-    now = int(time())
-    if connection.execute(
-        f"SELECT 1 FROM {quote_identifier(names.log_removed)} WHERE session_id = ? AND run_id IN (?, ?)",  # noqa: S608
-        (session_id, run_id, parent_run_id),
-    ).fetchone():
-        return _Saved(run_id, "removed", created_at=data.get("created_at") or now, updated_at=now)
-    stored = _stored_row(connection, runs, session_id, run_id)
-    team_run = _stored_row(connection, runs, session_id, parent_run_id) if parent_run_id is not None else None
+    """Write one run from its stored dict by ``ConversationStore.save_run``'s rules; an interrupted one is not final."""
+    run_id, parent_run_id, now = data["run_id"], data.get("parent_run_id"), int(time())
+    runs, ids = quote_identifier(names.log_runs), (session_id, run_id, parent_run_id)
+    removed = f"SELECT 1 FROM {quote_identifier(names.log_removed)} WHERE session_id = ? AND run_id IN (?, ?)"  # noqa: S608
+    if connection.execute(removed, ids).fetchone():
+        return _Saved(run_id, "removed", data.get("created_at") or now, now)
+    rows = {
+        row[0]: _StoredRow(*row[1:])
+        for row in connection.execute(
+            f"SELECT run_id, parent_run_id, status, seq, created_at FROM {runs} "  # noqa: S608
+            "WHERE session_id = ? AND run_id IN (?, ?)",
+            ids,
+        )
+    }
+    stored, team_run = rows.get(run_id), rows.get(parent_run_id)
     if team_run is not None and team_run.parent_run_id is not None:
         msg = f"Run {run_id!r} names member run {parent_run_id!r} as its team run; team members have no members"
         raise ValueError(msg)
-    if not interrupted and _is_visible(team_run if parent_run_id is not None else stored):
+    # A top-level run, or a member's team run, whose stored status is visible is final; a member's own is not.
+    judged = team_run if parent_run_id is not None else stored
+    if not interrupted and judged is not None and judged.status not in _NON_VISIBLE:
         return _Saved(run_id, "final")
     columns = run_columns(data, kind)
     if stored is None:
-        moved, created_at = (
-            True,
-            _insert_run(connection, runs, session_id, data, columns, next_seq(connection, names), now),
-        )
+        moved, created_at, seq = True, data.get("created_at") or now, next_seq(connection, names)
     else:
-        # A run saved visible over its paused, cancelled, or errored row finished after the turns it waited for.
-        moved = (
-            parent_run_id is None
-            and stored.parent_run_id is None
-            and stored.status in NON_VISIBLE_RUN_STATUS_VALUES
-            and columns.status not in NON_VISIBLE_RUN_STATUS_VALUES
-        )
-        created_at = stored.created_at
-        connection.execute(
-            f"UPDATE {runs} SET {', '.join(f'{column} = ?' for column in _WRITTEN_COLUMNS)} WHERE run_id = ?",  # noqa: S608
-            (
-                *_written_values(parent_run_id, columns, next_seq(connection, names) if moved else stored.seq, now),
-                run_id,
-            ),
-        )
-    _set_visible_messages(
-        connection,
-        names,
-        run_id,
-        data["messages"],
-        keep_system=columns.status == RunStatus.paused.value,
-    )
+        # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
+        moved = parent_run_id is None and stored.status in _NON_VISIBLE and columns.status not in _NON_VISIBLE
+        created_at, seq = stored.created_at, next_seq(connection, names) if moved else stored.seq
+    values = (run_id, session_id, created_at, parent_run_id, *astuple(columns), seq, now)
+    connection.execute(_UPSERT.format(runs=runs), values)
+    _set_visible_messages(connection, names, run_id, data["messages"], columns.status)
     _adopt_requester(connection, names, session_id, data.get("user_id"))
     [written] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
-    return _Saved(run_id, "written", created_at=created_at, updated_at=now, moved=moved, stored=written)
-
-
-def _insert_run(
-    connection: sqlite3.Connection,
-    runs: str,
-    session_id: str,
-    data: Mapping[str, Any],
-    columns: RunColumns,
-    seq: int,
-    now: int,
-) -> int:
-    """Insert a run's first row from its stored dict and columns, written at ``now``; return its ``created_at``."""
-    created_at = data.get("created_at") or now
-    connection.execute(
-        f"INSERT INTO {runs} (run_id, session_id, created_at, {', '.join(_WRITTEN_COLUMNS)}) "  # noqa: S608
-        f"VALUES (?, ?, ?, {', '.join('?' for _ in _WRITTEN_COLUMNS)})",
-        (data["run_id"], session_id, created_at, *_written_values(data.get("parent_run_id"), columns, seq, now)),
-    )
-    return created_at
-
-
-def _written_values(parent_run_id: str | None, columns: RunColumns, seq: int, now: int) -> tuple[object, ...]:
-    """Return the values of ``_WRITTEN_COLUMNS``, in order, for a row written at ``now``."""
-    return (
-        parent_run_id,
-        columns.kind,
-        columns.scope_key,
-        columns.status,
-        seq,
-        now,
-        columns.metadata,
-        columns.record,
-        columns.requirements,
-        columns.tools,
-    )
-
-
-def _stored_row(connection: sqlite3.Connection, runs: str, session_id: str, run_id: str) -> _StoredRow | None:
-    row = connection.execute(
-        f"SELECT parent_run_id, status, seq, created_at FROM {runs} WHERE session_id = ? AND run_id = ?",  # noqa: S608
-        (session_id, run_id),
-    ).fetchone()
-    return None if row is None else _StoredRow(*row)
-
-
-def _is_visible(row: _StoredRow | None) -> bool:
-    """Whether a stored run replays as model history: top-level and not paused, cancelled, or errored."""
-    return row is not None and row.parent_run_id is None and row.status not in NON_VISIBLE_RUN_STATUS_VALUES
+    return _Saved(run_id, "written", created_at, now, moved, written)
 
 
 def _set_visible_messages(
@@ -854,42 +769,28 @@ def _set_visible_messages(
     names: TableNames,
     run_id: str,
     messages: Sequence[Mapping[str, Any]],
-    *,
-    keep_system: bool,
+    status: str,
 ) -> None:
-    """Make run ``run_id``'s replay view ``messages``, stored message dicts in order, rewriting only changed rows.
+    """Make the replay view of run ``run_id``, saved with ``status``, its message dicts, rewriting changed rows only.
 
-    A message replayed from history is never stored, and a system message only with ``keep_system``, for a paused
-    run's continuation. A folded row stays as it is, so a message a fold took never replays again; an unfolded row
-    the list no longer holds is deleted. A list holding one message id twice raises, rather than keeping one copy.
+    History copies are never stored, and system messages only while the run is paused, for its continuation. A row a
+    fold took stays as it is, so it never replays again, and an unfolded row the list no longer holds is deleted. A
+    list holding one message id twice raises rather than keeping one copy.
     """
+    paused = status == RunStatus.paused.value
     kept = [
-        message
-        for message in messages
-        if not message.get("from_history") and (keep_system or message["role"] != "system")
+        message for message in messages if not message.get("from_history") and (paused or message["role"] != "system")
     ]
     ids = [message["id"] for message in kept]
     if len(set(ids)) < len(ids):
         msg = f"Run {run_id!r} holds a message id twice"
         raise ValueError(msg)
     table = quote_identifier(names.log_messages)
-    stored = {
-        message_id: (position, folded_by, data)
-        for message_id, position, folded_by, data in connection.execute(
-            f"SELECT message_id, ord, folded_by, data FROM {table} WHERE run_id = ?",  # noqa: S608
-            (run_id,),
-        )
-    }
-    writes: list[tuple[str, str, int, str]] = []
-    for position, message in enumerate(kept):
-        data = json.dumps(message)
-        held = stored.get(message["id"])
-        if held is None or (held[1] is None and (held[0], held[2]) != (position, data)):
-            writes.append((run_id, message["id"], position, data))
     connection.executemany(
-        f"INSERT INTO {table} (run_id, message_id, ord, data) VALUES (?, ?, ?, ?) "  # noqa: S608
-        "ON CONFLICT(run_id, message_id) DO UPDATE SET ord = excluded.ord, data = excluded.data",
-        writes,
+        f"INSERT INTO {table} (run_id, message_id, ord, data) VALUES (?, ?, ?, ?) ON CONFLICT(run_id, message_id) "  # noqa: S608
+        "DO UPDATE SET ord = excluded.ord, data = excluded.data "
+        "WHERE folded_by IS NULL AND (ord, data) IS NOT (excluded.ord, excluded.data)",
+        [(run_id, message["id"], position, json.dumps(message)) for position, message in enumerate(kept)],
     )
     connection.execute(
         f"DELETE FROM {table} WHERE run_id = ? AND folded_by IS NULL "  # noqa: S608
@@ -906,34 +807,20 @@ def _read_runs(
 ) -> list[AnyRunRecord]:
     """Decode the runs whose rows meet ``condition``, in ``seq`` order, each in its replay view.
 
-    A paused team run comes with the member runs its requirements name, in first-mention order, as its
-    ``member_responses``, which a team resume reads; each is a copy of its own, apart from the member's own record.
+    A paused team run's ``member_responses``, which its resume reads, are the member runs its requirements name, in
+    first-mention order, each decoded apart from the member's own record so the two share nothing.
     """
-    rows = _run_rows(connection, names, f"{condition} ORDER BY run.seq", parameters)
-    messages = _visible_messages(connection, names, [row.run_id for row in rows])
-    records = [_decoded(row, messages) for row in rows]
-    named = {
-        record.run_id: _named_members(record)
-        for record in records
-        if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused
-    }
-    by_id = {row.run_id: row for row in rows}
-    if missing := {member_id for member_ids in named.values() for member_id in member_ids} - by_id.keys():
-        extra = _run_rows(
-            connection,
-            names,
-            "run.run_id IN (SELECT value FROM json_each(?))",
-            (json.dumps(sorted(missing)),),
-        )
-        by_id |= {row.run_id: row for row in extra}
-        messages |= _visible_messages(connection, names, [row.run_id for row in extra])
+    records = _decoded(connection, names, _run_rows(connection, names, f"{condition} ORDER BY run.seq", parameters))
     for record in records:
-        if isinstance(record, TeamRunRecord) and record.run_id in named:
-            record.member_responses = [
-                cast("RunRecord", _decoded(by_id[member_id], messages))
-                for member_id in named[record.run_id]
-                if member_id in by_id and by_id[member_id].parent_run_id == record.run_id
+        if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
+            named = list(dict.fromkeys(item.member_run_id for item in record.requirements or () if item.member_run_id))
+            rows = [
+                row
+                for row in _run_rows(connection, names, "run.parent_run_id = ?", (record.run_id,))
+                if row.run_id in named
             ]
+            members = {member.run_id: cast("RunRecord", member) for member in _decoded(connection, names, rows)}
+            record.member_responses = [members[member_id] for member_id in named if member_id in members]
     return records
 
 
@@ -943,37 +830,26 @@ def _run_rows(
     condition: str,
     parameters: tuple[object, ...],
 ) -> list[_RunRow]:
+    selected = f"SELECT {_SELECTED} FROM {quote_identifier(names.log_runs)} AS run WHERE {condition}"  # noqa: S608
     return [
         _RunRow(run_id, session_id, parent_run_id, RunColumns(cast("SessionKind", kind), *columns))
-        for run_id, session_id, parent_run_id, kind, *columns in connection.execute(
-            f"SELECT {_RUN_COLUMNS} FROM {quote_identifier(names.log_runs)} AS run WHERE {condition}",  # noqa: S608
-            parameters,
-        )
+        for run_id, session_id, parent_run_id, kind, *columns in connection.execute(selected, parameters)
     ]
 
 
-def _visible_messages(connection: sqlite3.Connection, names: TableNames, run_ids: list[str]) -> dict[str, list[str]]:
-    """Return the unfolded message rows' JSON of each of ``run_ids``, in order."""
-    messages: dict[str, list[str]] = {}
+def _decoded(connection: sqlite3.Connection, names: TableNames, rows: Sequence[_RunRow]) -> list[AnyRunRecord]:
+    """Decode ``rows`` with their unfolded message rows, in order; each call parses its own copy of the JSON."""
+    messages: dict[str, list[dict[str, Any]]] = {}
     for run_id, data in connection.execute(
         f"SELECT run_id, data FROM {quote_identifier(names.log_messages)} WHERE folded_by IS NULL "  # noqa: S608
         "AND run_id IN (SELECT value FROM json_each(?)) ORDER BY run_id, ord",
-        (json.dumps(run_ids),),
+        (json.dumps([row.run_id for row in rows]),),
     ):
-        messages.setdefault(run_id, []).append(data)
-    return messages
-
-
-def _decoded(row: _RunRow, messages: Mapping[str, list[str]]) -> AnyRunRecord:
-    # Each decode parses the JSON afresh, so no two records share a message's dicts or lists.
-    message_dicts = [json.loads(data) for data in messages.get(row.run_id, ())]
-    return run_record(row.run_id, row.session_id, row.parent_run_id, row.columns, message_dicts)
-
-
-def _named_members(team_run: TeamRunRecord) -> list[str]:
-    """Return the member runs a paused team run's requirements name, in first-mention order."""
-    named = (requirement.member_run_id for requirement in team_run.requirements or ())
-    return list(dict.fromkeys(member_id for member_id in named if member_id is not None))
+        messages.setdefault(run_id, []).append(json.loads(data))
+    return [
+        run_record(row.run_id, row.session_id, row.parent_run_id, row.columns, messages.get(row.run_id, []))
+        for row in rows
+    ]
 
 
 def _loads_sql(alias: str, summaries: str) -> str:
@@ -1006,46 +882,6 @@ def _replay_summary(
     if latest is None or latest[0] is None:
         return None
     return ScopeSummary(text=latest[0], updated_at=datetime.fromtimestamp(latest[1], UTC))
-
-
-def _join_covering_summary(
-    connection: sqlite3.Connection,
-    names: TableNames,
-    session_id: str,
-    scope_key: str,
-    seq: int,
-    metadata: Mapping[str, Any],
-) -> None:
-    """Join a covered visible run's event ids to the event sets of the summary row that covers it, if one does.
-
-    That row is the first summary of the scope after its latest barrier whose ``through`` reaches the run's ``seq``.
-    A run behind the latest barrier is retired, so no row covers it.
-    """
-    summaries = quote_identifier(names.log_summaries)
-    barrier = connection.execute(
-        f"SELECT id, through FROM {summaries} WHERE session_id = ? AND scope_key = ? AND summary IS NULL "  # noqa: S608
-        "ORDER BY id DESC LIMIT 1",
-        (session_id, scope_key),
-    ).fetchone()
-    if barrier is not None and seq <= barrier[1]:
-        return
-    covering = connection.execute(
-        f"SELECT id, event_ids, seen_event_ids FROM {summaries} WHERE session_id = ? AND scope_key = ? "  # noqa: S608
-        "AND summary IS NOT NULL AND id > ? AND through >= ? ORDER BY id LIMIT 1",
-        (session_id, scope_key, barrier[0] if barrier is not None else 0, seq),
-    ).fetchone()
-    if covering is None:
-        return
-    row_id, event_ids, seen = covering
-    seen_ids = seen_event_ids(metadata)
-    connection.execute(
-        f"UPDATE {summaries} SET event_ids = ?, seen_event_ids = ? WHERE id = ?",  # noqa: S608
-        (
-            json.dumps(sorted(set(json.loads(event_ids)) | seen_ids | source_event_ids(metadata))),
-            json.dumps(sorted(set(json.loads(seen)) | seen_ids)),
-            row_id,
-        ),
-    )
 
 
 def source_event_ids(metadata: object) -> set[str]:
@@ -1088,11 +924,7 @@ def seen_event_ids(metadata: object) -> set[str]:
 
 @dataclass(frozen=True, slots=True)
 class FoldWrite:
-    """What a mid-turn fold stores of its running run, beside the fold's summary row.
-
-    ``session`` names the conversation, and is the row to create when it is missing; ``record`` is the live running
-    record; ``messages`` are the messages the fold took; ``member_run_ids`` are the member runs that ended before it.
-    """
+    """What a mid-turn fold stores: its conversation, live running record, folded messages, and ended member runs."""
 
     session: ConversationSession
     record: AnyRunRecord
@@ -1103,21 +935,18 @@ class FoldWrite:
 def store_fold(connection: sqlite3.Connection, names: TableNames, fold: FoldWrite, summary_id: int) -> None:
     """Store what fold summary ``summary_id`` took out of its running run, in the caller's write transaction.
 
-    The running run takes the next ``seq``, so it sorts after the summary. A run without a row yet, such as one that
-    has not paused or checkpointed, gets one: cancelled, with its live scalars and metadata and no tools or
-    requirements, so a crash leaves a run that does not replay. Each folded message's row is flagged with the summary,
-    a stored one keeping its data, and so is each named member run's row, so neither replays again. The caller
-    creates the session row (``ensure_session_row``) before inserting the summary row.
+    The run takes the next ``seq``, so it sorts after the summary; one without a row gets a cancelled one with its live
+    scalars and metadata, which a crash leaves as a run that does not replay. The folded messages and the named member
+    runs are flagged with the summary, a stored message keeping its data, so none replays again. The caller creates
+    the session row (``ensure_session_row``) before it inserts the summary row.
     """
-    session_id, record = fold.session.session_id, fold.record
-    runs = quote_identifier(names.log_runs)
-    seq = next_seq(connection, names)
-    if not connection.execute(
-        f"UPDATE {runs} SET seq = ? WHERE session_id = ? AND run_id = ?",  # noqa: S608
-        (seq, session_id, record.run_id),
-    ).rowcount:
+    session_id, record, now = fold.session.session_id, fold.record, int(time())
+    runs, seq = quote_identifier(names.log_runs), next_seq(connection, names)
+    move = f"UPDATE {runs} SET seq = ? WHERE session_id = ? AND run_id = ?"  # noqa: S608
+    if not connection.execute(move, (seq, session_id, record.run_id)).rowcount:
         data = {**record.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
-        _insert_run(connection, runs, session_id, data, run_columns(data, run_type(record)), seq, int(time()))
+        values = (record.parent_run_id, *astuple(run_columns(data, run_type(record))), seq, now)
+        connection.execute(_UPSERT.format(runs=runs), (record.run_id, session_id, record.created_at or now, *values))
     connection.executemany(
         f"INSERT INTO {quote_identifier(names.log_messages)} (run_id, message_id, ord, folded_by, data) "  # noqa: S608
         "VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, message_id) DO UPDATE SET folded_by = COALESCE(folded_by, excluded.folded_by)",
@@ -1127,9 +956,9 @@ def store_fold(connection: sqlite3.Connection, names: TableNames, fold: FoldWrit
         ],
     )
     connection.execute(
-        f"UPDATE {runs} SET folded_by = ? WHERE session_id = ? AND parent_run_id = ? AND folded_by IS NULL "  # noqa: S608
+        f"UPDATE {runs} SET folded_by = ? WHERE session_id = ? AND folded_by IS NULL "  # noqa: S608
         "AND run_id IN (SELECT value FROM json_each(?))",
-        (summary_id, session_id, record.run_id, json.dumps(sorted(fold.member_run_ids))),
+        (summary_id, session_id, json.dumps(sorted(fold.member_run_ids))),
     )
 
 
@@ -1140,18 +969,14 @@ def delete_runs_in_transaction(
     *,
     session_id: str,
 ) -> set[str]:
-    """Delete session ``session_id``'s runs ``run_ids`` and their member runs in the caller's write transaction.
-
-    Their message rows go with them. Returns the ids of the deleted runs.
-    """
+    """Delete session ``session_id``'s runs ``run_ids`` with their members and messages; return the deleted ids."""
     selected = json.dumps(sorted(run_ids))
     return {
         run_id
         for (run_id,) in connection.execute(
-            f"DELETE FROM {quote_identifier(names.log_runs)} WHERE session_id = ? "  # noqa: S608
-            "AND (run_id IN (SELECT value FROM json_each(?)) OR parent_run_id IN (SELECT value FROM json_each(?))) "
-            "RETURNING run_id",
-            (session_id, selected, selected),
+            f"DELETE FROM {quote_identifier(names.log_runs)} WHERE session_id = ?1 AND (run_id IN "  # noqa: S608
+            "(SELECT value FROM json_each(?2)) OR parent_run_id IN (SELECT value FROM json_each(?2))) RETURNING run_id",
+            (session_id, selected),
         ).fetchall()
     }
 

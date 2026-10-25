@@ -465,6 +465,16 @@ def test_system_messages_are_kept_only_while_paused_and_deleted_when_the_run_com
     assert [message.role for message in paused.messages] == ["system", "user"]
 
 
+def test_a_run_reads_its_messages_in_saved_order(store: ConversationStore) -> None:
+    """Message rows replay in list order, whatever their ids."""
+    messages = [Message(role="user", content=name, id=name, created_at=1) for name in ("b", "c", "a")]
+    _save(store, _run("r1", messages=messages))
+
+    for read in (_loaded(store).runs[0], store.get_run("r1"), store.list_runs("s1")[0]):
+        assert read is not None
+        assert [message.id for message in read.messages] == ["b", "c", "a"]
+
+
 def test_messages_replayed_from_history_are_never_stored(store: ConversationStore) -> None:
     """A CLI checkpoint's batch holds the provider history it replayed; only the run's own messages are stored."""
     replayed = Message(role="assistant", content="older answer", id="old-answer", from_history=True, created_at=1)
@@ -601,15 +611,22 @@ def test_a_metadata_patch_of_a_covered_run_joins_the_covering_summarys_event_set
 
 def test_a_metadata_patch_joins_nothing_behind_the_latest_barrier(store: ConversationStore) -> None:
     """A retired run is no summary's; a later summary that reaches past it did not cover it."""
-    _save(store, _run("r1"), _run("r2"))
+    _save(store, _run("r1"), _run("r2"), _run("r3"))
     retired = _summary(store, 1)
     _summary(store, 1, summary=None)
-    later = _summary(store, 2)
+    middle = _summary(store, 2)
+    _summary(store, 2, summary=None)
+    later = _summary(store, 3)
 
-    store.patch_run_metadata("s1", "r1", {"matrix_response_event_id": "$retired"})
+    store.patch_run_metadata("s1", "r1", {"matrix_response_event_id": "$first"})
+    store.patch_run_metadata("s1", "r2", {"matrix_response_event_id": "$second"})
+    store.patch_run_metadata("s1", "r3", {"matrix_response_event_id": "$third"})
 
-    assert _summary_sets(store, retired) == ([], [])
-    assert _summary_sets(store, later) == ([], [])
+    assert [_summary_sets(store, row_id) for row_id in (retired, middle, later)] == [
+        ([], []),
+        ([], []),
+        (["$third"], ["$third"]),
+    ]
 
 
 def test_a_metadata_patch_of_a_run_that_is_not_visible_joins_nothing(store: ConversationStore) -> None:
@@ -684,6 +701,19 @@ def test_a_message_rewrite_never_unfolds_a_message(store: ConversationStore) -> 
     store.rewrite_run_messages("s1", "agent", edit)
 
     assert [(row[0], row[2]) for row in _message_rows(store, "r1")] == [("m0", summary_id), ("m1", None)]
+
+
+def test_a_message_rewrite_keeps_a_paused_runs_system_message(store: ConversationStore) -> None:
+    """The stored status decides, not what the edit did to its copy: a paused run's prompt stays for its continuation."""
+    _save(store, _run("r1", RunStatus.paused))
+
+    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
+        runs[0].status = RunStatus.completed
+        return runs
+
+    store.rewrite_run_messages("s1", "agent", edit)
+
+    assert [row[0] for row in _message_rows(store, "r1")] == ["r1-system", "r1-user"]
 
 
 def test_a_message_rewrite_holds_the_write_lock_while_it_edits(store: ConversationStore) -> None:
@@ -788,7 +818,10 @@ def test_load_returns_none_for_a_missing_session_or_one_of_another_kind(store: C
 def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_name(store: ConversationStore) -> None:
     """The members come in first-mention order, each a copy of its own; a run another team run owns is no member."""
     team = _team()
-    _save(store, _member("m1", "t0", RunStatus.paused), _member("m2", "t0", RunStatus.paused), session=team)
+    replying = Message(role="assistant", content="ok", id="m1-reply", provider_data={"k": ["v"]}, created_at=1)
+    m1 = _member("m1", "t0", RunStatus.paused)
+    m1.messages.append(replying)
+    _save(store, m1, _member("m2", "t0", RunStatus.paused), session=team)
     _save(store, _member("other", "t9", RunStatus.paused), _team_run("t9", RunStatus.paused), session=team)
     requirements = [
         _member_requirement("m2", "c1"),
@@ -807,7 +840,7 @@ def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_nam
     loaded_team = loaded["t0"]
     assert isinstance(loaded_team, TeamRunRecord)
     assert loaded_team.member_responses[1] is not loaded["m1"]
-    assert loaded_team.member_responses[1].messages[0] is not loaded["m1"].messages[0]
+    assert loaded_team.member_responses[1].messages[-1].provider_data is not loaded["m1"].messages[-1].provider_data
     assert loaded_team.member_responses[1].to_dict() == loaded["m1"].to_dict()
 
 
