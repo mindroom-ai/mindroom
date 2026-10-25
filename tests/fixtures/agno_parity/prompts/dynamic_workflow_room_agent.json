@@ -1,0 +1,80 @@
+{
+  "description": "Dynamic workflow room-agent participant: a restricted agent without runtime capabilities runs one step.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook.",
+          "tools": [
+            "dynamic_workflow"
+          ]
+        },
+        "researcher": {
+          "access": {
+            "users": [
+              "@user:localhost"
+            ]
+          },
+          "display_name": "Researcher",
+          "instructions": [
+            "Name your sources."
+          ],
+          "role": "Research topics in depth.",
+          "tools": [
+            "calculator"
+          ]
+        }
+      },
+      "memory": {
+        "backend": "none"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "anthropic"
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.custom_tools.dynamic_workflow._aexecute_room_agent_participant",
+    "participant": {
+      "agent": "researcher",
+      "id": "writer_a",
+      "kind": "room_agent"
+    },
+    "prompt": "Summarize the travel policy.",
+    "run_scope": "travel-report:run_1"
+  },
+  "requests": [
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "stream": true,
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Researcher (Matrix ID: @mindroom_researcher:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Researcher and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\nResearch topics in depth.\n</your_role>\n\nName your sources.\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "Summarize the travel policy.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
+    }
+  ],
+  "scenario": "dynamic_workflow_room_agent"
+}

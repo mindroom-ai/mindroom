@@ -3,23 +3,20 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import tiktoken
-from agno.models.anthropic import Claude
-from agno.session.summary import SessionSummary
 from structlog.testing import capture_logs
 
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage
-from tests.conftest import FakeModel, seed_session
+from tests.conftest import seed_session
+from tests.fakes.summary_model import summary_model as _summary_model
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
-    _close_test_storages,
     _completed_run,
     _make_config,
     _session,
@@ -29,19 +26,18 @@ from tests.history_helpers import (  # noqa: F401
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.db.base import BaseDb
-    from agno.models.base import Model
-    from agno.session.agent import AgentSession
-
     from mindroom.history.compaction import _CompactionRewriteResult
+    from mindroom.llm.provider import ModelProvider
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
 
 
 async def _rewrite_with_summary_model(
     *,
-    storage: BaseDb,
-    working_session: AgentSession,
+    storage: ConversationStore,
+    working_session: ConversationSession,
     summary_input_budget: int,
-    summary_model: Model,
+    summary_model: ModelProvider,
 ) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
         storage=storage,
@@ -80,17 +76,17 @@ def _assert_truthful_sizing_fields(
     ("summary_model", "kind"),
     [
         pytest.param(
-            Claude(id="claude-sonnet-5"),
+            _summary_model(model_id="claude-sonnet-5", claude=True),
             "utf8_bytes_token_upper_bound",
             id="claude-byte-bound",
         ),
         pytest.param(
-            FakeModel(id="gpt-4o", provider="fake"),
+            _summary_model(model_id="gpt-4o"),
             "model_tiktoken_tokens",
             id="known-tiktoken-model",
         ),
         pytest.param(
-            FakeModel(id="local-model", provider="fake"),
+            _summary_model(model_id="local-model"),
             "o200k_base_tokens",
             id="unknown-model",
         ),
@@ -98,7 +94,7 @@ def _assert_truthful_sizing_fields(
 )
 async def test_chunk_events_report_actual_sizing_strategy(
     tmp_path: Path,
-    summary_model: Model,
+    summary_model: ModelProvider,
     kind: str,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -106,9 +102,9 @@ async def test_chunk_events_report_actual_sizing_strategy(
     working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
     summary_inputs: list[str] = []
 
-    async def record_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+    async def record_summary(*, summary_input: str, **_kwargs: object) -> str:
         summary_inputs.append(summary_input)
-        return SessionSummary(summary="chunk summary", updated_at=datetime.now(UTC))
+        return "chunk summary"
 
     with (
         patch(
@@ -148,7 +144,7 @@ async def test_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
     working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
     summary_inputs: list[str] = []
 
-    async def fail_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+    async def fail_summary(*, summary_input: str, **_kwargs: object) -> str:
         summary_inputs.append(summary_input)
         msg = "provider exploded"
         raise RuntimeError(msg)
@@ -165,7 +161,7 @@ async def test_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
             storage=storage,
             working_session=working_session,
             summary_input_budget=8_000,
-            summary_model=Claude(id="claude-sonnet-5"),
+            summary_model=_summary_model(model_id="claude-sonnet-5", claude=True),
         )
 
     _assert_truthful_sizing_fields(
@@ -190,7 +186,7 @@ async def test_no_run_fit_warning_uses_token_budget_field(tmp_path: Path) -> Non
             storage=storage,
             working_session=working_session,
             summary_input_budget=1,
-            summary_model=Claude(id="claude-sonnet-5"),
+            summary_model=_summary_model(model_id="claude-sonnet-5", claude=True),
         )
 
     assert rewrite_result is None

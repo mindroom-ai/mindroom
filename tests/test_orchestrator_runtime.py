@@ -99,7 +99,7 @@ from mindroom.runtime_state import (
 from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
 from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
@@ -5409,7 +5409,7 @@ class TestMultiAgentOrchestrator:
             authorization_changed=False,
         )
 
-        original_plugin_skill_roots = _get_plugin_skill_roots()
+        original_plugin_skill_roots = get_plugin_skill_roots()
         set_plugin_skill_roots([])
         try:
             with (
@@ -5427,7 +5427,7 @@ class TestMultiAgentOrchestrator:
             assert orchestrator.config is current_config
             assert orchestrator.hook_registry is old_hook_registry
             assert "updated_plugin_tool" not in TOOL_METADATA
-            assert _get_plugin_skill_roots() == []
+            assert get_plugin_skill_roots() == []
         finally:
             set_plugin_skill_roots(original_plugin_skill_roots)
 
@@ -5480,7 +5480,7 @@ class TestMultiAgentOrchestrator:
             authorization_changed=False,
         )
 
-        original_plugin_skill_roots = _get_plugin_skill_roots()
+        original_plugin_skill_roots = get_plugin_skill_roots()
         original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
         original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
         original_modules = set(sys.modules)

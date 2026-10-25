@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import cast
 
-from agno.run.requirement import RunRequirement
+from mindroom.llm.runs import RunRequirement
 
 
 @dataclass(frozen=True)
@@ -66,8 +66,7 @@ class CliApprovalCall:
             RunRequirement.from_dict(deepcopy(cast("dict[str, object]", external))) if external is not None else None
         )
         if external_requirement is not None and (
-            (execution := external_requirement.tool_execution) is None
-            or execution.tool_call_id != payload["call_id"]
+            (execution := external_requirement.tool_execution).tool_call_id != payload["call_id"]
             or execution.tool_name != payload["function"]
             or execution.tool_args != arguments
         ):

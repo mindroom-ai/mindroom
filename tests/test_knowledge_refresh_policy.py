@@ -33,9 +33,8 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.knowledge.knowledge import Knowledge
-
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.read_proxy import ChromaReadProxy
 
 _WALL_NOW = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -78,7 +77,7 @@ def _resolution(
     )
     index = knowledge_registry._PublishedIndexHandle(
         key=key,
-        knowledge=cast("Knowledge", object()),
+        reader=cast("ChromaReadProxy", object()),
         state=state,
         metadata_path=published_index_metadata_path(key),
     )

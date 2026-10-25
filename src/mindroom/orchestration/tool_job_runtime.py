@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.custom_tools.job import is_job_function
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants_child, delegation_grant
 from mindroom.delegation.recovery import interrupt_stopped_child
@@ -19,7 +19,7 @@ from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
-from mindroom.tool_jobs.authorization import function_authority, locally_allowed
+from mindroom.tool_jobs.authorization import locally_allowed
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_jobs, next_follow_up_id
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
@@ -38,13 +38,12 @@ from mindroom.tool_jobs.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from agno.tools.function import Function
-
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore
+    from mindroom.tool_jobs.execution_authority import JobTool
     from mindroom.tool_jobs.instances import ToolJobInstance
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -246,24 +245,24 @@ class ToolJobRuntimeCoordinator:
     def _authorize_execution(
         self,
         owner: ToolExecutionIdentity,
-        function: Function,
+        tool: JobTool,
         arguments: Mapping[str, Any] | None = None,
     ) -> None:
         """Recheck retained functions immediately before application execution."""
-        if is_job_function(function):
+        if isinstance(tool.toolkit, JobTools):
             return  # Every action checks its exact stored owner through the runtime.
 
-        origin = function_provenance(function, arguments)
+        origin = function_provenance(tool, arguments)
         config = self.config_provider()
         edges = active_delegation_edges(owner)
         if config is None or not locally_allowed(
             config,
             owner,
-            tool_name=function.name,
-            toolkit_name=function.owning_toolkit,
+            tool_name=tool.function.name,
+            toolkit_name=tool.toolkit_name,
             origin=origin,
             depth=len(edges),
-            authority=function_authority(function),
+            authority=dict(tool.authority),
         ):
             msg = "Tool execution is no longer authorized for this caller."
             raise JobAccessError(msg)

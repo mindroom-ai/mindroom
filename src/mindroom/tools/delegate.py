@@ -6,6 +6,7 @@ agent context and is instantiated directly in ``create_agent()``, so it
 is NOT added to ``TOOL_REGISTRY`` (no generic factory).
 """
 
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
@@ -28,6 +29,6 @@ register_builtin_tool_metadata(
         icon_color="text-blue-500",
         config_fields=[],
         dependencies=[],
-        function_names=("run_subagent", "continue_subagent"),
+        function_names=DELEGATION_FUNCTIONS,
     ),
 )

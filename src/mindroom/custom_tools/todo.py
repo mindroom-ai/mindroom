@@ -12,8 +12,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from agno.agent import Agent
-from agno.team.team import Team  # noqa: TC002 - Agno resolves tool annotations at runtime.
 from agno.tools import Toolkit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -292,26 +290,12 @@ def _template_path(name: str, template_dir: Path | None = None) -> Path:
         raise ValueError(msg) from None
 
 
-def _agent_config_key(agent: Agent | Team | None, configured_agents: set[str]) -> str | None:
-    if not isinstance(agent, Agent):
-        return None
-    if isinstance(agent.id, str) and agent.id in configured_agents:
-        return agent.id
-    if agent.name in configured_agents:
-        return agent.name
-    return None
-
-
-def _current_agent_workspace_root(agent: Agent | Team | None = None) -> Path | None:
+def _current_agent_workspace_root() -> Path | None:
     ctx = get_tool_runtime_context()
     if ctx is None:
         return None
 
     agent_name = ctx.agent_name
-    member_agent_name = _agent_config_key(agent, set(ctx.config.agents))
-    if member_agent_name is not None:
-        agent_name = member_agent_name
-
     agent_config = ctx.config.agents.get(agent_name)
     if agent_config is None:
         return None
@@ -332,9 +316,9 @@ def _current_agent_workspace_root(agent: Agent | Team | None = None) -> Path | N
     return agent_workspace_root_path(ctx.runtime_paths.storage_root, agent_name)
 
 
-def _visible_template_roots(agent: Agent | Team | None = None) -> tuple[_TemplateRoot, ...]:
+def _visible_template_roots() -> tuple[_TemplateRoot, ...]:
     roots: list[_TemplateRoot] = []
-    workspace_root = _current_agent_workspace_root(agent)
+    workspace_root = _current_agent_workspace_root()
     if workspace_root is not None:
         try:
             workspace_template_root = resolve_path_within_root(
@@ -723,13 +707,8 @@ def _assignee_error(agent_name: str, configured: set[str]) -> str | None:
     return _unknown_assigned_agent_message(agent_name, configured) or _unauthorized_assignee_message(agent_name)
 
 
-def _default_assignee(agent: Agent | Team, context_agent_name: str) -> str:
-    configured = _configured_agent_names()
-    if agent_config_key := _agent_config_key(agent, configured):
-        return agent_config_key
-    if context_agent_name in configured:
-        return context_agent_name
-    return ""
+def _default_assignee(context_agent_name: str) -> str:
+    return context_agent_name if context_agent_name in _configured_agent_names() else ""
 
 
 class TodoTools(Toolkit):
@@ -753,10 +732,10 @@ class TodoTools(Toolkit):
             ],
         )
 
-    def plan(self, agent: Agent | Team, tasks: str) -> str:  # noqa: C901
+    def plan(self, tasks: str) -> str:  # noqa: C901
         """Create a multi-step work plan for the current thread."""
         state_root, room_id, thread_id, agent_name = _current_scope()
-        assigned_agent = _default_assignee(agent, agent_name)
+        assigned_agent = _default_assignee(agent_name)
         path = todos_path(state_root, room_id, thread_id)
 
         lines = [line.strip() for line in tasks.strip().splitlines() if line.strip()]
@@ -817,7 +796,6 @@ class TodoTools(Toolkit):
 
     def add_todo(  # noqa: C901
         self,
-        agent: Agent | Team,
         title: str,
         depends_on: str = "",
         priority: str = "medium",
@@ -835,7 +813,7 @@ class TodoTools(Toolkit):
             return f"Invalid priority '{priority}'. Must be: low, medium, high, critical."
 
         dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()] if depends_on else []
-        resolved_agent = assigned_agent.strip() or _default_assignee(agent, agent_name)
+        resolved_agent = assigned_agent.strip() or _default_assignee(agent_name)
         assignee_error = _assignee_error(resolved_agent, _configured_agent_names())
         if assignee_error is not None:
             return assignee_error
@@ -883,9 +861,8 @@ class TodoTools(Toolkit):
             message += f" assigned to {resolved_agent}"
         return message
 
-    def list_todos(self, agent: Agent | Team, show_all: bool = False) -> str:
+    def list_todos(self, show_all: bool = False) -> str:
         """List todo items in the current thread's work plan."""
-        del agent
         state_root, room_id, thread_id, _agent_name = _current_scope()
         path = todos_path(state_root, room_id, thread_id)
         state = read_json(path)
@@ -928,7 +905,6 @@ class TodoTools(Toolkit):
 
     def update_todo(  # noqa: C901, PLR0915
         self,
-        agent: Agent | Team,
         todo_id: str,
         title: str = "",
         priority: str = "",
@@ -937,7 +913,6 @@ class TodoTools(Toolkit):
         assigned_agent: str = "",
     ) -> str:
         """Update fields on an existing todo item."""
-        del agent
         state_root, room_id, thread_id, _agent_name = _current_scope()
         path = todos_path(state_root, room_id, thread_id)
 
@@ -1019,13 +994,12 @@ class TodoTools(Toolkit):
 
     def apply_template(
         self,
-        agent: Agent | Team,
         name: str,
         params: dict[str, str | int | bool],
         dry_run: bool = False,
     ) -> str:
         """Apply a named todo template to the current thread's work plan."""
-        template_roots = _visible_template_roots(agent)
+        template_roots = _visible_template_roots()
         rendered_template = _render_template_definition(
             name,
             params,
@@ -1042,7 +1016,7 @@ class TodoTools(Toolkit):
 
         state_root, room_id, thread_id, agent_name = _current_scope()
         path = todos_path(state_root, room_id, thread_id)
-        default_assignee = _default_assignee(agent, agent_name)
+        default_assignee = _default_assignee(agent_name)
         configured_agents = _configured_agent_names()
         for template_todo in rendered_template["todos"]:
             resolved_agent = template_todo.get("assigned_agent") or default_assignee
@@ -1088,11 +1062,11 @@ class TodoTools(Toolkit):
             created_items,
         )
 
-    def list_templates(self, agent: Agent | Team) -> str:
+    def list_templates(self) -> str:
         """List available todo templates."""
         templates: list[dict[str, Any]] = []
         remaining_workspace_bytes = _MAX_TEMPLATE_LISTING_BYTES
-        template_roots = _visible_template_roots(agent)
+        template_roots = _visible_template_roots()
         for template_root in template_roots:
             templates_root = template_root.path.resolve()
             if not templates_root.is_dir():

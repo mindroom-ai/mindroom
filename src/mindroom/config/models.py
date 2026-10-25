@@ -7,12 +7,17 @@ from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.legacy_fields import (
+    drop_retired_fields,
+    drop_retired_model_settings,
+    drop_retired_tool_overrides,
+    reject_legacy_defaults_fields,
+)
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
@@ -38,7 +43,6 @@ class EffectiveToolConfig:
     authored_name: str | None = None
 
 
-AgentLearningMode = Literal["always", "agentic"]
 FileAccess = Literal["workspace", "unrestricted"]
 _LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
@@ -227,6 +231,12 @@ class ToolConfigEntry(BaseModel):
             msg = "Tool name must not be empty"
             raise ValueError(msg)
         return stripped
+
+    @field_validator("overrides")
+    @classmethod
+    def drop_retired_fields(cls, value: dict[str, object], info: ValidationInfo) -> dict[str, object]:
+        """Ignore retired overrides that older configs still set, with a warning."""
+        return drop_retired_tool_overrides(info.data["name"], value) if "name" in info.data else value
 
     @model_validator(mode="after")
     def validate_lazy_flags(self) -> Self:
@@ -433,9 +443,7 @@ class DefaultsConfig(BaseModel):
             "other agents and teams; a message from a person resets the count"
         ),
     )
-    learning: bool = Field(default=True, description="Default Agno Learning setting")
     knowledge_graph: bool = Field(default=False, description="Default knowledge graph setting")
-    learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     cheap_model: str | None = Field(
         default=None,
         description="Cheaper model key for agents without their own cheap_model, used by cold_cache",
@@ -448,19 +456,12 @@ class DefaultsConfig(BaseModel):
     num_history_runs: int | None = Field(
         default=None,
         ge=1,
-        description="Default number of prior Agno runs to include as history context (None = all)",
+        description="Default number of prior runs to include as history context (None = all)",
     )
     num_history_messages: int | None = Field(
         default=None,
         ge=1,
         description="Default max messages from history (mutually exclusive with num_history_runs)",
-    )
-    compress_tool_results: bool = Field(
-        default=False,
-        description=(
-            "Compress tool results in history to save context. Disabled by default because on Anthropic/Vertex "
-            "Claude this can mutate replayed tool messages and invalidate prompt-cache prefixes."
-        ),
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
@@ -568,8 +569,8 @@ class DefaultsConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
-        """Reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_defaults_fields(data)
+        """Ignore retired fields with a warning, then reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_defaults_fields(drop_retired_fields(data))
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -797,6 +798,14 @@ class ModelConfig(BaseModel):
     def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
         return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def drop_retired_fields(cls, value: dict[str, Any] | None, info: ValidationInfo) -> dict[str, Any] | None:
+        """Ignore Agno model fields that older configs still set in ``extra_kwargs``, with a warning."""
+        if value is None or "provider" not in info.data:
+            return value
+        return drop_retired_model_settings(info.data["provider"], value)
 
     @field_validator("icon")
     @classmethod

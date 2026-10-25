@@ -27,7 +27,6 @@ from mindroom.constants import (
 from mindroom.execution_preparation import (
     _build_unseen_context_messages,
     _classify_partial_reply,
-    _clean_partial_reply_body,
     _get_unseen_event_ids_for_metadata,
     _get_unseen_messages_for_sender,
     _PartialReplyKind,
@@ -48,6 +47,7 @@ from mindroom.streaming import (
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     TEAM_PROGRESS_PLACEHOLDER,
     StreamingResponse,
+    clean_partial_reply_text,
 )
 from tests.conftest import (
     bind_runtime_paths,
@@ -97,7 +97,7 @@ def _render_normalized_interrupted_replay(body: str) -> str:
     return _render_interrupted_replay_content(
         InterruptedReplaySnapshot(
             user_message="",
-            partial_text=_clean_partial_reply_body(body),
+            partial_text=clean_partial_reply_text(body),
             completed_tools=(),
             interrupted_tools=(),
             run_metadata={},
@@ -343,11 +343,11 @@ class TestCleanPartialReplyBody:
     )
     def test_clean_partial_reply_body_strips_markers(self, body: str, expected: str) -> None:
         """Remove terminal status notes from preserved text."""
-        assert _clean_partial_reply_body(body) == expected
+        assert clean_partial_reply_text(body) == expected
 
     def test_clean_partial_reply_body_preserves_long_content(self) -> None:
         """Keep long partial-reply content once markers are removed."""
-        result = _clean_partial_reply_body("x" * 5000)
+        result = clean_partial_reply_text("x" * 5000)
         assert result == "x" * 5000
 
     def test_replay_text_byte_identical_across_cancel_sources(self) -> None:
@@ -414,7 +414,7 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e3", sender="@user:localhost", body="New question"),
         ]
 
-        context_messages, unseen_event_ids = _build_unseen_context_messages(
+        turn, unseen_event_ids = _build_unseen_context_messages(
             "Answer the new question.",
             thread_history,
             seen_event_ids={"e1"},
@@ -423,6 +423,7 @@ class TestUnseenMessagesPartialReplies:
             response_sender_id=agent_id,
             config=config,
         )
+        context_messages = turn.in_request_order()
 
         assert unseen_event_ids == []
         assert [message.role for message in context_messages] == ["user", "user", "user"]
@@ -516,7 +517,7 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e2", sender="@user:localhost", body="Continue"),
         ]
 
-        context_messages, unseen_event_ids = _build_unseen_context_messages(
+        turn, unseen_event_ids = _build_unseen_context_messages(
             "Continue.",
             thread_history,
             seen_event_ids=set(),
@@ -525,6 +526,7 @@ class TestUnseenMessagesPartialReplies:
             response_sender_id=agent_id,
             config=config,
         )
+        context_messages = turn.in_request_order()
 
         assert unseen_event_ids == []
         assert [message.role for message in context_messages] == ["user"]

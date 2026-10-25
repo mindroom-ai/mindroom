@@ -25,6 +25,7 @@ import nio
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import (
     MATRIX_MEDIA_MSGTYPES,
@@ -92,6 +93,14 @@ class AttachmentRecord:
     size_bytes: int | None = None
     content_sha256: str | None = None
     created_at: str | None = None
+
+    def __post_init__(self) -> None:
+        """Hold ``mime_type`` as its bare ``type/subtype``, whether the record is registered now or read from disk.
+
+        Matrix events and bridges can carry HTTP-style parameters, as in ``text/plain; charset=utf-8``, and every
+        model route matches the bare type.
+        """
+        object.__setattr__(self, "mime_type", canonical_mime_type(self.mime_type))
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize record into a JSON-safe dictionary."""
@@ -282,13 +291,9 @@ def _attachment_record_path(storage_path: Path, attachment_id: str) -> Path:
 
 def _extension_from_mime_type(mime_type: str | None) -> str:
     """Map MIME type to a stable file extension."""
-    if not mime_type:
-        return ".bin"
-    normalized_mime_type = mime_type.split(";", 1)[0].strip().lower()
-    extension = mimetypes.guess_extension(normalized_mime_type)
-    if extension:
-        return extension
-    return ".bin"
+    canonical = canonical_mime_type(mime_type)
+    extension = mimetypes.guess_extension(canonical) if canonical is not None else None
+    return extension or ".bin"
 
 
 def _store_media_bytes_locally(

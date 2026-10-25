@@ -9,8 +9,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import ai as ai_module
 from mindroom.config.plugin import PluginEntryConfig
@@ -22,10 +20,12 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
+from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system import tool_hooks as tool_hooks_module
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
+from tests.agent_tool_helpers import tool_policy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -50,20 +50,20 @@ async def test_stream_processing_marks_tool_call_started() -> None:
             tool_args={"cmd": "date +%s.%N"},
             tool_call_id="call-1",
         )
-        yield ToolCallStartedEvent(tool=tool)
-        yield ToolCallStartedEvent(
-            tool=ToolExecution(
+        yield ToolStarted(call=tool.call)
+        yield ToolStarted(
+            call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
-            ),
+            ).call,
         )
-        yield ToolCallCompletedEvent(
-            tool=ToolExecution(
+        yield ToolCompleted(
+            call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
                 tool_call_id="call-1",
                 result="ok",
-            ),
+            ).call,
         )
 
     with patch(
@@ -85,7 +85,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_started",
+                "phase": "tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
                 "tool_call_id": "call-1",
@@ -95,7 +95,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_started",
+                "phase": "tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
                 "tool_call_id": None,
@@ -105,7 +105,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_completed",
+                "phase": "tool_call_completed",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
                 "tool_call_id": "call-1",
@@ -231,7 +231,7 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
             ),
         ],
     )
-    bridge = build_tool_hook_bridge(registry, agent_name="code")
+    bridge = tool_policy(registry, agent_name="code")
 
     async def echo(text: str) -> str:
         return text.upper()
@@ -294,7 +294,7 @@ async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch
             ),
         ],
     )
-    bridge = build_tool_hook_bridge(registry, agent_name="code")
+    bridge = tool_policy(registry, agent_name="code")
     next_func = AsyncMock(return_value="should not run")
     perf_counter = Mock(
         side_effect=[

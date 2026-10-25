@@ -10,15 +10,15 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 import httpx
-from agno.media import Audio, File, Image, Video
-from agno.tools.function import ToolResult
 from httpx._utils import get_environment_proxies
 
+from mindroom.llm.media import canonical_mime_type
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
+from mindroom.tool_system.agno_toolkits import AgnoAudio, AgnoFile, AgnoImage, AgnoVideo, ToolResult
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
-type _Media = Image | Audio | Video | File
+type _Media = AgnoImage | AgnoAudio | AgnoVideo | AgnoFile
 
 _AUDIO_FORMAT_BY_MIME_TYPE = {
     "audio/mpeg": "mp3",
@@ -87,8 +87,7 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
                         msg = "Worker media exceeds the byte limit."
                         raise ValueError(msg)
                     content.extend(chunk)
-                mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                return bytes(content), mime or None
+                return bytes(content), canonical_mime_type(response.headers.get("content-type"))
             finally:
                 response.close()
         msg = "Exceeded maximum allowed redirects."
@@ -104,20 +103,20 @@ def _resource_name(media: _Media) -> str:
 def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]:
     """Retain provider-relevant resource identity before dropping its location."""
     name = _resource_name(media)
-    if isinstance(media, File):
+    if isinstance(media, AgnoFile):
         filename = media.filename or media.name or name or None
         candidates = (declared_mime, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(name)[0])
-        mime = media.mime_type or next((value for value in candidates if value in File.valid_mime_types()), None)
+        mime = media.mime_type or next((value for value in candidates if value in AgnoFile.valid_mime_types()), None)
         return {"filename": filename, "mime_type": mime}
     updates: dict[str, Any] = {}
     if media.mime_type is None and media.format is None:
         family = media_transport.MEDIA_MIME_FAMILIES[type(media)]
-        inferred_mime = mimetypes.guess_type(name)[0] if isinstance(media, Image) else None
+        inferred_mime = mimetypes.guess_type(name)[0] if isinstance(media, AgnoImage) else None
         candidates = (declared_mime, inferred_mime)
         updates["mime_type"] = next((value for value in candidates if value and value.startswith(family)), None)
-    if isinstance(media, (Audio, Video)) and media.format is None and name:
+    if isinstance(media, (AgnoAudio, AgnoVideo)) and media.format is None and name:
         updates["format"] = Path(name).suffix.removeprefix(".").lower() or None
-    if isinstance(media, Audio) and media.format is None:
+    if isinstance(media, AgnoAudio) and media.format is None:
         suffix_mime = mimetypes.guess_type(name)[0] or ""
         if updates.get("format") not in {"mp3", "wav", "ogg", "webm"} and not suffix_mime.startswith("audio/"):
             mime = media.mime_type or updates.get("mime_type")
@@ -127,7 +126,7 @@ def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]
 
 
 def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
-    if limit <= 0 or media.media_reference is not None or (isinstance(media, File) and media.external is not None):
+    if limit <= 0 or media.media_reference is not None or (isinstance(media, AgnoFile) and media.external is not None):
         msg = "Unsupported worker media resource or exhausted byte limit."
         raise ValueError(msg)
     declared_mime = None
@@ -144,7 +143,7 @@ def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
     except (OSError, httpx.HTTPError, ServerFetchUrlError):
         msg = "Unable to read worker media resource."
         raise ValueError(msg) from None
-    if isinstance(media, File) and isinstance(content, str):
+    if isinstance(media, AgnoFile) and isinstance(content, str):
         content = content.encode("utf-8")
     if not isinstance(content, bytes) or not content or len(content) > limit:
         msg = "Worker media must contain bytes within the byte limit."

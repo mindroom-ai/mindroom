@@ -22,7 +22,6 @@ from mindroom.hooks import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -31,8 +30,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
-    from agno.run.requirement import RunRequirement
-    from agno.tools.function import Function
     from structlog.stdlib import BoundLogger
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -50,6 +47,7 @@ if TYPE_CHECKING:
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
+    from mindroom.llm.runs import RunRequirement
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
@@ -58,6 +56,8 @@ if TYPE_CHECKING:
     from mindroom.response_turn import PausedAttempt
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import SchedulingRuntime
+    from mindroom.tool_system.agno_toolkits import Function
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
 
@@ -106,13 +106,6 @@ def detached_requester_context(context: DetachedRequesterContext | None) -> Iter
         _DETACHED_REQUESTER_CONTEXT.reset(token)
 
 
-@contextmanager
-def _tool_runtime_context_scope(tool_context: ToolRuntimeContext | None) -> Iterator[None]:
-    """Bind tool runtime state only for the duration of one concrete operation."""
-    with tool_runtime_context(tool_context):
-        yield
-
-
 @dataclass(frozen=True)
 class ToolRuntimeContext:
     """Shared runtime metadata available to all tools."""
@@ -142,7 +135,7 @@ class ToolRuntimeContext:
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
-    tool_function_filter: Callable[[Function], bool] | None = None
+    tool_function_filter: Callable[[Function | ToolFunction], bool] | None = None
     # Persona of the authored subagent running this turn; copies it authors stay within its tools, skills, and knowledge.
     persona: SubagentPersona | None = None
     membership: PrincipalStore | None = None
@@ -332,34 +325,8 @@ class WorkerProgressPump:
     shutdown: threading.Event
 
 
-class ToolRuntimeModelBinding:
-    """Bind attempt-local model identity into the ambient tool context."""
-
-    async def run_with_model(
-        self,
-        *,
-        active_model_name: str,
-        operation: Callable[[], Awaitable[_ToolContextReturn]],
-    ) -> _ToolContextReturn:
-        """Run one provider attempt with its model visible to tools."""
-        with _tool_runtime_model_context(active_model_name):
-            return await operation()
-
-    def stream_with_model[ChunkT](
-        self,
-        stream: AsyncIterator[ChunkT],
-        *,
-        active_model_name: str,
-    ) -> AsyncIterator[ChunkT]:
-        """Bind one attempt's model while its stream is created, pulled, or closed."""
-        return context_bound_async_stream(
-            context_factory=lambda: _tool_runtime_model_context(active_model_name),
-            stream_factory=lambda: stream,
-        )
-
-
 @dataclass
-class ToolRuntimeSupport(ToolRuntimeModelBinding):
+class ToolRuntimeSupport:
     """Own shared tool-runtime context building and scoped execution helpers."""
 
     runtime: BotRuntimeView
@@ -455,16 +422,12 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
         agent_name: str | None = None,
     ) -> ToolExecutionIdentity:
         """Build the serializable execution identity used for worker routing."""
-        return build_tool_execution_identity(
-            channel="matrix",
+        return _matrix_execution_identity(
+            target,
             agent_name=agent_name or self.agent_name,
             transport_agent_name=self.agent_name,
-            runtime_paths=self.runtime_paths,
             requester_id=user_id or self.matrix_id.full_id,
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            resolved_thread_id=target.resolved_thread_id,
-            session_id=target.session_id,
+            runtime_paths=self.runtime_paths,
         )
 
     async def run_in_context(
@@ -474,7 +437,7 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
         operation: Callable[[], Awaitable[_ToolContextReturn]],
     ) -> _ToolContextReturn:
         """Execute one async operation inside the ambient tool runtime context."""
-        with _tool_runtime_context_scope(tool_context):
+        with tool_runtime_context(tool_context):
             return await operation()
 
     def stream_in_context(
@@ -485,7 +448,7 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
     ) -> AsyncIterator[_StreamChunk]:
         """Wrap one async iterator without spanning tool-runtime tokens across yields."""
         return context_bound_async_stream(
-            context_factory=lambda: _tool_runtime_context_scope(tool_context),
+            context_factory=lambda: tool_runtime_context(tool_context),
             stream_factory=stream_factory,
         )
 
@@ -555,13 +518,30 @@ def resolve_current_session_id(
 
 def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -> ToolExecutionIdentity:
     """Build the canonical execution identity represented by one live runtime context."""
-    target = context.target
-    return build_tool_execution_identity(
-        channel="matrix",
+    return _matrix_execution_identity(
+        context.target,
         agent_name=context.agent_name,
         transport_agent_name=context.transport_agent_name,
-        runtime_paths=context.runtime_paths,
         requester_id=context.requester_id,
+        runtime_paths=context.runtime_paths,
+    )
+
+
+def _matrix_execution_identity(
+    target: MessageTarget,
+    *,
+    agent_name: str,
+    transport_agent_name: str | None,
+    requester_id: str,
+    runtime_paths: RuntimePaths,
+) -> ToolExecutionIdentity:
+    """Build the execution identity of one Matrix conversation, keyed by its resolved thread."""
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        transport_agent_name=transport_agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
         resolved_thread_id=target.resolved_thread_id,
@@ -682,25 +662,6 @@ def get_tool_runtime_media_attachment(
     return context.runtime_media_attachments.get(attachment_id.strip())
 
 
-def get_plugin_state_root(
-    plugin_name: str,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-) -> Path:
-    """Return the canonical plugin state root used by hooks and plugin tools."""
-    normalized_plugin_name = validate_plugin_name(plugin_name)
-
-    context = get_tool_runtime_context()
-    resolved_runtime_paths = runtime_paths or (context.runtime_paths if context is not None else None)
-    if resolved_runtime_paths is None:
-        msg = "runtime_paths are required when no tool runtime context is active"
-        raise RuntimeError(msg)
-
-    plugin_root = resolved_runtime_paths.storage_root / "plugins" / normalized_plugin_name
-    plugin_root.mkdir(parents=True, exist_ok=True)
-    return plugin_root
-
-
 async def emit_custom_event(
     plugin_name: str,
     event_name: str,
@@ -751,11 +712,16 @@ def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
 
 
 @contextmanager
-def _tool_runtime_model_context(active_model_name: str) -> Iterator[None]:
-    """Bind the model used by one provider attempt into the ambient tool context."""
+def tool_runtime_model_context(model_name: str | None) -> Iterator[None]:
+    """Bind ``model_name`` as the ambient context's ``active_model_name`` for one tool call; None binds nothing.
+
+    Agno-authored tools and plugins read the model a call runs for there.
+    """
     context = get_tool_runtime_context()
-    resolved_context = replace(context, active_model_name=active_model_name) if context is not None else None
-    with tool_runtime_context(resolved_context):
+    if model_name is None or context is None:
+        yield
+        return
+    with tool_runtime_context(replace(context, active_model_name=model_name)):
         yield
 
 

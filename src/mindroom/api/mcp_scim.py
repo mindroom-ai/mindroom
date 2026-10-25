@@ -15,6 +15,7 @@ from starlette.routing import Route
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.json_utils import object_with_unique_keys
+from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.mcp_gateway.accounts import (
     AccountConflictError,
@@ -135,10 +136,7 @@ def _reject_constant(_value: str) -> Never:
 
 
 async def _body(request: Request, schema: str) -> dict[str, Any]:
-    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() not in {
-        "application/json",
-        "application/scim+json",
-    }:
+    if canonical_mime_type(request.headers.get("content-type")) not in {"application/json", "application/scim+json"}:
         raise _ScimError(415, "Use application/scim+json.")
     try:
         body = await collect_bounded_bytes(request.stream(), max_bytes=_MAX_BODY)

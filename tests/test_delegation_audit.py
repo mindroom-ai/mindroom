@@ -9,10 +9,6 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 import pytest
-from agno.metrics import RunMetrics
-from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
-from agno.run.base import RunStatus
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.main import Config
@@ -30,6 +26,9 @@ from mindroom.delegation.recovery import interrupt_child
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -102,7 +101,7 @@ async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: 
     before_handle = handle_path.read_bytes()
     await record_child_response(
         child,
-        RunOutput(run_id=child.run_id, session_id=child.session_id, status=status, content="retained outcome"),
+        RunRecord(run_id=child.run_id, session_id=child.session_id, status=status, content="retained outcome"),
         config=config,
         runtime_paths=paths,
     )
@@ -241,13 +240,13 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
         tool_args={"command": "pwd"},
         requires_confirmation=True,
     )
-    paused = RunOutput(
+    paused = RunRecord(
         run_id=child.run_id,
         session_id=child.session_id,
         status=RunStatus.paused,
         content="partial response",
         tools=[completed_tool, pending_tool],
-        metrics=RunMetrics(input_tokens=5, output_tokens=2),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2)),
     )
 
     await settle_child_response(child, paused, config=config, runtime_paths=runtime_paths)
@@ -261,13 +260,13 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
         confirmation_note="approved for this call",
         result="/workspace",
     )
-    completed = RunOutput(
+    completed = RunRecord(
         run_id=child.run_id,
         session_id=child.session_id,
         status=RunStatus.completed,
         content="final response",
         tools=[completed_tool, resumed_tool],
-        metrics=RunMetrics(input_tokens=8, output_tokens=4),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=8, output_tokens=4)),
     )
     await settle_child_response(
         child,
@@ -334,13 +333,13 @@ async def test_settlement_finishes_a_full_record_with_its_reserved_terminal_even
     )
     # The start event and one ordinary event fill the record, leaving the slot reserved for the terminal event.
     monkeypatch.setattr(records, "_MAX_EVENTS", 3)
-    response = RunOutput(
+    response = RunRecord(
         run_id=child.run_id,
         session_id=child.session_id,
         status=status,
         content="final response",
         tools=[ToolExecution(tool_call_id="lookup-call", tool_name="lookup", tool_args={}, result="found")],
-        metrics=RunMetrics(input_tokens=8, output_tokens=4),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=8, output_tokens=4)),
     )
 
     if status == RunStatus.paused:
@@ -381,7 +380,7 @@ async def test_a_child_that_edits_its_exported_log_still_settles(tmp_path: Path)
 
     await settle_child_response(
         child,
-        RunOutput(run_id=child.run_id, session_id=child.session_id, status=RunStatus.completed, content="done"),
+        RunRecord(run_id=child.run_id, session_id=child.session_id, status=RunStatus.completed, content="done"),
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -394,7 +393,7 @@ async def test_a_child_that_edits_its_exported_log_still_settles(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_live_observer_records_matching_child_events_once(tmp_path: Path) -> None:
-    """Recording parent events, missing live tool data, or replaying an event must fail this test."""
+    """Missing live tool data or replaying an event must fail this test; content gets the id of its last chunk."""
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
@@ -411,42 +410,17 @@ async def test_live_observer_records_matching_child_events_once(tmp_path: Path) 
         tool_args={"query": "live query"},
         result="live result",
     )
-    started = ToolCallStartedEvent(
-        run_id=child.run_id,
-        session_id=child.session_id,
-        tool=tool,
-    )
-    started.event_index = 10
-    completed = ToolCallCompletedEvent(
-        run_id=child.run_id,
-        session_id=child.session_id,
-        tool=tool,
-    )
-    completed.event_index = 11
-    content = RunContentEvent(
-        run_id=child.run_id,
-        session_id=child.session_id,
-        content="visible chunk",
-    )
-    content.event_index = 12
-    parent_event = ToolCallStartedEvent(
-        run_id="parent-run",
-        session_id="parent-session",
-        tool=tool,
-    )
-    parent_event.event_index = 13
-
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
-        await observe_child_event(parent_event)
-        await observe_child_event(started)
-        await observe_child_event(content)
-        await observe_child_event(completed)
-        await observe_child_event(completed)
+        await observe_child_event(ToolStarted(tool.call))
+        await observe_child_event(TextDelta("visible "))
+        await observe_child_event(TextDelta("chunk"))
+        await observe_child_event(ToolCompleted(tool.call))
+        await observe_child_event(ToolCompleted(tool.call))
 
     events = _events(await _record_dir(child, config, runtime_paths))
     assert [(event["kind"], event["event_id"]) for event in events[1:]] == [
         ("tool_call", "run:child-run:tool:live-tool:call"),
-        ("output", "run:child-run:stream:12"),
+        ("output", "run:child-run:stream:3"),
         ("tool_result", "run:child-run:tool:live-tool:result"),
     ]
     assert events[1]["data"]["arguments"] == {"query": "live query"}
@@ -467,16 +441,10 @@ async def test_live_observer_flushes_buffered_partial_output_during_cancellation
         runtime_paths=runtime_paths,
         caller_execution_identity=_identity("leader", "parent-session"),
     )
-    content = RunContentEvent(
-        run_id=child.run_id,
-        session_id=child.session_id,
-        content="partial before cancel",
-    )
-    content.event_index = 20
 
     async def cancel_during_context() -> None:
         async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
-            await observe_child_event(content)
+            await observe_child_event(TextDelta("partial before cancel"))
             raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
@@ -484,7 +452,7 @@ async def test_live_observer_flushes_buffered_partial_output_during_cancellation
 
     events = _events(await _record_dir(child, config, runtime_paths))
     assert events[-1]["kind"] == "output"
-    assert events[-1]["event_id"] == "run:child-run:stream:20"
+    assert events[-1]["event_id"] == "run:child-run:stream:1"
     assert events[-1]["data"]["content"] == "partial before cancel"
 
 
@@ -502,25 +470,23 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
         caller_execution_identity=_identity("leader", "parent-session"),
     )
     tool = ToolExecution(tool_call_id="reused-tool", tool_name="lookup", tool_args={"value": 1})
-    first_metrics = RunMetrics(input_tokens=9, output_tokens=3)
+    first_metrics = RunMetrics(tokens=TokenCounts(input_tokens=9, output_tokens=3))
 
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+        await observe_child_event(ToolStarted(tool.call))
         await observe_child_event(
-            ToolCallStartedEvent(run_id="child-run", session_id=child.session_id, tool=tool),
-        )
-        await observe_child_event(
-            RunOutput(
-                run_id="child-run",
-                session_id=child.session_id,
-                status=RunStatus.completed,
-                content="discarded attempt",
-                metrics=first_metrics,
+            RunFinished(
+                RunRecord(
+                    run_id="child-run",
+                    session_id=child.session_id,
+                    status=RunStatus.completed,
+                    content="discarded attempt",
+                    metrics=first_metrics,
+                ),
             ),
         )
         child.run_id = "retried-run"
-        await observe_child_event(
-            ToolCallStartedEvent(run_id="retried-run", session_id=child.session_id, tool=tool),
-        )
+        await observe_child_event(ToolStarted(tool.call))
 
     events = _events(await _record_dir(child, config, runtime_paths))
     assert [event["event_id"] for event in events if event["kind"] == "tool_call"] == [
@@ -529,6 +495,39 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
     ]
     assert next(event for event in events if event["kind"] == "output")["data"]["content"] == ("discarded attempt")
     assert next(event for event in events if event["kind"] == "usage")["data"]["input_tokens"] == 9
+
+
+@pytest.mark.asyncio
+async def test_live_observer_numbers_a_resumed_run_past_its_earlier_leg(tmp_path: Path) -> None:
+    """A run resumed in a new context keeps its run id, so its numbering continues where the record's left off.
+
+    The record drops an event whose id it already holds; restarting the count would lose the resumed leg's output
+    whenever its last chunk lands on an index the earlier leg flushed at.
+    """
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    gated = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, requires_confirmation=True)
+    async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+        await observe_child_event(TextDelta("first leg"))
+        await observe_child_event(ToolStarted(gated.call))
+    done = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, result="ok")
+    async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+        await observe_child_event(TextDelta("final answer"))
+        await observe_child_event(ToolCompleted(done.call))
+
+    events = _events(await _record_dir(child, config, runtime_paths))
+    assert [(event["event_id"], event["data"]["content"]) for event in events if event["kind"] == "output"] == [
+        ("run:child-run:stream:1", "first leg"),
+        ("run:child-run:stream:2", "final answer"),
+    ]
 
 
 @pytest.mark.asyncio

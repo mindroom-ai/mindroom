@@ -156,11 +156,10 @@ async def handle_tool_approval_action(
         before_consume=before_consume,
         authorize_responder=authorize_responder,
     )
-    notice_event_id = approval_event_id
-    if notice_event_id is not None and result.error_reason is not None and orchestrator is not None:
+    if result.error_reason is not None and orchestrator is not None:
         await orchestrator.send_approval_notice(
             room_id=room.room_id,
-            approval_event_id=notice_event_id,
+            approval_event_id=approval_event_id,
             thread_id=result.thread_id,
             reason=result.error_reason,
         )

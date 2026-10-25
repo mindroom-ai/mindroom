@@ -50,7 +50,7 @@ from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.runtime import shutdown_primary_worker_manager
 from tests.conftest import bind_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
-from tests.minimal_agent_fixtures import PLUGIN, ScriptedProvider
+from tests.minimal_agent_fixtures import PLUGIN, ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 
 
@@ -285,10 +285,9 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             display_name="Helper",
             tools=["shell", "file", "parity"],
             delegate_to=["code", "helper"],
-            learning=False,
             memory_backend="file",
         )
-        config.agents["code"] = AgentConfig(display_name="Code", tools=[], learning=False, memory_backend="file")
+        config.agents["code"] = AgentConfig(display_name="Code", tools=[], memory_backend="file")
         bind_runtime_paths(config, paths)
         paths.config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
         persist_entity_accounts(config, paths)
@@ -439,8 +438,8 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         results["steps"].append("retired response grant rejected by actual API")
         assert len(provider.requests) == 4, len(provider.requests)
         minimal_requests = [provider.requests[1], provider.requests[3]]
-        assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in minimal_requests)
-        projection = str(provider.requests[3]["messages"])
+        assert all(offered_tools(request) == ["bash"] for request in minimal_requests)
+        projection = str(provider.requests[3].messages)
         for expected in (
             "primary credential accepted",
             "approved:exact value",
@@ -465,10 +464,10 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         result = await respond("Read the same note and keep earlier history")
         assert "standard done" in str(result)
         final_request = provider.requests[-1]
-        assert "same-agent persistent note" in str(final_request["messages"])
-        assert "standard history sentinel" in str(final_request["messages"])
-        assert any(tool["function"]["name"] == "read_file" for tool in final_request["tools"])
-        assert len(storage.get_session(runtime.session_id).runs) == 3
+        assert "same-agent persistent note" in str(final_request.messages)
+        assert "standard history sentinel" in str(final_request.messages)
+        assert "read_file" in offered_tools(final_request)
+        assert len(storage.load_session(runtime.session_id, "agent").runs) == 3
         results["steps"].append("standard mode reads identical workspace note and prior history")
         # The standard parent runs a minimal copy of itself, which uses the real CLI in the same ordinary worker.
         provider.steps = [
@@ -480,19 +479,14 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         result = await respond("Delegate a minimal copy of yourself")
         assert "parent after minimal child" in str(result), result
         parent_request, child_first, child_second, parent_final = provider.requests[-4:]
-        run_subagent = next(
-            tool["function"] for tool in parent_request["tools"] if tool["function"]["name"] == "run_subagent"
-        )
-        assert "Subagents that support minimal mode: helper." in run_subagent["description"]
-        assert "minimal" in run_subagent["parameters"]["properties"]
-        assert all(
-            [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
-            for request in (child_first, child_second)
-        )
-        listing = next(str(message["content"]) for message in child_second["messages"] if message["role"] == "tool")
+        run_subagent = next(tool for tool in parent_request.tools if tool.name == "run_subagent")
+        assert "Subagents that support minimal mode: helper." in str(run_subagent.description)
+        assert "minimal" in run_subagent.parameters["properties"]
+        assert all(offered_tools(request) == ["bash"] for request in (child_first, child_second))
+        listing = next(message.get_content_string() for message in child_second.messages if message.role == "tool")
         assert "integration" in listing, listing
         assert "approved" not in listing, listing
-        assert "minimal child done" in str(parent_final["messages"])
+        assert "minimal child done" in str(parent_final.messages)
         results["steps"].append(
             "minimal subagent: Bash-only child lists tools through the agent's worker without gated ones",
         )
@@ -500,7 +494,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         audit.capture(
             "history",
             runtime.session_id,
-            json.dumps(storage.get_session(runtime.session_id).to_dict(), default=str),
+            json.dumps([run.to_dict() for run in storage.load_session(runtime.session_id, "agent").runs], default=str),
         )
         results["requests"] = len(provider.requests)
     except BaseException as exc:

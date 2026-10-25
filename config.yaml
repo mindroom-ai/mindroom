@@ -11,8 +11,6 @@ agents:
     - Provide clear explanations of MindRoom features and capabilities
     - Test agent configurations when requested
     - Help users understand how agents, teams, and tools work together
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Expert MindRoom agent builder that helps create and configure custom AI
       agents with deep knowledge of the system
@@ -31,8 +29,6 @@ agents:
     - Provide structured insights.
     - Consider multiple perspectives.
     - Make evidence-based recommendations.
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Provide analytical insights and recommendations.
     rooms:
@@ -47,8 +43,6 @@ agents:
     - Show your work step by step.
     - Explain the mathematical concepts when helpful.
     - Double-check calculations for accuracy.
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Solve mathematical problems.
     rooms:
@@ -68,8 +62,6 @@ agents:
     - Handle phone numbers in international format when possible
     - Be concise and clear in SMS messages due to character limits
     - For calls, prepare a brief script of what will be communicated
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Manage phone calls and SMS messages through Twilio integration.
     rooms:
@@ -90,8 +82,6 @@ agents:
     - Be careful with shell commands - explain what they do
     - Always read files before modifying them
     - Follow the project's existing style and conventions
-    learning: true
-    learning_mode: always
     model: opus
     role: Generate code, manage files, and execute shell commands.
     rooms:
@@ -111,8 +101,6 @@ agents:
     - Identify patterns and trends in data.
     - Provide actionable insights and recommendations.
     - Handle missing or inconsistent data appropriately.
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Analyze data, create visualizations, and provide insights.
     rooms:
@@ -138,8 +126,6 @@ agents:
     - Respect privacy - only access emails when specifically requested
     - When summarizing, focus on sender, subject, and key points
     - For email drafts, maintain appropriate tone and formality based on context
-    learning: true
-    learning_mode: always
     # A workspace gives file and gmail attachments a place to work under the default file_access: workspace.
     memory_backend: file
     model: sol
@@ -162,8 +148,6 @@ agents:
     - Explain financial concepts clearly.
     - Include relevant disclaimers about investment advice.
     - Present data in a clear, organized format.
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Analyze financial data, stock information, and perform calculations.
     rooms:
@@ -182,8 +166,6 @@ agents:
     - Remember context from the conversation.
     - Be conversational and friendly.
     - Ask clarifying questions when needed.
-    learning: true
-    learning_mode: always
     model: sonnet
     role: A general-purpose assistant that provides helpful, conversational responses
       to users.
@@ -204,8 +186,6 @@ agents:
     - List available devices when asked about what you can control
     - Provide clear status updates after performing actions
     - Group related actions together for efficiency
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Control and monitor smart home devices through Home Assistant
     rooms:
@@ -224,8 +204,6 @@ agents:
     - Include publication dates and sources.
     - Distinguish between news and opinion pieces.
     - Highlight key developments and their significance.
-    learning: true
-    learning_mode: always
     model: nemotron
     role: Gather and summarize news and current events.
     rooms:
@@ -272,7 +250,6 @@ agents:
       or preferences, use search_memories to search memory files. Do not guess
       from incomplete context; search first.
     include_default_tools: false
-    learning: false
     memory_backend: file
     context_files:
     - SOUL.md
@@ -307,8 +284,6 @@ agents:
     - Distinguish between facts and opinions.
     - Provide balanced viewpoints on controversial topics.
     - Summarize findings in a clear, organized manner.
-    learning: true
-    learning_mode: always
     model: sol
     role: Conduct research using web sources, Wikipedia, and academic papers.
     rooms:
@@ -328,8 +303,6 @@ agents:
     - Provide security best practices.
     - Identify potential vulnerabilities.
     - Suggest mitigation strategies.
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Analyze security aspects and provide recommendations.
     rooms:
@@ -346,8 +319,6 @@ agents:
     - Provide clear output and error messages.
     - Suggest safer alternatives when appropriate.
     - Remember the user's working directory context.
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Execute shell commands and manage system operations.
     rooms:
@@ -381,8 +352,6 @@ agents:
     - Gebruik Nederlandse uitdrukkingen en culturele elementen die geschikt zijn voor
       Nederlandse kinderen
     - Maak de verhalen warm, gezellig en vertrouwd voor Nederlandse gezinnen
-    learning: true
-    learning_mode: always
     markdown: true
     model: sonnet
     role: Je bent Sleepy Paws, een magische verhalenverteller die zachte dierenaventuren
@@ -403,8 +372,6 @@ agents:
     - Use bullet points for clarity when appropriate.
     - Indicate the level of detail in your summary.
     - Preserve important quotes or specific data points.
-    learning: true
-    learning_mode: always
     model: sonnet
     role: Summarize long texts and extract key information.
     rooms:
@@ -426,8 +393,6 @@ mindroom_user:
   username: mindroom_user
 defaults:
   enable_streaming: true
-  learning: true
-  learning_mode: always
   markdown: true
   show_stop_button: true
 memory:

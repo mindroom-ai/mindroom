@@ -1,4 +1,4 @@
-"""Paused Agno runs owned by their exact pending journal events."""
+"""Paused runs owned by their exact pending journal events."""
 
 from __future__ import annotations
 
@@ -175,7 +175,7 @@ def _origin_from_dict(stored: Mapping[str, object]) -> TurnOrigin:
 
 @dataclass(frozen=True, slots=True)
 class ApprovalContinuation:
-    """The MindRoom context required to continue one persisted Agno pause."""
+    """The MindRoom context required to continue one persisted pause."""
 
     approval_id: str
     run_id: str
@@ -611,7 +611,7 @@ def claim(transaction: Transaction, principal_id: str, *, approval_id: str, span
 
 @dataclass(frozen=True, slots=True)
 class ApprovalAdvance:
-    """One claimed generation's next exact Agno pause."""
+    """One claimed generation's next exact pause."""
 
     approval_id: str
     claimant_generation: int
@@ -624,7 +624,7 @@ class ApprovalAdvance:
     continuation_count: int | None = None
 
     def apply(self, transaction: Transaction, principal_id: str) -> ApprovalContinuation | None:
-        """Replace the claimed generation with this next exact Agno pause."""
+        """Replace the claimed generation with this next exact pause."""
         current = get(transaction, principal_id, approval_id=self.approval_id)
         if current is None:
             return None

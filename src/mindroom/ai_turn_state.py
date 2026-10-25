@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from agno.run.base import RunStatus
+from mindroom.llm.runs import RunStatus
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

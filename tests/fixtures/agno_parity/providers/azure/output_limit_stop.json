@@ -1,0 +1,109 @@
+{
+  "family": "azure",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "extra_kwargs": {
+        "azure_deployment": "parity-deployment",
+        "azure_endpoint": "https://parity-resource.openai.azure.com"
+      },
+      "id": "gpt-6-astra",
+      "provider": "azure"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": false,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "Pack a light rain jacket and",
+      "from_history": false,
+      "provider_data": {
+        "finish_reason": "length",
+        "id": "chatcmpl-parity",
+        "mindroom_model": {
+          "id": "gpt-6-astra",
+          "provider": "Azure"
+        },
+        "system_fingerprint": "fp_parity"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 8,
+      "total_tokens": 50
+    },
+    "stop_reason": "length"
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
+        }
+      ],
+      "model": "gpt-6-astra"
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://parity-resource.openai.azure.com/openai/deployments/parity-deployment/chat/completions?api-version=2024-10-21"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "message": {
+            "content": "Pack a light rain jacket and",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1792540800,
+      "id": "chatcmpl-parity",
+      "model": "gpt-6-astra",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_parity",
+      "usage": {
+        "completion_tokens": 8,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 42,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 50
+      }
+    },
+    "status": 200
+  },
+  "scenario": "output_limit_stop"
+}

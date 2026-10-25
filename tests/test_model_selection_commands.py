@@ -21,7 +21,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
-from mindroom.teams import TeamTurnModelSelection, resolve_team_turn_models
+from mindroom.teams.members import TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.thread_models import resolve_thread_model_override, set_thread_model_override
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context

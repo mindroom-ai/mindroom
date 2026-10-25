@@ -2,26 +2,21 @@
 
 from __future__ import annotations
 
-__all__ = ["CliTurnLifetime", "cli_control_executions", "current_cli_lifetime", "response_cli_lifetime"]
+__all__ = ["CliTurnLifetime", "cli_control_calls", "current_cli_lifetime", "response_cli_lifetime"]
 
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
-from mindroom.agent_cli.agno_compat_cli_checkpoint import checkpoint_resolver
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
-    from agno.agent import Agent
-    from agno.models.response import ToolExecution
-    from agno.tools.function import Function
-
-    from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_cli.turn import LiveTurnTools
+    from mindroom.llm.events import ReportedCall
 
 _CURRENT: ContextVar[CliTurnLifetime | None] = ContextVar("cli_turn_lifetime", default=None)
 
@@ -33,7 +28,6 @@ class CliTurnLifetime:
         self.owner: LiveTurnTools | None = None
         self.grant_expires_at_ns: int | None = None
         self.continuation_count = 0
-        self._provider: tuple[ProviderBatchCheckpoint, Function] | None = None
         self._response_task = asyncio.current_task()
         self._registry: TurnToolRegistry | None = None
         self._closed = False
@@ -43,20 +37,9 @@ class CliTurnLifetime:
         """Bind only within a pull or close, never across a public stream yield."""
         token = _CURRENT.set(self)
         try:
-            with checkpoint_resolver(lambda: self._provider):
-                yield
+            yield
         finally:
             _CURRENT.reset(token)
-
-    def bind_provider(self, checkpoint: ProviderBatchCheckpoint, function: Function) -> None:
-        """Publish the actual prepared facade to the already-bound lazy stream."""
-        checkpoint.prepare_capture()
-        self._provider = checkpoint, function
-
-    def _clear_provider(self) -> None:
-        if self._provider is not None:
-            self._provider[0].clear()
-            self._provider = None
 
     def register(self, owner: LiveTurnTools, registry: TurnToolRegistry) -> None:
         """Accept an explicit orchestrator registry, never an ambient authority."""
@@ -69,19 +52,15 @@ class CliTurnLifetime:
         self._registry = registry
 
     async def retire_attempt(self) -> None:
-        """Retain queue and grant while the response driver rebuilds its Agent."""
-        self._clear_provider()
+        """Retain queue and grant while the response driver builds its next attempt."""
         if self.owner is not None:
             await self.owner.retire_binding()
 
     async def close(self) -> None:
         """Close the response's owner, or leave that to its last background job, which may still run CLI calls."""
         self._closed = True
-        try:
-            if self.owner is None or not defer_execution_cleanup(self._close_owner, resource=self):
-                await self._close_owner()
-        finally:
-            self._clear_provider()
+        if self.owner is None or not defer_execution_cleanup(self._close_owner, resource=self):
+            await self._close_owner()
 
     async def _close_owner(self) -> None:
         """Finish hooks/catalog, then forget the response's owner and task."""
@@ -98,7 +77,7 @@ class CliTurnLifetime:
 
 
 def current_cli_lifetime() -> CliTurnLifetime | None:
-    """Return the response's registration scope to its normal Agent builder."""
+    """Return the response's registration scope to the attempt that binds its CLI."""
     return _CURRENT.get()
 
 
@@ -113,10 +92,10 @@ async def response_cli_lifetime() -> AsyncIterator[CliTurnLifetime]:
             await lifetime.close()
 
 
-def cli_control_executions(agent: Agent) -> tuple[ToolExecution, ...]:
-    """Read trusted attempt controls only for this exact live Agent."""
+def cli_control_calls(run_id: str) -> tuple[ReportedCall, ...]:
+    """Read trusted attempt controls only for the catalog of run ``run_id``."""
     lifetime = current_cli_lifetime()
     owner = lifetime.owner if lifetime is not None else None
-    if owner is None or owner.catalog.agent is not agent:
+    if owner is None or owner.catalog.run.run_id != run_id:
         return ()
-    return tuple(owner.control_executions)
+    return tuple(owner.control_calls)

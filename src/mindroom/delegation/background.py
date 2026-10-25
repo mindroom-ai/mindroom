@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.records import DelegationTerminalStatus
+    from mindroom.delegation.state import DelegationTerminalStatus
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -51,13 +51,9 @@ async def delegation_result(runtime: ToolJobRuntime, job: BackgroundJob) -> str 
 
 def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
     # Metadata-only reconstruction still needs the durable native outcome.
-    if child.result is None:
+    if child.result is None or child.status not in TERMINAL_CHILD_STATUSES:
         return None
-    match child.status:
-        case "completed" | "failed" | "cancelled" | "denied" as status:
-            return delegation_outcome(status, child.result)
-        case _:
-            return None
+    return delegation_outcome(cast("DelegationTerminalStatus", child.status), child.result)
 
 
 async def reconcile_delegation(

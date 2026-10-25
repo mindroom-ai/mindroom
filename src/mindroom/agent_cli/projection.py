@@ -8,9 +8,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from agno.media import File
-
 from mindroom.attachments.storage import register_local_attachment
+from mindroom.llm.media import File
 from mindroom.tool_system.output_files import (
     ToolOutputFileRequest,
     finalize_tool_output_file,
@@ -18,10 +17,9 @@ from mindroom.tool_system.output_files import (
 )
 
 if TYPE_CHECKING:
-    from agno.models.response import ModelResponse
-
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolValue
 
 
 # Budget encoded JSON: control characters can expand sixfold on the wire.
@@ -71,13 +69,13 @@ def project_cli_result(result: object, policy: ToolOutputFilePolicy | None, tool
 
 
 def register_cli_media(
-    response: ModelResponse,
+    response: ToolValue,
     *,
     context: ToolRuntimeContext,
     policy: ToolOutputFilePolicy | None,
     call_id: str,
 ) -> list[dict[str, object]]:
-    """Retain scoped local references while leaving Agno's media objects intact."""
+    """Retain scoped local references while leaving the call's media objects intact."""
     references: list[dict[str, object]] = []
     for kind, items in (
         ("image", response.images),
@@ -85,7 +83,7 @@ def register_cli_media(
         ("video", response.videos),
         ("file", response.files),
     ):
-        for item in items or []:
+        for item in items:
             reference: dict[str, object] = {"kind": kind, "mime_type": item.mime_type}
             if item.url:
                 reference["url"] = item.url

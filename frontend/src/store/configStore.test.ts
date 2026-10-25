@@ -364,8 +364,6 @@ describe("configStore", () => {
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe("test");
       expect(state.agents[0].display_name).toBe("Test Agent");
-      expect(state.agents[0].learning).toBe(true);
-      expect(state.agents[0].learning_mode).toBe("always");
       expect(state.agentPoliciesByAgent).toEqual({
         test: makeAgentPolicy("test"),
       });
@@ -552,49 +550,6 @@ describe("configStore", () => {
       expect(state.config?.defaults?.tools).toEqual(["gmail", "file"]);
     });
 
-    it("should apply global learning defaults when agent settings are omitted", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        defaults: {
-          learning: false,
-          learning_mode: "agentic",
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      const { loadConfig } = useConfigStore.getState();
-      await loadConfig();
-
-      const state = useConfigStore.getState();
-      expect(state.agents[0].learning).toBe(false);
-      expect(state.agents[0].learning_mode).toBe("agentic");
-    });
-
     describe("agents and teams that omit defaulted fields", () => {
       const authoredAgent = { display_name: "Test Agent" };
       const authoredTeam = {
@@ -661,8 +616,6 @@ describe("configStore", () => {
             knowledge_bases: [],
             delegate_to: [],
             context_files: [],
-            learning: true,
-            learning_mode: "always",
           },
         ]);
         expect(state.teams).toEqual([
@@ -677,7 +630,6 @@ describe("configStore", () => {
         useConfigStore.getState().updateAgent("test", {
           role: "Edited role",
           instructions: ["Be brief"],
-          learning: false,
         });
         useConfigStore.getState().updateTeam("ops", { mode: "collaborate" });
 
@@ -686,7 +638,6 @@ describe("configStore", () => {
           ...authoredAgent,
           role: "Edited role",
           instructions: ["Be brief"],
-          learning: false,
         });
         expect(payload.teams.ops).toEqual({
           ...authoredTeam,
@@ -714,8 +665,6 @@ describe("configStore", () => {
           knowledge_bases: [],
           delegate_to: [],
           context_files: [],
-          learning: true,
-          learning_mode: "always",
         };
         const team = { ...authoredTeam, rooms: [], mode: "coordinate" };
         await loadAuthored({ agent, team });
@@ -729,14 +678,6 @@ describe("configStore", () => {
       });
 
       it.each([
-        {
-          edits: "learning turned off and on again",
-          edit: () => {
-            useConfigStore.getState().updateAgent("test", { learning: false });
-            useConfigStore.getState().updateAgent("test", { learning: true });
-          },
-          agent: { learning: true },
-        },
         {
           edits: "an instruction added and removed again",
           edit: () => {
@@ -767,48 +708,11 @@ describe("configStore", () => {
         expect(payload.teams.ops).toEqual({ ...authoredTeam, ...team });
       });
 
-      it("keeps learning set on an agent after the global default changes", async () => {
-        await loadAuthored();
-
-        useConfigStore
-          .getState()
-          .updateConfigValue(["defaults", "learning"], false);
-        useConfigStore.getState().updateAgent("test", { learning: true });
-
-        const payload = await savedPayload();
-        expect(payload.defaults.learning).toBe(false);
-        expect(payload.agents.test).toEqual({
-          ...authoredAgent,
-          learning: true,
-        });
-      });
-
-      it("lets an edited agent keep inheriting non-default global learning", async () => {
-        await loadAuthored({
-          defaults: {
-            markdown: true,
-            learning: false,
-            learning_mode: "agentic",
-          },
-        });
-        expect(useConfigStore.getState().agents[0]).toMatchObject({
-          learning: false,
-          learning_mode: "agentic",
-        });
-
-        useConfigStore.getState().updateAgent("test", { role: "Edited role" });
-
-        expect((await savedPayload()).agents.test).toEqual({
-          ...authoredAgent,
-          role: "Edited role",
-        });
-      });
-
       it("keeps untouched fields omitted after a reload during edits", async () => {
         await loadAuthored();
         useConfigStore.getState().updateAgent("test", { role: "Edited role" });
 
-        await loadAuthored({ defaults: { markdown: true, learning: false } });
+        await loadAuthored({ defaults: { markdown: false } });
 
         expect((await savedPayload()).agents.test).toEqual({
           ...authoredAgent,
@@ -818,9 +722,6 @@ describe("configStore", () => {
 
       it("keeps untouched fields omitted after an edit during a save", async () => {
         await loadAuthored();
-        useConfigStore
-          .getState()
-          .updateConfigValue(["defaults", "learning"], false);
         useConfigStore.getState().updateAgent("test", { role: "First edit" });
         const response = deferred<Response>();
         vi.mocked(fetch).mockReturnValueOnce(response.promise);
@@ -839,11 +740,11 @@ describe("configStore", () => {
 
       it("treats an authored null like an omitted field", async () => {
         await loadAuthored({
-          agent: { ...authoredAgent, learning: null, learning_mode: null },
+          agent: { ...authoredAgent, instructions: null, rooms: null },
         });
         expect(useConfigStore.getState().agents[0]).toMatchObject({
-          learning: true,
-          learning_mode: "always",
+          instructions: [],
+          rooms: [],
         });
 
         useConfigStore.getState().updateAgent("test", { role: "Edited role" });
@@ -853,86 +754,6 @@ describe("configStore", () => {
           role: "Edited role",
         });
       });
-    });
-
-    it("should preserve explicit learning=false from configuration", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-            learning: false,
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      const { loadConfig } = useConfigStore.getState();
-      await loadConfig();
-
-      const state = useConfigStore.getState();
-      expect(state.agents[0].learning).toBe(false);
-      expect(state.agents[0].learning_mode).toBe("always");
-    });
-
-    it("should preserve explicit learning_mode from configuration", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-            learning: true,
-            learning_mode: "agentic",
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      const { loadConfig } = useConfigStore.getState();
-      await loadConfig();
-
-      const state = useConfigStore.getState();
-      expect(state.agents[0].learning_mode).toBe("agentic");
     });
 
     it("should preserve private agent configuration from the backend", async () => {
@@ -1470,8 +1291,6 @@ describe("configStore", () => {
             skills: [],
             instructions: [],
             rooms: [],
-            learning: true,
-            learning_mode: "always",
           },
         ],
       });
@@ -1880,8 +1699,6 @@ describe("configStore", () => {
             skills: [],
             instructions: [],
             rooms: ["lobby"],
-            learning: true,
-            learning_mode: "always",
           },
         ],
         agentPoliciesByAgent: {
@@ -1938,8 +1755,6 @@ describe("configStore", () => {
           knowledge_bases: [],
           delegate_to: [],
           context_files: [],
-          learning: true,
-          learning_mode: "always",
         },
       ]);
       expect(state.agentPoliciesByAgent).toEqual({});
@@ -3257,8 +3072,6 @@ describe("configStore", () => {
                 knowledge_bases: [],
                 delegate_to: [],
                 context_files: [],
-                learning: true,
-                learning_mode: "always",
               },
             },
           }),
@@ -3950,47 +3763,8 @@ describe("configStore", () => {
       expect(state.agents).toHaveLength(3);
       const newAgent = state.agents[2];
       expect(newAgent.display_name).toBe("New Agent");
-      expect(newAgent.learning).toBe(true);
-      expect(newAgent.learning_mode).toBe("always");
       expect(state.selectedAgentId).toBe(newAgent.id);
       expect(state.isDirty).toBe(true);
-    });
-
-    it("should create new agent with learning values from global defaults", () => {
-      const newAgentData = {
-        display_name: "New Agent",
-        role: "New role",
-        tools: [],
-        skills: [],
-        instructions: [],
-        rooms: [],
-      };
-      useConfigStore.setState({
-        config: {
-          memory: {
-            embedder: {
-              provider: "openai",
-              config: { model: "text-embedding-3-small" },
-            },
-          },
-          models: {},
-          agents: {},
-          defaults: {
-            markdown: true,
-            learning: false,
-            learning_mode: "agentic",
-          },
-          router: { model: "default" },
-        },
-      });
-
-      const { createAgent } = useConfigStore.getState();
-      createAgent(newAgentData);
-
-      const state = useConfigStore.getState();
-      const newAgent = state.agents[state.agents.length - 1];
-      expect(newAgent?.learning).toBe(false);
-      expect(newAgent?.learning_mode).toBe("agentic");
     });
 
     it("refreshes agent policies when creating a standard shared agent", async () => {

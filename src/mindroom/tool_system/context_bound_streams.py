@@ -22,7 +22,7 @@ class _AsyncClosableIterator(Protocol):
         """Close the async iterator and release any underlying resources."""
 
 
-async def close_async_stream(
+async def _close_async_stream(
     stream: AsyncIterator[object] | None,
     *,
     context_factory: Callable[[], AbstractContextManager[object]] = nullcontext,
@@ -39,7 +39,7 @@ async def closing_async_stream(stream: AsyncIterator[object]) -> AsyncIterator[N
     try:
         yield
     finally:
-        await close_async_stream(stream)
+        await _close_async_stream(stream)
 
 
 def context_bound_async_stream[ChunkT](
@@ -62,7 +62,7 @@ def context_bound_async_stream[ChunkT](
                     return
                 yield chunk
         finally:
-            await close_async_stream(stream, context_factory=context_factory)
+            await _close_async_stream(stream, context_factory=context_factory)
 
     return wrapped_stream()
 

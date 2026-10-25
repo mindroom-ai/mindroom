@@ -112,13 +112,8 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team non-streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
     team_agents = _team_agents(bot)
-    response_run_id: str | None = None
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
-        nonlocal response_run_id
-        assert isinstance(kwargs["run_id"], str)
-        assert kwargs["run_id"]
-        response_run_id = kwargs["run_id"]
         response_function = kwargs["response_function"]
         await response_function(None)
 
@@ -126,7 +121,8 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
         assert get_tool_runtime_context() is not None
         assert _kwargs["ctx"].session_id == "!team:localhost:$thread_root"
         assert _kwargs["user_id"] == "@user:localhost"
-        assert _kwargs["ctx"].run_id == response_run_id
+        assert isinstance(_kwargs["ctx"].run_id, str)
+        assert _kwargs["ctx"].run_id
         return "team non-streaming response"
 
     with (
@@ -243,13 +239,8 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
     team_agents = _team_agents(bot)
-    response_run_id: str | None = None
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
-        nonlocal response_run_id
-        assert isinstance(kwargs["run_id"], str)
-        assert kwargs["run_id"]
-        response_run_id = kwargs["run_id"]
         response_function = kwargs["response_function"]
         await response_function(None)
 
@@ -267,7 +258,8 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         assert get_tool_runtime_context() is not None
         assert _kwargs["ctx"].session_id == "!team:localhost:$thread_root"
         assert _kwargs["user_id"] == "@user:localhost"
-        assert _kwargs["ctx"].run_id == response_run_id
+        assert isinstance(_kwargs["ctx"].run_id, str)
+        assert _kwargs["ctx"].run_id
         yield "stream chunk"
 
     with (

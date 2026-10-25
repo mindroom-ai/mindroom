@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
-from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import (
     platform_administrator_error,
     preserve_tool_overrides,
@@ -84,8 +83,6 @@ class SelfConfigTools(Toolkit):
         model: str | None = None,
         rooms: list[str] | None = None,
         markdown: bool | None = None,
-        learning: bool | None = None,
-        learning_mode: AgentLearningMode | None = None,
         knowledge_bases: list[str] | None = None,
         skills: list[str] | None = None,
         include_default_tools: bool | None = None,
@@ -93,7 +90,6 @@ class SelfConfigTools(Toolkit):
         thread_mode: Literal["thread", "room"] | None = None,
         num_history_runs: int | None = None,
         num_history_messages: int | None = None,
-        compress_tool_results: bool | None = None,
         max_tool_calls_from_history: int | None = None,
         context_files: list[str] | None = None,
     ) -> str:
@@ -107,8 +103,6 @@ class SelfConfigTools(Toolkit):
             model: Model name to use
             rooms: List of room names to auto-join
             markdown: Whether to use markdown formatting
-            learning: Whether to enable Agno Learning
-            learning_mode: Learning mode ("always" or "agentic")
             knowledge_bases: List of knowledge base IDs
             skills: List of skill names
             include_default_tools: Whether to merge defaults.tools
@@ -116,7 +110,6 @@ class SelfConfigTools(Toolkit):
             thread_mode: Conversation threading mode ("thread" or "room")
             num_history_runs: Number of prior runs to include as history
             num_history_messages: Max messages from history
-            compress_tool_results: Compress tool results in history (disabled by default because it can invalidate Anthropic/Vertex Claude prompt caches)
             max_tool_calls_from_history: Max tool call messages replayed from history
             context_files: Workspace-relative file paths loaded into each freshly built agent instance
 
@@ -183,8 +176,6 @@ class SelfConfigTools(Toolkit):
             ("model", model),
             ("rooms", rooms),
             ("markdown", markdown),
-            ("learning", learning),
-            ("learning_mode", learning_mode),
             ("knowledge_bases", knowledge_bases),
             ("skills", skills),
             ("include_default_tools", include_default_tools),
@@ -192,7 +183,6 @@ class SelfConfigTools(Toolkit):
             ("thread_mode", thread_mode),
             ("num_history_runs", num_history_runs),
             ("num_history_messages", num_history_messages),
-            ("compress_tool_results", compress_tool_results),
             ("max_tool_calls_from_history", max_tool_calls_from_history),
             ("context_files", context_files),
         ]

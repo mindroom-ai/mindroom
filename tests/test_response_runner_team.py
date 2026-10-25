@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.run.team import TeamRunOutput
-from agno.session.team import TeamSession
-from agno.team import Team as AgnoTeam
 
 from mindroom import reply_lifecycle as rl
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.models import ModelConfig, ModelPricing
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.conversation_resolver import ConversationResolver
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
@@ -34,15 +31,17 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.room_model_overrides import set_room_model_override
-from mindroom.session_storage.agent_storage import get_team_session
-from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.turn_policy import _ResponderAvailability
 from tests.bot_helpers import (
@@ -69,24 +68,80 @@ from tests.conftest import (
     message_origin,
     patch_response_runner_module,
     replace_delivery_gateway_deps,
+    replace_response_runner_deps,
     request_envelope,
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.response_runner_helpers import _PersistenceSeamProbe
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
+    from collections.abc import AsyncGenerator, Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import (
         RuntimePaths,
     )
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.matrix.conversation_reads import DeliveredResponse
     from mindroom.matrix.users import AgentMatrixUser
+
+
+@dataclass(frozen=True)
+class _RecordedPostResponseEffects(PostResponseEffectsSupport):
+    """Post-response support that records the thread-summary handoff and runs no other effect."""
+
+    summary_checks: list[tuple[str, str, int | None]] = field(default_factory=list)
+    queued_summaries: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def build_deps(
+        self,
+        *,
+        room_id: str,
+        membership_turn_id: str,
+        queue_memory_persistence: Callable[[], None] | None = None,
+        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
+        notify_response_finished: Callable[[], None] | None = None,
+        persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> PostResponseEffectsDeps:
+        del room_id, membership_turn_id, queue_memory_persistence, queue_skill_review, notify_response_finished
+        del persist_response_event_id
+
+        def should_queue_thread_summary(room_id: str, thread_id: str, message_count_hint: int | None) -> bool:
+            self.summary_checks.append((room_id, thread_id, message_count_hint))
+            return True
+
+        def queue_thread_summary(
+            room_id: str,
+            thread_id: str,
+            _entity_name: str | None,
+            delivered_response: DeliveredResponse,
+        ) -> None:
+            self.queued_summaries.append((room_id, thread_id, delivered_response.event_id))
+
+        return PostResponseEffectsDeps(
+            logger=self.logger,
+            should_queue_thread_summary=should_queue_thread_summary,
+            queue_thread_summary=queue_thread_summary,
+        )
+
+
+def _record_post_response_effects(bot: AgentBot) -> _RecordedPostResponseEffects:
+    """Install the recording post-response support on the bot's response runner."""
+    support = unwrap_extracted_collaborator(bot._response_runner).deps.post_response_effects
+    recorded = _RecordedPostResponseEffects(
+        runtime=support.runtime,
+        logger=support.logger,
+        runtime_paths=support.runtime_paths,
+        conversation_reader=support.conversation_reader,
+        membership=support.membership,
+        agent_name=support.agent_name,
+    )
+    replace_response_runner_deps(bot, post_response_effects=recorded)
+    return recorded
 
 
 @pytest.fixture
@@ -97,139 +152,6 @@ def mock_agent_user() -> AgentMatrixUser:
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
-
-    @pytest.mark.asyncio
-    async def test_team_finalization_persists_response_link_behind_pending_save(  # noqa: PLR0915
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Team finalization must join the scoped SQLite save lane and close its handle."""
-        config = _configured_team_test_config(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        matrix_ids = entity_ids(config, runtime_paths)
-        team_agents = [matrix_ids["general"]]
-        bot = make_test_team_bot(
-            _configured_team_user(config, runtime_paths),
-            tmp_path,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        install_direct_response_admission(bot)
-        _wrap_extracted_collaborators(bot)
-        bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        runner = unwrap_extracted_collaborator(bot._response_runner)
-        request = ResponseRequest(
-            sources=ResponseSources(
-                pending_event_ids=("$source",),
-                logical_source_event_ids=("$source",),
-            ),
-            thread_history=[],
-            user_id="@user:localhost",
-            prompt="team prompt",
-            response_envelope=request_envelope(
-                room_id="!test:localhost",
-                reply_to_event_id="$source",
-                prompt="team prompt",
-                user_id="@user:localhost",
-                agent_name=bot.agent_name,
-            ),
-        )
-        target = request.response_envelope.target
-        execution_identity = runner.deps.tool_runtime.build_execution_identity(
-            target=target,
-            user_id=request.user_id,
-        )
-        session_scope = runner.deps.state_writer.team_history_scope(
-            team_agents,
-            requester_user_id=execution_identity.requester_id,
-        )
-        original_create_storage = runner.deps.state_writer.create_storage
-        save_storage = original_create_storage(execution_identity, scope=session_scope)
-        probe = _PersistenceSeamProbe(save_storage, original_create_storage)
-        save_task: asyncio.Task[None] | None = None
-
-        async def persist_session_before_delivery(*_args: object, **kwargs: object) -> str:
-            nonlocal save_task
-            run_id = "team-run"
-            cast("Callable[[str], None]", kwargs["run_id_callback"])(run_id)
-            cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
-            owner = AgnoTeam(db=save_storage, members=[], telemetry=False)
-            session = TeamSession(
-                session_id=target.session_id,
-                team_id=session_scope.scope_id,
-                session_data={"session_state": {"durable": "kept"}},
-                created_at=1,
-                updated_at=1,
-                runs=[
-                    TeamRunOutput(
-                        run_id=run_id,
-                        team_id=session_scope.scope_id,
-                        session_id=target.session_id,
-                        metadata={"preserved": True},
-                    ),
-                ],
-            )
-            # The run row the link lands on exists before the contended session save starts.
-            probe.seed(save_storage, session)
-            save_task = asyncio.create_task(owner.asave_session(session))
-            assert await asyncio.to_thread(probe.save_started.wait, 5)
-            probe.arm_link_storage()
-            return "Team answer"
-
-        response_task: asyncio.Task[str | None] | None = None
-        persisted: TeamSession | None = None
-        try:
-            with (
-                patch.object(save_storage, "upsert_session", new=probe.blocked_upsert),
-                patch.object(runner.deps.state_writer, "create_storage", new=probe.create_storage),
-                patch(
-                    "mindroom.delivery_gateway.send_message_outcome",
-                    new=AsyncMock(side_effect=delivered_matrix_side_effect("$answer")),
-                ),
-                patch_response_runner_module(
-                    typing_indicator=_noop_typing_indicator,
-                    should_use_streaming=AsyncMock(return_value=False),
-                    team_response=AsyncMock(side_effect=persist_session_before_delivery),
-                ),
-            ):
-                response_task = asyncio.create_task(
-                    runner.generate_team_response_helper(
-                        request,
-                        team_agents=team_agents,
-                        team_mode="coordinate",
-                    ),
-                )
-                assert await asyncio.to_thread(probe.link_storage_created.wait, 5)
-                assert not response_task.done()
-                assert not probe.link_storage_closed.is_set()
-                probe.release_save.set()
-                assert await asyncio.wait_for(response_task, timeout=5) == "$answer"
-        finally:
-            probe.release_save.set()
-            await asyncio.gather(
-                *([response_task] if response_task is not None else []),
-                *([save_task] if save_task is not None else []),
-                return_exceptions=True,
-            )
-            try:
-                persisted = get_team_session(save_storage, target.session_id)
-            finally:
-                save_storage.close()
-
-        assert persisted is not None
-        assert persisted.session_data == {"session_state": {"durable": "kept"}}
-        assert persisted.runs is not None
-        assert len(persisted.runs) == 1
-        assert persisted.runs[0].metadata == {
-            "preserved": True,
-            MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer",
-        }
-        assert probe.link_storage_closed.is_set()
 
     @pytest.mark.asyncio
     async def test_team_model_snapshot_precedes_locked_turn_preparation(
@@ -996,11 +918,11 @@ class TestAgentBot(AgentBotTestBase):
         assert result == "$reject"
 
     @pytest.mark.asyncio
-    async def test_team_generate_response_uses_shared_thread_summary_helper_for_summary_gate(
+    async def test_team_generate_response_sizes_the_summary_gate_by_the_refreshed_thread(
         self,
         tmp_path: Path,
     ) -> None:
-        """Team replies should reuse the shared thread-summary helper for summary gating."""
+        """A team reply hands the summary gate the size of the thread it refreshed under the lock, counting itself."""
         thread_history = [
             _visible_message(
                 sender=f"@user{i}:localhost",
@@ -1010,55 +932,40 @@ class TestAgentBot(AgentBotTestBase):
             )
             for i in range(4)
         ]
+        refreshed_history = ThreadHistoryResult(thread_history, is_full_history=True)
+
+        async def fake_team_response(*_args: object, **kwargs: object) -> str:
+            cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
+            return "Team reply"
 
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        team_member = entity_ids(config, runtime_paths)["general"]
         bot = make_test_team_bot(
             _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
         )
-        _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$team-response")
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
             runtime_paths=runtime_paths,
         )
-
-        resolution = TeamResolution(
-            intent=TeamIntent.EXPLICIT_MEMBERS,
-            requested_members=[team_member],
-            member_statuses=[
-                TeamResolutionMember(
-                    agent=team_member,
-                    name="general",
-                    status=TeamMemberStatus.ELIGIBLE,
-                ),
-            ],
-            eligible_members=[team_member],
-            outcome=TeamOutcome.TEAM,
-            mode=TeamMode.COORDINATE,
-        )
+        effects = _record_post_response_effects(bot)
 
         with (
-            patch.object(
-                bot._turn_policy,
-                "responder_availability",
-                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=False),
+                typing_indicator=_noop_typing_indicator,
+                team_response=fake_team_response,
             ),
-            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(
-                bot._response_runner,
-                "generate_team_response_helper",
-                new=AsyncMock(return_value="$response"),
+                ConversationResolver,
+                "fetch_thread_history",
+                new=AsyncMock(return_value=refreshed_history),
             ),
-            patch(
-                "mindroom.post_response_effects.maybe_generate_thread_summary",
-                new_callable=AsyncMock,
-            ) as mock_thread_summary,
         ):
             await bot._run_regenerated_response(
                 ResponseRequest(
@@ -1067,7 +974,8 @@ class TestAgentBot(AgentBotTestBase):
                         logical_source_event_ids=("$event",),
                     ),
                     prompt="Team, summarize this thread",
-                    thread_history=thread_history,
+                    # The ingress history is older than the thread the turn reads once it holds the lock.
+                    thread_history=thread_history[:2],
                     user_id="@alice:localhost",
                     response_envelope=request_envelope(
                         room_id="!test:localhost",
@@ -1080,7 +988,8 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        mock_thread_summary.assert_not_called()
+        # The four refreshed thread messages plus the team's reply.
+        assert effects.summary_checks == [("!test:localhost", "$thread", 5)]
 
     @pytest.mark.asyncio
     async def test_team_generate_response_keeps_streamed_visible_reply_when_before_response_suppresses(
@@ -1093,94 +1002,32 @@ class TestAgentBot(AgentBotTestBase):
         async def suppressing_hook(ctx: BeforeResponseContext) -> None:
             ctx.draft.suppress = True
 
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
         async def fake_team_response_stream(turn_recorder: TurnRecorder) -> AsyncGenerator[str, None]:
             turn_recorder.mark_completed()
             yield "Team reply"
 
-        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            response_stream = cast("AsyncIterator[object]", args[4])
-            async for _chunk in response_stream:
-                pass
-            return StreamTransportOutcome(
-                last_physical_stream_event_id="$team-response",
-                terminal_status="completed",
-                rendered_body="Team reply",
-                visible_body_state="visible_body",
-            )
-
-        scheduled_tasks: list[asyncio.Task[None]] = []
-        scheduled_names: list[str] = []
-
-        def schedule_background_task(
-            coro: Coroutine[Any, Any, None],
-            *,
-            name: str,
-            error_handler: object | None = None,  # noqa: ARG001
-            owner: object | None = None,  # noqa: ARG001
-        ) -> asyncio.Task[None]:
-            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
-            scheduled_tasks.append(task)
-            scheduled_names.append(name)
-            return task
-
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        team_member = entity_ids(config, runtime_paths)["general"]
         bot = make_test_team_bot(
             _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
         )
-        _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$team-response")
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [suppressing_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
             runtime_paths=runtime_paths,
         )
-        resolution = TeamResolution(
-            intent=TeamIntent.EXPLICIT_MEMBERS,
-            requested_members=[team_member],
-            member_statuses=[
-                TeamResolutionMember(
-                    agent=team_member,
-                    name="general",
-                    status=TeamMemberStatus.ELIGIBLE,
-                ),
-            ],
-            eligible_members=[team_member],
-            outcome=TeamOutcome.TEAM,
-            mode=TeamMode.COORDINATE,
-        )
+        effects = _record_post_response_effects(bot)
 
-        with (
-            patch_response_runner_module(
-                should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=_noop_typing_indicator,
-                team_response_stream=lambda *_args, **kwargs: fake_team_response_stream(kwargs["turn_recorder"]),
-            ),
-            patch.object(
-                bot._turn_policy,
-                "responder_availability",
-                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
-            ),
-            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
-            patch(
-                "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(side_effect=fake_send_streaming_response),
-            ),
-            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.response_runner.store_conversation_memory", side_effect=fake_store_conversation_memory),
-            patch(
-                "mindroom.post_response_effects.maybe_generate_thread_summary",
-                new_callable=AsyncMock,
-            ) as mock_thread_summary,
+        with patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing_indicator,
+            team_response_stream=lambda *_args, **kwargs: fake_team_response_stream(kwargs["turn_recorder"]),
         ):
             resolution = await bot._run_regenerated_response(
                 ResponseRequest(
@@ -1202,12 +1049,13 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        if scheduled_tasks:
-            await asyncio.gather(*scheduled_tasks)
-
-        assert resolution == "$team-response"
-        mock_thread_summary.assert_awaited_once()
-        assert "thread_summary_!test:localhost_$thread" in scheduled_names
+        # The stream filled the reply's placeholder, and the answer stands as a delivered reply.
+        assert resolution == "$team-response1"
+        final_edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
+        assert final_edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$team-response1"}
+        assert final_edit["m.new_content"]["body"] == "Team reply"
+        bot.client.room_redact.assert_not_awaited()
+        assert effects.queued_summaries == [("!test:localhost", "$thread", "$team-response1")]
 
     def test_thread_summary_message_count_hint_excludes_existing_summaries(self) -> None:
         """Thread-summary hints should count the post-response non-summary total."""
@@ -1351,42 +1199,16 @@ class TestAgentBot(AgentBotTestBase):
         assert config.defaults.show_tool_calls is True
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
         bot.orchestrator = MagicMock()
-        bot._redact_message_event = AsyncMock(return_value=True)
-        replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
         mock_team_response = AsyncMock(return_value="Finding")
         mock_team_response_stream = MagicMock(side_effect=fake_team_response_stream)
 
-        with (
-            patch_response_runner_module(
-                should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=record_typing,
-                team_response_stream=mock_team_response_stream,
-                team_response=mock_team_response,
-            ),
-            patch(
-                "mindroom.delivery_gateway.DeliveryGateway.send_text",
-                new=AsyncMock(return_value="$response"),
-            ) as send_text,
-            patch(
-                "mindroom.delivery_gateway.DeliveryGateway.edit_text",
-                new=AsyncMock(return_value="$response"),
-            ) as edit_text,
-            patch(
-                "mindroom.delivery_gateway.DeliveryGateway.add_reply_stop_button",
-                new=AsyncMock(),
-            ) as add_stop_button,
-            patch(
-                "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(
-                    return_value=StreamTransportOutcome(
-                        last_physical_stream_event_id="$stream",
-                        terminal_status="completed",
-                        rendered_body="stream chunk",
-                        visible_body_state="visible_body",
-                    ),
-                ),
-            ),
+        with patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=record_typing,
+            team_response_stream=mock_team_response_stream,
+            team_response=mock_team_response,
         ):
             await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
@@ -1416,12 +1238,11 @@ class TestAgentBot(AgentBotTestBase):
         assert mock_team_response.await_args.kwargs["ctx"].allow_no_report_response is True
         assert mock_team_response.await_args.kwargs["compaction_lifecycle"] is None
         assert typing_events == []
-        assert send_text.await_count == 1
-        assert send_text.await_args.args[-1].response_text == "Finding"
-        edit_text.assert_not_awaited()
-        bot._redact_message_event.assert_not_awaited()
-        add_stop_button.assert_not_awaited()
-        bot.client.room_send.assert_not_awaited()
+        # One message, the final answer: no placeholder to edit or redact, and no stop button.
+        [send] = bot.client.room_send.await_args_list
+        assert send.kwargs["message_type"] == "m.room.message"
+        assert send.kwargs["content"]["body"] == "Finding"
+        bot.client.room_redact.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_silent_schedule_ad_hoc_team_writes_receipt_to_each_member(
@@ -1502,49 +1323,20 @@ class TestAgentBot(AgentBotTestBase):
         async def before_hook(ctx: BeforeResponseContext) -> None:
             ctx.draft.suppress = True
 
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
-            response_function = response_kwargs["response_function"]
-            await response_function("$placeholder")
-            return "$placeholder"
-
         async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
             yield "stream chunk"
 
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$stream")
         bot.orchestrator = MagicMock()
-        bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-        replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
 
-        with (
-            patch.object(
-                unwrap_extracted_collaborator(bot._response_runner),
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=run_cancellable_response),
-            ),
-            patch(
-                "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(
-                    return_value=StreamTransportOutcome(
-                        last_physical_stream_event_id="$placeholder",
-                        terminal_status="completed",
-                        rendered_body="stream chunk",
-                        visible_body_state="visible_body",
-                    ),
-                ),
-            ),
-            patch_response_runner_module(
-                should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=noop_typing_indicator,
-                team_response_stream=fake_team_response_stream,
-            ),
+        with patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing_indicator,
+            team_response_stream=fake_team_response_stream,
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
@@ -1555,7 +1347,6 @@ class TestAgentBot(AgentBotTestBase):
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
-                    existing_event_id="$placeholder",
                     response_envelope=_hook_envelope(
                         body="Continue",
                         source_event_id="$event",
@@ -1567,8 +1358,15 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="coordinate",
             )
 
-        assert resolution == "$placeholder"
-        bot._redact_message_event.assert_not_awaited()
+        reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+        assert reply is not None
+        # The stream filled the reply's placeholder, and the suppression after it left the answer standing.
+        assert resolution == reply.event_id == "$stream1"
+        assert reply.state is rl.ReplyState.COMPLETED
+        final_edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
+        assert final_edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$stream1"}
+        assert final_edit["m.new_content"]["body"] == "stream chunk"
+        bot.client.room_redact.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_returns_none_when_suppressed_placeholder_is_redacted(

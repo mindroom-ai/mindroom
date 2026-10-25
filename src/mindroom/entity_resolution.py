@@ -256,6 +256,10 @@ class EntityIdentityRegistry:
                 return entity_name
         return None
 
+    def entity_name_or_username(self, matrix_id: MatrixID) -> str:
+        """Return the configured entity, router included, behind one Matrix ID, else the ID's username."""
+        return self.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
+
     def is_managed_user_id(self, user_id: str, *, include_router: bool = True) -> bool:
         """Return whether a Matrix user ID belongs to a current configured entity."""
         return self.current_entity_name_for_user_id(user_id, include_router=include_router) is not None

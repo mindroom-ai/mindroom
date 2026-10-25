@@ -9,12 +9,13 @@ from pathlib import Path
 
 import pytest
 from agno.media import Image
-from agno.models.openai.chat import OpenAIChat
 from agno.tools.function import Function, ToolResult
 from mcp.types import CallToolResult, TextContent, Tool
 
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
+from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.tool_system import media_transport
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
@@ -37,11 +38,9 @@ def test_native_catalog_has_fixed_safe_schemas() -> None:
 
 def test_native_screenshot_wire_keeps_optional_fields_optional() -> None:
     """OpenAI formatting cannot promote omitted native screenshot fields to required empty values."""
-    function = BrowserMCPTools().get_async_functions()["browser_take_screenshot"].model_copy(deep=True)
-    effective_strict = True if function.strict is None else function.strict
-    function.process_entrypoint(strict=effective_strict)
+    function = adapt_function(BrowserMCPTools().get_async_functions()["browser_take_screenshot"])
 
-    formatted = OpenAIChat(id="gpt-6-astra", api_key="sk-test")._format_tools([function])[0]["function"]
+    formatted = function_definition(function.definition())
 
     assert formatted["strict"] is False
     assert formatted["parameters"]["required"] == ["type", "scale"]

@@ -38,11 +38,11 @@ if TYPE_CHECKING:
     from typing import Protocol
 
     import structlog
-    from agno.models.message import Message
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
+    from mindroom.llm.messages import Message
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling.tasks import ScheduledWorkflow

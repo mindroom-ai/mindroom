@@ -36,7 +36,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
   Deleted sources, sources that became terminal without an answer, and those of a removed entity or of an approval whose owner is gone settle unanswered.
   Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
 - I-S3. The outbox commits nothing outside transport for a reply's outbox row.
-- I-S4. An approval continuation owns consent and the Agno run payload, names its reply through its paused span, and holds no reply or source fact of its own.
+- I-S4. An approval continuation owns consent and the paused run payload, names its reply through its paused span, and holds no reply or source fact of its own.
 
 ### Claims
 

@@ -8,32 +8,27 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
 
 from mindroom.config.models import ToolConfigEntry
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import (
-    authority_snapshot,
-    bind_actor_authority,
-    bind_toolkit_authority,
-    function_authority,
-)
+from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
+from tests.delegation_helpers import _delegate_runtime_context
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     completed_delegation_job,
+    job_actor,
     lookup,
     managed_team_config,
     pending_outcome,
+    run_job_turn,
     team_coordinator,
+    toolkit_job_tools,
 )
 
 if TYPE_CHECKING:
@@ -66,7 +61,10 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
     deferred: bool,
     revoked: bool,
 ) -> None:
-    """An accepted outer job cannot enter a now-disabled real file or shell function."""
+    """An accepted outer job cannot enter a now-disabled real file or shell function.
+
+    The refused nested call fails as that call, so the outer work reports it.
+    """
     config = managed_team_config(tmp_path)
     config.defaults.tools = []
     entry = ToolConfigEntry(name=toolkit_name, defer=deferred, overrides={flag: True})
@@ -87,36 +85,19 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
         worker_target=None,
         disable_sandbox_proxy=True,
     )
-    bind_toolkit_authority(toolkit, authored_name=toolkit_name)
-    function = toolkit.get_async_functions()[function_name]
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call(function_name, "nested-call", **arguments)]),
-            ModelResponse(content="done"),
-        ],
-    )
-    install_tool_job_execution(model)
-    actor = bind_actor_authority(
-        Agent(
-            id="lead",
-            model=model,
-            tools=[toolkit],
-        ),
-        authority_snapshot(config, "lead"),
-    )
-    function._agent = actor
+    tools = toolkit_job_tools(toolkit, authored_name=toolkit_name, snapshot=authority_snapshot(config, "lead"))
+    tool = tools[function_name]
+    model = ScriptedModel([calls(tool_call(function_name, "nested-call", **arguments)), answer("done")])
+    actor = job_actor(*tools.values(), name="lead")
     started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
         started.set()
         await release.wait()
         try:
-            response = await actor.arun("Write the marker", session_id=owner.session_id)
-            return BackgroundOutcome(
-                "failed" if response.status == RunStatus.error else "completed",
-                str(response.content),
-            )
+            record = await run_job_turn(actor, model, "Write the marker", session_id=owner.session_id or "session")
+            [nested] = record.tools or []
+            return BackgroundOutcome("failed" if nested.is_error else "completed", str(nested.result))
         finally:
             finished.set()
 
@@ -130,7 +111,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                     tool_name=function_name,
                     depth=0,
                     toolkit_name=toolkit_name,
-                    adapter={"origin": function_provenance(function), "authority": function_authority(function)},
+                    adapter={"origin": function_provenance(tool), "authority": dict(tool.authority)},
                     owner=owner,
                     operation=operation,
                 )

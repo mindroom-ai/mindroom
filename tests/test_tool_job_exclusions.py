@@ -5,21 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from dataclasses import dataclass, field
 from textwrap import dedent
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -32,43 +26,36 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from tests.conftest import test_runtime_paths
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.test_config_lifecycle import _make_lifecycle
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    job_actor,
+    job_tool,
+    run_job_turn,
+    tool_job_runtime,
+    toolkit_job_tools,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
     from pathlib import Path
 
-    from agno.run.agent import ToolExecution
-    from agno.tools import Toolkit
-
+    from mindroom.llm.runs import ToolExecution
+    from mindroom.tool_jobs.execution import JobActor
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-@dataclass
-class _SchemaRecordingModel(DelegationModel):
-    """Capture provider-facing schemas after the SDK binds each tool to its actor."""
-
-    schemas: dict[str, Any] = field(default_factory=dict)
-
-    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
-        tools = cast("list[dict[str, Any]]", kwargs.get("tools") or [])
-        self.schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools}
-        return await super().ainvoke(*args, **kwargs)
+type _ShellRuntime = tuple[JobActor, ToolJobRuntime, ToolExecutionIdentity, Toolkit]
 
 
-type _ShellRuntime = tuple[Agent | Team, _SchemaRecordingModel, ToolJobRuntime, ToolExecutionIdentity, Toolkit]
-
-
-@pytest_asyncio.fixture(
-    params=[(False, "shell"), (True, "shell"), (False, "openclaw_compat"), (True, "openclaw_compat")],
-    ids=["agent", "team", "preset-agent", "preset-team"],
-)
+@pytest_asyncio.fixture(params=["shell", "openclaw_compat"], ids=["shell", "preset"])
 async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> AsyncIterator[_ShellRuntime]:
-    """Use registered, output-wrapped shell tools through actual SDK dispatch."""
+    """Use registered, output-wrapped shell tools through the owned loop's dispatch."""
     paths = _runtime_paths(tmp_path)
-    team, authored_name = request.param
+    authored_name = request.param
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True, exclude_toolkits=["shell"]),
         agents={"leader": AgentConfig(display_name="Leader", tools=[authored_name])},
@@ -86,33 +73,26 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
         tool_init_overrides={"base_dir": str(tmp_path)},
         tool_output_workspace_root=tmp_path,
     )
-    bind_toolkit_authority(toolkit, authored_name=authored_name)
-    model = _SchemaRecordingModel(id="test")
-    install_tool_job_execution(model)
-    actor = (
-        Team(id="leader", model=model, tools=[toolkit], members=[], telemetry=False)
-        if team
-        else Agent(id="leader", model=model, tools=[toolkit], telemetry=False)
-    )
+    actor = job_actor(*toolkit_job_tools(toolkit, authored_name=authored_name).values())
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                yield actor, model, runtime, owner, toolkit
+                yield actor, runtime, owner, toolkit
     finally:
         (tmp_path / "release").touch()
         await runtime.shutdown()
 
 
-async def _invoke(actor: Agent | Team, model: DelegationModel, name: str, **arguments: object) -> ToolExecution:
-    model.responses.extend(
-        [
-            ModelResponse(tool_calls=[_call(name, f"call-{name}", **arguments)]),
-            ModelResponse(content="done"),
-        ],
-    )
-    response = await actor.arun("Execute the tool", session_id="session")
-    assert response.tools is not None
-    return response.tools[0]
+async def _invoke(
+    actor: JobActor,
+    name: str,
+    **arguments: object,
+) -> tuple[ToolExecution, Mapping[str, Mapping[str, Any]]]:
+    """Run one reply that calls ``name``: the call's execution, and each offered function's schema as the model saw it."""
+    model = ScriptedModel([calls(tool_call(name, f"call-{name}", **arguments)), answer("done")])
+    record = await run_job_turn(actor, model, "Execute the tool")
+    assert record.tools is not None
+    return record.tools[0], {definition.name: definition.parameters for definition in model.requests[0].tools}
 
 
 async def _wait_for_file(path: Path) -> None:
@@ -127,24 +107,22 @@ async def test_an_excluded_shell_command_stops_at_its_timeout_without_a_job(
     shell_runtime: _ShellRuntime,
 ) -> None:
     """An excluded shell keeps its own timeout, stops the command there, and never creates a job."""
-    actor, model, runtime, owner, toolkit = shell_runtime
+    actor, runtime, owner, toolkit = shell_runtime
     try:
-        stopped = await _invoke(
+        stopped, schemas = await _invoke(
             actor,
-            model,
             "run_shell_command",
             timeout=1,
             args="echo $$ > started; while [ ! -f release ]; do sleep 0.01; done; printf 'native result'",
         )
-        assert not stopped.tool_call_error, stopped.result
-        assert stopped.result.endswith("Stopped after 1s.")
+        assert not stopped.is_error, stopped.result
+        assert str(stopped.result).endswith("Stopped after 1s.")
         with pytest.raises(ProcessLookupError):
             os.kill(int((tmp_path / "started").read_text()), 0)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
         for name in toolkit.get_async_functions():
-            schema = model.schemas[name]
-            assert "background_after" not in schema["properties"]
-        run_schema = model.schemas["run_shell_command"]
+            assert "background_after" not in schemas[name]["properties"]
+        run_schema = schemas["run_shell_command"]
         assert "timeout" in run_schema["properties"]
         assert "mindroom_output_path" in run_schema["properties"]
     finally:
@@ -154,27 +132,27 @@ async def test_an_excluded_shell_command_stops_at_its_timeout_without_a_job(
 @pytest.mark.asyncio
 async def test_empty_exclusion_list_includes_shell(shell_runtime: _ShellRuntime) -> None:
     """An empty exclusion list makes shell calls background jobs in execution and schemas."""
-    actor, model, runtime, owner, _ = shell_runtime
+    actor, runtime, owner, _ = shell_runtime
     context = get_tool_runtime_context()
     assert context is not None
     context.config.background_tool_jobs.exclude_toolkits.clear()
     # Start the instance again with the explicit empty list.
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
-    result = await _invoke(actor, model, "run_shell_command", args="printf 'managed shell'")
-    assert not result.tool_call_error
-    assert "managed shell" in result.result
+    result, schemas = await _invoke(actor, "run_shell_command", args="printf 'managed shell'")
+    assert not result.is_error
+    assert "managed shell" in str(result.result)
     assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
-    assert "background_after" in model.schemas["run_shell_command"]["properties"]
+    assert "background_after" in schemas["run_shell_command"]["properties"]
 
 
 @pytest.mark.asyncio
 async def test_shell_rejects_extra_wait_before_side_effect(tmp_path: Path, shell_runtime: _ShellRuntime) -> None:
     """A stale model call cannot silently create a second shell execution owner."""
-    actor, model, runtime, owner, _ = shell_runtime
-    result = await _invoke(actor, model, "run_shell_command", args="echo wrong > unexpected", background_after=0)
-    assert result.tool_call_error
-    assert "background_after" in result.result
+    actor, runtime, owner, _ = shell_runtime
+    result, _ = await _invoke(actor, "run_shell_command", args="echo wrong > unexpected", background_after=0)
+    assert result.is_error
+    assert "background_after" in str(result.result)
     assert not (tmp_path / "unexpected").exists()
     assert await runtime.list_jobs(owner=owner, depth=0) == []
 
@@ -182,13 +160,12 @@ async def test_shell_rejects_extra_wait_before_side_effect(tmp_path: Path, shell
 @pytest.mark.asyncio
 async def test_human_followup_keeps_shell_under_native_wait(tmp_path: Path, shell_runtime: _ShellRuntime) -> None:
     """A human signal cannot wrap an excluded process in a second background handle."""
-    actor, model, runtime, owner, _ = shell_runtime
+    actor, runtime, owner, _ = shell_runtime
     signal = asyncio.Event()
     with pending_human_messages_context(signal):
         pending = asyncio.create_task(
             _invoke(
                 actor,
-                model,
                 "run_shell_command",
                 timeout=5,
                 args="echo started > started; while [ ! -f release ]; do sleep 0.01; done; printf 'native result'",
@@ -201,8 +178,8 @@ async def test_human_followup_keeps_shell_under_native_wait(tmp_path: Path, shel
             assert not done
             assert await runtime.list_jobs(owner=owner, depth=0) == []
             (tmp_path / "release").touch()
-            result = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
-            assert "native result" in result.result
+            result, _ = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
+            assert "native result" in str(result.result)
             assert await runtime.list_jobs(owner=owner, depth=0) == []
         finally:
             (tmp_path / "release").touch()
@@ -212,17 +189,16 @@ async def test_human_followup_keeps_shell_under_native_wait(tmp_path: Path, shel
 @pytest.mark.asyncio
 async def test_same_named_unrelated_function_still_backgrounds(shell_runtime: _ShellRuntime) -> None:
     """Exclusions identify the toolkit as well as the function name."""
-    actor, model, runtime, owner, _ = shell_runtime
+    _, runtime, owner, _ = shell_runtime
     release = asyncio.Event()
 
     async def run_shell_command() -> str:
         await release.wait()
         return "unrelated result"
 
-    actor.tools = [assembled_function(run_shell_command)]
     try:
-        result = await _invoke(actor, model, "run_shell_command", background_after=0)
-        handle = json.loads(result.result)
+        result, _ = await _invoke(job_actor(job_tool(run_shell_command)), "run_shell_command", background_after=0)
+        handle = json.loads(str(result.result))
         assert handle["status"] == "running"
         release.set()
         completed = await runtime.wait(handle["job_id"], owner=owner, depth=0)
@@ -232,11 +208,9 @@ async def test_same_named_unrelated_function_still_backgrounds(shell_runtime: _S
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("excluded_name", [None, "native_plugin", "different_runtime_name"])
 async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa: PLR0915 - Real plugin construction and restart policy.
     tmp_path: Path,
-    team: bool,
     excluded_name: str | None,
 ) -> None:
     """YAML excludes complete registered toolkits, preserving native args across reload until restart."""
@@ -285,19 +259,12 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
     try:
         with isolated_plugin_runtime(config, paths), tool_runtime_context(context):
             toolkit = get_tool_by_name("native_plugin", paths, runtime_config=config, worker_target=None)
-            bind_toolkit_authority(toolkit, authored_name="native_plugin")
-            model = _SchemaRecordingModel(id="test")
-            install_tool_job_execution(model)
-            actor = (
-                Team(id="leader", model=model, tools=[toolkit], members=[])
-                if team
-                else Agent(id="leader", model=model, tools=[toolkit])
-            )
+            actor = job_actor(*toolkit_job_tools(toolkit, authored_name="native_plugin").values())
             async with execution_resources():
                 if not excluded:
-                    rejected = await _invoke(actor, model, "native_step", background_after=3)
-                    assert rejected.tool_call_error
-                    assert "exclude_toolkits" in rejected.result
+                    rejected, _ = await _invoke(actor, "native_step", background_after=3)
+                    assert rejected.is_error
+                    assert "exclude_toolkits" in str(rejected.result)
                     assert not (plugin / "executions").exists()
                     assert await runtime.list_jobs(owner=owner, depth=0) == []
                     return
@@ -306,13 +273,13 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 lifecycle = _make_lifecycle(tmp_path, current_config=config)
                 lifecycle.record_applied(config)
                 assert lifecycle.status.status == "restart_required"
-                step = await _invoke(actor, model, "native_step", background_after=3)
-                assert not step.tool_call_error
+                step, _ = await _invoke(actor, "native_step", background_after=3)
+                assert not step.is_error
                 assert step.result == "step:3"
-                status = await _invoke(actor, model, "native_status")
-                assert not status.tool_call_error
+                status, schemas = await _invoke(actor, "native_status")
+                assert not status.is_error
                 for name in toolkit.get_async_functions():
-                    properties = model.schemas[name]["properties"]
+                    properties = schemas[name]["properties"]
                     if name == "native_step":
                         assert properties["background_after"]["type"] == "integer"
                     else:
@@ -322,9 +289,9 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 release_background_tool_jobs(paths, instance)
                 instance = pin_background_tool_jobs(config, paths)
                 register_background_runtime(paths, runtime)
-                rejected = await _invoke(actor, model, "native_step", background_after=3)
-                assert rejected.tool_call_error
-                assert "exclude_toolkits" in rejected.result
+                rejected, _ = await _invoke(actor, "native_step", background_after=3)
+                assert rejected.is_error
+                assert "exclude_toolkits" in str(rejected.result)
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         release_background_tool_jobs(paths, instance)

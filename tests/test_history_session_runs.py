@@ -5,16 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.db.sqlite import SqliteDb
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.history.session_runs import session_runs, unredacted_runs, updated_sessions
 from mindroom.history.types import HistoryScope
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs
 
@@ -27,14 +26,11 @@ SESSION = f"{ROOM}:$thread"
 
 
 @pytest.fixture
-def storage(tmp_path: Path) -> Iterator[SqliteDb]:
+def storage(tmp_path: Path) -> Iterator[ConversationStore]:
     """The production conversation storage owner."""
-    db = create_state_storage("mind", tmp_path, subdir="sessions", session_table="mind_sessions")
-    assert isinstance(db, SqliteDb)
-    try:
-        yield db
-    finally:
-        db.close()
+    db = create_state_storage("mind", tmp_path)
+    assert isinstance(db, ConversationStore)
+    return db
 
 
 def _run(
@@ -44,8 +40,8 @@ def _run(
     room_id: str | None = ROOM,
     parent_run_id: str | None = None,
     status: RunStatus = RunStatus.completed,
-) -> RunOutput:
-    return RunOutput(
+) -> RunRecord:
+    return RunRecord(
         run_id=run_id,
         session_id=SESSION,
         agent_id="mind",
@@ -57,22 +53,22 @@ def _run(
     )
 
 
-def _seed(storage: SqliteDb, runs: list[RunOutput], session_id: str = SESSION) -> AgentSession:
-    return seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=runs))
+def _seed(storage: ConversationStore, runs: list[RunRecord], session_id: str = SESSION) -> ConversationSession:
+    return seed_session(storage, ConversationSession(kind="agent", session_id=session_id, owner_id="mind", runs=runs))
 
 
-def test_session_runs_read_compacted_and_later_runs_in_order(storage: SqliteDb) -> None:
+def test_session_runs_read_compacted_and_later_runs_in_order(storage: ConversationStore) -> None:
     """Runs a summary folded are still read, in time order with the later ones, each once."""
     session = _seed(storage, [_run("r1", 100), _run("r2", 200), _run("r3", 300)])
     compact_runs(storage, session, HistoryScope(kind="agent", scope_id="mind"), ["r1", "r2"], "summary")
-    loaded = get_agent_session(storage, SESSION)
+    loaded = storage.load_session(SESSION, "agent")
     assert loaded is not None
     assert [run.run_id for run in loaded.runs or []] == ["r3"]
 
     assert [run.run_id for run in session_runs(storage, SESSION)] == ["r1", "r2", "r3"]
 
 
-def test_unfinished_member_and_non_matrix_runs_are_excluded(storage: SqliteDb) -> None:
+def test_unfinished_member_and_non_matrix_runs_are_excluded(storage: ConversationStore) -> None:
     """Only finished top-level Matrix turns are evidence."""
     _seed(
         storage,
@@ -87,7 +83,7 @@ def test_unfinished_member_and_non_matrix_runs_are_excluded(storage: SqliteDb) -
     assert [run.run_id for run in session_runs(storage, SESSION)] == ["done"]
 
 
-def test_updated_sessions_lists_sessions_changed_after_the_cursor(storage: SqliteDb) -> None:
+def test_updated_sessions_lists_sessions_changed_after_the_cursor(storage: ConversationStore) -> None:
     """Sessions are listed with their last update, oldest first, and workflow participant sessions are skipped."""
     _seed(storage, [_run("r1", 100)], session_id="!a:x:$t1")
     _seed(storage, [_run("r2", 100)], session_id="!a:x:$t1:dynamic_workflow:w:p")

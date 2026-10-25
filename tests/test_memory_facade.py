@@ -248,10 +248,14 @@ class TestMemoryFacade:
         failure_detail = "embedder authentication failed (HTTP 401)"
 
         class FailingEmbedder:
-            def get_embedding(self, _text: str) -> list[float]:
+            sends_batches = True
+
+            def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+                del purpose
                 raise EmbedderRequestError(failure_detail)
 
-            def get_embeddings_batch(self, _texts: list[str]) -> list[list[float]]:
+            async def aembed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+                del purpose
                 raise EmbedderRequestError(failure_detail)
 
         class SwallowingMemory:
@@ -443,7 +447,7 @@ class TestMemoryFacade:
             if calls == 2:
                 raise AuthenticationError(auth_error_message, response=response, body=None)
             # A real successful Mem0 request clears health inside
-            # MindRoomOpenAIEmbedder; this fake must model that side effect.
+            # OpenAIEmbedder; this fake must model that side effect.
             capture_embedder_health_recorder().record(None)
             return {"results": [{"id": "team", "memory": "team"}]}
 

@@ -215,7 +215,7 @@ Custom events default to 1000 ms.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
-  In compaction hooks, `ctx.messages` holds the raw `agno.models.message.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, citations, reasoning, and metrics.
+  In compaction hooks, `ctx.messages` holds the raw `mindroom.llm.messages.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, reasoning, and metrics.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
   The event fires for visible and silent schedules.
   Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.

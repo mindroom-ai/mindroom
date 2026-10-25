@@ -17,7 +17,6 @@ from agno.tools.function import FunctionCall
 from agno.tools.google.gmail import GmailTools as AgnoGmailTools
 from googleapiclient.errors import HttpError
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.main import Config
 from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -28,6 +27,7 @@ from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.path_confinement import resolve_path_within_root
 from tests.oauth_test_utils import publish_oauth_credentials
+from tests.tool_approval_helpers import gated_functions
 
 
 @pytest.fixture
@@ -539,16 +539,14 @@ class TestGmailTools:
             credentials_manager=mock_credentials_manager,
         )
 
-        result = apply_tool_approval_capability(
+        functions = gated_functions(
             gmail_tools,
             Config.model_validate({"tool_approval": {"default": "require_approval"}}),
-            supports_native_tool_approval=True,
             registered_tool_name="gmail",
         )
 
-        assert result is gmail_tools
-        assert gmail_tools.functions["send_email_to_self"].requires_confirmation is True
-        assert gmail_tools.functions["send_email"].requires_confirmation is True
+        assert functions["send_email_to_self"].requires_confirmation is True
+        assert functions["send_email"].requires_confirmation is True
 
     def test_gmail_metadata_advertises_send_email_to_self(self) -> None:
         """The built-in Gmail configuration must expose the self-send function."""

@@ -23,7 +23,7 @@ from mindroom.credentials.sync import (
     get_secret_from_env,
     sync_env_to_credentials,
 )
-from mindroom.providers.model_loading import missing_model_api_key_provider
+from mindroom.providers.credentials import missing_model_api_key_provider
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV, SHARED_CREDENTIALS_PATH_ENV
 from tests.conftest import load_config_yaml
 

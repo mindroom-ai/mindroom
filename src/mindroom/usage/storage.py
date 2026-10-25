@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, read_model_provenance
+from mindroom.llm.usage import TOKEN_FIELDS
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -33,25 +36,6 @@ USAGE_KINDS: frozenset[str] = frozenset({"run", *get_args(IndependentUsageKind._
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"
-SYSTEM_USAGE_SESSION_TABLE = "system_sessions"
-SYSTEM_USAGE_RELATIVE_PATH = "system/sessions/system.db"
-
-TOKEN_FIELDS = (
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-    "audio_input_tokens",
-    "audio_output_tokens",
-    "audio_total_tokens",
-)
-
-
-def has_token_usage(metrics: Mapping[str, object]) -> bool:
-    """Return whether serialized metrics report any provider token counter."""
-    return any(metrics.get(key) for key in TOKEN_FIELDS)
 
 
 def quote_identifier(value: str) -> str:
@@ -59,10 +43,15 @@ def quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
+def usage_table_name(session_table: str) -> str:
+    """Return the name of the usage table that sits beside a sessions table."""
+    return f"{session_table}_usage"
+
+
 def usage_table_sql(session_table: str) -> str:
     """Create the usage table; its publication also marks completed initial seeding."""
     return (
-        f"CREATE TABLE IF NOT EXISTS {quote_identifier(session_table + '_usage')} ("
+        f"CREATE TABLE IF NOT EXISTS {quote_identifier(usage_table_name(session_table))} ("
         "id INTEGER PRIMARY KEY, "
         f"session_id TEXT NOT NULL REFERENCES {quote_identifier(session_table)}(session_id) ON DELETE CASCADE, "
         "run_id TEXT, usage_data TEXT, UNIQUE(session_id, run_id))"
@@ -72,7 +61,7 @@ def usage_table_sql(session_table: str) -> str:
 def usage_upsert_sql(session_table: str) -> str:
     """Replace a saved run's snapshot; missing historical IDs remain distinct rows."""
     return (
-        f"INSERT INTO {quote_identifier(session_table + '_usage')} (session_id, run_id, usage_data) "  # noqa: S608
+        f"INSERT INTO {quote_identifier(usage_table_name(session_table))} (session_id, run_id, usage_data) "  # noqa: S608
         "VALUES (?, ?, ?) ON CONFLICT(session_id, run_id) DO UPDATE SET usage_data = excluded.usage_data"
     )
 
@@ -164,7 +153,7 @@ def project_requests(messages: object) -> list[dict[str, object]] | None:
         provider_data = message.get("provider_data")
         if (
             isinstance(provider_data, dict)
-            and cast("dict[str, object]", provider_data).get("mindroom_aggregate_usage") is True
+            and cast("dict[str, object]", provider_data).get(AGGREGATE_USAGE_KEY) is True
         ):
             # Retried attempts have aggregate counters, not one request's price or timestamp.
             continue
@@ -178,11 +167,11 @@ def project_requests(messages: object) -> list[dict[str, object]] | None:
                 "created_at": created_at if isinstance(created_at, (int, float)) else None,
                 "metrics": request_metrics,
             }
-            if isinstance(provider_data, dict) and "mindroom_model" in provider_data:
-                model = cast("dict[str, object]", provider_data)["mindroom_model"]
-                for source, target in (("id", "model"), ("provider", "model_provider")):
-                    value = cast("dict[str, object]", model).get(source) if isinstance(model, dict) else None
-                    request[target] = value if isinstance(value, str) else False
+            if isinstance(provider_data, dict) and MODEL_PROVENANCE_KEY in provider_data:
+                # A recorded model of another shape stays visible to the reporter as invalid attribution.
+                model = read_model_provenance(cast("dict[str, object]", provider_data))
+                request["model"] = model.model_id if model is not None else False
+                request["model_provider"] = model.provider if model is not None else False
             requests.append(request)
     return requests
 

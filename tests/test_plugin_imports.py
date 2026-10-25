@@ -25,22 +25,16 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     import sys
     from pathlib import Path
 
-    from agno.agent import Agent
-
     from mindroom.config.main import Config
     from mindroom.constants import resolve_runtime_paths
-    from mindroom.tool_jobs.authorization import (
-        bind_actor_authority,
-        authority_snapshot,
-        bind_toolkit_authority,
-        function_authority,
-        locally_allowed,
-    )
+    from mindroom.tool_jobs.authorization import authority_snapshot, locally_allowed, toolkit_authority
+    from mindroom.tool_jobs.execution_authority import JobTool
     from mindroom.tool_jobs.provenance import function_provenance
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.opening import event_journal_sqlite_path
     from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
     from mindroom.tool_system.construction import get_toolkit_construction
+    from mindroom.tool_system.agno_toolkits import adapt_function
     from mindroom.tool_system.metadata import get_tool_by_name
     from mindroom.tool_system.plugins import load_plugins
     from mindroom.tool_system.registry_state import tool_registry_origin
@@ -76,9 +70,12 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             runtime_config=config,
             worker_target=None,
         )
-        bind_toolkit_authority(toolkit, authored_name="stable_plugin")
-        function = toolkit.get_async_functions()["stable_echo"]
-        function._agent = bind_actor_authority(Agent(id="lead"), authority_snapshot(config, "lead"))
+        tool = JobTool(
+            function=adapt_function(toolkit.get_async_functions()["stable_echo"]),
+            toolkit_name="stable_plugin",
+            toolkit=toolkit,
+            authority=toolkit_authority(authority_snapshot(config, "lead"), toolkit),
+        )
         construction = get_toolkit_construction(toolkit)
         identity = {
             "factory": tool_registry_origin("stable_plugin"),
@@ -94,8 +91,8 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             "session",
         )
         adapter = {
-            "origin": function_provenance(function),
-            "authority": function_authority(function),
+            "origin": function_provenance(tool),
+            "authority": dict(tool.authority),
         }
 
         def authorized(job):

@@ -1,1 +1,1 @@
-"""Agno session databases owned by MindRoom: stores, run rewrites, schema preflight, and their Agno repairs."""
+"""Conversation databases on stdlib sqlite3: the store, its factories, migrations, and schema preflight."""

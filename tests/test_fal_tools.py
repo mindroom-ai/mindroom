@@ -5,10 +5,10 @@ from unittest.mock import Mock
 
 import fal_client
 import pytest
-from agno.agent import Agent
 
 from mindroom.custom_tools.fal import MindRoomFalTools
 from mindroom.model_defaults import FAL_VIDEO
+from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tools.fal import fal_tools
 
 
@@ -75,7 +75,7 @@ def test_generate_media_uses_configured_key_and_returns_images(
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
     toolkit = MindRoomFalTools(api_key="configured-key", model="fal-ai/flux-2")
 
-    result = toolkit.generate_media(Mock(spec=Agent), prompt="A geometric Matrix room")
+    result = toolkit.generate_media(ToolCallActor(session_state={}), prompt="A geometric Matrix room")
 
     sync_client.assert_called_once_with(key="configured-key")
     subscribe.assert_called_once_with(
@@ -146,7 +146,7 @@ def test_generate_media_uses_default_model_and_returns_videos(
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
     toolkit = MindRoomFalTools(api_key="configured-key", model=FAL_VIDEO)
 
-    result = toolkit.generate_media(Mock(spec=Agent), prompt="A camera circles a forest")
+    result = toolkit.generate_media(ToolCallActor(session_state={}), prompt="A camera circles a forest")
 
     sync_client.assert_called_once_with(key="configured-key")
     subscribe.assert_called_once_with(
@@ -209,7 +209,7 @@ def test_image_to_image_uses_flux_2_edit_and_returns_attachment(
     )
 
     result = toolkit.image_to_image(
-        Mock(spec=Agent),
+        ToolCallActor(session_state={}),
         prompt="Add a blue sky",
         image_url="https://cdn.example.test/source.png",
     )
@@ -236,7 +236,7 @@ def test_image_to_image_rejects_missing_image_url(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
     toolkit = MindRoomFalTools(api_key="configured-key", enable_generate_media=False)
 
-    result = toolkit.image_to_image(Mock(spec=Agent), prompt="Add a blue sky")
+    result = toolkit.image_to_image(ToolCallActor(session_state={}), prompt="Add a blue sky")
 
     sync_client.assert_not_called()
     assert result.content == "Error: image_url is required for image editing."
@@ -254,7 +254,7 @@ def test_image_to_image_returns_provider_error(monkeypatch: pytest.MonkeyPatch) 
     toolkit = MindRoomFalTools(api_key="configured-key", enable_generate_media=False)
 
     result = toolkit.image_to_image(
-        Mock(spec=Agent),
+        ToolCallActor(session_state={}),
         prompt="Add a blue sky",
         image_url="https://cdn.example.test/source.png",
     )

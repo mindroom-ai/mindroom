@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 from agno.tools.function import Function
 
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import (
     ToolDescriptor,
     ToolKey,
-    function_schema,
     search_tool_metadata,
     validate_tool_arguments,
 )
@@ -40,8 +40,8 @@ def test_tool_descriptors_keep_same_named_functions_namespaced() -> None:
     assert catalog[ToolKey(toolkit="files", function="list")].instructions == ("Use an absolute path.",)
 
 
-def test_function_schema_prepares_a_copy_without_mutating_the_function() -> None:
-    """Schema preparation rebuilds a selected function while preserving its live binding."""
+def test_adapted_schema_is_a_copy_that_leaves_the_function_unchanged() -> None:
+    """Adapting a function derives the schema the model sees while preserving the live function and its binding."""
 
     def list_files(path: str) -> str:
         return path
@@ -54,7 +54,7 @@ def test_function_schema_prepares_a_copy_without_mutating_the_function() -> None
         parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": required},
     )
 
-    schema = function_schema(function)
+    schema = adapt_function(function).parameters
 
     assert schema["required"] == ["path"]
     assert function.parameters["required"][0] is function.parameters["required"]

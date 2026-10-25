@@ -4,7 +4,6 @@ import {
   Agent,
   AgentConfig,
   AgentPoliciesByAgent,
-  LearningMode,
   Team,
   TeamConfig,
   Room,
@@ -273,7 +272,7 @@ function deriveRooms(
 // reached only through personal rooms or invitations lists no rooms. Loading
 // fills them in, and saving drops each filled-in field that no edit has
 // touched, so config.yaml keeps its authored shape.
-function agentFieldDefaults(config: Config | null) {
+function agentFieldDefaults() {
   return {
     tools: [] as string[],
     skills: [] as string[],
@@ -282,9 +281,6 @@ function agentFieldDefaults(config: Config | null) {
     knowledge_bases: [] as string[],
     delegate_to: [] as string[],
     context_files: [] as string[],
-    learning: config?.defaults?.learning ?? true,
-    learning_mode:
-      config?.defaults?.learning_mode ?? ("always" as LearningMode),
   };
 }
 
@@ -342,7 +338,7 @@ function deriveConfigCollections(
   config: Config,
 ): Pick<ConfigState, "agents" | "teams" | "rooms"> {
   const agents = Object.entries(config.agents).map(([id, agent]) =>
-    withFieldDefaults({ id, ...agent }, agentFieldDefaults(config)),
+    withFieldDefaults({ id, ...agent }, agentFieldDefaults()),
   );
   const teams = Object.entries(config.teams ?? {}).map(([id, team]) =>
     withFieldDefaults({ id, ...team }, teamFieldDefaults()),
@@ -1630,7 +1626,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const id = agentData.display_name.toLowerCase().replace(/\s+/g, "_");
     const newAgent: Agent = withFieldDefaults(
       { id, ...agentData },
-      agentFieldDefaults(get().config),
+      agentFieldDefaults(),
     );
     set((state) => ({
       agents: [...state.agents, newAgent],

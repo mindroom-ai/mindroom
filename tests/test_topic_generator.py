@@ -7,17 +7,17 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.llm.errors import ProviderError
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.matrix.state import MatrixState
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 from tests.access_schema_support import membership_config
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -86,7 +86,10 @@ async def test_topic_generation_rechecks_remote_state_before_writing(
 
 
 @pytest.mark.asyncio
-async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) -> None:  # noqa: ANN001
+async def test_generate_room_topic_includes_team_only_room_entities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Team-configured rooms should describe the team in the topic prompt."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -104,46 +107,40 @@ async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) ->
         ),
         runtime_paths,
     )
-    captured_prompt: str | None = None
+    model = ScriptedModel([answer("Ops topic")])
 
-    async def capture_run(**kwargs: object) -> RunOutput:
-        nonlocal captured_prompt
-        captured_prompt = str(kwargs["run_input"])
-        return RunOutput(content="Ops topic")
-
-    with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=None),
-        patch("mindroom.topic_generator.cached_agent_run", new=AsyncMock(side_effect=capture_run)),
-    ):
-        topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
+    install_model_providers(monkeypatch, {"default": model})
+    topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
 
     assert topic == "Ops topic"
-    assert captured_prompt is not None
+    [request] = model.requests
+    captured_prompt = request.messages[-1].get_content_string()
     assert "- Configured agents and teams: Ops Team" in captured_prompt
     assert "No specific agents or teams configured yet" not in captured_prompt
 
 
 @pytest.mark.asyncio
-async def test_a_failed_model_run_never_becomes_the_topic(tmp_path: Path) -> None:
-    """Agno returns a provider failure, such as a bad API key, as the run's content; the room then gets no topic."""
+async def test_a_failed_model_run_never_becomes_the_topic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A provider failure, such as a bad API key, raises instead of answering, so the room gets no topic."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(models={"default": ModelConfig(provider="test", id="test-model")}),
         runtime_paths,
     )
-    failed = RunOutput(
-        content="Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
-        status=RunStatus.error,
-    )
-    with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=None),
-        patch("mindroom.topic_generator.cached_agent_run", new=AsyncMock(return_value=failed)),
-    ):
-        assert await generate_room_topic_ai("lobby", "Lobby", config, runtime_paths_for(config)) is None
+
+    async def fail() -> None:
+        message = "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}"
+        raise ProviderError(message, provider="Synthetic")
+
+    install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(fail)]])})
+    assert await generate_room_topic_ai("lobby", "Lobby", config, runtime_paths_for(config)) is None
 
 
 @pytest.mark.asyncio
-async def test_generate_room_topic_resolves_configured_entities_for_persisted_room_key(tmp_path) -> None:  # noqa: ANN001
+async def test_generate_room_topic_resolves_configured_entities_for_persisted_room_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Persisted room IDs should not hide room-key configured entities from topic prompts."""
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState()
@@ -164,21 +161,14 @@ async def test_generate_room_topic_resolves_configured_entities_for_persisted_ro
         ),
         runtime_paths,
     )
-    captured_prompt: str | None = None
+    model = ScriptedModel([answer("Ops topic")])
 
-    async def capture_run(**kwargs: object) -> RunOutput:
-        nonlocal captured_prompt
-        captured_prompt = str(kwargs["run_input"])
-        return RunOutput(content="Ops topic")
-
-    with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=None),
-        patch("mindroom.topic_generator.cached_agent_run", new=AsyncMock(side_effect=capture_run)),
-    ):
-        topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
+    install_model_providers(monkeypatch, {"default": model})
+    topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
 
     assert topic == "Ops topic"
-    assert captured_prompt is not None
+    [request] = model.requests
+    captured_prompt = request.messages[-1].get_content_string()
     assert "- Configured agents and teams: Research Agent, Ops Team" in captured_prompt
 
 

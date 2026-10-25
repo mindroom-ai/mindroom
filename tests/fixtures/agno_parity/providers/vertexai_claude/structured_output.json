@@ -1,0 +1,133 @@
+{
+  "family": "vertexai_claude",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "Route the message to the best agent.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "project_id": "parity-project",
+        "region": "us-east5"
+      },
+      "id": "claude-sonnet-5-5",
+      "provider": "vertexai_claude"
+    },
+    "portable_replay": null,
+    "response_format": {
+      "type": "dict",
+      "value": {
+        "type": "json_object"
+      }
+    },
+    "stream": false,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+      "from_history": false,
+      "provider_data": {
+        "content_blocks": [
+          {
+            "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+            "type": "text"
+          }
+        ],
+        "mindroom_model": {
+          "id": "claude-sonnet-5-5",
+          "provider": "VertexAI"
+        },
+        "mindroom_native_compaction": null,
+        "stop_reason": "end_turn"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "context_usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 42
+        }
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": "end_turn"
+  },
+  "request": {
+    "body": {
+      "max_tokens": 8192,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What should I pack for Paris tomorrow?",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
+            }
+          ]
+        }
+      ],
+      "system": [
+        {
+          "text": "Route the message to the best agent.",
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        }
+      ],
+      "anthropic_version": "vertex-2023-10-16"
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://us-east5-aiplatform.googleapis.com/v1/projects/parity-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5-5:rawPredict"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "content": [
+        {
+          "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+          "type": "text"
+        }
+      ],
+      "id": "msg_parity",
+      "model": "claude-sonnet-5-5",
+      "role": "assistant",
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "type": "message",
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 42,
+        "output_tokens": 12
+      }
+    },
+    "status": 200
+  },
+  "scenario": "structured_output"
+}

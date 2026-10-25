@@ -358,7 +358,7 @@ def test_tagged_coalesced_prompt_is_safe_inside_current_message_wrapper() -> Non
         current_timestamp_ms=1_774_019_760_000,
         current_prompt_is_structured=batch.current_prompt_is_structured,
         config=Config(timezone="America/Los_Angeles"),
-    )
+    ).in_request_order()
 
     content = messages[0].content
     assert content == (
@@ -393,7 +393,7 @@ def test_structured_coalesced_prompt_with_model_tail_is_not_wrapped() -> None:
         current_timestamp_ms=1_774_019_760_000,
         current_prompt_is_structured=True,
         config=Config(timezone="America/Los_Angeles"),
-    )
+    ).in_request_order()
 
     content = messages[0].content
     assert content == f"Current message:\n{prompt}"

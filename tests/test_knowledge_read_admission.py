@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from threading import BoundedSemaphore, Event, Lock, get_ident
 from typing import TYPE_CHECKING
 
@@ -16,7 +16,7 @@ from mindroom.knowledge import read_process
 from mindroom.knowledge.read_protocol import ReadRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 _RESULT = b'{"exists":true,"documents":[],"error_type":null}'
 
@@ -95,12 +95,27 @@ def children(monkeypatch: pytest.MonkeyPatch) -> list[_Child]:
     return processes
 
 
+@contextmanager
+def _held_slot() -> Iterator[None]:
+    """Hold one reader slot, as a running read does."""
+    assert read_process._read_slots.acquire(blocking=False), "No reader slot is free"
+    try:
+        yield
+    finally:
+        read_process._read_slots.release()
+
+
+def _assert_no_free_slot() -> None:
+    if read_process._read_slots.acquire(blocking=False):
+        read_process._read_slots.release()
+        pytest.fail("A reader acquired capacity another reader holds")
+
+
 def _assert_all_slots_available() -> None:
     with ExitStack() as stack:
         for _ in range(4):
-            stack.enter_context(read_process._read_slot())
-        with pytest.raises(RuntimeError, match="Knowledge reader is busy"), read_process._read_slot():
-            pytest.fail("A fifth reader acquired capacity")
+            stack.enter_context(_held_slot())
+        _assert_no_free_slot()
 
 
 @pytest.mark.asyncio
@@ -121,8 +136,7 @@ async def test_async_burst_drains_after_reaping_and_leaves_executor_available(ch
             assert await asyncio.wait_for(asyncio.to_thread(lambda: "available"), 1) == "available"
             assert prepared == 4
             assert not any(task.done() for task in tasks)
-            with pytest.raises(RuntimeError, match="Knowledge reader is busy"):
-                read_process.read_chroma(ReadRequest("unused", "published"))
+            _assert_no_free_slot()
             first = _serving(children)
             for child in first:
                 child.reap.clear()
@@ -160,7 +174,7 @@ async def test_queued_exit_has_no_side_effects_or_permit_leak(children: list[_Ch
 
     with ExitStack() as holders:
         for _ in range(4):
-            holders.enter_context(read_process._read_slot())
+            holders.enter_context(_held_slot())
         task = asyncio.create_task(read_process.read_chroma_async(prepare, timeout=0.03 if not cancel else 30))
         await asyncio.sleep(0)
         if cancel:
@@ -171,8 +185,8 @@ async def test_queued_exit_has_no_side_effects_or_permit_leak(children: list[_Ch
         else:
             with pytest.raises(TimeoutError, match="Knowledge read timed out"):
                 await task
-            with pytest.raises(RuntimeError, match="Knowledge reader is busy"), read_process._read_slot():
-                pytest.fail("Waiting timeout released somebody else's capacity")
+            # A waiter that timed out never released capacity somebody else holds.
+            _assert_no_free_slot()
         assert not prepared
         assert children == []
     _assert_all_slots_available()
@@ -191,7 +205,7 @@ async def test_admission_and_preparation_share_original_deadline(children: list[
 
     with ExitStack() as holders:
         for _ in range(4):
-            holders.enter_context(read_process._read_slot())
+            holders.enter_context(_held_slot())
         task = asyncio.create_task(read_process.read_chroma_async(prepare, timeout=0.5))
         loop = asyncio.get_running_loop()
         release_slot = loop.call_later(0.35, holders.close)
@@ -214,8 +228,7 @@ async def test_admission_and_preparation_share_original_deadline(children: list[
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("async_read", [False, True])
-async def test_startup_failure_releases_capacity(monkeypatch: pytest.MonkeyPatch, async_read: bool) -> None:
+async def test_startup_failure_releases_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed spawn returns its original error and leaves all four slots reusable."""
 
     def spawn() -> _Child:
@@ -223,49 +236,16 @@ async def test_startup_failure_releases_capacity(monkeypatch: pytest.MonkeyPatch
         raise OSError(message)
 
     monkeypatch.setattr(read_process, "_spawn_reader", spawn)
-    read = (
-        read_process.read_chroma_async(_prepare_request)
-        if async_read
-        else asyncio.to_thread(read_process.read_chroma, ReadRequest("unused", "published"))
-    )
     with pytest.raises(OSError, match="synthetic spawn failure"):
-        await read
+        await read_process.read_chroma_async(_prepare_request)
     _assert_all_slots_available()
 
 
-@pytest.mark.asyncio
-async def test_saturated_sync_reads_leave_executor_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Four blocked native reads must not let queued reads starve unrelated application work."""
-    release = Event()
-    children: list[_Child] = []
-    monkeypatch.setattr(read_process, "_spawn_reader", _spawner(children, release))
-    loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        loop.set_default_executor(executor)
-        tasks = [
-            asyncio.create_task(asyncio.to_thread(read_process.read_chroma, ReadRequest("unused", "published")))
-            for _ in range(6)
-        ]
-        try:
-            # Wait for the two rejections too, so no read can start after the blocked ones finish.
-            await _wait_until(lambda: len(_serving(children)) == 4 and sum(task.done() for task in tasks) == 2)
-            assert (
-                await asyncio.wait_for(asyncio.to_thread(lambda: "unrelated work completed"), timeout=0.5)
-                == "unrelated work completed"
-            )
-        finally:
-            release.set()
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-    errors = [result for result in results if isinstance(result, RuntimeError)]
-    assert len(errors) == 2
-    assert all("Knowledge reader is busy" in str(error) for error in errors)
-
-
-def test_sync_and_separate_async_loops_share_capacity(
+def test_separate_event_loops_share_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two independent loops wait behind four sync readers and reuse one global limit."""
-    release_sync = Event()
+    """Two more loops wait behind four readers on other loops and reuse one global limit."""
+    release_first = Event()
     async_waiting = Event()
     waiting_threads: set[int] = set()
     children: list[_Child] = []
@@ -284,19 +264,19 @@ def test_sync_and_separate_async_loops_share_capacity(
     async def read() -> bool:
         return (await read_process.read_chroma_async(_prepare_request)).exists
 
-    monkeypatch.setattr(read_process, "_spawn_reader", _spawner(children, release_sync))
+    monkeypatch.setattr(read_process, "_spawn_reader", _spawner(children, release_first))
     monkeypatch.setattr(read_process, "_read_slots", ObservedSlots(4))
     with ThreadPoolExecutor(max_workers=6) as executor:
-        sync_reads = [executor.submit(read_process.read_chroma, ReadRequest("unused", "published")) for _ in range(4)]
+        first_reads = [executor.submit(asyncio.run, read()) for _ in range(4)]
         try:
             _wait_until_sync(lambda: len(_serving(children)) == 4)
-            async_reads = [executor.submit(asyncio.run, read()) for _ in range(2)]
+            later_reads = [executor.submit(asyncio.run, read()) for _ in range(2)]
             assert async_waiting.wait(3)
-            assert len(_serving(children)) == 4, "Neither independent loop may bypass occupied sync capacity"
+            assert len(_serving(children)) == 4, "Neither later loop may bypass capacity the others hold"
         finally:
-            release_sync.set()
-        assert all(future.result(timeout=3).exists for future in sync_reads)
-        assert all(future.result(timeout=3) for future in async_reads)
+            release_first.set()
+        assert all(future.result(timeout=3) for future in first_reads)
+        assert all(future.result(timeout=3) for future in later_reads)
     assert len(_serving(children)) == 6
     assert all(child.returncode == 0 for child in _serving(children))
     assert asyncio.run(read())

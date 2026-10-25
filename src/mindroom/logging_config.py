@@ -386,14 +386,14 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
     # Reason: Importing agno.utils.log gives the agno, agno-team, and agno-workflow loggers their own
     # stdout handler at INFO with propagation disabled, so their records ignore the configured level,
     # skip the JSON renderer and redaction, and leave the knowledge refresh child as plain stderr lines.
-    # Agno also resets these loggers to INFO or DEBUG on every Agent, Team, and Workflow run, and
-    # propagated records skip the root level, so a logger filter enforces the resolved level instead.
+    # The loggers keep the INFO level Agno sets on them, and propagated records skip the root level, so a
+    # logger filter enforces the resolved level instead.
     # Upstream issue: https://github.com/agno-agi/agno/issues/4097, closed after Agno 2.0 added
     # `configure_agno_logging`, which swaps module globals but leaves the default handlers on the
     # loggers that modules imported directly.
     # Upstream PR: none identified.
     # Remove when: Agno's library loggers propagate to the host's handlers without installing their own
-    # handlers or resetting their levels on each run.
+    # handlers or setting their own levels.
     # Coverage: tests/test_logging_config.py::test_agno_records_follow_configured_format_and_level;
     # tests/test_logging_config.py::test_agno_records_keep_the_resolved_level_after_agno_resets_it;
     # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level.

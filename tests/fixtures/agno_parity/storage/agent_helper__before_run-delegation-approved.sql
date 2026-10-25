@@ -1,0 +1,68 @@
+-- The sessions one approval resume reads, from a conversation database written by Agno 3.0.9 through
+-- MindRoom's storage path just before the resume, dumped and normalized like the full stores (see
+-- tests/fixtures/agno_parity/README.md); never edit by hand.
+BEGIN TRANSACTION;
+CREATE TABLE agno_schema_versions (
+	table_name VARCHAR NOT NULL,
+	version VARCHAR NOT NULL,
+	created_at VARCHAR NOT NULL,
+	updated_at VARCHAR,
+	PRIMARY KEY (table_name)
+);
+INSERT INTO "agno_schema_versions" VALUES('helper_sessions','3.0.0','2027-01-15T08:08:00','2027-01-15T08:08:00');
+INSERT INTO "agno_schema_versions" VALUES('helper_sessions_runs','3.0.0','2027-01-15T08:08:00','2027-01-15T08:08:00');
+CREATE TABLE helper_sessions (
+	session_id VARCHAR NOT NULL,
+	session_type VARCHAR NOT NULL,
+	agent_id VARCHAR,
+	team_id VARCHAR,
+	workflow_id VARCHAR,
+	user_id VARCHAR,
+	session_data JSON,
+	agent_data JSON,
+	team_data JSON,
+	workflow_data JSON,
+	metadata JSON,
+	summary JSON,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT,
+	PRIMARY KEY (session_id)
+);
+INSERT INTO "helper_sessions" VALUES('delegate:code:helper:00000000000000000000000000000004','agent','helper',NULL,NULL,'@alice:example.org','{"session_state": {}, "session_metrics": {"input_tokens": 90, "output_tokens": 5, "total_tokens": 95, "details": {"model": [{"input_tokens": 90, "output_tokens": 5, "total_tokens": 95, "id": "helper-model", "provider": "Synthetic"}]}}}','{"name": "Helper", "agent_id": "helper", "model": {"id": "helper-model", "provider": "Synthetic", "name": "Synthetic"}}',NULL,NULL,'null','null',1800001560,1800001560);
+CREATE TABLE "helper_sessions_removed_runs" (run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES "helper_sessions"(session_id) ON DELETE CASCADE);
+CREATE TABLE helper_sessions_runs (
+	run_id VARCHAR NOT NULL,
+	session_id VARCHAR NOT NULL,
+	run_type VARCHAR NOT NULL,
+	agent_id VARCHAR,
+	team_id VARCHAR,
+	workflow_id VARCHAR,
+	user_id VARCHAR,
+	parent_run_id VARCHAR,
+	status VARCHAR,
+	run_index BIGINT,
+	run_data JSON NOT NULL,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT,
+	PRIMARY KEY (run_id),
+	FOREIGN KEY(session_id) REFERENCES helper_sessions (session_id) ON DELETE CASCADE
+);
+INSERT INTO "helper_sessions_runs" VALUES('00000000000000000000000000000005','delegate:code:helper:00000000000000000000000000000004','agent','helper',NULL,NULL,'@alice:example.org',NULL,'PAUSED',0,'{"run_id": "00000000000000000000000000000005", "agent_id": "helper", "agent_name": "Helper", "session_id": "delegate:code:helper:00000000000000000000000000000004", "user_id": "@alice:example.org", "content": "I have tools to execute, but I need confirmation.", "content_type": "str", "model": "helper-model", "model_provider": "Synthetic", "session_state": {"current_user_id": "@alice:example.org", "current_session_id": "delegate:code:helper:00000000000000000000000000000004", "current_run_id": "00000000000000000000000000000005"}, "created_at": 1800001560, "status": "PAUSED", "metrics": {"input_tokens": 90, "output_tokens": 5, "total_tokens": 95, "time_to_first_token": 0.25, "duration": 0.5, "details": {"model": [{"input_tokens": 90, "output_tokens": 5, "total_tokens": 95, "id": "helper-model", "provider": "Synthetic"}]}}, "messages": [{"id": "00000000-0000-4000-8000-000000000081", "content": "<your_role>\n## Your Identity\nYou are Helper (Matrix ID: @mindroom_helper:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: helper-model.\nWhen working in teams with other agents, you should identify yourself as Helper and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender''s full Matrix ID and their stable identity. The optional `display_name` attribute is the sender''s current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message''s local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Runs calculations for other agents.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>", "from_history": false, "stop_after_tool_call": false, "role": "system", "created_at": 1800001560}, {"id": "00000000-0000-4000-8000-000000000046", "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>", "from_history": false, "stop_after_tool_call": false, "role": "user", "created_at": 1800001560}, {"id": "00000000-0000-4000-8000-000000000047", "from_history": false, "stop_after_tool_call": false, "role": "assistant", "tool_calls": [{"id": "call-helper-multiply-approved", "type": "function", "function": {"name": "multiply", "arguments": "{\"a\": 6, \"b\": 7}"}}], "provider_data": {"mindroom_model": {"id": "helper-model", "provider": "Synthetic"}}, "metrics": {"input_tokens": 90, "output_tokens": 5, "total_tokens": 95}, "created_at": 1800001560}], "metadata": {"io.mindroom.ai_run": {"version": 1, "prepared_context": {"tokens": 1432}, "compaction": {"decision": "none", "outcome": "none", "reason": "missing_session", "replay_plan": {"mode": "configured", "estimated_tokens": 0}}}, "room_id": "!room:example.org", "thread_id": "$delegation-approved", "requester_id": "@alice:example.org", "correlation_id": "00000000000000000000000000000007", "model_params": {"supports_native_structured_outputs": false, "supports_json_schema_outputs": false, "tool_message_role": "tool", "assistant_message_role": "assistant", "cache_response": false, "retries": 0, "delay_between_retries": 1, "exponential_backoff": false, "retry_with_guidance": true, "retry_with_guidance_limit": 1, "seed": 1, "min_response_chars": 320, "max_response_chars": 960, "chunk_chars": 40, "chars_per_second": 80.0, "tool_call_probability": 0.2}}, "tools": [{"tool_call_id": "call-helper-multiply-approved", "tool_name": "multiply", "tool_args": {"a": 6, "b": 7}, "tool_call_error": null, "result": null, "metrics": null, "child_run_id": null, "stop_after_tool_call": false, "created_at": 1800001560, "requires_confirmation": true, "confirmed": null, "confirmation_note": null, "requires_user_input": null, "user_input_schema": null, "user_feedback_schema": null, "answered": null, "external_execution_required": null, "external_execution_silent": null, "approval_type": "mindroom_policy", "approval_id": null}], "requirements": [{"id": "00000000-0000-4000-8000-00000000004a", "created_at": "2027-01-15T08:26:00+00:00", "tool_execution": {"tool_call_id": "call-helper-multiply-approved", "tool_name": "multiply", "tool_args": {"a": 6, "b": 7}, "tool_call_error": null, "result": null, "metrics": null, "child_run_id": null, "stop_after_tool_call": false, "created_at": 1800001560, "requires_confirmation": true, "confirmed": null, "confirmation_note": null, "requires_user_input": null, "user_input_schema": null, "user_feedback_schema": null, "answered": null, "external_execution_required": null, "external_execution_silent": null, "approval_type": "mindroom_policy", "approval_id": null}}], "input": {"input_content": [{"id": "00000000-0000-4000-8000-000000000046", "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>", "from_history": false, "stop_after_tool_call": false, "role": "user", "created_at": 1800001560}]}}',1800001560,1800001560);
+CREATE TABLE "helper_sessions_summaries" (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES "helper_sessions"(session_id) ON DELETE CASCADE, scope_key TEXT NOT NULL, after_run_index INTEGER NOT NULL, summary TEXT, summary_model TEXT, event_ids TEXT NOT NULL DEFAULT '[]', seen_event_ids TEXT NOT NULL DEFAULT '[]', legacy INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, segment_run_id TEXT, segment TEXT);
+CREATE TABLE "helper_sessions_usage" (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES "helper_sessions"(session_id) ON DELETE CASCADE, run_id TEXT, usage_data TEXT, UNIQUE(session_id, run_id));
+INSERT INTO "helper_sessions_usage" VALUES(2,'delegate:code:helper:00000000000000000000000000000004','00000000000000000000000000000005','{"run_id": "00000000000000000000000000000005", "user_id": "@alice:example.org", "model_provider": "Synthetic", "model": "helper-model", "created_at": 1800001560, "updated_at": 1800001560, "metadata": {"requester_id": "@alice:example.org"}, "metrics": {"input_tokens": 90, "output_tokens": 5, "total_tokens": 95, "details": {"model": [{"input_tokens": 90, "output_tokens": 5, "total_tokens": 95, "id": "helper-model", "provider": "Synthetic"}]}}, "requests": [{"created_at": 1800001560, "metrics": {"input_tokens": 90, "output_tokens": 5, "total_tokens": 95}, "model": "helper-model", "model_provider": "Synthetic"}]}');
+CREATE INDEX "helper_sessions_removed_runs_session" ON "helper_sessions_removed_runs" (session_id);
+CREATE INDEX "helper_sessions_summaries_scope" ON "helper_sessions_summaries" (session_id, scope_key, id);
+CREATE INDEX idx_agno_schema_versions_created_at ON agno_schema_versions (created_at);
+CREATE INDEX idx_helper_sessions_created_at ON helper_sessions (created_at);
+CREATE INDEX idx_helper_sessions_runs_agent_id ON helper_sessions_runs (agent_id);
+CREATE INDEX idx_helper_sessions_runs_created_at ON helper_sessions_runs (created_at);
+CREATE INDEX idx_helper_sessions_runs_run_type ON helper_sessions_runs (run_type);
+CREATE INDEX idx_helper_sessions_runs_session_id ON helper_sessions_runs (session_id);
+CREATE INDEX idx_helper_sessions_runs_session_id_run_index ON helper_sessions_runs (session_id, run_index);
+CREATE INDEX idx_helper_sessions_runs_status ON helper_sessions_runs (status);
+CREATE INDEX idx_helper_sessions_runs_team_id ON helper_sessions_runs (team_id);
+CREATE INDEX idx_helper_sessions_runs_user_id ON helper_sessions_runs (user_id);
+CREATE INDEX idx_helper_sessions_runs_workflow_id ON helper_sessions_runs (workflow_id);
+CREATE INDEX idx_helper_sessions_session_type ON helper_sessions (session_type);
+COMMIT;

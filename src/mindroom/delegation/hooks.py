@@ -34,7 +34,7 @@ async def before_delegation(
     *,
     execution_identity: ToolExecutionIdentity,
     arguments: dict[str, Any],
-    tool_name: str = "run_subagent",
+    tool_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> DelegationHookState:

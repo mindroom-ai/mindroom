@@ -26,57 +26,53 @@ def owned_tool_execution(*, enabled: Callable[..., bool] = lambda *_args, **_kwa
     """
 
     def decorate[FunctionT: Callable[..., object]](function: FunctionT, /) -> FunctionT:
-        return _owned(function, enabled)
+        if inspect.isasyncgenfunction(function):
 
-    return decorate
+            @wraps(function)
+            def streaming(*args: object, **kwargs: object) -> AsyncIterator[object]:
+                if not enabled(*args, **kwargs):
+                    return cast("Callable[..., AsyncIterator[object]]", function)(*args, **kwargs)
+                resources = ExecutionResources()
+                consumption = ConsumptionOwner()
+                notices = JobNotices()
 
+                @contextmanager
+                def bind() -> Iterator[None]:
+                    with (
+                        bind_execution_resources(resources),
+                        consumption_context(consumption),
+                        job_notice_context(notices),
+                    ):
+                        yield
 
-def _owned[FunctionT: Callable[..., object]](function: FunctionT, enabled: Callable[..., bool]) -> FunctionT:
-    if inspect.isasyncgenfunction(function):
+                async def stream() -> AsyncIterator[object]:
+                    try:
+                        source = cast("Callable[..., AsyncIterator[object]]", function)(*args, **kwargs)
+                        async with closing_async_stream(source):
+                            async for chunk in source:
+                                yield chunk
+                    finally:
+                        try:
+                            await finalize_consumption()
+                        finally:
+                            await run_coroutine_until_complete(resources.release_parent())
+
+                return context_bound_async_stream(context_factory=bind, stream_factory=stream)
+
+            return cast("FunctionT", streaming)
 
         @wraps(function)
-        def streaming(*args: object, **kwargs: object) -> AsyncIterator[object]:
+        async def blocking(*args: object, **kwargs: object) -> object:
             if not enabled(*args, **kwargs):
-                return cast("Callable[..., AsyncIterator[object]]", function)(*args, **kwargs)
-            resources = ExecutionResources()
-            consumption = ConsumptionOwner()
-            notices = JobNotices()
-
-            @contextmanager
-            def bind() -> Iterator[None]:
-                with (
-                    bind_execution_resources(resources),
-                    consumption_context(consumption),
-                    job_notice_context(notices),
-                ):
-                    yield
-
-            async def stream() -> AsyncIterator[object]:
-                try:
-                    source = cast("Callable[..., AsyncIterator[object]]", function)(*args, **kwargs)
-                    async with closing_async_stream(source):
-                        async for chunk in source:
-                            yield chunk
-                finally:
+                return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
+            # Consumption finalizes, even for a cancelled parent, before response resources are released.
+            async with execution_resources():
+                with consumption_context(ConsumptionOwner()), job_notice_context(JobNotices()):
                     try:
-                        await finalize_consumption()
+                        return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
                     finally:
-                        await run_coroutine_until_complete(resources.release_parent())
+                        await finalize_consumption()
 
-            return context_bound_async_stream(context_factory=bind, stream_factory=stream)
+        return cast("FunctionT", blocking)
 
-        return cast("FunctionT", streaming)
-
-    @wraps(function)
-    async def blocking(*args: object, **kwargs: object) -> object:
-        if not enabled(*args, **kwargs):
-            return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
-        # Consumption finalizes, even for a cancelled parent, before response resources are released.
-        async with execution_resources():
-            with consumption_context(ConsumptionOwner()), job_notice_context(JobNotices()):
-                try:
-                    return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
-                finally:
-                    await finalize_consumption()
-
-    return cast("FunctionT", blocking)
+    return decorate

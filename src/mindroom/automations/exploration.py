@@ -14,8 +14,6 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 
-from agno.run.base import RunStatus
-
 from mindroom.automations.registry import automation
 from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads
@@ -24,6 +22,7 @@ from mindroom.durable_write import write_json_file_durable
 from mindroom.history.session_runs import session_runs, updated_sessions
 from mindroom.knowledge_graph.episodes import classify_thread, is_evidence, tool_arguments
 from mindroom.knowledge_graph.ingestion import wake_knowledge_graph_ingestion
+from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_session_storage
 
@@ -63,29 +62,26 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> tuple[l
     automation_thread_ids = automation_threads(ctx.runtime_paths)
     seen: dict[tuple[str, str], tuple[int, int]] = {}
     active = False
-    try:
-        for session_id, _updated_at in updated_sessions(storage, ctx.agent_name, since=since):
-            try:
-                runs = session_runs(storage, session_id)
-            except Exception as exc:
-                # One conversation that cannot be read must not stop every later check.
-                logger.warning("Exploration skipped an unreadable conversation", agent=ctx.agent_name, error=str(exc))
+    for session_id, _updated_at in updated_sessions(storage, ctx.agent_name, since=since):
+        try:
+            runs = session_runs(storage, session_id)
+        except Exception as exc:
+            # One conversation that cannot be read must not stop every later check.
+            logger.warning("Exploration skipped an unreadable conversation", agent=ctx.agent_name, error=str(exc))
+            continue
+        if classify_thread(runs, automation_thread_ids) != "conversation":
+            continue
+        active = True
+        for run in runs:
+            # An updated conversation's earlier turns were listed by an earlier run.
+            if run.status != RunStatus.completed or (run.created_at or 0) <= since:
                 continue
-            if classify_thread(runs, automation_thread_ids) != "conversation":
-                continue
-            active = True
-            for run in runs:
-                # An updated conversation's earlier turns were listed by an earlier run.
-                if run.status != RunStatus.completed or (run.created_at or 0) <= since:
+            for execution in run.tools or []:
+                if not execution.tool_name or not is_evidence(execution):
                     continue
-                for execution in run.tools or []:
-                    if not execution.tool_name or not is_evidence(execution):
-                        continue
-                    key = (execution.tool_name, tool_arguments(execution)[:_MAX_ARGUMENT_CHARS])
-                    count, last_seen = seen.get(key, (0, 0))
-                    seen[key] = (count + 1, max(last_seen, run.created_at or 0))
-    finally:
-        storage.close()
+                key = (execution.tool_name, tool_arguments(execution)[:_MAX_ARGUMENT_CHARS])
+                count, last_seen = seen.get(key, (0, 0))
+                seen[key] = (count + 1, max(last_seen, run.created_at or 0))
     leads = [_Lead(function, arguments, count, last_seen) for (function, arguments), (count, last_seen) in seen.items()]
     leads.sort(key=lambda lead: lead.last_seen, reverse=True)
     return leads[:limit], active

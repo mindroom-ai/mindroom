@@ -235,7 +235,7 @@ def published_index_settings_compatible(
 
 
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
-    """Check collection existence without constructing Agno Knowledge."""
+    """Check collection existence without opening a Chroma client."""
     from mindroom.knowledge.read_proxy import collection_exists  # noqa: PLC0415
 
     return collection_exists(str(storage_path), collection_name)

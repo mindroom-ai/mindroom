@@ -28,7 +28,7 @@ from tests.ai_user_id_helpers import (
     _response_request,
     _runtime_paths,
     _set_gateway_method,
-    _team_orchestrator,
+    team_orchestrator,
 )
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
@@ -335,7 +335,7 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -406,7 +406,7 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,

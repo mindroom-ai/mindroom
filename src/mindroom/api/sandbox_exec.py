@@ -280,14 +280,9 @@ def _current_runtime_site_packages() -> list[str]:
     return list(dict.fromkeys(discovered_paths))
 
 
-def _subprocess_passthrough_env() -> dict[str, str]:
-    """Return the small set of host env vars forwarded to subprocesses."""
-    return dict(sandbox_subprocess_system_env(os.environ))
-
-
 def generic_subprocess_env() -> dict[str, str]:
-    """Build the baseline subprocess env for non-worker execution."""
-    env = _subprocess_passthrough_env()
+    """Build the baseline subprocess env for non-worker execution, starting from the forwarded host vars."""
+    env = dict(sandbox_subprocess_system_env(os.environ))
     env.update(vendor_telemetry_env_values())
     for key in ("HOME", "PATH", "VIRTUAL_ENV"):
         value = os.environ.get(key)

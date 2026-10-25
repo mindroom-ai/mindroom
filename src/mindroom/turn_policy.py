@@ -41,15 +41,15 @@ from mindroom.responder_availability import (
     materializable_agent_names_for_orchestrator,
 )
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
-from mindroom.teams import (
+from mindroom.teams.formation import (
     TeamIntent,
     TeamMemberStatus,
-    TeamMode,
     TeamOutcome,
     TeamResolution,
     decide_team_formation,
     resolve_configured_team,
 )
+from mindroom.teams.spec import TeamMode
 from mindroom.thread_utils import (
     AgentResponseDecision,
     decide_agent_response,

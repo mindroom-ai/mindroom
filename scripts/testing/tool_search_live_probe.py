@@ -1,9 +1,7 @@
-"""Live probe for Anthropic server-side tool search (defer_loading) on the MindRoom hook path.
+"""Live probe for Anthropic server-side tool search (defer_loading) through MindRoom's Claude adapter.
 
-Closes the verification gap left by PR #1412: all defer_loading behavior was tested
-against fakes because no API key was available. This probe drives the real merged
-code path — an Agno Claude model with the MindRoom prompt-cache and deferred-tool
-hooks installed — against the live API and checks that:
+All defer_loading behavior is otherwise tested against canned replies. This probe sends real requests
+through the Claude adapter the runtime builds (``providers/anthropic/messages.py``) and checks that:
 
 1. the request with ``defer_loading`` tools plus the regex search tool is accepted;
 2. the model discovers the deferred tool via ``tool_search_tool_result`` and calls it;
@@ -23,25 +21,29 @@ Exit codes: 0 = pass, 1 = fail, 2 = missing credentials/arguments.
 from __future__ import annotations
 
 import argparse
-import contextlib
+import asyncio
 import json
 import os
 import sys
+import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from agno.models.anthropic import Claude
-from agno.models.message import Message
-from agno.tools.function import Function
+import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from mindroom.config.models import ModelConfig  # noqa: E402
+from mindroom.constants import resolve_runtime_paths  # noqa: E402
+from mindroom.llm.messages import Message  # noqa: E402
+from mindroom.llm.provider import ModelRequest, ModelTurn, ToolSpec, complete  # noqa: E402
 from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS  # noqa: E402
-from mindroom.providers.claude_prompt_cache import install_claude_deferred_tool_search  # noqa: E402
-from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude  # noqa: E402
+from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider  # noqa: E402
+from mindroom.providers.model_http_client import closing_model_connections  # noqa: E402
 
 DEFAULT_MODEL_ID = CONFIG_INIT_MODEL_PRESETS["anthropic"].id
 
@@ -51,96 +53,110 @@ DEFERRED_TOOL_NAME = "get_weather"
 _SYSTEM_PROMPT = "You are a MindRoom tool-search live probe agent. " + (
     "This sentence is deterministic cache padding for the probe system prompt. " * 700
 )
+_MAX_TOOL_ROUNDS = 4
 
 
 def echo(text: str) -> str:
-    """Echo the provided text back to the user.
-
-    Args:
-        text: Text to echo.
-
-    """
+    """Echo the provided text back to the user."""
     return text
 
 
 def get_weather(location: str) -> str:
-    """Get the current weather for a location.
-
-    Args:
-        location: City name.
-
-    """
+    """Get the current weather for a location."""
     return f"The weather in {location} is 22 degrees Celsius and sunny."
 
 
-def build_probe_tools() -> list[Function]:
-    """Build executable probe tools so Agno's response loop can run them for real."""
-    return [Function.from_callable(echo), Function.from_callable(get_weather)]
+_ENTRYPOINTS = {"echo": echo, "get_weather": get_weather}
+PROBE_TOOLS = (
+    ToolSpec(
+        name="echo",
+        description="Echo the provided text back to the user.",
+        parameters={
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "Text to echo."}},
+            "required": ["text"],
+        },
+    ),
+    ToolSpec(
+        name="get_weather",
+        description="Get the current weather for a location.",
+        parameters={
+            "type": "object",
+            "properties": {"location": {"type": "string", "description": "City name."}},
+            "required": ["location"],
+        },
+    ),
+)
 
 
-def build_probe_model(args: argparse.Namespace) -> Claude:
-    """Build a Claude model mirroring the production settings, hooks not yet installed.
+def build_probe_provider(args: argparse.Namespace, http_client: httpx.AsyncClient | None = None) -> ClaudeProvider:
+    """Build the Claude adapter with the production cache and tool-search defaults.
 
-    ``--provider vertexai`` builds the same ``MindroomVertexAIClaude`` class the
-    production model loader uses, authenticated via GCP application-default
-    credentials — no ``ANTHROPIC_API_KEY`` needed.
+    ``--provider vertexai`` builds the Vertex AI route, authenticated via GCP application-default
+    credentials, so no ``ANTHROPIC_API_KEY`` is needed.
     """
     if args.provider == "vertexai":
-        return MindroomVertexAIClaude(
+        model_config = ModelConfig(
+            provider="vertexai_claude",
             id=args.model_id,
-            project_id=args.project_id,
-            region=args.region,
-            cache_system_prompt=True,
-            extended_cache_time=True,
+            extra_kwargs={"project_id": args.project_id, "region": args.region},
         )
-    return Claude(
-        id=args.model_id,
-        api_key=os.environ.get("ANTHROPIC_API_KEY", "dry-run-key"),
-        cache_system_prompt=True,
-        extended_cache_time=True,
+    else:
+        model_config = ModelConfig(
+            provider="anthropic",
+            id=args.model_id,
+            api_key=os.environ.get("ANTHROPIC_API_KEY", "dry-run-key"),
+        )
+    # The adapter reads its credentials while it is built and keeps no path into the storage root.
+    with tempfile.TemporaryDirectory(prefix="tool-search-probe-") as storage:
+        storage_root = Path(storage)
+        runtime_paths = resolve_runtime_paths(
+            config_path=storage_root / "config.yaml",
+            storage_path=storage_root,
+            process_env=dict(os.environ),
+        )
+        provider = build_provider(model_config, runtime_paths)
+    return provider if http_client is None else replace(provider, http_client=http_client)
+
+
+def _request(messages: list[Message]) -> ModelRequest:
+    return ModelRequest(
+        messages=messages,
+        tools=PROBE_TOOLS,
+        deferred_tool_names=frozenset({DEFERRED_TOOL_NAME}),
+        stream=False,
     )
 
 
-def install_probe_hooks(model: Claude) -> None:
-    """Install the production deferred-tool-search (and prompt-cache) hooks.
-
-    Must run after any fake client is planted on the model: the hook wraps the
-    current ``get_client``, so installing first would let a later fake bypass it.
-    """
-    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({DEFERRED_TOOL_NAME}))
-
-
-class _DryRunStop(BaseException):
-    """Raised by the dry-run fake client once the wire request has been captured.
-
-    Derives from BaseException so Agno's invoke error handling (which wraps any
-    Exception in ModelProviderError and retries) lets it propagate untouched.
-    """
+def _send(provider: ClaudeProvider, messages: list[Message]) -> ModelTurn:
+    return asyncio.run(closing_model_connections(complete(provider, _request(messages))))
 
 
 def run_dry_run(args: argparse.Namespace) -> int:
-    """Print the prepared wire request via a capturing fake client; no network."""
+    """Print the prepared wire request via a capturing HTTP transport; no network."""
     captured: list[dict[str, Any]] = []
 
-    class _FakeMessagesAPI:
-        def create(self, **kwargs: Any) -> Any:  # noqa: ANN401
-            captured.append(kwargs)
-            raise _DryRunStop
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_dry_run",
+                "type": "message",
+                "role": "assistant",
+                "model": args.model_id,
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
 
-    class _FakeClient:
-        def __init__(self) -> None:
-            self.messages = _FakeMessagesAPI()
-
-    model = build_probe_model(args)
-    vars(model)["get_client"] = lambda: _FakeClient()
-    install_probe_hooks(model)
-
-    messages = [Message(role="system", content=_SYSTEM_PROMPT), Message(role="user", content="probe")]
-    with contextlib.suppress(_DryRunStop):
-        model.response(messages=messages, tools=build_probe_tools(), compression_manager=None)
+    provider = build_probe_provider(args, httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+    _send(provider, [Message(role="system", content=_SYSTEM_PROMPT), Message(role="user", content="probe")])
 
     if not captured:
-        print("FAIL: the hooked client was never invoked; the request never reached the fake SDK client.")
+        print("FAIL: the adapter never sent the request.")
         return 1
     wire = captured[0]
     tool_summary = [
@@ -178,10 +194,34 @@ def run_dry_run(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _run_tool(call: dict[str, Any]) -> Message:
+    function = call["function"]
+    arguments = json.loads(function.get("arguments") or "{}")
+    return Message(
+        role="tool",
+        tool_call_id=call["id"],
+        tool_name=function["name"],
+        content=_ENTRYPOINTS[function["name"]](**arguments),
+    )
+
+
+def _answer(provider: ClaudeProvider, messages: list[Message]) -> tuple[ModelTurn, list[str]]:
+    """Send the conversation and run the tools the model calls until it answers; return the answer and calls."""
+    called: list[str] = []
+    for _ in range(_MAX_TOOL_ROUNDS):
+        turn = _send(provider, messages)
+        messages.append(turn.message)
+        calls = turn.message.tool_calls or []
+        if not calls:
+            return turn, called
+        called.extend(call["function"]["name"] for call in calls)
+        messages.extend(_run_tool(call) for call in calls)
+    return turn, called
+
+
 def run_live(args: argparse.Namespace) -> int:
     """Run the two-turn live probe and report discovery and cache reuse."""
-    model = build_probe_model(args)
-    install_probe_hooks(model)
+    provider = build_probe_provider(args)
     messages = [
         Message(role="system", content=_SYSTEM_PROMPT),
         Message(
@@ -190,11 +230,7 @@ def run_live(args: argparse.Namespace) -> int:
         ),
     ]
 
-    tools = build_probe_tools()
-    # Agno's response() runs the full production loop: the model searches, the
-    # API expands the discovered schema, Agno executes the entrypoint, and the
-    # model finishes with the tool result.
-    first = model.response(messages=messages, tools=tools, compression_manager=None)
+    first, called = _answer(provider, messages)
     block_types = [
         block.get("type")
         for message in messages
@@ -202,10 +238,9 @@ def run_live(args: argparse.Namespace) -> int:
         for block in (message.provider_data or {}).get("server_tool_blocks", [])
     ]
     discovered = "tool_search_tool_result" in block_types
-    tool_calls = first.tool_executions or []
-    called_deferred = any(execution.tool_name == DEFERRED_TOOL_NAME for execution in tool_calls)
-    usage_first = first.response_usage
-    print(f"turn 1: server blocks={block_types} tool calls={[execution.tool_name for execution in tool_calls]}")
+    called_deferred = DEFERRED_TOOL_NAME in called
+    usage_first = first.message.metrics
+    print(f"turn 1: server blocks={block_types} tool calls={called}")
     if usage_first is not None:
         print(f"turn 1 usage: cache_write={usage_first.cache_write_tokens} cache_read={usage_first.cache_read_tokens}")
 
@@ -214,8 +249,8 @@ def run_live(args: argparse.Namespace) -> int:
         return 1
 
     messages.append(Message(role="user", content="Thanks — and what is the weather in London?"))
-    second = model.response(messages=messages, tools=tools, compression_manager=None)
-    usage_second = second.response_usage
+    second, _ = _answer(provider, messages)
+    usage_second = second.message.metrics
     cache_read = usage_second.cache_read_tokens if usage_second is not None else 0
     print(
         f"turn 2 usage: cache_write={usage_second.cache_write_tokens if usage_second else '?'} cache_read={cache_read}",

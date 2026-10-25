@@ -15,8 +15,6 @@ This directory contains utility scripts for MindRoom self-hosting.
 - **`utilities/cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker environment
 - **`utilities/cleanup_agent_edits.py`** - Python version of cleanup script with more options
 - **`utilities/forward-ports.sh`** - Forward ports from remote servers for local testing
-- **`utilities/rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
-- **`utilities/rewrite_git_history_apply.py`** - Apply git history rewrites
 
 ## For SaaS Platform Scripts
 

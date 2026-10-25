@@ -1,0 +1,255 @@
+{
+  "description": "Helper agent run by mindroom.scheduling.tasks._parse_workflow_schedule on cerebras qwen-3.8-27b.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook."
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_graph": {
+        "model": "default"
+      },
+      "memory": {
+        "backend": "file"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "qwen-3.8-27b",
+          "provider": "cerebras"
+        }
+      },
+      "router": {
+        "model": "default"
+      },
+      "teams": {
+        "launch": {
+          "agents": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Launch Team",
+          "role": "Plan and announce product launches."
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.scheduling.tasks._parse_workflow_schedule"
+  },
+  "requests": [
+    {
+      "model": {
+        "id": "qwen-3.8-27b",
+        "provider": "Cerebras"
+      },
+      "stream": false,
+      "messages": [
+        {
+          "content": "<your_role>\nParse scheduling requests into structured workflows\n</your_role>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "Parse this scheduling request into a structured workflow.\n\nCurrent time (UTC): 2026-09-21T14:14:00+00:00\nCurrent time in the user's timezone (UTC): 2026-09-21T14:14:00+00:00\nRequest: \"Every weekday at 9am, ask @assistant for the travel policy changes.\"\n\nYour task is to:\n1. Determine if this is a one-time task or recurring (cron)\n2. Extract the schedule/timing\n3. Create a message that mentions the appropriate agents or teams\n4. Set is_conditional=true only when the request is event-based or conditional\n5. Resolve history_limit using the conversation context rules below\n6. Resolve silent using the schedule visibility rules below\n\nAvailable agents and teams: @assistant, @researcher\n\nIMPORTANT: Event-based and conditional requests:\nWhen the request depends on an external event or condition rather than a fixed time:\n1. Convert to an appropriate recurring (cron) schedule for polling\n2. Include BOTH the condition check AND the action in the message\n3. Choose polling frequency based on urgency and type\n4. Set is_conditional to true\n\nConversation context (history_limit):\n- history_limit is the number of recent thread messages the responding agent sees each time the task fires\n- \"with no history\", \"without context\", or \"context-free\" -> history_limit=0\n- \"with only the last 5 messages of context\" or \"include the last 5 messages\" -> history_limit=5\n- On edits, \"restore full history\" or \"use unlimited history\" -> history_limit=null\n- On edits, keep the current history_limit unchanged when the request says nothing about context or history\n- For new schedules, leave history_limit unset (null) when the request says nothing about context or history\n- Remove context phrases like \"with no history\" from the message itself\n\nSchedule visibility (silent):\n- For new schedules, default silent=false when the request says nothing about visibility\n- Explicit quiet or silent wording sets silent=true\n- Explicit visible wording sets silent=false\n- On edits, preserve the current silent value when the request omits visibility\n\nImportant rules:\n- Set is_conditional=false for normal time-based schedules\n- For conditional/event-based requests, ALWAYS include the check condition in the message\n- Mention relevant agents or teams with @ only when needed\n- Interpret times in the request as UTC wall-clock times unless the request names an explicit timezone\n- Convert the interpreted time to UTC for the schedule (execute_at and cron_schedule are in UTC), but DO NOT include times in the message\n- Remove time phrases like \"in 15 seconds\" from the message itself\n- If schedule_type is \"once\", you MUST provide execute_at as a UTC datetime with an explicit UTC offset (e.g. 2026-01-15T17:30:00Z)\n- If schedule_type is \"cron\", you MUST provide cron_schedule\n\nExamples of event/condition phrasing to include in the message (do not include times in these examples):\n- @email_assistant Check for emails containing 'urgent'. If found, @phone_agent notify the user.\n- @crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user.\n- @monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers.\n- @reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points.\n",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "ScheduledWorkflow",
+          "schema": {
+            "$defs": {
+              "CronSchedule": {
+                "description": "Standard cron-like schedule definition.",
+                "properties": {
+                  "minute": {
+                    "default": "*",
+                    "description": "0-59, *, */5, or comma-separated",
+                    "title": "Minute",
+                    "type": "string"
+                  },
+                  "hour": {
+                    "default": "*",
+                    "description": "0-23, *, */2, or comma-separated",
+                    "title": "Hour",
+                    "type": "string"
+                  },
+                  "day": {
+                    "default": "*",
+                    "description": "1-31, *, or comma-separated",
+                    "title": "Day",
+                    "type": "string"
+                  },
+                  "month": {
+                    "default": "*",
+                    "description": "1-12, *, or comma-separated",
+                    "title": "Month",
+                    "type": "string"
+                  },
+                  "weekday": {
+                    "default": "*",
+                    "description": "0-6 (0=Sunday), *, or comma-separated",
+                    "title": "Weekday",
+                    "type": "string"
+                  }
+                },
+                "title": "CronSchedule",
+                "type": "object"
+              }
+            },
+            "description": "Structured representation of a scheduled task or workflow.",
+            "properties": {
+              "schedule_type": {
+                "enum": [
+                  "once",
+                  "cron"
+                ],
+                "title": "Schedule Type",
+                "type": "string"
+              },
+              "is_conditional": {
+                "default": false,
+                "title": "Is Conditional",
+                "type": "boolean"
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Execute At"
+              },
+              "cron_schedule": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CronSchedule"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "message": {
+                "title": "Message",
+                "type": "string"
+              },
+              "description": {
+                "title": "Description",
+                "type": "string"
+              },
+              "history_limit": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
+                "title": "History Limit"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Configured model alias for this scheduled run only",
+                "title": "Model"
+              },
+              "created_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Created By"
+              },
+              "thread_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Thread Id"
+              },
+              "room_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Room Id"
+              },
+              "new_thread": {
+                "default": false,
+                "title": "New Thread",
+                "type": "boolean"
+              },
+              "silent": {
+                "default": false,
+                "title": "Silent",
+                "type": "boolean"
+              },
+              "pre_approved_call": {
+                "default": false,
+                "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+                "title": "Pre Approved Call",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "schedule_type",
+              "message",
+              "description"
+            ],
+            "title": "ScheduledWorkflow",
+            "type": "object"
+          }
+        }
+      },
+      "deferred_tool_names": []
+    }
+  ],
+  "scenario": "helper_schedule_parse_cerebras"
+}

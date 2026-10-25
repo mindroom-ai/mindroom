@@ -11,14 +11,12 @@ from uuid import UUID
 
 import nio
 import pytest
-from agno.run.agent import RunContentEvent
-from agno.run.team import TeamRunOutput
 from nio.durable import DurableSyncConfig
 
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
 )
@@ -58,12 +56,13 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
-    FakeModel,
     drain_coalescing,
+    install_model_providers,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
@@ -144,35 +143,6 @@ def test_bot_ingestion_config_freezes_existing_transport_settings(tmp_path: Path
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
-
-    def test_agent_property_rejects_private_agent_without_request_identity(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """AgentBot.agent should fail fast for private agents with no request scope."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        role="Math assistant",
-                        rooms=[],
-                        private=AgentPrivateConfig(per="user", root="mind_data"),
-                    ),
-                },
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-        with pytest.raises(
-            ValueError,
-            match="AgentBot\\.agent is only available for shared agents",
-        ):
-            _ = bot.agent
 
     @pytest.mark.asyncio
     @patch("mindroom.config.main.load_config")
@@ -1584,10 +1554,7 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.load_config")
-    @patch("mindroom.teams.resolve_agent_knowledge_access")
-    @patch("mindroom.teams.create_agent")
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.teams.Team.arun")
+    @patch("mindroom.teams.members.resolve_agent_knowledge_access")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.response_runner.should_use_streaming")
@@ -1596,28 +1563,25 @@ class TestAgentBot(AgentBotTestBase):
         mock_should_use_streaming: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
-        mock_team_arun: AsyncMock,
-        mock_get_model_instance: MagicMock,
-        mock_create_agent: MagicMock,
         mock_resolve_agent_knowledge_access: MagicMock,
         mock_load_config: MagicMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Test agent bot thread response behavior based on agent participation."""
         # Use the helper method to create mock config
         config = self._config_for_storage(tmp_path)
         mock_load_config.return_value = config
 
-        # Mock get_model_instance to return a mock model
-        mock_model = FakeModel(id="test-model", provider="fake")
-        mock_get_model_instance.return_value = mock_model
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
-        fake_member = MagicMock()
-        fake_member.name = "MockAgent"
-        fake_member.instructions = []
-        mock_create_agent.return_value = fake_member
+        # Every model builds as one scripted model: it chooses the team mode, then answers as the team's leader on
+        # its own; the members are never asked.
+        team_model = ScriptedModel(
+            [answer('{"mode": "collaborate", "reasoning": "Both weigh in"}'), answer("Team response")],
+        )
+        install_model_providers(monkeypatch, {"default": team_model})
 
         bot = make_test_agent_bot(
             mock_agent_user,
@@ -1633,10 +1597,9 @@ class TestAgentBot(AgentBotTestBase):
         # Mock orchestrator with agent_bots
         mock_orchestrator = MagicMock()
         mock_agent_bot = MagicMock()
-        mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
         mock_orchestrator.current_config = config
-        mock_orchestrator.config = config  # This is what teams.py uses
+        mock_orchestrator.config = config  # Team formation reads the live config from here
         mock_orchestrator.runtime_paths = runtime_paths_for(config)
         bot.orchestrator = mock_orchestrator
 
@@ -1685,35 +1648,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_stream_agent_response.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Thread response"
 
-        # Mock team arun to return either a string or async iterator based on stream parameter
-
-        async def mock_team_stream() -> AsyncGenerator[Any, None]:
-            # Yield member content events (using display names as Agno would)
-            event1 = MagicMock(spec=RunContentEvent)
-            event1.event = "RunContent"  # Set the event type
-            event1.agent_name = "CalculatorAgent"  # Display name, not short name
-            event1.content = "Team response chunk 1"
-            yield event1
-
-            event2 = MagicMock(spec=RunContentEvent)
-            event2.event = "RunContent"  # Set the event type
-            event2.agent_name = "GeneralAgent"  # Display name, not short name
-            event2.content = "Team response chunk 2"
-            yield event2
-
-            # Yield final team response
-            team_response = MagicMock(spec=TeamRunOutput)
-            team_response.content = "Team consensus"
-            team_response.member_responses = []
-            team_response.messages = []
-            yield team_response
-
-        def mock_team_arun_side_effect(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001, ANN401
-            if kwargs.get("stream"):
-                return mock_team_stream()
-            return "Team response"
-
-        mock_team_arun.side_effect = mock_team_arun_side_effect
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
 
@@ -1749,7 +1683,6 @@ class TestAgentBot(AgentBotTestBase):
         # Reset mocks
         mock_stream_agent_response.reset_mock()
         mock_ai_response.reset_mock()
-        mock_team_arun.reset_mock()
         bot.client.room_send.reset_mock()
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
@@ -1795,14 +1728,14 @@ class TestAgentBot(AgentBotTestBase):
         # Should form team and send a structured streaming team response
         mock_stream_agent_response.assert_not_called()
         mock_ai_response.assert_not_called()
-        mock_team_arun.assert_called_once()
+        # The team mode was chosen once, then the team formed once.
+        assert [request.output_schema is not None for request in team_model.requests] == [True, False]
         # Structured streaming sends an initial message and one or more edits
         assert bot.client.room_send.call_count >= 1
 
         # Reset mocks
         mock_stream_agent_response.reset_mock()
         mock_ai_response.reset_mock()
-        mock_team_arun.reset_mock()
         bot.client.room_send.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond

@@ -12,8 +12,8 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
-from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.delegation.state import SubagentPersona
+from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.catalog import TOOL_METADATA
@@ -22,7 +22,7 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skills import (
     SKILL_FUNCTION_NAMES,
     SkillMarkdownError,
-    build_agent_skills,
+    build_skills_toolkit,
     parse_skill_markdown,
     workspace_entry_names,
 )
@@ -31,12 +31,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
-    from agno.tools.function import Function
-
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import PersonaSourceKind
+    from mindroom.tool_system.agno_toolkits import Function
 
 _MAX_PERSONA_PROMPT_BYTES = 64 << 10
 _PROFILE_DIRNAME = "subagents"
@@ -287,8 +286,8 @@ def caller_skill_names(
     """Return every skill this agent may use: its configured skills and the skills in its workspace."""
     if agent_name not in config.agents:
         return []
-    skills = build_agent_skills(agent_name, config, runtime_paths, workspace_root=workspace_root)
-    return [] if skills is None else skills.get_skill_names()
+    toolkit = build_skills_toolkit(agent_name, config, runtime_paths, workspace_root=workspace_root)
+    return [] if toolkit is None else [skill.name for skill in toolkit.skills]
 
 
 def caller_knowledge_names(agent_name: str, config: Config) -> list[str]:

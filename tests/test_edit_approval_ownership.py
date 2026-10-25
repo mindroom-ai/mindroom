@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 import pytest_asyncio
-from agno.models.response import ToolExecution
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval.manager import initialize_approval_store
@@ -23,6 +22,7 @@ from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
+from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
@@ -650,7 +650,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
                 progress=progress,
                 response_function=AsyncMock(),
                 user_id=request.user_id,
-                run_id="run",
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=runner.deps.logger),
                 approval_suspension_handler=fail_handoff,

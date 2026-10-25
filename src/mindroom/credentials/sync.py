@@ -23,6 +23,7 @@ from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager, validate_service_name
 from mindroom.credentials.policy import is_oauth_token_service
 from mindroom.logging_config import get_logger
+from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV, is_unset_env_value
 
 logger = get_logger(__name__)
@@ -433,14 +434,10 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
         The API key if found, None otherwise
 
     """
+    provider = provider_route(provider)
     # Special case for Ollama - return None as it doesn't use API keys
     if provider == "ollama":
         return None
-
-    # For Google/Gemini, both use the same key
-    if provider == "gemini":
-        provider = "google"
-
     return _get_provider_service_api_key(provider, runtime_paths)
 
 

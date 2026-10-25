@@ -1655,7 +1655,6 @@ async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path:
     )
     context = tools_api._ResolvedToolAvailabilityContext(
         execution_scope=None,
-        dashboard_configuration_supported=True,
         status_authoritative=True,
         credentials_manager=credentials_manager,
         worker_target=None,
@@ -1704,7 +1703,6 @@ def test_effective_allowed_shared_services_uses_credential_policy(
     """Tool availability should apply local-only credential policy before worker grants."""
     context = tools_api._ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
-        dashboard_configuration_supported=True,
         status_authoritative=True,
         credentials_manager=get_runtime_credentials_manager(_runtime_paths(tmp_path)),
         worker_target=None,
@@ -2422,7 +2420,6 @@ def test_get_tools_uses_one_runtime_snapshot(
         captured_runtime_paths.append(runtime_paths)
         return tools_api._ResolvedToolAvailabilityContext(
             execution_scope=None,
-            dashboard_configuration_supported=True,
             status_authoritative=True,
             credentials_manager=MagicMock(),
             worker_target=None,

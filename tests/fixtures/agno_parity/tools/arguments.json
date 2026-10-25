@@ -1,0 +1,632 @@
+{
+  "agent_parameter_drops_model_value": {
+    "arguments": {
+      "query": "x"
+    },
+    "function": "probe_agent",
+    "kwargs": {
+      "agent": {
+        "type": "injected",
+        "value": null
+      },
+      "query": {
+        "type": "str",
+        "value": "x"
+      }
+    },
+    "raw_arguments": "{\"query\": \"x\", \"agent\": \"spoof\"}"
+  },
+  "agent_parameter_missing_required": {
+    "arguments": {},
+    "error_text": "probe_agent() missing 1 required positional argument: 'query'",
+    "function": "probe_agent",
+    "raw_arguments": "{}"
+  },
+  "agent_parameter_skips_coercion": {
+    "arguments": {
+      "query": 3
+    },
+    "function": "probe_agent",
+    "kwargs": {
+      "agent": {
+        "type": "injected",
+        "value": null
+      },
+      "query": {
+        "type": "int",
+        "value": 3
+      }
+    },
+    "raw_arguments": "{\"query\": 3}"
+  },
+  "agent_parameter_unknown_argument": {
+    "arguments": {
+      "extra": 1,
+      "query": "x"
+    },
+    "error_text": "probe_agent() got an unexpected keyword argument 'extra'",
+    "function": "probe_agent",
+    "raw_arguments": "{\"query\": \"x\", \"extra\": 1}"
+  },
+  "async_invalid_number": {
+    "arguments": {
+      "count": "four"
+    },
+    "error_text": "1 validation error for probe_async\ncount\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='four', input_type=str]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/int_parsing",
+    "function": "probe_async",
+    "raw_arguments": "{\"count\": \"four\"}"
+  },
+  "async_string_number": {
+    "arguments": {
+      "count": "4"
+    },
+    "function": "probe_async",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 4
+      }
+    },
+    "raw_arguments": "{\"count\": \"4\"}"
+  },
+  "choice_invalid": {
+    "arguments": {
+      "mode": "medium"
+    },
+    "error_text": "1 validation error for probe_choice\nmode\n  Input should be 'fast' or 'slow' [type=literal_error, input_value='medium', input_type=str]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/literal_error",
+    "function": "probe_choice",
+    "raw_arguments": "{\"mode\": \"medium\"}"
+  },
+  "choice_valid": {
+    "arguments": {
+      "mode": "fast"
+    },
+    "function": "probe_choice",
+    "kwargs": {
+      "mode": {
+        "type": "str",
+        "value": "fast"
+      }
+    },
+    "raw_arguments": "{\"mode\": \"fast\"}"
+  },
+  "collections_coerced_values": {
+    "arguments": {
+      "tags": [
+        "a",
+        "b"
+      ],
+      "weights": {
+        "x": "1.5",
+        "y": 2
+      }
+    },
+    "function": "probe_collections",
+    "kwargs": {
+      "tags": {
+        "type": "list",
+        "value": [
+          {
+            "type": "str",
+            "value": "a"
+          },
+          {
+            "type": "str",
+            "value": "b"
+          }
+        ]
+      },
+      "weights": {
+        "type": "dict",
+        "value": {
+          "x": {
+            "type": "float",
+            "value": 1.5
+          },
+          "y": {
+            "type": "float",
+            "value": 2.0
+          }
+        }
+      }
+    },
+    "raw_arguments": "{\"tags\": [\"a\", \"b\"], \"weights\": {\"x\": \"1.5\", \"y\": 2}}"
+  },
+  "collections_json_encoded_list": {
+    "arguments": {
+      "tags": "[\"a\"]",
+      "weights": {}
+    },
+    "error_text": "1 validation error for probe_collections\ntags\n  Input should be a valid list [type=list_type, input_value='[\"a\"]', input_type=str]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/list_type",
+    "function": "probe_collections",
+    "raw_arguments": "{\"tags\": \"[\\\"a\\\"]\", \"weights\": {}}"
+  },
+  "collections_nested_strings_kept": {
+    "arguments": {
+      "tags": [
+        "true",
+        "null"
+      ],
+      "weights": {}
+    },
+    "function": "probe_collections",
+    "kwargs": {
+      "tags": {
+        "type": "list",
+        "value": [
+          {
+            "type": "str",
+            "value": "true"
+          },
+          {
+            "type": "str",
+            "value": "null"
+          }
+        ]
+      },
+      "weights": {
+        "type": "dict",
+        "value": {}
+      }
+    },
+    "raw_arguments": "{\"tags\": [\"true\", \"null\"], \"weights\": {}}"
+  },
+  "collections_wrong_item_type": {
+    "arguments": {
+      "tags": [
+        1
+      ],
+      "weights": {}
+    },
+    "error_text": "1 validation error for probe_collections\ntags.0\n  Input should be a valid string [type=string_type, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/string_type",
+    "function": "probe_collections",
+    "raw_arguments": "{\"tags\": [1], \"weights\": {}}"
+  },
+  "model_default_field": {
+    "arguments": {
+      "query_filter": {
+        "field": "name"
+      }
+    },
+    "function": "probe_model",
+    "kwargs": {
+      "query_filter": {
+        "type": "ProbeFilter",
+        "value": {
+          "field": "name",
+          "limit": 10
+        }
+      }
+    },
+    "raw_arguments": "{\"query_filter\": {\"field\": \"name\"}}"
+  },
+  "model_from_json_string": {
+    "arguments": {
+      "query_filter": "{\"field\": \"name\"}"
+    },
+    "error_text": "1 validation error for probe_model\nquery_filter\n  Input should be a valid dictionary or instance of ProbeFilter [type=model_type, input_value='{\"field\": \"name\"}', input_type=str]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/model_type",
+    "function": "probe_model",
+    "raw_arguments": "{\"query_filter\": \"{\\\"field\\\": \\\"name\\\"}\"}"
+  },
+  "model_from_object": {
+    "arguments": {
+      "query_filter": {
+        "field": "name",
+        "limit": "5"
+      }
+    },
+    "function": "probe_model",
+    "kwargs": {
+      "query_filter": {
+        "type": "ProbeFilter",
+        "value": {
+          "field": "name",
+          "limit": 5
+        }
+      }
+    },
+    "raw_arguments": "{\"query_filter\": {\"field\": \"name\", \"limit\": \"5\"}}"
+  },
+  "model_invalid_fields": {
+    "arguments": {
+      "query_filter": {
+        "limit": "many"
+      }
+    },
+    "error_text": "2 validation errors for probe_model\nquery_filter.field\n  Field required [type=missing, input_value={'limit': 'many'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing\nquery_filter.limit\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='many', input_type=str]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/int_parsing",
+    "function": "probe_model",
+    "raw_arguments": "{\"query_filter\": {\"limit\": \"many\"}}"
+  },
+  "no_arguments_empty_array": {
+    "arguments": null,
+    "function": "probe_no_arguments",
+    "kwargs": {},
+    "raw_arguments": "[]"
+  },
+  "no_arguments_empty_object": {
+    "arguments": {},
+    "function": "probe_no_arguments",
+    "kwargs": {},
+    "raw_arguments": "{}"
+  },
+  "no_arguments_unknown_argument": {
+    "arguments": {
+      "extra": 1
+    },
+    "error_text": "1 validation error for probe_no_arguments\nextra\n  Unexpected keyword argument [type=unexpected_keyword_argument, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/unexpected_keyword_argument",
+    "function": "probe_no_arguments",
+    "raw_arguments": "{\"extra\": 1}"
+  },
+  "optional_empty_arguments": {
+    "arguments": {},
+    "function": "probe_optional",
+    "kwargs": {
+      "flag": {
+        "type": "bool",
+        "value": false
+      },
+      "limit": {
+        "type": "NoneType",
+        "value": null
+      },
+      "note": {
+        "type": "NoneType",
+        "value": null
+      }
+    },
+    "raw_arguments": ""
+  },
+  "optional_none_strings": {
+    "arguments": {
+      "flag": false,
+      "limit": null,
+      "note": null
+    },
+    "function": "probe_optional",
+    "kwargs": {
+      "flag": {
+        "type": "bool",
+        "value": false
+      },
+      "limit": {
+        "type": "NoneType",
+        "value": null
+      },
+      "note": {
+        "type": "NoneType",
+        "value": null
+      }
+    },
+    "raw_arguments": "{\"note\": \"None\", \"limit\": \"none\", \"flag\": \"False\"}"
+  },
+  "optional_omitted": {
+    "arguments": {},
+    "function": "probe_optional",
+    "kwargs": {
+      "flag": {
+        "type": "bool",
+        "value": false
+      },
+      "limit": {
+        "type": "NoneType",
+        "value": null
+      },
+      "note": {
+        "type": "NoneType",
+        "value": null
+      }
+    },
+    "raw_arguments": "{}"
+  },
+  "optional_values": {
+    "arguments": {
+      "flag": true,
+      "limit": "4",
+      "note": "hi"
+    },
+    "function": "probe_optional",
+    "kwargs": {
+      "flag": {
+        "type": "bool",
+        "value": true
+      },
+      "limit": {
+        "type": "int",
+        "value": 4
+      },
+      "note": {
+        "type": "str",
+        "value": "hi"
+      }
+    },
+    "raw_arguments": "{\"note\": \"hi\", \"limit\": \"4\", \"flag\": \"true\"}"
+  },
+  "scalars_decimal_string_for_int": {
+    "arguments": {
+      "count": "3.5",
+      "enabled": true,
+      "label": "x",
+      "ratio": 2
+    },
+    "error_text": "1 validation error for probe_scalars\ncount\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='3.5', input_type=str]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/int_parsing",
+    "function": "probe_scalars",
+    "raw_arguments": "{\"count\": \"3.5\", \"ratio\": 2, \"enabled\": true, \"label\": \"x\"}"
+  },
+  "scalars_empty_array": {
+    "arguments": null,
+    "error_text": "4 validation errors for probe_scalars\ncount\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs(()), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nratio\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs(()), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nenabled\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs(()), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nlabel\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs(()), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument",
+    "function": "probe_scalars",
+    "raw_arguments": "[]"
+  },
+  "scalars_false_string_for_text": {
+    "arguments": {
+      "count": 1,
+      "enabled": false,
+      "label": "false",
+      "ratio": 1.0
+    },
+    "function": "probe_scalars",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 1
+      },
+      "enabled": {
+        "type": "bool",
+        "value": false
+      },
+      "label": {
+        "type": "str",
+        "value": "false"
+      },
+      "ratio": {
+        "type": "float",
+        "value": 1.0
+      }
+    },
+    "raw_arguments": "{\"count\": 1, \"ratio\": 1.0, \"enabled\": false, \"label\": \"false\"}"
+  },
+  "scalars_fractional_float_for_int": {
+    "arguments": {
+      "count": 3.5,
+      "enabled": true,
+      "label": "x",
+      "ratio": 2
+    },
+    "error_text": "1 validation error for probe_scalars\ncount\n  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=3.5, input_type=float]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/int_from_float",
+    "function": "probe_scalars",
+    "raw_arguments": "{\"count\": 3.5, \"ratio\": 2, \"enabled\": true, \"label\": \"x\"}"
+  },
+  "scalars_integral_float_for_int": {
+    "arguments": {
+      "count": 3.0,
+      "enabled": true,
+      "label": "x",
+      "ratio": 2
+    },
+    "function": "probe_scalars",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 3
+      },
+      "enabled": {
+        "type": "bool",
+        "value": true
+      },
+      "label": {
+        "type": "str",
+        "value": "x"
+      },
+      "ratio": {
+        "type": "float",
+        "value": 2.0
+      }
+    },
+    "raw_arguments": "{\"count\": 3.0, \"ratio\": 2, \"enabled\": true, \"label\": \"x\"}"
+  },
+  "scalars_invalid_json": {
+    "error_text": "Error while decoding function arguments: '{' was never closed (<unknown>, line 1)\n\nPlease make sure we can json.loads() the arguments and retry.",
+    "function": "probe_scalars",
+    "raw_arguments": "{\"count\": 3"
+  },
+  "scalars_json_array": {
+    "error_text": "Function arguments are not a valid JSON object.\n\n Please fix and retry.",
+    "function": "probe_scalars",
+    "raw_arguments": "[1, 2]"
+  },
+  "scalars_json_null": {
+    "error_text": "Function arguments are not a valid JSON object.\n\n Please fix and retry.",
+    "function": "probe_scalars",
+    "raw_arguments": "null"
+  },
+  "scalars_json_string": {
+    "error_text": "Function arguments are not a valid JSON object.\n\n Please fix and retry.",
+    "function": "probe_scalars",
+    "raw_arguments": "\"count\""
+  },
+  "scalars_missing_required": {
+    "arguments": {
+      "count": 1
+    },
+    "error_text": "3 validation errors for probe_scalars\nratio\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs((), {'count': 1}), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nenabled\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs((), {'count': 1}), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nlabel\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs((), {'count': 1}), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument",
+    "function": "probe_scalars",
+    "raw_arguments": "{\"count\": 1}"
+  },
+  "scalars_native_types": {
+    "arguments": {
+      "count": 3,
+      "enabled": true,
+      "label": "x",
+      "ratio": 2.5
+    },
+    "function": "probe_scalars",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 3
+      },
+      "enabled": {
+        "type": "bool",
+        "value": true
+      },
+      "label": {
+        "type": "str",
+        "value": "x"
+      },
+      "ratio": {
+        "type": "float",
+        "value": 2.5
+      }
+    },
+    "raw_arguments": "{\"count\": 3, \"ratio\": 2.5, \"enabled\": true, \"label\": \"x\"}"
+  },
+  "scalars_null_string_for_number": {
+    "arguments": {
+      "count": null,
+      "enabled": true,
+      "label": "x",
+      "ratio": 1.0
+    },
+    "error_text": "1 validation error for probe_scalars\ncount\n  Input should be a valid integer [type=int_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/int_type",
+    "function": "probe_scalars",
+    "raw_arguments": "{\"count\": \"null\", \"ratio\": 1.0, \"enabled\": true, \"label\": \"x\"}"
+  },
+  "scalars_padded_true_string": {
+    "arguments": {
+      "count": 1,
+      "enabled": true,
+      "label": "x",
+      "ratio": 1
+    },
+    "function": "probe_scalars",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 1
+      },
+      "enabled": {
+        "type": "bool",
+        "value": true
+      },
+      "label": {
+        "type": "str",
+        "value": "x"
+      },
+      "ratio": {
+        "type": "float",
+        "value": 1.0
+      }
+    },
+    "raw_arguments": "{\"count\": 1, \"ratio\": 1, \"enabled\": \" TRUE \", \"label\": \"x\"}"
+  },
+  "scalars_python_literal": {
+    "arguments": {
+      "count": 3,
+      "enabled": true,
+      "label": "x",
+      "ratio": 2.5
+    },
+    "function": "probe_scalars",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 3
+      },
+      "enabled": {
+        "type": "bool",
+        "value": true
+      },
+      "label": {
+        "type": "str",
+        "value": "x"
+      },
+      "ratio": {
+        "type": "float",
+        "value": 2.5
+      }
+    },
+    "raw_arguments": "{'count': 3, 'ratio': 2.5, 'enabled': True, 'label': 'x'}"
+  },
+  "scalars_string_numbers": {
+    "arguments": {
+      "count": "3",
+      "enabled": true,
+      "label": "7",
+      "ratio": "2.5"
+    },
+    "function": "probe_scalars",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 3
+      },
+      "enabled": {
+        "type": "bool",
+        "value": true
+      },
+      "label": {
+        "type": "str",
+        "value": "7"
+      },
+      "ratio": {
+        "type": "float",
+        "value": 2.5
+      }
+    },
+    "raw_arguments": "{\"count\": \"3\", \"ratio\": \"2.5\", \"enabled\": true, \"label\": \"7\"}"
+  },
+  "scalars_unknown_argument": {
+    "arguments": {
+      "count": 1,
+      "enabled": true,
+      "extra": 1,
+      "label": "x",
+      "ratio": 1.0
+    },
+    "error_text": "1 validation error for probe_scalars\nextra\n  Unexpected keyword argument [type=unexpected_keyword_argument, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/unexpected_keyword_argument",
+    "function": "probe_scalars",
+    "raw_arguments": "{\"count\": 1, \"ratio\": 1.0, \"enabled\": true, \"label\": \"x\", \"extra\": 1}"
+  },
+  "scalars_yes_string_for_flag": {
+    "arguments": {
+      "count": 1,
+      "enabled": "yes",
+      "label": "x",
+      "ratio": 1.0
+    },
+    "function": "probe_scalars",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 1
+      },
+      "enabled": {
+        "type": "bool",
+        "value": true
+      },
+      "label": {
+        "type": "str",
+        "value": "x"
+      },
+      "ratio": {
+        "type": "float",
+        "value": 1.0
+      }
+    },
+    "raw_arguments": "{\"count\": 1, \"ratio\": 1.0, \"enabled\": \"yes\", \"label\": \"x\"}"
+  },
+  "tool_raises": {
+    "arguments": {
+      "message": "boom"
+    },
+    "error_text": "boom",
+    "function": "probe_raises",
+    "raw_arguments": "{\"message\": \"boom\"}"
+  },
+  "unknown_function": {
+    "error_text": "Error: The requested tool does not exist or is not available.",
+    "function": "probe_missing",
+    "raw_arguments": "{}"
+  }
+}

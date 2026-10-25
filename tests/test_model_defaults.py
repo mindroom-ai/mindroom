@@ -213,7 +213,6 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "moonshotai/kimi-k3",
         1_048_576,
     )
-    assert model_defaults.DEEPSEEK_V4_PRO == "deepseek-v4-pro"
 
 
 def test_current_generation_media_models() -> None:

@@ -22,11 +22,10 @@ from mindroom.response_turn import ResponsePausedForApproval, apply_exact_approv
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
-    from agno.run.requirement import RunRequirement
-
     from mindroom.approval.response import ApprovalResponseCoordinator
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
+    from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import PausedAttempt
 

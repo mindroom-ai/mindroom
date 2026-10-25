@@ -1,6 +1,6 @@
 """Table layout of the conversation log's summary rows, shared by storage reads, run writes, and migrations.
 
-A scope's history is Agno's runs table in ``run_index`` order with summary rows
+A scope's history is its runs table in ``run_index`` order with summary rows
 positioned between its runs. Each summary row sorts right after the run whose
 ``run_index`` it records; replay is the scope's latest summary row plus the runs
 after it. Removed run ids keep a run a cut deleted from being written again.

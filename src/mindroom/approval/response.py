@@ -23,6 +23,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
+from mindroom.delegation.state import member_slot_id, pending_call_slot
 from mindroom.delivery_gateway import DeliveryStage
 from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
@@ -43,12 +44,11 @@ def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from agno.models.response import ToolExecution
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import MatrixDelivery, PrincipalStore
+    from mindroom.llm.runs import ToolExecution
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_approval_grants import ApprovalOperation
     from mindroom.tool_system.events import ToolTraceEntry
@@ -99,33 +99,18 @@ def _team_config_names_by_provider_id(state: dict[str, object]) -> dict[str, str
     return config_names_by_provider_id
 
 
-def _resolve_team_member_identity(member_id: str, config_names_by_provider_id: dict[str, str]) -> tuple[str, str]:
-    """Resolve an exact requirement identity to its frozen presentation ID and config name."""
-    matches = [
-        (provider_id, config_name)
-        for provider_id, config_name in config_names_by_provider_id.items()
-        if member_id in (provider_id, config_name)
-    ]
-    if len(matches) != 1:
-        msg = "Paused approval tool has no unique frozen member config identity"
-        raise RuntimeError(msg)
-    return matches[0]
-
-
 def identify_approval_tools(
     paused: PausedAttempt,
     *,
     default_agent_name: str,
 ) -> tuple[tuple[ToolExecution, str, str, str], ...]:
     """Resolve exact paused call IDs, names, and invoking member ownership."""
-    config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
+    # Each frozen member slot's config name, by slot id; a requirement names its member by either.
+    slots = _team_config_names_by_provider_id(paused.response_presentation_state)
     owners = {
-        requirement.tool_execution.tool_call_id: _resolve_team_member_identity(
-            requirement.member_agent_id,
-            config_names_by_provider_id,
-        )[1]
+        requirement.tool_execution.tool_call_id: slots[member_slot_id(slots, requirement.member_agent_id)]
         for requirement in paused.requirements
-        if requirement.tool_execution is not None and requirement.member_agent_id
+        if requirement.member_agent_id
     }
     identified: list[tuple[ToolExecution, str, str, str]] = []
     for tool in paused.tools:
@@ -144,38 +129,44 @@ def identify_approval_tools(
 
 
 def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls: bool) -> None:
-    """Reject a visible approval handoff whose pending tools have no ordered anchors."""
+    """Reject a visible approval handoff whose pending tools have no ordered anchors.
+
+    The card of a team member's own delegation call, ``member_id:call_id``, is anchored by that call in the member's
+    slot.
+    """
     if not show_tool_calls:
         return
+    unordered = "Approval suspension requires an ordered presentation for every pending tool"
     if not tool_markers_match_trace(paused.response_text, paused.tool_trace):
-        msg = "Approval suspension requires an ordered presentation for every pending tool"
-        raise RuntimeError(msg)
+        raise RuntimeError(unordered)
     requirements_by_call_id = {
         requirement.tool_execution.tool_call_id: requirement
         for requirement in paused.requirements
-        if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
+        if requirement.tool_execution.tool_call_id
     }
     is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
     config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
+    member_names = config_names_by_provider_id.values()
     for tool in paused.tools:
         call_id = tool.tool_call_id
-        matches = [
-            (index, entry)
-            for index, entry in enumerate(paused.tool_trace, start=1)
-            if entry.type == "tool_call_started" and entry.tool_call_id == call_id
-        ]
-        if call_id is None or len(matches) != 1:
-            msg = "Approval suspension requires an ordered presentation for every pending tool"
-            raise RuntimeError(msg)
-        _, entry = matches[0]
+        if call_id is None:
+            raise RuntimeError(unordered)
         requirement = requirements_by_call_id.get(call_id)
-        member_id = requirement.member_agent_id if requirement is not None else None
+        member_id, anchor_id = (None, call_id) if requirement is None else pending_call_slot(requirement, member_names)
+        matches = [
+            entry
+            for entry in paused.tool_trace
+            if entry.type == "tool_call_started" and entry.tool_call_id == anchor_id
+        ]
+        # An unanchored call is refused as such, before its member identity is resolved.
+        if not matches:
+            raise RuntimeError(unordered)
         if member_id is not None:
-            member_id, _ = _resolve_team_member_identity(member_id, config_names_by_provider_id)
+            member_id = member_slot_id(config_names_by_provider_id, member_id)
         expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
-        if entry.scope_key != expected_scope:
-            msg = "Approval suspension requires an ordered presentation for every pending tool"
-            raise RuntimeError(msg)
+        # Call ids are unique only within one member's run, so another member's call may share the anchor's id.
+        if sum(entry.scope_key == expected_scope for entry in matches) != 1:
+            raise RuntimeError(unordered)
 
 
 def continuation_target(
@@ -202,7 +193,7 @@ async def plan_approval_calls(
     config: Config,
     runtime_paths: RuntimePaths,
     requester_id: str,
-    toolkit_owners: Mapping[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str],
     room_id: str | None,
     thread_id: str | None,
 ) -> _ApprovalPausePlan:
@@ -379,7 +370,7 @@ class ApprovalResponseCoordinator:
         pending_text: str,
         reply_pause: _ReplyPause,
     ) -> _ApprovalPausePresentation:
-        """Replace one claim with Agno's next exact pause generation.
+        """Replace one claim with the run's next exact pause generation.
 
         ``reply_pause`` records the advance with the reply's pause row and
         returns the advanced continuation and whether its pause row reached Matrix.
@@ -523,7 +514,7 @@ class ApprovalResponseCoordinator:
         *,
         recover: bool = False,
     ) -> MatrixDelivery | None:
-        """Return FINAL debt produced by a completed Agno continuation, not failure settlement."""
+        """Return FINAL debt produced by a completed continuation, not failure settlement."""
         delivery = await self.final_delivery(continuation, recover=recover)
         if delivery is None or delivery.permanently_failed:
             return None
@@ -537,15 +528,13 @@ class ApprovalResponseCoordinator:
         recover: bool = False,
     ) -> MatrixDelivery | None:
         """Return the continuation's frozen FINAL, optionally retrying its delivery."""
-        outbox = self.delivery_gateway.deps.outbox
-        delivery = await outbox.load_matrix_delivery(
+        load = partial(
+            self.delivery_gateway.deps.outbox.load_matrix_delivery,
             delivery_id=continuation.source_event_ids[0],
             stage=DeliveryStage.FINAL,
         )
+        delivery = await load()
         if recover and delivery is not None and delivery.acknowledged_event_id is None:
             await self.delivery_gateway.recover_deliveries()
-            delivery = await outbox.load_matrix_delivery(
-                delivery_id=continuation.source_event_ids[0],
-                stage=DeliveryStage.FINAL,
-            )
+            delivery = await load()
         return delivery

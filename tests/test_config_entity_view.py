@@ -96,7 +96,6 @@ def test_history_settings_resolution() -> None:
         settings = config.resolve_entity(inheriting_scope).history_settings
         assert settings.policy == HistoryPolicy(mode="runs", limit=4)
         assert settings.max_tool_calls_from_history == 9
-        assert settings.system_message_role == "system"
 
 
 def test_compaction_resolution() -> None:

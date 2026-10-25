@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.media import Image
-
+from mindroom.llm.media import Image
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import ImageMessageEvent, download_media_bytes, media_mime_type, resolve_image_mime_type
 
@@ -19,7 +18,7 @@ async def download_image(
     client: nio.AsyncClient,
     event: ImageMessageEvent,
 ) -> Image | None:
-    """Download image from Matrix, returning an agno Image or None.
+    """Download image from Matrix, returning an Image or None.
 
     Handles both unencrypted and encrypted images. For encrypted images,
     decrypts using the key material in the event source.
@@ -29,7 +28,7 @@ async def download_image(
         event: Image event (encrypted or unencrypted)
 
     Returns:
-        agno Image object or None if download failed
+        Image or None if download failed
 
     """
     image_bytes = await download_media_bytes(client, event)

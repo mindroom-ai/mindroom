@@ -1,10 +1,17 @@
-"""Tests for the pytest guard that refuses network dials."""
+"""Tests for the pytest guards that keep tests off the network and away from the developer's credentials."""
 
 import asyncio
+import json
+import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
+import google.auth
+import google.auth._cloud_sdk
+import google.auth.compute_engine._metadata
+import google.auth.exceptions
 import httpcore
 import httpx
 import httpx2
@@ -110,3 +117,53 @@ def test_every_patched_http_client_backend_is_refused(request: pytest.FixtureReq
     assert dials[start:] == [conftest._RefusedDial("192.0.2.1:80", test_thread) for _ in range(4)]
     # These refusals are the expected outcome, so keep them out of this test's network report.
     del dials[start:]
+
+
+def test_google_default_credentials_are_not_this_machines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Google client built without credentials finds none, even where a gcloud login and a key file exist."""
+
+    def refuse_metadata_server(*_args: object, **_kwargs: object) -> bool:
+        msg = "the GCE metadata server was asked"
+        raise AssertionError(msg)
+
+    # google-auth runs the gcloud CLI for a login's project, and gcloud would ask the metadata server itself.
+    monkeypatch.setattr(google.auth._cloud_sdk, "get_project_id", lambda: None)
+    monkeypatch.setattr(google.auth.compute_engine._metadata, "ping", refuse_metadata_server)
+    login = json.dumps(
+        {"type": "authorized_user", "client_id": "test", "client_secret": "test", "refresh_token": "test"},
+    )
+    gcloud = tmp_path / "gcloud"
+    gcloud.mkdir()
+    gcloud_login = gcloud / "application_default_credentials.json"
+    key_file = tmp_path / "key.json"
+    key_file.write_text(login, encoding="utf-8")
+    monkeypatch.setenv("CLOUDSDK_CONFIG", str(gcloud))
+    gcloud_login.write_text(login, encoding="utf-8")
+    assert google.auth.default()[0] is not None
+    gcloud_login.unlink()
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key_file))
+    assert google.auth.default()[0] is not None
+    gcloud_login.write_text(login, encoding="utf-8")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    conftest.hide_developer_google_credentials(os.environ, str(empty))
+
+    with pytest.raises(google.auth.exceptions.DefaultCredentialsError):
+        google.auth.default()
+
+
+def test_inherited_google_keys_are_dropped() -> None:
+    """A Google API key or key file the developer exported never reaches a test."""
+    environ = {
+        "GOOGLE_APPLICATION_CREDENTIALS": "key.json",
+        "GOOGLE_API_KEY": "test",
+        "GOOGLE_API_KEY_FILE": "google-key",
+        "GEMINI_API_KEY": "test",
+        "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json",
+        "GOOGLE_DELEGATED_USER": "user@example.org",
+    }
+
+    conftest.hide_developer_google_credentials(environ, "empty")
+
+    assert environ == {"CLOUDSDK_CONFIG": "empty", "NO_GCE_CHECK": "true"}
