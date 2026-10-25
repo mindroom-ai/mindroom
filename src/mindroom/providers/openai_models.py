@@ -229,6 +229,16 @@ def _responses_image_tokens(block: dict[str, Any], model_id: str) -> int:
     return math.ceil(patches * 1.2)
 
 
+def _without_reasoning_ciphertext(item: Any) -> Any:  # noqa: ANN401
+    """Drop encrypted reasoning, whose base64 length says nothing about the tokens the provider counts.
+
+    History estimates skip thinking; mid-turn sizing adds the running turn's reported thinking itself.
+    """
+    if isinstance(item, dict) and item.get("type") == "reasoning" and "encrypted_content" in item:
+        return {key: value for key, value in item.items() if key != "encrypted_content"}
+    return item
+
+
 def _prepare_response_continuation(
     messages: list[Message],
     *,
@@ -302,7 +312,7 @@ class MindRoomOpenAIResponses(KeepHttpClient, NativeCompactionModel, OpenAIRespo
         replay_model = copy(self)
         replay_model._portable_replay = True
         replay_model.native_compaction = None
-        formatted = replay_model._format_messages(messages)
+        formatted = [_without_reasoning_ciphertext(item) for item in replay_model._format_messages(messages)]
         if not self.portable_replay_uses_visual_tokens():
             return approximate_o200k_tokens(stable_serialize(formatted))
         estimated_input = []

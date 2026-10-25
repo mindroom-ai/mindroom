@@ -417,6 +417,32 @@ def test_responses_image_file_id_retains_unknown_dimension_allowance() -> None:
     assert 3000 <= tokens < 3100
 
 
+def test_responses_budget_ignores_encrypted_reasoning_length() -> None:
+    """Encrypted reasoning is opaque base64; its length says nothing about the tokens the provider counts."""
+
+    def answered(ciphertext: str) -> list[Message]:
+        output = [
+            {"type": "reasoning", "id": "rs_plan", "summary": [], "encrypted_content": ciphertext},
+            {
+                "type": "message",
+                "id": "msg_answer",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Ready", "annotations": []}],
+            },
+        ]
+        return [
+            Message(role="user", content="Plan the trip."),
+            Message(role="assistant", content="Ready", provider_data={"mindroom_response_output": output}),
+        ]
+
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    model.configure_portable_replay()
+    short, long = answered("gAAAA"), answered("gAAAA" + "Zm9vYmFy" * 5000)
+    assert any(item.get("type") == "reasoning" for item in model._format_messages(long))
+    assert model.estimate_portable_replay_tokens(long) == model.estimate_portable_replay_tokens(short)
+
+
 def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments() -> None:
     """Only typed Responses image input is discounted, never similar-looking text."""
     literal = "data:image/png;base64," + "aGVsbG8=" * 1000
