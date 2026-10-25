@@ -473,15 +473,29 @@ async def _execute_room_agent_participant(
     context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
     participant_id = _required_participant_text(participant, "id")
-    active_model_name = _budgeted_model(context, _runtime_model_name(context, agent_name))
     session_id = f"{context.session_id}:dynamic_workflow:{run_scope}:{participant_id}"
+    participant_context, build = await run_blocking_until_complete(
+        _build_room_agent_participant,
+        context,
+        agent_name,
+        session_id,
+    )
+    return await _run_room_agent_turn(participant_context, build, prompt)
+
+
+def _build_room_agent_participant(
+    context: ToolRuntimeContext,
+    agent_name: str,
+    session_id: str,
+) -> tuple[ToolRuntimeContext, AgentBuild]:
+    """Resolve a room agent's model and build it; both walk the filesystem, so callers run this off the event loop."""
+    active_model_name = _budgeted_model(context, _runtime_model_name(context, agent_name))
     participant_context = replace(
         context,
         agent_name=agent_name,
         active_model_name=active_model_name,
         target=replace(context.target, session_id=session_id),
     )
-    execution_identity = build_execution_identity_from_runtime_context(participant_context)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import create_agent  # noqa: PLC0415
 
@@ -489,7 +503,7 @@ async def _execute_room_agent_participant(
         agent_name,
         context.config,
         context.runtime_paths,
-        execution_identity=execution_identity,
+        execution_identity=build_execution_identity_from_runtime_context(participant_context),
         hook_registry=context.hook_registry,
         knowledge=None,
         active_model_name=active_model_name,
@@ -497,7 +511,7 @@ async def _execute_room_agent_participant(
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
     )
-    return await _run_room_agent_turn(participant_context, build, prompt)
+    return participant_context, build
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:

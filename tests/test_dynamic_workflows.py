@@ -86,7 +86,7 @@ class LoopFreedom:
 
 
 @contextmanager
-def file_work_waiting_for_the_loop(methods: dict[type, tuple[str, ...]]) -> Iterator[LoopFreedom]:
+def file_work_waiting_for_the_loop(methods: dict[object, tuple[str, ...]]) -> Iterator[LoopFreedom]:
     """Make each named method wait, before its file work, until another coroutine has run on the event loop.
 
     Another coroutine runs only while the loop is free, so a method called on the loop thread records itself as
@@ -2264,6 +2264,27 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
     assert create_kwargs["persist_runtime_state"] is False
     assert create_kwargs["disable_runtime_capabilities"] is True
     assert create_kwargs["execution_identity"].agent_name == "specialist"
+
+
+@pytest.mark.asyncio
+async def test_room_agent_participant_is_resolved_and_built_while_the_loop_stays_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolving a room-agent participant's model and building it, which walk the filesystem, leave the loop free."""
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+    _room_agent_model(monkeypatch, answer("done"))
+
+    with file_work_waiting_for_the_loop({agents: ("create_agent",), Config: ("resolve_runtime_model",)}) as freedom:
+        result = await dynamic_workflow_module._execute_room_agent_participant(
+            context,
+            {"id": "writer_a", "kind": "room_agent", "agent": "specialist"},
+            "Write a report.",
+        )
+
+    assert result == "done"
+    assert freedom.blocked == []
+    assert {"create_agent", "resolve_runtime_model"} <= set(freedom.called)
 
 
 def test_resolve_participant_toolkits_builds_real_instances_with_caller_routing(tmp_path: Path) -> None:
