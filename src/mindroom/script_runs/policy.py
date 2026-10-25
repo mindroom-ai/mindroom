@@ -47,7 +47,7 @@ def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToo
     return tuple(
         ScriptToolGrant(toolkit_name, function_name)
         for toolkit_name, toolkit in toolkits.items()
-        for function_name in _visible_function_names(context, toolkit)
+        for function_name in _visible_function_names(context, toolkit_name, toolkit)
     )
 
 
@@ -75,7 +75,7 @@ def resolve_current_script_tool(
     toolkit = _build_script_toolkits(context, config, (tool_entry,)).get(grant.toolkit_name)
     if toolkit is None:
         return None
-    if grant.function_name not in _visible_function_names(context, toolkit):
+    if grant.function_name not in _visible_function_names(context, grant.toolkit_name, toolkit):
         if rejected_toolkit_cleanup is not None:
             rejected_toolkit_cleanup(toolkit)
         return None
@@ -143,10 +143,10 @@ def _build_script_toolkits(
     return toolkits
 
 
-def _visible_function_names(context: ToolRuntimeContext, toolkit: Toolkit) -> tuple[str, ...]:
+def _visible_function_names(context: ToolRuntimeContext, toolkit_name: str, toolkit: Toolkit) -> tuple[str, ...]:
     # One function per name, the one an agent's run offers.
     if context.tool_function_filter is None:
         return tuple(toolkit.get_async_functions())
-    return tuple(
-        function.name for function in adapt_toolkit(toolkit).functions if context.tool_function_filter(function)
-    )
+    # Each function names the toolkit it is granted from, as it names the one an agent's build offers it from.
+    functions = adapt_toolkit(toolkit, key=toolkit_name).functions
+    return tuple(function.name for function in functions if context.tool_function_filter(function))

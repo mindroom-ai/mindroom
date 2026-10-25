@@ -100,6 +100,34 @@ def _echo(text: str) -> str:
     return text
 
 
+def test_launch_and_call_filters_see_the_toolkit_each_function_is_granted_from(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context's filter reads the toolkit a function is granted from, as an agent's build names it."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(
+        context,
+        tool_function_filter=lambda function: (function.toolkit, function.name) == ("calculator", "echo"),
+    )
+
+    def build_toolkit(_tool_name: str, **_kwargs: object) -> Toolkit:
+        # Agno's own name for the toolkit differs from the configured one the grant names.
+        return Toolkit(name="arithmetic", tools=[Function(name="echo", entrypoint=_echo)])
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "echo")) is not None
+
+
 def test_launch_grants_skip_a_refused_function_the_filter_leaves_out(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
