@@ -338,7 +338,7 @@ async def test_every_family_encodes_a_tool_result_with_its_call_name_content_and
     wire = Wire(spec.reply())
 
     await complete(
-        _pipeline(spec.adapter(tmp_path, wire)),
+        pipeline_provider(spec.adapter(tmp_path, wire)),
         ModelRequest(messages=_answered_tool_turn(), tools=[_tool("get_weather")]),
     )
 
