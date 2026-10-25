@@ -3,6 +3,7 @@
 A [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) agent keeps one copy of its state for each requester, but everyone still talks to a single Matrix account, so nobody can address "Bob's agent", add it to a team, or delegate to it.
 The optional `personal_agents` section gives each person onboarded through [`personal_rooms`](https://docs.mindroom.chat/personal-rooms/) their own agent with its own Matrix account, all built from one template whose defaults you control.
 Use `private` when one shared agent with separate state per requester is enough, and `personal_agents` when each person needs an agent others can mention or put in a team.
+A generated agent is a personal agent in the sense of the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) and [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) pages only when its worker scope, from the template's `agent` or `defaults.worker_scope`, is `user` or `user_agent`.
 
 ## Setup
 
@@ -51,6 +52,7 @@ Placeholders are replaced as exact tokens, so other braces in prompts stay liter
 
 If the rendered `name` or Matrix account is already taken, `{username}` becomes the slug plus `_` and the first 6 hex characters of the SHA-256 of the user ID, for example `alice_86f01a` for `@alice:example.org`.
 Taken means an authored agent or team, a template key, `router`, `user`, `_shared`, another generated agent, or an account MindRoom already manages.
+A user on another server than MindRoom's always gets this hashed form, so nobody elsewhere can take a local person's plain name.
 A second clash fails that user's onboarding.
 
 Every generated agent also gets these settings, whatever the template says:
@@ -77,7 +79,8 @@ They never appear in the saved config file, and the dashboard and `config_manage
 ## Letting Agents Talk to Each Other
 
 By default nobody except the owner and administrators can use a generated agent, so agents do not reach each other.
-To let them, set `access` in the template, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
+To let them, set `access` under the template's `agent:`, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
+With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onboarded user can use every other user's agent.
 
 > [!WARNING]
 > **Whoever `access` admits works with the owner's agent.**
@@ -89,15 +92,16 @@ To let them, set `access` in the template, for example `members_of_rooms: [lobby
 
 The router handles a join, a `commands` entry, or a `backfill` hit in an onboarding room like any [personal-room](https://docs.mindroom.chat/personal-rooms/#onboarding-behavior) trigger, with these differences:
 
-1. MindRoom registers the user's Matrix account before it records the agent, so a failed registration leaves no agent behind.
-2. It then writes the roster entry and requests a config reload, which is debounced for 2 seconds, and the agent starts.
-3. The usual personal-room flow runs with that user's own agent once the agent has finished its first sync.
+1. MindRoom registers the agent's Matrix account and starts the agent without a restart; a failed registration leaves no agent behind.
+2. The usual personal-room flow runs with that user's own agent once the agent has finished its first sync.
    Until then the trigger is pending, which does not hold up the onboarding room for anyone else, and the router logs `Personal agent is starting`.
-4. The user keeps the agent, its account, and its room when they leave the onboarding room or are banned, and MindRoom has no command that removes them.
+3. The user keeps the agent, its account, and its room when they leave the onboarding room or are banned, and MindRoom has no command that removes them.
 
-The roster is `tracking/personal_agents.json` in the storage directory, with `personal_agents.lock` beside it.
-Each entry holds the template, user ID, `{username}` slug, agent name, Matrix username, display name, and onboarding room, and entries are never rewritten, so names never change.
-A generated agent's personal-room service applies `personal_rooms` settings only for its owner.
+A [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) onboards onto its person's agent, which gives the alias account its own personal room.
+A Matrix ID containing a space, `*`, `?`, `[`, or `]` gets no agent, because access settings cannot name it exactly.
+
+The roster of generated agents is `tracking/personal_agents.json` in the storage directory; back it up with the storage, because an agent's name and Matrix account never change once recorded there.
+Stop MindRoom before editing it by hand; a file MindRoom cannot read fails config loading with `Personal agent roster <path> is invalid:` and the reason.
 
 > [!WARNING]
 > **Everyone who joins an onboarding room gets an agent on your model keys.**
@@ -111,6 +115,12 @@ MindRoom's own accounts and the internal `mindroom_user` never get an agent.
 The dashboard's Settings page edits `personal_agents` next to Personal rooms.
 Its `personal_rooms.agent` dropdown lists configured agents only, so type a template name in YAML, after which the dropdown shows it and saves it unchanged.
 
+## Switching From a Single Personal-Room Agent
+
+When `personal_rooms.agent` changes from an agent to a template, existing personal rooms stay with the old agent, and a user's new agent cannot take over a room the old agent created.
+Set a new `personal_rooms.alias_prefix` at the same time so that each user gets a new personal room with their own agent; otherwise their onboarding fails with `Personal-room alias ... which this agent does not own`.
+The old agent's `access` no longer limits who gets an agent: everyone in an onboarding room gets one.
+
 ## Troubleshooting Personal Agents
 
 A failure affects only that user's onboarding.
@@ -119,7 +129,7 @@ Failed onboarding retries after 30 seconds, then at doubling intervals up to one
 | Log message | Meaning |
 | --- | --- |
 | `Personal agent is starting` | Normal: the user's agent was just created or has not finished its first sync, and the trigger is retried when it has. |
-| `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, or `No free personal agent name for <user>` when the plain and the hashed names are both taken. |
+| `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, `No free personal agent name for <user>` when the plain and the hashed names are both taken, or `<user> cannot own a personal agent` for an unsupported Matrix ID. |
 | `Personal-room reconciliation failed` | A retry failed, with the attempt number and the delay before the next try. |
 | `Personal agent roster unavailable` | The roster file cannot be read, and the pass is retried. |
 
