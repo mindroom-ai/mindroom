@@ -22,6 +22,9 @@ from mindroom.providers.names import provider_route
 # Agent names
 ROUTER_AGENT_NAME = "router"
 ROUTER_DISPLAY_NAME = "RouterAgent"
+AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+# "_shared" is the requester-store directory part for `user` scope in CredentialsManager.for_primary_runtime_scope.
+RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"

@@ -2403,6 +2403,37 @@ async def test_mention_in_an_agents_finished_reply_wakes_the_mentioned_agent_onc
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_placeholder_the_mentioned_agent_cannot_answer_does_not_swallow_the_finished_reply(
+    tmp_path: Path,
+) -> None:
+    """A placeholder carries no requester, so its refusal must not mark the turn its finished reply needs."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _joined_room(config, "general", "research")
+    placeholder_id = "$placeholder:localhost"
+    _admit_placeholder(harness, placeholder_id)
+    placeholder = _entity_reply_event(
+        config,
+        sender=_entity_user_id(config, "research"),
+        acting_requester=_OWNER,
+        mention=None,
+        event_id=placeholder_id,
+    )
+    content = placeholder.source["content"]
+    del content[constants.ACTING_REQUESTER_KEY]
+    content["body"] = "Thinking..."
+    content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_PENDING
+    content["m.relates_to"] = {"rel_type": "m.thread", "event_id": _THREAD_ROOT}
+
+    await harness.deliver(room, placeholder)
+    await harness.deliver(room, _final_reply_edit(config, placeholder_id=placeholder_id, event_id="$final:localhost"))
+
+    assert len(harness.runner.requests) == 1
+    assert harness.runner.requests[0].user_id == _OWNER
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("status", [constants.STREAM_STATUS_CANCELLED, constants.STREAM_STATUS_ERROR])
 async def test_cancelled_or_failed_agent_reply_never_wakes_the_agent_it_mentions(tmp_path: Path, status: str) -> None:
     """Only a completed reply hands off; a stopped or failed one stays an agent's edit, which changes nothing."""
@@ -3191,26 +3222,60 @@ async def test_first_message_after_joining_waits_for_the_router_to_apply_the_joi
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
     await memberships.refresh(config, runtime_paths_for(config), client)
     validator = harness.controller.deps.ingress
-
-    with pytest.raises(ReplyMembershipPendingError):
-        await validator.precheck_event(room, event)
-    assert harness.turn_store.get_turn_record(event.event_id) is None
-
-    join = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": "$join",
-            "sender": _SENDER,
-            "state_key": _SENDER,
-            "origin_server_ts": 1,
-            "content": {"membership": "join"},
-        },
-    )
-    assert isinstance(join, nio.RoomMemberEvent)
     router_id = _entity_user_id(config, ROUTER_AGENT_NAME)
-    memberships.apply_member_event(config, room.room_id, join, control_user_id=router_id)
 
-    assert await validator.precheck_event(room, event) == _SENDER
+    def router_applies_join(user_id: str) -> None:
+        join = nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": f"$join-{user_id}",
+                "sender": user_id,
+                "state_key": user_id,
+                "origin_server_ts": 1,
+                "content": {"membership": "join"},
+            },
+        )
+        assert isinstance(join, nio.RoomMemberEvent)
+        assert memberships.apply_member_event(config, room.room_id, join, control_user_id=router_id)
+
+    # The check settles in the same callback once the router catches up, instead of failing it into a journal retry.
+    precheck = asyncio.create_task(validator.precheck_event(room, event))
+    await asyncio.sleep(0)
+    assert not precheck.done()
+    router_applies_join("@someone_else:localhost")  # a publication that still lacks the sender
+    await asyncio.sleep(0)
+    assert not precheck.done()
+    assert harness.turn_store.get_turn_record(event.event_id) is None
+    router_applies_join(_SENDER)
+
+    assert await asyncio.wait_for(precheck, timeout=5) == _SENDER
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_message_checked_during_a_membership_refresh_passes_when_the_refresh_publishes(tmp_path: Path) -> None:
+    """A grant awaiting the router's authoritative refresh settles in the same callback once the refresh lands."""
+    config = _membership_single_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("owed", event_id="$during-refresh")
+    memberships = harness.controller.deps.runtime.agent_reply_memberships
+    client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(_SENDER, None, None)],
+        room_id=room.room_id,
+    )
+    await memberships.refresh(config, runtime_paths_for(config), client)
+    memberships.invalidate(config, reason="uncertain_sync_response")
+    validator = harness.controller.deps.ingress
+
+    precheck = asyncio.create_task(validator.precheck_event(room, event))
+    await asyncio.sleep(0)
+    assert not precheck.done()
+    await memberships.refresh(config, runtime_paths_for(config), client)
+
+    assert await asyncio.wait_for(precheck, timeout=5) == _SENDER
 
 
 @pytest.mark.asyncio
@@ -5397,7 +5462,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
     dispatcher.release_turn_replay()
     dispatcher.start()
     try:
-        await asyncio.wait_for(failed.wait(), timeout=3)
+        await asyncio.wait_for(failed.wait(), timeout=4)  # above the first gate's 1 s wait for the router
         assert attempted == ["$first"]
         assert await dispatcher.store.is_pending("$first")
         assert await dispatcher.store.is_pending("$second")

@@ -8,6 +8,7 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
+from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_room_members
@@ -19,13 +20,15 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomValidationError
 from mindroom.matrix.state import resolve_room_aliases
+from mindroom.personal_agents import is_mindroom_account_id
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     import nio
 
+    from mindroom.config.personal_rooms import PersonalRoomsConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.personal_rooms import PersonalRoomService
     from mindroom.matrix.room_member_joins import RoomMemberJoin
@@ -41,6 +44,10 @@ _RECONCILIATION_MAX_RETRY_SECONDS = 3600.0
 
 class _TargetNotReadyError(RuntimeError):
     """The personal-room agent is not connected yet."""
+
+
+class _TargetPendingError(RuntimeError):
+    """The requester's own personal agent is not in the live config or not connected yet."""
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,8 @@ class PersonalRoomLifecycle:
     service: PersonalRoomService
     lookup_target: Callable[[str], PersonalRoomTarget | None]
     requester_user_id: Callable[[nio.RoomMessageFormatted], str]
+    # Creates one user's agent from a template (template, owner, joining account, source_room_id) and requests a reload.
+    provision_personal_agent: Callable[[str, str, str, str], Awaitable[None]] | None = None
     _reconciled: bool = field(default=False, init=False)
     _config_revision: int = field(default=0, init=False)
     _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
@@ -87,6 +96,7 @@ class PersonalRoomLifecycle:
     _retry_candidates: dict[tuple[str, str], bool] = field(default_factory=dict, init=False)
     _reconciliation_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _next_reconciliation_at: float = field(default=0.0, init=False)
+    _target_ready_during_pass: bool = field(default=False, init=False)
 
     @property
     def observes_onboarding_joins(self) -> bool:
@@ -101,6 +111,32 @@ class PersonalRoomLifecycle:
         self._candidate_backoff.clear()
         self._next_reconciliation_at = 0.0
 
+    def target_ready(self) -> None:
+        """Reconcile at once because a user's own agent has just finished its first sync."""
+        self._reconciled = False
+        self._next_reconciliation_at = 0.0
+        # A running pass may have seen that agent unsynced, so another pass follows it without the cooldown.
+        self._target_ready_during_pass = self._reconciliation_task is not None
+        self.schedule_reconciliation()
+
+    def _uses_template(self, settings: PersonalRoomsConfig) -> bool:
+        return settings.agent in self.runtime.config.personal_agents
+
+    def _target_name(self, settings: PersonalRoomsConfig, user_id: str) -> str | None:
+        """Return the agent that serves one user's personal room, or None before their own agent exists."""
+        if not self._uses_template(settings):
+            return settings.agent
+        return self.runtime.config.personal_agent_name(settings.agent, user_id)
+
+    def _reconciliation_ready(self, settings: PersonalRoomsConfig) -> bool:
+        """Whether a pass can start; each user's own agent is checked per candidate instead."""
+        if self.runtime.client is None:
+            return False
+        if self._uses_template(settings):
+            return True
+        target = self.lookup_target(settings.agent)
+        return target is not None and target.first_sync_complete
+
     def schedule_reconciliation(self) -> None:
         """Start at most one maintenance pass without delaying durable sync admission."""
         if (
@@ -112,8 +148,7 @@ class PersonalRoomLifecycle:
             return
         settings = self.runtime.config.personal_rooms
         assert settings is not None
-        target = self.lookup_target(settings.agent)
-        if target is None or not target.first_sync_complete or self.runtime.client is None:
+        if not self._reconciliation_ready(settings):
             return
         self._reconciliation_task = create_background_task(
             self._run_reconciliation(),
@@ -130,9 +165,12 @@ class PersonalRoomLifecycle:
             cancelled = True
             raise
         finally:
-            if not cancelled and revision == self._config_revision:
+            nudged, self._target_ready_during_pass = self._target_ready_during_pass, False
+            if not cancelled and not nudged and revision == self._config_revision:
                 self._next_reconciliation_at = monotonic() + _RECONCILIATION_RETRY_SECONDS
             self._reconciliation_task = None
+            if nudged and not cancelled:
+                self.target_ready()
 
     async def cancel_reconciliation(self, *, timeout_seconds: float) -> None:
         """Cancel within the shutdown budget, retaining ownership of unfinished work."""
@@ -153,7 +191,14 @@ class PersonalRoomLifecycle:
         *,
         reinvite_departed_owner: bool = False,
     ) -> None:
-        """Forward a trusted router observation; unavailable owners leave it retryable."""
+        """Forward a trusted router observation; unavailable owners leave it retryable.
+
+        When personal_rooms.agent names a template, the requester's own agent
+        serves the room: a missing one is provisioned, and until it is in the
+        live config, connected, and past its first sync the trigger is pending.
+        An unsynced agent's membership changes wait for its sync to catch up,
+        which would stall the pass for every other user.
+        """
         settings = self.runtime.config.personal_rooms
         if (
             not self.observes_onboarding_joins
@@ -162,8 +207,26 @@ class PersonalRoomLifecycle:
             or not is_human_requester_id(user_id, self.runtime.config, self.runtime_paths)
         ):
             return
-        target = self.lookup_target(settings.agent)
-        if target is None or self.runtime.client is None:
+        # A bridge alias shares its person's agent; the personal room stays keyed by the joining account.
+        owner_id = resolve_human_requester_alias(user_id, self.runtime.config, self.runtime_paths)
+        target_name = self._target_name(settings, owner_id)
+        if target_name is None:
+            # A new agent's account can join the lobby before the reload that makes it known.
+            if is_mindroom_account_id(user_id, self.runtime_paths):
+                logger.debug("MindRoom account gets no personal agent", user_id=user_id, room_id=source_room_id)
+                return
+            if self.provision_personal_agent is None:
+                msg = "Personal agents need a provisioning callback"
+                raise RuntimeError(msg)
+            await self.provision_personal_agent(settings.agent, owner_id, user_id, source_room_id)
+            msg = "Personal agent is not in the live config yet"
+            raise _TargetPendingError(msg)
+        target = self.lookup_target(target_name)
+        if self._uses_template(settings):
+            if target is None or not target.first_sync_complete or self.runtime.client is None:
+                msg = "Personal agent is not connected and synced yet"
+                raise _TargetPendingError(msg)
+        elif target is None or self.runtime.client is None:
             msg = "Personal-room target is not ready"
             raise _TargetNotReadyError(msg)
         await target.service.ensure(
@@ -190,12 +253,18 @@ class PersonalRoomLifecycle:
         hands the trigger to reconciliation, which retries it after doubling
         delays up to hourly. A personal-room agent that is not connected yet
         still raises, so the journal keeps the trigger across restarts until
-        that agent is ready.
+        that agent is ready. A requester's own agent that is still starting
+        settles the event and hands the trigger to reconciliation without a
+        delay, and that agent's first sync asks for a pass at once.
         """
+        candidate = (user_id, source_room_id)
         try:
             await self._onboard(user_id, source_room_id, reinvite_departed_owner=reinvite_departed_owner)
         except _TargetNotReadyError:
             raise
+        except _TargetPendingError:
+            logger.info("Personal agent is starting", user_id=user_id, room_id=source_room_id)
+            self._queue_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
         except PersonalRoomValidationError as error:
             logger.warning(
                 "Personal-room validation failed for an onboarding trigger",
@@ -211,12 +280,15 @@ class PersonalRoomLifecycle:
                 error_type=type(error).__name__,
                 error=str(error),
             )
-            candidate = (user_id, source_room_id)
-            self._retry_candidates[candidate] = reinvite_departed_owner or self._retry_candidates.get(candidate, False)
-            self._completed_candidates.discard(candidate)
-            self._reconciled = False
+            self._queue_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
         else:
-            self._settle_retry((user_id, source_room_id), reinvite_departed_owner=reinvite_departed_owner)
+            self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
+
+    def _queue_retry(self, candidate: tuple[str, str], *, reinvite_departed_owner: bool) -> None:
+        """Hand a live trigger that did not finish to the next reconciliation pass."""
+        self._retry_candidates[candidate] = reinvite_departed_owner or self._retry_candidates.get(candidate, False)
+        self._completed_candidates.discard(candidate)
+        self._reconciled = False
 
     def _settle_retry(self, candidate: tuple[str, str], *, reinvite_departed_owner: bool) -> bool:
         """Forget a failed trigger's retry once a successful attempt covered it, and say whether it did.
@@ -307,6 +379,27 @@ class PersonalRoomLifecycle:
                 candidates.add((record.user_id, record.resume_source_room_id or record.source_room_id))
         return candidates, failed
 
+    def _recorded_intent(self, settings: PersonalRoomsConfig) -> tuple[set[tuple[str, str]], bool]:
+        """Collect retained intent of the target, or of every user's own agent from a template."""
+        if not self._uses_template(settings):
+            return self._recorded_candidates(settings.agent)
+        try:
+            roster = read_personal_agent_roster(self.runtime_paths)
+        except Exception:
+            logger.exception("Personal agent roster unavailable")
+            return set(), True
+        candidates: set[tuple[str, str]] = set()
+        failed = False
+        for entry in roster:
+            if entry.template != settings.agent:
+                continue
+            # A bridge alias's join is retried for the alias, whose membership is the one that onboarded.
+            candidates.add((entry.source_user_id or entry.user_id, entry.source_room_id))
+            recorded, recorded_failed = self._recorded_candidates(entry.agent_name)
+            candidates.update(recorded)
+            failed |= recorded_failed
+        return candidates, failed
+
     async def _backfill_candidates(self, onboarding_rooms: list[str]) -> tuple[set[tuple[str, str]], bool]:
         """Collect lobby members without losing recorded intent when a lobby is unavailable."""
         assert self.runtime.client is not None
@@ -327,15 +420,19 @@ class PersonalRoomLifecycle:
         return candidates, failed
 
     async def _reconcile(self) -> None:
-        """Retry recorded intent and optional lobby backfill after the owner has synced."""
+        """Retry recorded intent and optional lobby backfill once the serving agents have synced.
+
+        A static target must have synced before the pass starts; each user's
+        own agent from a template is checked per candidate, which stays
+        pending until that agent has synced.
+        """
         revision = self._config_revision
         settings = self.runtime.config.personal_rooms
         if self._reconciled or not self.observes_onboarding_joins or settings is None:
             return
-        target = self.lookup_target(settings.agent)
-        if target is None or not target.first_sync_complete or self.runtime.client is None:
+        if not self._reconciliation_ready(settings):
             return
-        candidates, failed = await asyncio.to_thread(self._recorded_candidates, settings.agent)
+        candidates, failed = await asyncio.to_thread(self._recorded_intent, settings)
         if settings.backfill:
             backfill, backfill_failed = await self._backfill_candidates(settings.onboarding_rooms)
             candidates.update(backfill)
@@ -359,6 +456,9 @@ class PersonalRoomLifecycle:
         reinvite_departed_owner = self._retry_candidates.get(candidate, False)
         try:
             await self._onboard(user_id, room_id, reinvite_departed_owner=reinvite_departed_owner)
+        except _TargetPendingError:
+            # The user's own agent is starting; its first sync asks for the next pass.
+            return False
         except Exception as error:
             backoff = _next_backoff(previous, error)
             if revision == self._config_revision:

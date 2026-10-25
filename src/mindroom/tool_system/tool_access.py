@@ -12,7 +12,7 @@ from referencing.exceptions import NoSuchResource
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.llm.provider import ToolSpec
 
 
 class _InvalidToolArgumentsError(ValueError):
@@ -44,9 +44,9 @@ class ToolDescriptor:
     instructions: tuple[str, ...]
 
 
-def tool_definition(function: ToolFunction) -> dict[str, object]:
-    """Return the name, description, and input schema the model is shown for one adapted function."""
-    return {"name": function.name, "description": function.description or "", "parameters": dict(function.parameters)}
+def tool_definition(tool: ToolSpec) -> dict[str, object]:
+    """Return the name, description, and input schema the model is shown for one tool definition."""
+    return {"name": tool.name, "description": tool.description or "", "parameters": dict(tool.parameters)}
 
 
 def _no_remote_schema(uri: str) -> Never:

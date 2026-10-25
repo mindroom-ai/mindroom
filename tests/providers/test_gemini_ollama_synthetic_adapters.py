@@ -1269,6 +1269,64 @@ async def test_gemini_places_videos_before_the_prompt_and_other_media_after(tmp_
     ]
 
 
+@pytest.mark.asyncio
+async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A text file goes as plain text; a file of a type Gemini rejects goes as a note naming it, never read or fetched."""
+    # The local file does not exist, so reading it would fail the request.
+    deck = tmp_path / "deck.pptx"
+    message = Message(
+        role="user",
+        content="Summarize",
+        files=[
+            File(filepath=str(deck), mime_type="application/octet-stream", filename="deck.pptx"),
+            File(url="https://media.test/archive.zip", mime_type="application/zip", filename="archive.zip"),
+            File(url="http://media.test/backup.zip", mime_type="application/zip", filename="backup.zip"),
+            File(content=b"key: value", mime_type="application/yaml", filename="settings.yaml"),
+            File(content=b"%PDF", filename="a.pdf"),
+        ],
+    )
+    server = _MediaServer()
+
+    await _stream_media(GEMINI_VERTEX, _request(message), tmp_path, server, monkeypatch)
+
+    assert server.requests == server.model_requests()
+    assert _user_parts(server) == [
+        {"text": "Summarize"},
+        {"text": "[Attachment omitted: deck.pptx (application/octet-stream) is a file type Gemini cannot read]"},
+        {"text": "[Attachment omitted: archive.zip (application/zip) is a file type Gemini cannot read]"},
+        {"text": "[Attachment omitted: backup.zip (application/zip) is a file type Gemini cannot read]"},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"key: value").decode(), "mime_type": "text/plain"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"%PDF").decode(), "mime_type": "application/pdf"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_keeps_function_responses_last_in_their_user_turn(tmp_path: Path) -> None:
+    """Text and media that follow tool results go before their function responses.
+
+    Gemini 4 on Vertex AI rejects a last user turn whose final part is not a function response as a request ending
+    with a model turn.
+    """
+    messages = (
+        Message(role="user", content="Show me the chart"),
+        Message(
+            role="assistant",
+            tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "view_file", "arguments": "{}"}}],
+        ),
+        Message(role="tool", tool_call_id="call-1", tool_name="view_file", content="viewed"),
+        Message(role="user", content="The tool call above generated the attached media.", images=[Image(content=PNG)]),
+    )
+
+    request, _ = await run_adapter(GEMINI, _request(*messages), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+
+    contents = request["body"]["contents"]
+    assert [content["role"] for content in contents] == ["user", "model", "user"]
+    assert [next(iter(part)) for part in contents[-1]["parts"]] == ["text", "inlineData", "functionResponse"]
+
+
 def test_gemini_schema_conversion_breaks_cycles_and_leaves_the_input_alone() -> None:
     """Self references end in a placeholder object, and nullable type lists do not rewrite the caller's schema."""
     schema = {

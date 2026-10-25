@@ -17,12 +17,10 @@
             "mime_type": "text/plain"
           }
         ],
-        "from_history": true,
         "role": "user"
       },
       {
         "content": "Your list says to bring an umbrella.",
-        "from_history": true,
         "metrics": {
           "input_tokens": 42,
           "output_tokens": 12,
@@ -59,8 +57,7 @@
           "mindroom_native_compaction": null,
           "stop_reason": "end_turn"
         },
-        "role": "assistant",
-        "stop_after_tool_call": false
+        "role": "assistant"
       },
       {
         "content": "Anything else?",
@@ -76,21 +73,15 @@
       "id": "anthropic.claude-sonnet-5-5",
       "provider": "bedrock_claude"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [],
-        "urls": []
-      },
       "content": "Walking shoes.",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -105,8 +96,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "end_turn"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -120,7 +110,7 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": "end_turn"
+    "stop_reason": "end"
   },
   "request": {
     "body": {

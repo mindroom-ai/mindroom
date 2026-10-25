@@ -36,7 +36,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+from mindroom.orchestration.script_runtime import _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, ScriptRuntimeLifecycle
 from mindroom.script_runs import broker as broker_module
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
@@ -64,6 +64,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
@@ -109,9 +110,17 @@ async def _cancel_cleanup_owner(
     owner.cancel()
     with pytest.raises(asyncio.CancelledError):
         await owner
-    await asyncio.wait_for(replacement_ready.wait(), timeout=1.0)
+    await asyncio.wait_for(replacement_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     assert len(replacement) == 1
     return replacement[0]
+
+
+async def _assert_cleanup_forgotten(broker: ScriptToolBroker) -> None:
+    """Assert the broker keeps no cleanup owner once every owner has finished."""
+    # A finished owner leaves the set from its done callback one loop pass later, and a drain that finds every
+    # owner already done returns without yielding.
+    await asyncio.sleep(0)
+    assert broker._cleanup_tasks == set()
 
 
 def _hook_registry(events: list[str], *, decline: str | None = None) -> HookRegistry:
@@ -436,13 +445,13 @@ async def test_shutdown_during_call_preparation_never_starts_new_tool_execution(
     def delayed_claim(**kwargs: object) -> object:
         claim = original_claim(**kwargs)
         claimed.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return claim
 
     monkeypatch.setattr(broker.store, "claim_call", delayed_claim)
     acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
     try:
-        assert await asyncio.to_thread(claimed.wait, 2)
+        assert await asyncio.to_thread(claimed.wait, SETTLE_TIMEOUT_SECONDS)
         broker.close_call_admission()
     finally:
         release.set()
@@ -479,7 +488,7 @@ async def test_detach_drains_completed_calls_without_revoking_script(
     await broker.accept_authenticated(_request(), f"Bearer {token}")
     await entered.wait()
     broker.close_call_admission()
-    detachment = asyncio.create_task(broker.detach_runs({"run-1"}, timeout_seconds=1))
+    detachment = asyncio.create_task(broker.detach_runs({"run-1"}, timeout_seconds=SETTLE_TIMEOUT_SECONDS))
     release.set()
     await detachment
 
@@ -502,19 +511,21 @@ async def test_detach_budget_retains_pending_preparation_cleanup(
     def delayed_claim(**kwargs: object) -> object:
         claim = original_claim(**kwargs)
         claimed.set()
-        assert release.wait(timeout=2)
+        # No bound: the finally below always releases it, and a release timeout would end the blocked claim and
+        # let a detach that wrongly waits for it finish.
+        release.wait()
         return claim
 
     monkeypatch.setattr(broker.store, "claim_call", delayed_claim)
     acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
     try:
-        assert await asyncio.to_thread(claimed.wait, 2)
+        assert await asyncio.to_thread(claimed.wait, SETTLE_TIMEOUT_SECONDS)
         broker.close_call_admission()
-        await asyncio.wait_for(broker.detach_runs({"run-1"}, timeout_seconds=0), timeout=0.2)
+        await asyncio.wait_for(broker.detach_runs({"run-1"}, timeout_seconds=0), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         release.set()
         await acceptance
-        await drain_script_tool_cleanup(broker, timeout_seconds=1)
+        await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
     assert broker.store.require_active_capability("run-1", token).cancel_requested_at is None
     assert broker.store.get_call("run-1", "call-1").state is ScriptCallState.INDETERMINATE
 
@@ -738,7 +749,7 @@ async def test_script_broker_closes_a_filtered_requested_toolkit(
     receipt = await _call_through_gateway(broker, _request(call_id="filtered-toolkit"), token)
 
     assert receipt.state is ScriptCallState.FAILED
-    await asyncio.wait_for(closed.wait(), timeout=1.0)
+    await asyncio.wait_for(closed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -804,7 +815,7 @@ async def test_cancel_run_settles_pending_exact_approval(tmp_path: Path) -> None
     await resolver.approval_started.wait()
     broker.store.request_cancel(request.run_id, reason="run cancelled")
 
-    await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=1.0)
+    await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=SETTLE_TIMEOUT_SECONDS)
 
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
@@ -1193,23 +1204,23 @@ async def test_cancelled_sync_connect_closes_only_after_connect_returns(
     request = _request(call_id="cancelled-connect")
     accepted = await broker.accept_authenticated(request, f"Bearer {token}")
     assert accepted.state is ScriptCallState.PENDING
-    assert await asyncio.to_thread(connect_started.wait, 1.0)
+    assert await asyncio.to_thread(connect_started.wait, SETTLE_TIMEOUT_SECONDS)
     broker.store.request_cancel(request.run_id)
 
-    await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=1.0)
+    await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert body_called is False
     assert close_started.is_set() is False
     cleanup_retained = bool(broker._cleanup_tasks)
     release_connect.set()
-    close_after_connect = await asyncio.to_thread(close_started.wait, 1.0)
-    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
+    close_after_connect = await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
+    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
 
     assert cleanup_retained is True
     assert close_after_connect is True
     assert cleanup_drained is True
     assert broker.get_call(request.run_id, request.call_id).state is ScriptCallState.INDETERMINATE
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1309,12 +1320,12 @@ async def test_script_broker_cancellation_waits_for_claim_schedule_ownership(
     def claim_call(**kwargs: object) -> object:
         claim = original_claim_call(**kwargs)  # type: ignore[arg-type]
         claim_returned.set()
-        assert release_claim.wait(timeout=1.0)
+        assert release_claim.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return claim
 
     monkeypatch.setattr(broker.store, "claim_call", claim_call)
     submission = asyncio.create_task(broker.accept_authenticated(request, f"Bearer {token}"))
-    assert await asyncio.to_thread(claim_returned.wait, 1.0)
+    assert await asyncio.to_thread(claim_returned.wait, SETTLE_TIMEOUT_SECONDS)
     submission.cancel()
     await asyncio.sleep(0)
 
@@ -1399,22 +1410,22 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
     request = _request(call_id="cancelled-sync-call")
     accepted = await broker.accept_authenticated(request, f"Bearer {token}")
     assert accepted.state is ScriptCallState.PENDING
-    assert await asyncio.to_thread(body_entered.wait, 1.0)
+    assert await asyncio.to_thread(body_entered.wait, SETTLE_TIMEOUT_SECONDS)
     assert close_started.is_set() is False
     broker.store.request_cancel(request.run_id)
 
     cancellation = asyncio.create_task(broker.cancel_run(request.run_id))
     try:
-        await asyncio.wait_for(asyncio.shield(cancellation), timeout=1.0)
+        await asyncio.wait_for(asyncio.shield(cancellation), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         close_started_before_body_returned = close_started.is_set()
         release_body.set()
-        close_did_start = await asyncio.to_thread(close_started.wait, 1.0)
+        close_did_start = await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
         close_finished_before_release = close_finished.is_set()
         release_close.set()
-        await asyncio.wait_for(cancellation, timeout=1.0)
-    assert await asyncio.to_thread(close_finished.wait, 1.0)
-    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
+        await asyncio.wait_for(cancellation, timeout=SETTLE_TIMEOUT_SECONDS)
+    assert await asyncio.to_thread(close_finished.wait, SETTLE_TIMEOUT_SECONDS)
+    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
 
     assert close_started_before_body_returned is False
     assert close_did_start is True
@@ -1422,7 +1433,7 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
     assert cleanup_drained is True
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1463,14 +1474,14 @@ async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellatio
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="cancelled-sync-close")
     await broker.accept_authenticated(request, f"Bearer {token}")
-    assert await asyncio.to_thread(body_entered.wait, 1.0)
+    assert await asyncio.to_thread(body_entered.wait, SETTLE_TIMEOUT_SECONDS)
     broker.store.request_cancel(request.run_id)
     await broker.cancel_run(request.run_id)
 
     [body_owner] = broker._cleanup_tasks
     first_close_owner = await _cancel_cleanup_owner(broker, body_owner)
     release_body.set()
-    assert await asyncio.to_thread(close_started.wait, 1.0)
+    assert await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
 
     try:
         second_close_owner = await _cancel_cleanup_owner(broker, first_close_owner)
@@ -1484,8 +1495,8 @@ async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellatio
     finally:
         release_close.set()
 
-    assert await asyncio.to_thread(close_finished.wait, 1.0)
-    assert await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
+    assert await asyncio.to_thread(close_finished.wait, SETTLE_TIMEOUT_SECONDS)
+    assert await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
 
     assert owned_after_first_cancel is True
     assert first_drain is False
@@ -1493,7 +1504,7 @@ async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellatio
     assert second_drain is False
     assert close_finished_before_release is False
     assert close_calls == 1
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1534,9 +1545,9 @@ async def test_cancelled_async_tool_close_keeps_one_owner_through_repeated_cance
     broker.store.request_cancel(request.run_id)
 
     cancellation = asyncio.create_task(broker.cancel_run(request.run_id))
-    assert await asyncio.to_thread(close_started.wait, 1.0)
+    assert await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
     try:
-        await asyncio.wait_for(cancellation, timeout=1.0)
+        await asyncio.wait_for(cancellation, timeout=SETTLE_TIMEOUT_SECONDS)
         [first_close_owner] = broker._cleanup_tasks
         second_close_owner = await _cancel_cleanup_owner(broker, first_close_owner)
         await _cancel_cleanup_owner(broker, second_close_owner)
@@ -1546,12 +1557,12 @@ async def test_cancelled_async_tool_close_keeps_one_owner_through_repeated_cance
     finally:
         release_close.set()
 
-    assert await asyncio.to_thread(close_finished.wait, 1.0)
-    assert await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
+    assert await asyncio.to_thread(close_finished.wait, SETTLE_TIMEOUT_SECONDS)
+    assert await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
     assert cleanup_retained is True
     assert drained_before_release is False
     assert close_finished_before_release is False
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1585,7 +1596,7 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="shutdown-sync-cleanup")
     await broker.accept_authenticated(request, f"Bearer {token}")
-    assert await asyncio.to_thread(body_entered.wait, 1.0)
+    assert await asyncio.to_thread(body_entered.wait, SETTLE_TIMEOUT_SECONDS)
     broker.store.request_cancel(request.run_id)
     await broker.cancel_run(request.run_id)
     [original_cleanup] = broker._cleanup_tasks
@@ -1605,8 +1616,18 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         worker_lease_provider=lambda: None,
     )
     lifecycle._activated_once = True
-    monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
+    loop = asyncio.get_running_loop()
+    shutdown_budget_seconds = 0.05
+    # The interrupt phase before the drain spends half the budget, so a drain given the whole budget shows.
+    interrupt_seconds = shutdown_budget_seconds / 2
+
+    async def interrupt_and_prune(_lifecycle: ScriptRuntimeLifecycle, _runs: object) -> None:
+        await asyncio.sleep(interrupt_seconds)
+
+    monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", interrupt_and_prune)
     drain_started = asyncio.Event()
+    # For each drain shutdown runs: its timeout, a lower bound on the shutdown budget left then, and its result.
+    shutdown_drains: list[tuple[float, float, bool]] = []
     original_drain = broker_module.drain_script_tool_cleanup
 
     async def observing_drain(
@@ -1615,27 +1636,36 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         timeout_seconds: float,
     ) -> bool:
         drain_started.set()
-        return await original_drain(observed_broker, timeout_seconds=timeout_seconds)
+        budget_left_seconds = shutdown_started_at + shutdown_budget_seconds - loop.time()
+        drained = await original_drain(observed_broker, timeout_seconds=timeout_seconds)
+        shutdown_drains.append((timeout_seconds, budget_left_seconds, drained))
+        return drained
 
     monkeypatch.setattr("mindroom.orchestration.script_runtime.drain_script_tool_cleanup", observing_drain)
-    shutdown = asyncio.create_task(lifecycle.shutdown(timeout_seconds=0.05))
-    await asyncio.wait_for(drain_started.wait(), timeout=1.0)
+    shutdown_started_at = loop.time()
+    shutdown = asyncio.create_task(lifecycle.shutdown(timeout_seconds=shutdown_budget_seconds))
+    try:
+        await asyncio.wait_for(drain_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        await _cancel_cleanup_owner(broker, original_cleanup)
+        close_started_before_body_returned = close_started.is_set()
+        # The body stays blocked until the finally below, so shutdown returns only if its drain is bounded, and this
+        # bound sits below shutdown's default budget, so a shutdown that drops its explicit budget fails.
+        await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
+        cleanup_owned_after_shutdown = bool(broker._cleanup_tasks)
+    finally:
+        release_body.set()
 
-    shutdown_waited_for_cleanup = shutdown.done() is False
-    await _cancel_cleanup_owner(broker, original_cleanup)
-    close_started_before_body_returned = close_started.is_set()
-    await asyncio.wait_for(shutdown, timeout=0.2)
-    cleanup_owned_after_timeout = bool(broker._cleanup_tasks)
+    assert await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
+    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
 
-    release_body.set()
-    assert await asyncio.to_thread(close_started.wait, 1.0)
-    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
-
-    assert shutdown_waited_for_cleanup is True
+    [(drain_timeout_seconds, budget_left_seconds, drained_before_shutdown_returned)] = shutdown_drains
+    # Shutdown gives its cleanup drain what is left of its own budget, and the drain gives up at that deadline.
+    assert budget_left_seconds <= drain_timeout_seconds <= shutdown_budget_seconds - interrupt_seconds
+    assert drained_before_shutdown_returned is False
     assert close_started_before_body_returned is False
-    assert cleanup_owned_after_timeout is True
+    assert cleanup_owned_after_shutdown is True
     assert cleanup_drained is True
-    assert broker._cleanup_tasks == set()
+    await _assert_cleanup_forgotten(broker)
 
 
 @pytest.mark.asyncio
@@ -1749,12 +1779,12 @@ async def test_duplicate_post_returns_terminal_winner_when_claim_races_orphan_se
     def pause_after_stale_claim(**kwargs: object) -> object:
         claim = original_claim_call(**kwargs)  # type: ignore[arg-type]
         stale_claim_returned.set()
-        assert release_stale_claim.wait(timeout=1.0)
+        assert release_stale_claim.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return claim
 
     monkeypatch.setattr(broker.store, "claim_call", pause_after_stale_claim)
     submission = asyncio.create_task(broker.accept_authenticated(request, f"Bearer {token}"))
-    assert await asyncio.to_thread(stale_claim_returned.wait, 1.0)
+    assert await asyncio.to_thread(stale_claim_returned.wait, SETTLE_TIMEOUT_SECONDS)
     published = broker.store.publish_call_result(
         run_id=request.run_id,
         call_id=request.call_id,
@@ -1815,13 +1845,13 @@ def test_script_broker_get_returns_terminal_winner_when_publish_races_orphan_set
         record = original_get_call(run_id, call_id)
         if record.state is ScriptCallState.PENDING:
             pending_read.set()
-            assert release_stale_read.wait(timeout=1.0)
+            assert release_stale_read.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return record
 
     monkeypatch.setattr(broker.store, "get_call", pause_after_pending_read)
     with ThreadPoolExecutor(max_workers=1) as executor:
         polling = executor.submit(broker.get_call, request.run_id, request.call_id)
-        assert pending_read.wait(timeout=1.0)
+        assert pending_read.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         published = broker.store.publish_call_result(
             run_id=request.run_id,
             call_id=request.call_id,
@@ -1829,7 +1859,7 @@ def test_script_broker_get_returns_terminal_winner_when_publish_races_orphan_set
             result=3,
         )
         release_stale_read.set()
-        receipt = polling.result(timeout=1.0)
+        receipt = polling.result(timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert published.state is ScriptCallState.COMPLETED
     assert receipt.state is ScriptCallState.COMPLETED
@@ -1879,7 +1909,7 @@ async def test_script_broker_get_reports_retryable_preclaim_preparation(
 
     def blocking_require(run_id: str, capability: str) -> ScriptRunRecord:
         preparation_started.set()
-        assert release_preparation.wait(timeout=1)
+        assert release_preparation.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_require(run_id, capability)
 
     monkeypatch.setattr(broker.store, "require_active_capability", blocking_require)
@@ -1889,7 +1919,7 @@ async def test_script_broker_get_reports_retryable_preclaim_preparation(
             f"Bearer {token}",
         ),
     )
-    assert await asyncio.to_thread(preparation_started.wait, 1)
+    assert await asyncio.to_thread(preparation_started.wait, SETTLE_TIMEOUT_SECONDS)
 
     with pytest.raises(ScriptCallPreparationPendingError):
         await broker.get_authenticated(
