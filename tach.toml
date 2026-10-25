@@ -3551,6 +3551,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.history.conversation_text",
     "mindroom.history.session_runs",
+    "mindroom.llm",
     "mindroom.session_storage.agent_storage",
     "mindroom.logging_config",
     "mindroom.memory._prompting",
