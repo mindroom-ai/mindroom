@@ -75,7 +75,13 @@ async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: P
         patch.object(runner, "_build_turn_recorder", side_effect=_BuiltRecorder) as build,
         pytest.raises(_BuiltRecorder),
     ):
-        await getattr(runner, method)(request)
+        await getattr(runner, method)(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await runner.prepare_response_runtime(request),
+        )
 
     metadata = build.call_args.kwargs["matrix_run_metadata"]
     assert metadata[TURN_INTENT_RUN_METADATA_KEY] == TurnIntent.JOB_FOLLOW_UP
@@ -94,11 +100,19 @@ async def test_a_turn_stopped_before_its_run_starts_keeps_its_room(tmp_path: Pat
         recorders.append(build_recorder(**kwargs))
         raise _BuiltRecorder
 
+    request = _request(None, TurnIntent.USER_MESSAGE)
+
     with (
         patch.object(runner, "_build_turn_recorder", side_effect=build_then_stop),
         pytest.raises(_BuiltRecorder),
     ):
-        await getattr(runner, method)(_request(None, TurnIntent.USER_MESSAGE))
+        await getattr(runner, method)(
+            request,
+            run_id=None,
+            on_delivery_started=None,
+            attempt_run_id_collector=None,
+            runtime=await runner.prepare_response_runtime(request),
+        )
 
     metadata = recorders[0].run_metadata
     assert (metadata["room_id"], metadata["thread_id"]) == ("!room:localhost", "$thread")
