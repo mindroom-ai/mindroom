@@ -468,23 +468,14 @@ class GraphitiStore:
         # graph extracted before that name was settled can still hold only the name asked for.
         config = self._config_provider()
         agent_keys = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self._runtime_paths)
-        names = entity_names(config, agent_keys)
-        canonical = names.canonical(name)
+        canonical = entity_names(config, agent_keys).canonical(name)
         # Hybrid search ranks an entity whose summary or longer name mentions the text above one named exactly that
         # (a bare first name), so an exact name is looked up first. The entity under the one name comes first, and the
-        # others, named as asked or by another of its configured names, are duplicates, such as one extracted under an
-        # alias or Matrix ID, that only their ids reach.
+        # others named either way are duplicates, such as one extracted under an alias, that only their ids reach.
         records: dict[str, str] = {}
         for exact in dict.fromkeys([canonical, name]):
             found, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=exact, limit=_ENTITY_CANDIDATES)
             records.update((record["uuid"], record["name"]) for record in found)
-        aliased: list[dict[str, Any]] = []
-        for alias in names.aliases_of(canonical):
-            found, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=alias, limit=_ENTITY_CANDIDATES)
-            aliased += found
-        # Among the entities under its other names, the one with the most facts comes first, as among exact names.
-        aliased.sort(key=lambda record: -record["facts"])
-        records.update((record["uuid"], record["name"]) for record in aliased if record["uuid"] not in records)
         if records:
             first, *rest = records
             node = await EntityNode.get_by_uuid(driver, first)

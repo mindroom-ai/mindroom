@@ -111,40 +111,16 @@ class EntityNames:
 
         A name wins over an alias, so an alias that another entity is named never finds the entry, as in the instructions.
         """
-        if (named := self._named(name)) is not None:
-            return named.name
         wanted = name.casefold()
         entities = (*self.entries.values(), *self.agents.values())
+        named = (entity.name for entity in entities if entity.name.casefold() == wanted)
         called = (entity.name for entity in entities if wanted in {alias.casefold() for alias in entity.aliases})
-        return next(called, name)
-
-    def aliases_of(self, name: str) -> tuple[str, ...]:
-        """Return the other names of the entry or agent named ``name`` in any letter case, or none.
-
-        An agent's key, display name, and username often name something else too, such as a product or a company, so
-        an agent's other names are only its Matrix IDs. An alias that another entry or agent is named is left out, since
-        that name finds the other one.
-        """
-        named = self._named(name)
-        if named is None:
-            return ()
-        aliases = named.aliases if named.kind != "agent" else [alias for alias in named.aliases if _is_matrix_id(alias)]
-        return tuple(alias for alias in aliases if self._named(alias) is None)
-
-    def _named(self, name: str) -> KnownEntity | None:
-        """Return the entry or agent named ``name`` in any letter case."""
-        wanted = name.casefold()
-        entities = (*self.entries.values(), *self.agents.values())
-        return next((entity for entity in entities if entity.name.casefold() == wanted), None)
-
-
-def _is_matrix_id(name: str) -> bool:
-    return name.startswith("@") and ":" in name
+        return next(named, None) or next(called, name)
 
 
 def _entry(name: str, aliases: list[str]) -> KnownEntity:
     """Return an entry, a person when it lists a Matrix user ID, which has a server part, also called its localpart."""
-    ids = [alias for alias in aliases if _is_matrix_id(alias)]
+    ids = [alias for alias in aliases if alias.startswith("@") and ":" in alias]
     return _known(name, "person" if ids else None, [*aliases, *map(_localpart, ids)])
 
 

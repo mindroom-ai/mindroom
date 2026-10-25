@@ -191,7 +191,8 @@ class KnowledgeGraphTools(Toolkit):
             merged = await store.merge_entities(scope, duplicate_id, into_id)
             if merged is None:
                 return f"{duplicate_id!r} or {into_id!r} is not the id of an entity in your graph."
-            return f"Merged {merged.duplicate!r} into {merged.into!r}, moving {merged.moved_facts} facts."
+            facts = "fact" if merged.moved_facts == 1 else "facts"
+            return f"Merged {merged.duplicate!r} into {merged.into!r}, moving {merged.moved_facts} {facts}."
 
         return await self._in_graph("merge_graph_entities", merge)
 

@@ -152,6 +152,8 @@ async def test_search_graph_reads_only_the_callers_graph(tmp_path: Path, store: 
     assert "Alice leads Project Atlas" in text
     assert "valid 2026-01-05 until 2026-03-09 (superseded)" in text
     assert "tool_results: room !r thread $t; calls: get_repo 1a2b (2026-01-05)" in text
+    # Ids are only for agents that may edit the graph.
+    assert "id: " not in text
 
 
 def test_a_fact_with_more_sources_than_shown_says_how_many_more() -> None:

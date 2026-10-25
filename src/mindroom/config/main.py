@@ -1943,7 +1943,7 @@ class Config(BaseModel):
         return agent.knowledge_graph if agent.knowledge_graph is not None else self.defaults.knowledge_graph
 
     def agent_edits_knowledge_graph(self, agent_name: str) -> bool:
-        """Return whether an agent may delete facts and entities from its knowledge graph and merge entities."""
+        """Return whether an agent may delete facts and entities from its knowledge graph, merge entities, and rewrite summaries."""
         agent = self.get_agent(agent_name)
         edits = (
             agent.knowledge_graph_edits

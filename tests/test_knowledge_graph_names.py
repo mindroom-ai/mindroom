@@ -161,8 +161,6 @@ def test_a_name_wins_over_an_alias_in_a_lookup() -> None:
     assert names.known_entities("assistant", [])[1] == KnownEntity("Robin Vale", "person", ("@robin:example.test",))
     assert names.canonical("robin") == "Robin"
     assert names.canonical("@robin:example.test") == "Robin Vale"
-    # A lookup of the one name tries its other names too, but never one that names another entity.
-    assert names.aliases_of("robin vale") == ("@robin:example.test",)
 
 
 def test_an_agent_key_links_an_entry_in_any_letter_case_and_the_agent_keeps_its_display_name() -> None:
@@ -175,8 +173,6 @@ def test_an_agent_key_links_an_entry_in_any_letter_case_and_the_agent_keeps_its_
     lookout = KnownEntity("Lookout", "agent", ("Scout", "Scout Bot", "@mindroom_scout:example.test", "mindroom_scout"))
     assert names.speaker(None, {}, "scout") == lookout
     assert names.canonical("scout bot") == "Lookout"
-    # An agent's key, display name, and username often name something else too, so a lookup tries only its Matrix ID.
-    assert names.aliases_of("lookout") == ("@mindroom_scout:example.test",)
 
 
 def test_a_username_an_entry_or_agent_is_named_gets_its_server() -> None:

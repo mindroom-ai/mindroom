@@ -62,6 +62,7 @@ The agent would author the content while the fact kept sources that never said i
 Rejected: edits by entity name or fact text, because names repeat, and same-name duplicates are what a merge fixes.
 Edits take ids, which lookups show only when edits are on, so read-only agents' lookups stay as short as before.
 Rejected: a separate edit tool listed in `tools`, because the lookups would still need to know about it to show ids.
+Rejected: also looking an entity up under its other configured names, so a lookup of the one name lists every duplicate; an agent's key, display name, and username often name something else, such as a company, which the lookup then offered for merging, and every exception, such as an alias that names another entity or an alias listed for an agent, needed a rule of its own.
 Rejected: clearing the summaries of a deleted fact's entities, which drops the condensed summary of a central entity for one wrong fact, and removing the fact's text from them, which misses the condensed ones that central entities have.
 
 Limitations: edits do not wait for ingestion, because an extraction takes about a minute and an agent's edit would wait for it.
@@ -71,6 +72,7 @@ The conversation in which the agent confirms a deletion is ingested too; a live 
 In three such runs the wrong fact never came back; one run added the correction ("Alice never waters the plant") and a fact about the agent's deletion, which the built-in rule against an assistant's housekeeping did not stop.
 Naming graph edits in that rule was not tried, because the rule asks the model to extract the knowledge such housekeeping contains, which for a deletion is the deleted fact.
 A merge drops the duplicate's links from episodes to entities (Graphiti's `MENTIONS` edges), which MindRoom never reads; each fact's own sources stay.
+A merge cut off midway, for example when its reply is stopped, leaves the moved facts on both entities until the agent repeats it, which finishes it.
 A fact both entities held appears twice on the kept entity, each copy with its own sources, so deleting either copy deletes those sources.
 The kept entity keeps its summary until Graphiti rewrites it for the next episode that mentions the entity.
 
@@ -176,7 +178,7 @@ Entities that share a name are listed once, and an alias that another listed ent
 `custom_extraction_instructions` reach only Graphiti's node and edge extraction prompts, which is where names are chosen.
 They are joined as the built-in rules, then the operator's `knowledge_graph.extraction_instructions`, then the episode's names, so the operator's text reads as a continuation of the rules and everything before the names is the same for every episode.
 The built-in rule that keeps an assistant's own activity out named the old `agent <name>` label; it now points at the speakers the list marks as agents, a wording change made after that rule's measurements and not measured again.
-`graph_entity` tries the name as asked and the entity's other configured names when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay, and an agent with `knowledge_graph_edits` sees them listed under the one name and can merge them.
+`graph_entity` tries the name as asked when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay, and an agent with `knowledge_graph_edits` sees one listed with its id when it looks up the name it was extracted under, and can merge it.
 
 Rejected: matching entries against display names.
 An earlier attempt matched an entry on every name a speaker went by, so an entry fixing a first-name duplicate could list the first name, which was also the speaker's display name.

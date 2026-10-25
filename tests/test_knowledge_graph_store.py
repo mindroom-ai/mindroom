@@ -370,13 +370,13 @@ async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: Gra
         assert entity is not None
         assert entity.name == "Robin Vale"
         assert entity.exact
-    # The one name lists the entities under each of its configured names, which are its duplicates.
-    full_name = await store.entity(ALPHA, "Robin Vale")
-    assert full_name is not None
-    assert full_name.others == [
-        _EntityRef(name="@robin:example.test", uuid=by_id),
-        _EntityRef(name="Robin", uuid=stray),
-    ]
+    # A name asked for lists the entities under it, which are duplicates that only their ids reach.
+    alias = await store.entity(ALPHA, "robin")
+    assert alias is not None
+    assert alias.others == [_EntityRef(name="Robin", uuid=stray)]
+    matrix_id = await store.entity(ALPHA, "@robin:example.test")
+    assert matrix_id is not None
+    assert matrix_id.others == [_EntityRef(name="@robin:example.test", uuid=by_id)]
     matrix_id = await store.entity(ALPHA, "@robin:example.test")
     assert matrix_id is not None
     assert matrix_id.name == "Robin Vale"
@@ -386,31 +386,15 @@ async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: Gra
 
 
 @pytest.mark.asyncio
-async def test_among_entities_under_other_names_the_one_with_most_facts_wins(store: GraphitiStore) -> None:
-    """With nothing under the one name, the entity under another of its names with the most facts is the answer."""
-    by_id = await _seed_entity(store, ALPHA, "@robin:example.test", summary="Fewer facts.", facts=1)
-    await _seed_entity(store, ALPHA, "Robin", summary="More facts.", facts=3)
-
-    entity = await store.entity(ALPHA, "Robin Vale")
-
-    assert entity is not None
-    assert entity.summary == "More facts."
-    assert entity.others == [_EntityRef(name="@robin:example.test", uuid=by_id)]
-
-
-@pytest.mark.asyncio
 async def test_entity_falls_back_to_the_name_asked_for(store: GraphitiStore) -> None:
-    """A graph extracted before an alias entry existed can hold only the alias, which is then found as asked.
-
-    The one name finds it too, ahead of a closer search hit, because the alias is one of its configured names.
-    """
+    """A graph extracted before an alias entry existed can hold only the alias, which is then found as asked."""
     await _seed_entity(store, ALPHA, "Robin Vale Consulting", summary="A company.")
     await _seed_entity(store, ALPHA, "Robin", summary="A person.", name_embedding=[1.0] * 32)
 
-    for name in ("Robin", "Robin Vale"):
-        entity = await store.entity(ALPHA, name)
-        assert entity is not None
-        assert entity.summary == "A person."
+    entity = await store.entity(ALPHA, "Robin")
+
+    assert entity is not None
+    assert entity.summary == "A person."
 
 
 async def _seed_edge(
