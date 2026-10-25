@@ -98,6 +98,11 @@ async def _no_cleanup(_job: BackgroundJob) -> None:
     return None
 
 
+def always_owned(*_args: object, **_kwargs: object) -> bool:
+    """Own every call's execution, as a turn with background jobs on does."""
+    return True
+
+
 def tool_job_journal(storage_root: Path) -> EventJournalStore:
     """Open the event journal of one storage root, as one process does; another open is another process."""
     return EventJournalStore.open_sqlite(event_journal_sqlite_path(storage_root))

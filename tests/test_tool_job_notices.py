@@ -33,6 +33,7 @@ from tests.conftest import make_turn_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.tool_job_helpers import (
+    always_owned,
     job_actor,
     job_tool,
     lookup,
@@ -54,11 +55,6 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-def _always_owned(*_args: object, **_kwargs: object) -> bool:
-    """Own every call's execution, as a turn with background jobs on does."""
-    return True
 
 
 class _Conversation:
@@ -265,7 +261,7 @@ async def test_a_reply_is_not_told_that_its_own_finished_call_ended(tmp_path: Pa
     storage = storage_factory()
     actor = job_actor(job_tool(fast_tool), job_tool(second_tool))
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> RunRecord:
         set_consumption_storage(storage_factory)
         return await run_job_turn(actor, model, session_id=context.session_id, store=storage)
@@ -446,11 +442,11 @@ async def test_every_attempt_of_a_reply_opens_with_the_same_note(tmp_path: Path)
         await conversation.start("finished")
         await conversation.end("finished")
 
-        @owned_tool_execution(enabled=_always_owned)
+        @owned_tool_execution(enabled=always_owned)
         async def blocking() -> list[tuple[EnrichmentItem, ...]]:
             return [await append_turn_start_job_note(()) for _attempt in range(2)]
 
-        @owned_tool_execution(enabled=_always_owned)
+        @owned_tool_execution(enabled=always_owned)
         async def streaming() -> AsyncIterator[tuple[EnrichmentItem, ...]]:
             for _attempt in range(2):
                 yield await append_turn_start_job_note(())

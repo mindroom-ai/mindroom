@@ -24,6 +24,7 @@ from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    always_owned,
     job_actor,
     job_tool,
     lookup,
@@ -39,11 +40,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-def _always_owned(*_args: object, **_kwargs: object) -> bool:
-    """Own every call's execution, as a turn with background jobs on does."""
-    return True
 
 
 @pytest.mark.asyncio
@@ -73,7 +69,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
     storage = storage_factory()
     actor = job_actor(job_tool(report))
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def run_turn(topic: str) -> RunRecord:
         set_consumption_storage(storage_factory)
         model = ScriptedModel(
@@ -177,7 +173,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     controls = toolkit_job_tools(JobTools(paths, owner), authored_name="job").values()
     actor = job_actor(job_tool(slow_tool), *controls)
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def run_turn(prompt: str, run_id: str) -> RunRecord:
         set_consumption_storage(storage_factory)
         return await run_job_turn(actor, model, prompt, run_id=run_id, session_id=context.session_id, store=storage)

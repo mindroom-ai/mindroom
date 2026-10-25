@@ -57,6 +57,7 @@ from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     ProcessRuntime,
     SpanRecorder,
+    always_owned,
     call_job_tool,
     cancel_settled,
     job_actor,
@@ -78,11 +79,6 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-
-
-def _always_owned(*_args: object, **_kwargs: object) -> bool:
-    """Own every call's execution, as a turn with background jobs on does."""
-    return True
 
 
 def _hold_job_outcomes(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
@@ -480,7 +476,7 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(tm
     model = ScriptedModel([calls(tool_call("read", "read-call")), answer("done")])
     actor = job_actor(*toolkit_job_tools(ConnectionTools(), authored_name="connection").values())
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         return await run_job_turn(actor, model, session_id=context.session_id)
 
@@ -523,7 +519,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
     model = ScriptedModel([calls(tool_call("generated", "generator-call")), answer("done")])
     actor = job_actor(job_tool(generated))
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         return await run_job_turn(actor, model, session_id=context.session_id)
 
@@ -618,7 +614,7 @@ async def test_fast_result_acknowledges_exact_saved_run(  # noqa: PLR0915 - Rece
 
         monkeypatch.setattr(type(storage), "_save_encoded", fail_save)
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         set_consumption_storage(storage_factory)
         try:
@@ -675,7 +671,7 @@ async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Pa
     model = ScriptedModel([calls(tool_call("slow_tool", "sync-call")), answer("done")])
     actor = job_actor(job_tool(slow_tool, authored_name="slow"))
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         return await run_job_turn(actor, model, session_id=context.session_id)
 
@@ -729,7 +725,7 @@ async def test_a_jobs_blocking_call_runs_on_its_own_thread_not_the_shared_pool(t
     model = ScriptedModel([calls(tool_call("offloading", "offloading-call")), answer("done")])
     actor = job_actor(job_tool(offloading, authored_name="threads"))
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         return await run_job_turn(actor, model, session_id=context.session_id)
 
@@ -779,7 +775,7 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
         )
         controls = job_actor(*toolkit_job_tools(_job_controls(context), authored_name="job").values())
 
-        @owned_tool_execution(enabled=_always_owned)
+        @owned_tool_execution(enabled=always_owned)
         async def cancel() -> object:
             set_consumption_storage(storage_factory)
             with tool_runtime_context(context):
@@ -827,7 +823,7 @@ async def test_saved_result_reread_preserves_later_session_state(
 
     storage = storage_factory()
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def run(actor: JobActor, model: ScriptedModel, state: dict[str, object], run_id: str) -> RunRecord:
         set_consumption_storage(storage_factory)
         with tool_runtime_context(context):
@@ -888,7 +884,7 @@ async def test_job_list_skips_a_call_that_returned_inline_earlier_in_the_same_tu
     actor = job_actor(job_tool(report), *controls)
     storage = storage_factory()
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def run() -> object:
         set_consumption_storage(storage_factory)
         with tool_runtime_context(context):
@@ -924,7 +920,7 @@ async def test_a_key_a_sibling_writes_as_the_job_starts_survives_its_merge(
     context, runtime = await _managed_context(tmp_path)
     state: dict[str, object] = {"changed": 0}
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> ToolOutcome:
         async with execution_resources():
             with tool_runtime_context(context):
@@ -1022,7 +1018,7 @@ async def test_streamed_state_conflict_notice_reaches_the_tool_message(tmp_path:
     state: dict[str, object] = {"changed": 0, "conflict": "old"}
     model = ScriptedModel([calls(tool_call("generated", "stream-state")), answer("done")])
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> object:
         with tool_runtime_context(context):
             return await run_job_turn(job_actor(job_tool(generated)), model, session_state=state)
@@ -1251,7 +1247,7 @@ async def test_a_call_cancelled_while_its_reply_waits_tells_the_model_not_to_run
 
     storage = storage_factory()
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> object:
         set_consumption_storage(storage_factory)
         return await run_job_turn(
@@ -1296,7 +1292,7 @@ async def test_a_finished_call_counts_as_read_when_its_reply_fails_on_the_next_s
 
     storage = storage_factory()
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> None:
         set_consumption_storage(storage_factory)
         await run_job_turn(job_actor(job_tool(report)), model, "Go", session_id=context.session_id, store=storage)

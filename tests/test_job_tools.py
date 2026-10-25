@@ -34,6 +34,7 @@ from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
+    always_owned,
     call_job_tool,
     completed_delegation_job,
     job_actor,
@@ -55,11 +56,6 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-def _always_owned(*_args: object, **_kwargs: object) -> bool:
-    """Own every call's execution, as a turn with background jobs on does."""
-    return True
 
 
 def _controls(paths: RuntimePaths, owner: ToolExecutionIdentity, *, team: bool = False) -> JobActor:
@@ -307,7 +303,7 @@ async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
         await runtime.release_wait("ordinary", waited.claim)
         model = ScriptedModel([calls(tool_call("job", "wait", action="wait", job_id="ordinary")), answer("done")])
 
-        @owned_tool_execution(enabled=_always_owned)
+        @owned_tool_execution(enabled=always_owned)
         async def run() -> RunRecord:
             set_consumption_storage(storage_factory)
             return await run_job_turn(
@@ -588,7 +584,7 @@ async def _collect_in_a_run(
     tools = JobTools(paths, owner)
     actor = job_actor(*toolkit_job_tools(tools, authored_name="job").values())
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def run() -> RunRecord:
         set_consumption_storage(storage_factory)
         return await run_job_turn(actor, model, "collect", session_id=context.session_id, store=storage)

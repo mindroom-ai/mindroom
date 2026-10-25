@@ -33,6 +33,7 @@ from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuati
 from tests.test_tool_job_turn_integration import _wait_until_ready
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    always_owned,
     job_actor,
     job_tool,
     lookup,
@@ -48,11 +49,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import TurnContinuationRunState
     from mindroom.session_storage.store import ConversationStore
-
-
-def _always_owned(*_args: object, **_kwargs: object) -> bool:
-    """Own every call's execution, as a turn with background jobs on does."""
-    return True
 
 
 @pytest.mark.asyncio
@@ -95,7 +91,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     original_storage = storage_factory()
     controls = job_actor(*toolkit_job_tools(JobTools(paths, owner), authored_name="job").values())
 
-    @owned_tool_execution(enabled=_always_owned)
+    @owned_tool_execution(enabled=always_owned)
     async def start_original() -> RunRecord:
         set_consumption_storage(storage_factory)
         return await run_job_turn(
@@ -214,7 +210,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         )
         final_storage = storage_factory()
 
-        @owned_tool_execution(enabled=_always_owned)
+        @owned_tool_execution(enabled=always_owned)
         async def retrieve_after_restart() -> RunRecord:
             set_consumption_storage(storage_factory)
             return await run_job_turn(
