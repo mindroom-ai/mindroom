@@ -7777,11 +7777,18 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 
+# Delegation records that predate primary-owned state, left as they were.
+[[modules]]
+path = "mindroom.delegation.legacy_records"
+depends_on = ["mindroom.path_confinement"]
+visibility = ["mindroom.delegation.records"]
+
 [[modules]]
 path = "mindroom.delegation.records"
 depends_on = [
     "mindroom.atomic_file",
     "mindroom.constants",
+    "mindroom.delegation.legacy_records",
     "mindroom.delegation.state",
     "mindroom.path_confinement",
     "mindroom.runtime_resolution",
