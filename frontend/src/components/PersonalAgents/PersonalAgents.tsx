@@ -48,7 +48,11 @@ export function PersonalAgents() {
             Personal agents
           </span>
           <span className="flex items-center gap-2 text-sm text-muted-foreground">
-            {pluralize(agents.length, "agent")}
+            {query.isError
+              ? "Unavailable"
+              : query.isPending
+                ? "Loading"
+                : pluralize(agents.length, "agent")}
             <ChevronDown
               aria-hidden="true"
               className="h-4 w-4 transition-transform group-open:rotate-180"
@@ -81,7 +85,7 @@ export function PersonalAgents() {
                   <div className="min-w-0">
                     <p className="font-medium">
                       {agent.display_name ?? agent.agent_name}{" "}
-                      <span className="font-mono text-xs text-muted-foreground">
+                      <span className="break-all font-mono text-xs text-muted-foreground">
                         {agent.matrix_user_id}
                       </span>
                     </p>

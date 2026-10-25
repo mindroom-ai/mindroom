@@ -112,5 +112,6 @@ describe("PersonalAgents", () => {
       ),
     );
     expect(screen.getByText("Personal agents")).toBeInTheDocument();
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
   });
 });

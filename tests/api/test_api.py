@@ -1481,7 +1481,13 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     runtime_paths = main._app_runtime_paths(main.app)
     for entry in (
         personal_agent_entry(),
-        personal_agent_entry("@bob:localhost", agent_name="mind_bob", matrix_username="bob.mind", pending=True),
+        personal_agent_entry(
+            "@bob:localhost",
+            agent_name="mind_bob",
+            matrix_username="bob.mind",
+            user_display_name="Bob",
+            pending=True,
+        ),
         personal_agent_entry("@carol:localhost", template="old", agent_name="old_carol"),
     ):
         _append_personal_agent_roster_entry(runtime_paths, entry)
@@ -1512,7 +1518,7 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
             "user_id": "@bob:localhost",
             "agent_name": "mind_bob",
             "matrix_user_id": "@bob.mind:localhost",
-            "display_name": "Alice's Mind",
+            "display_name": "Bob's Mind",
             "pending": True,
             "template_exists": True,
         },
