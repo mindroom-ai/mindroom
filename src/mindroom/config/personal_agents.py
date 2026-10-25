@@ -147,7 +147,7 @@ class PersonalAgentInstance:
 
 
 @dataclass(frozen=True)
-class PersonalAgentExpansion:
+class _PersonalAgentExpansion:
     """Raw config data with generated agents added, plus a probe copy covering users without agents yet."""
 
     data: object
@@ -261,9 +261,9 @@ def _probe_agents(
     return agents
 
 
-def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEntry]) -> PersonalAgentExpansion:
+def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEntry]) -> _PersonalAgentExpansion:
     """Add one generated agent per roster entry to raw config data without mutating the input."""
-    unexpanded = PersonalAgentExpansion(data, {}, None)
+    unexpanded = _PersonalAgentExpansion(data, {}, None)
     if not isinstance(data, dict):
         return unexpanded
     config = cast("dict[str, Any]", data)
@@ -298,14 +298,14 @@ def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEnt
         owners.setdefault(entry.template, set()).add(entry.user_id)
 
     probes = _probe_agents(templates, owners)
-    return PersonalAgentExpansion(
+    return _PersonalAgentExpansion(
         {**config, "agents": agents} if instances else config,
         instances,
         {**config, "agents": {**agents, **probes}} if probes else None,
     )
 
 
-def personal_agent_roster_path(runtime_paths: RuntimePaths) -> Path:
+def _personal_agent_roster_path(runtime_paths: RuntimePaths) -> Path:
     """Return the primary-only roster file of generated agents."""
     return tracking_dir(runtime_paths) / "personal_agents.json"
 
@@ -317,7 +317,7 @@ def personal_agent_roster_lock_path(runtime_paths: RuntimePaths) -> Path:
 
 def read_personal_agent_roster(runtime_paths: RuntimePaths) -> list[PersonalAgentRosterEntry]:
     """Read every roster entry, or an empty list before the first onboarding."""
-    path = personal_agent_roster_path(runtime_paths)
+    path = _personal_agent_roster_path(runtime_paths)
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -329,4 +329,4 @@ def append_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: Perso
     """Append one entry durably; the caller holds the roster lock."""
     roster = [*read_personal_agent_roster(runtime_paths), entry]
     payload = _PersonalAgentRosterFile(entries=roster).model_dump(mode="json")
-    write_json_file_durable(personal_agent_roster_path(runtime_paths), payload, strict_atomic_replace=True)
+    write_json_file_durable(_personal_agent_roster_path(runtime_paths), payload, strict_atomic_replace=True)

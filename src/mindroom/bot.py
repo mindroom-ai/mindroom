@@ -67,6 +67,7 @@ from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manag
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.model_catalog_receiver import register_model_catalog_receiver
 from mindroom.orchestration.server_state import publish_server_state, server_state_content
+from mindroom.personal_agents import provision_personal_agent
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import (
@@ -512,6 +513,7 @@ class AgentBot:
             self.personal_rooms,
             self._lookup_personal_room_target,
             lambda event: self._ingress_validator.requester_user_id(sender=event.sender, source=event.source),
+            self._provision_personal_agent,
         )
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
@@ -2803,6 +2805,28 @@ class AgentBot:
         if not isinstance(target, AgentBot) or target.client is None:
             return None
         return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)
+
+    async def _provision_personal_agent(self, template: str, user_id: str, source_room_id: str) -> None:
+        """Create one user's agent from a template and reload the config so the runtime starts it."""
+        client = self.client
+        assert client is not None
+        profile = await client.get_displayname(user_id)
+        await provision_personal_agent(
+            self.config,
+            self.runtime_paths,
+            template=template,
+            user_id=user_id,
+            user_display_name=profile.displayname if isinstance(profile, nio.ProfileGetDisplayNameResponse) else None,
+            source_room_id=source_room_id,
+        )
+        # Also when the roster already had the entry: this runs only while the live config lacks the agent.
+        orchestrator = self.orchestrator
+        if orchestrator is not None:
+            orchestrator.config_reload.request_reload()
+
+    def personal_room_target_ready(self) -> None:
+        """Let the router onboard a user at once because their own agent finished its first sync."""
+        self._personal_room_lifecycle.target_ready()
 
     async def _reconcile_reply_membership_effects(self) -> None:
         """Run effects that depend on one committed reply-membership change."""

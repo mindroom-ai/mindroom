@@ -101,8 +101,14 @@ class PersonalRoomService:
     _guest_removal_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     def _settings(self) -> PersonalRoomsConfig | None:
-        settings = self.runtime.config.personal_rooms
-        return settings if settings is not None and settings.agent == self.agent_name else None
+        """Return the settings this agent serves, directly or as one user's agent from the named template."""
+        config = self.runtime.config
+        settings = config.personal_rooms
+        if settings is None:
+            return None
+        instance = config.personal_agent_instance(self.agent_name)
+        served = self.agent_name if instance is None else instance.template
+        return settings if settings.agent == served else None
 
     def _client(self) -> nio.AsyncClient:
         client = self.runtime.client
@@ -124,10 +130,12 @@ class PersonalRoomService:
         )
 
     def _current_settings(self, user_id: str, source_room_id: str) -> PersonalRoomsConfig | None:
-        """Read current onboarding and access policy at an authority boundary."""
+        """Read current onboarding and access policy at an authority boundary; a user's own agent serves only them."""
         settings = self._settings()
+        instance = self.runtime.config.personal_agent_instance(self.agent_name)
         if (
             settings is None
+            or (instance is not None and user_id != instance.user_id)
             or source_room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
             or not self._allowed(user_id, source_room_id)
         ):

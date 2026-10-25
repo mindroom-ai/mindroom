@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from structlog.testing import capture_logs
 from mindroom import personal_room_lifecycle
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
+from mindroom.config.personal_agents import append_personal_agent_roster_entry
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.personal_rooms import (
     PersonalRoomRosterMismatchError,
@@ -24,6 +26,8 @@ from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from tests.conftest import test_runtime_paths
+from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 
 @dataclass
@@ -76,6 +80,58 @@ def coordination(tmp_path: Path) -> Coordination:
     requester = Mock(side_effect=lambda event: event.sender)
     lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, requester)
     return Coordination(lifecycle, owner, local, lookup, requester)
+
+
+@dataclass
+class TemplateCoordination:
+    """A coordinator whose personal_rooms.agent names a template, so each user gets their own agent."""
+
+    lifecycle: PersonalRoomLifecycle
+    target: Mock
+    lookup: Mock
+    provision: AsyncMock
+
+
+@pytest.fixture
+def template_coordination(tmp_path: Path) -> TemplateCoordination:
+    """Wire a real coordinator to a provisioning callback and alice's own agent, once it exists."""
+    paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(paths)
+    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
+    state.save(paths)
+    client = SimpleNamespace(
+        user_id="@mindroom_router:localhost",
+        joined_members=AsyncMock(
+            return_value=nio.JoinedMembersResponse.from_dict(
+                {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
+                "!lobby:localhost",
+            ),
+        ),
+    )
+    runtime = SimpleNamespace(config=Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths), client=client)
+    target = Mock(spec=PersonalRoomService)
+    lookup = Mock(
+        side_effect=lambda name: PersonalRoomTarget(target, first_sync_complete=True) if name == "mind_alice" else None,
+    )
+    provision = AsyncMock()
+    lifecycle = PersonalRoomLifecycle(
+        "router",
+        runtime,
+        paths,
+        Mock(spec=PersonalRoomService),
+        lookup,
+        Mock(side_effect=lambda event: event.sender),
+        provision,
+    )
+    return TemplateCoordination(lifecycle, target, lookup, provision)
+
+
+def add_alices_agent(lifecycle: PersonalRoomLifecycle, source_room_id: str = "!lobby:localhost") -> None:
+    """Record alice's own agent in the roster and reload the config that contains it."""
+    paths = lifecycle.runtime_paths
+    append_personal_agent_roster_entry(paths, personal_agent_entry("@alice:localhost", source_room_id=source_room_id))
+    lifecycle.runtime.config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    lifecycle.config_changed()
 
 
 @dataclass
@@ -918,3 +974,119 @@ async def test_disabled_provisioning_retains_only_recorded_ids_for_rejoin(coordi
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     await lifecycle._reconcile()
     coordination.owner.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["first_join", "rejoin"])
+async def test_template_join_provisions_and_settles_without_holding_the_lane(
+    template_coordination: TemplateCoordination,
+    trigger: str,
+) -> None:
+    """A lobby join creates the user's own agent and settles, so the lobby keeps answering while it starts."""
+    lifecycle = template_coordination.lifecycle
+    join = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
+    with capture_logs() as logs:
+        if trigger == "first_join":
+            await lifecycle.baseline_join(join)
+        else:
+            await lifecycle.member_event(LOBBY, lobby_rejoin())
+    template_coordination.provision.assert_awaited_once_with("mind", "@alice:localhost", "!lobby:localhost")
+    assert call("mind") not in template_coordination.lookup.call_args_list
+    assert lifecycle._retry_candidates == {("@alice:localhost", "!lobby:localhost"): trigger == "rejoin"}
+    assert [(entry["event"], entry["log_level"]) for entry in logs] == [("Personal agent is starting", "info")]
+
+
+@pytest.mark.asyncio
+async def test_template_provisioning_failure_backs_off_like_any_failure(
+    template_coordination: TemplateCoordination,
+    clock: Clock,
+) -> None:
+    """A registration failure fails only that user's onboarding, which retries after the usual delays."""
+    lifecycle = template_coordination.lifecycle
+    template_coordination.provision.side_effect = RuntimeError("Failed to register personal agent account")
+    with capture_logs() as logs:
+        await lifecycle.member_event(LOBBY, lobby_rejoin())
+    assert [entry["event"] for entry in logs] == ["Personal-room onboarding trigger failed"]
+    await lifecycle._reconcile()
+    assert lifecycle._candidate_backoff[("@alice:localhost", "!lobby:localhost")].failures == 1
+    clock.now += 29
+    await lifecycle._reconcile()
+    assert template_coordination.provision.await_count == 2
+    clock.now += 1
+    await lifecycle._reconcile()
+    assert template_coordination.provision.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_template_reconciliation_ensures_on_the_users_own_agent(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """Once the user's agent is in the config and connected, reconciliation onboards them through it."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    await lifecycle._reconcile()
+    template_coordination.lookup.assert_any_call("mind_alice")
+    template_coordination.target.ensure.assert_awaited_once_with(
+        "@alice:localhost",
+        "!lobby:localhost",
+        lifecycle.runtime.client,
+        reinvite_departed_owner=False,
+    )
+    template_coordination.provision.assert_not_awaited()
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_template_reconciliation_retries_intent_recorded_by_each_users_agent(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """A personal room recorded by the user's own agent is retried from its source room, not only the roster's."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle, source_room_id="!retired:localhost")
+    write_personal_room(
+        personal_room_record_path(lifecycle.runtime_paths, "mind_alice", "@alice:localhost"),
+        PersonalRoomRecord(
+            user_id="@alice:localhost",
+            alias="#personal_alice:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
+    await lifecycle._reconcile()
+    template_coordination.target.ensure.assert_awaited_once_with(
+        "@alice:localhost",
+        "!lobby:localhost",
+        lifecycle.runtime.client,
+        reinvite_departed_owner=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_template_pending_target_does_not_back_off(template_coordination: TemplateCoordination) -> None:
+    """A user's agent that is still starting is retried on the next pass, without a growing delay or a warning."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    template_coordination.lookup.side_effect = None
+    template_coordination.lookup.return_value = None
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+    template_coordination.target.ensure.assert_not_awaited()
+    assert lifecycle._candidate_backoff == {}
+    assert lifecycle._reconciled is False
+    assert not [entry for entry in logs if entry["log_level"] in {"warning", "error"}]
+
+
+@pytest.mark.asyncio
+async def test_target_ready_allows_immediate_reconciliation(template_coordination: TemplateCoordination) -> None:
+    """A user's agent finishing its first sync onboards its owner at once instead of after the retry delay."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    lifecycle._reconciled = True
+    lifecycle._next_reconciliation_at = float("inf")
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    template_coordination.target.ensure.assert_not_awaited()
+    lifecycle.target_ready()
+    assert lifecycle._next_reconciliation_at == 0.0
+    assert lifecycle._reconciled is False
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    template_coordination.target.ensure.assert_awaited_once()

@@ -1586,6 +1586,10 @@ class _MultiAgentOrchestrator:
             self._router_reply_memberships_live_sync_ready.set()
         if bot.agent_name == ROUTER_AGENT_NAME and bot.running and bot.client is not None:
             await self._approval_recovery.mark_router_ready()
+        if self.config is not None and self.config.personal_agent_instance(bot.agent_name) is not None:
+            router = self.agent_bots.get(ROUTER_AGENT_NAME)
+            if isinstance(router, AgentBot):
+                router.personal_room_target_ready()
         self._schedule_ready_turn_dispatch_recovery()
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:

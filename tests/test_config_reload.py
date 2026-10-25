@@ -1354,6 +1354,23 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
 
 
 @pytest.mark.asyncio
+async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path) -> None:
+    """A generated agent's first sync lets the router onboard its owner at once instead of after a retry delay."""
+    paths = test_runtime_paths(tmp_path)
+    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    data = deepcopy(PERSONAL_AGENTS_BASE) | {"agents": {"general": {"display_name": "General"}}}
+    orchestrator = _MultiAgentOrchestrator(paths)
+    orchestrator.config = Config.validate_with_runtime(data, paths)
+    router = MagicMock(spec=AgentBot)
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router}
+
+    await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="general"))
+    router.personal_room_target_ready.assert_not_called()
+    await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="mind_alice_smith"))
+    router.personal_room_target_ready.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path: Path) -> None:
     """A generated agent's stored Matrix username is requested, so a wiped matrix_state recreates the same ID."""
     paths = test_runtime_paths(tmp_path)
