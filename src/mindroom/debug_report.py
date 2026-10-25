@@ -19,6 +19,8 @@ _AI_RUN_KEY = "io.mindroom.ai_run"
 _JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
 _MAX_JSONL_RECORDS = 1000
 _MAX_RUNS = 100
+# The JSON text columns of a run row and of its message rows.
+_RUN_JSON_COLUMNS = frozenset({"record", "tools", "requirements", "metadata", "data"})
 _MAX_LOG_LINES = 2000
 _MAX_LOG_LINE_CHARS = 4000
 _TOOL_CALL_ROTATIONS = 5
@@ -122,7 +124,7 @@ def _decode_json_columns(row: Mapping[str, Any]) -> dict[str, Any]:
     """Decode JSON stored as text, so the report nests objects instead of escaped strings."""
     decoded: dict[str, Any] = {}
     for key, value in row.items():
-        if isinstance(value, str) and (key.endswith("_json") or key == "run_data"):
+        if isinstance(value, str) and (key.endswith("_json") or key in _RUN_JSON_COLUMNS):
             try:
                 decoded[key] = json.loads(value)
             # JSONDecodeError and the integer digit limit are ValueErrors; deep nesting is a RecursionError.
@@ -290,25 +292,39 @@ def _read_run_database(
     conditions: Sequence[str],
     params: Sequence[object],
 ) -> tuple[int, list[dict[str, Any]]]:
-    """Return how many runs match and the newest `_MAX_RUNS` of the database's runs table, oldest first.
+    """Return how many runs match and the newest `_MAX_RUNS` of the database's runs, oldest first, with their messages.
 
-    The runs table is the one `TableNames.of_database` names for the database's file.
+    The tables are the ones `TableNames.of_database` names for the database's file. A message a mid-turn fold took
+    names that fold's summary row in `folded_by`. A database the storage conversion has not reached raises.
     """
     # The schema module loads the history package, which the CLI's import path keeps out (tests/test_cli_config.py).
     from mindroom.session_storage.schema import TableNames  # noqa: PLC0415
 
     where = " OR ".join(conditions)
-    runs_table = TableNames.of_database(database).runs
+    names = TableNames.of_database(database)
+    runs_table = names.log_runs
     with _sqlite_query(database) as query:
-        if not query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [runs_table]):
-            return 0, []
-        # The table name comes from the database's file name; values are placeholders.
+        if not query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [names.log_meta]):
+            msg = "not converted to the current storage layout"
+            raise sqlite3.DatabaseError(msg)
+        # The table names come from the database's file name; values are placeholders.
         [counted] = query(f'SELECT COUNT(*) AS matches FROM "{runs_table}" WHERE {where}', params)  # noqa: S608
         rows = query(
             f'SELECT * FROM "{runs_table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
             [*params, _MAX_RUNS],
         )
+        # Each fold numbers its messages from 0, so the stored messages come first, then each fold's in order.
+        message_rows = query(
+            f'SELECT run_id, folded_by, data FROM "{names.log_messages}" WHERE run_id IN '  # noqa: S608
+            "(SELECT value FROM json_each(?)) ORDER BY folded_by IS NOT NULL, folded_by, ord",
+            [json.dumps([row["run_id"] for row in rows])],
+        )
+    messages: dict[str, list[dict[str, Any]]] = {}
+    for message in message_rows:
+        messages.setdefault(message.pop("run_id"), []).append(_decode_json_columns(message))
     runs = [{"database": str(database), "table": runs_table, **_decode_json_columns(row)} for row in reversed(rows)]
+    for run in runs:
+        run["messages"] = messages.get(run["run_id"], [])
     return counted["matches"], runs
 
 
