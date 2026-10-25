@@ -7141,38 +7141,51 @@ class TestApprovalContinuations:
         self,
         journal_store: EventJournalStore,
     ) -> None:
-        """Every loader returns the calls each earlier approval decided beside the current generation's."""
+        """Every loader returns the calls each earlier approval decided, in pause order, beside the current generation's."""
         alice = journal_store.principal("agent@alice")
         await self.admit_sources(alice)
-        first = await paused_for_approval(alice, self.continuation())
+
+        def call(tool_call_id: str, decision: ApprovalDecision | None = ApprovalDecision.APPROVED) -> ApprovalCall:
+            return ApprovalCall(
+                tool_call_id=tool_call_id,
+                tool_name="write_file",
+                invoking_agent="agent",
+                expires_at_ns=time.time_ns() + 60_000_000_000,
+                decision=decision,
+            )
+
+        async def advance(claimant_generation: int, calls: tuple[ApprovalCall, ...]) -> ApprovalContinuation:
+            advanced = await advance_continuation(
+                alice,
+                "approval-1",
+                claimant_generation=claimant_generation,
+                run_id=f"run-{claimant_generation + 2}",
+                session_id="session-1",
+                calls=calls,
+            )
+            assert advanced is not None
+            return advanced
+
+        initial = self.continuation()
+        first = await paused_for_approval(alice, replace(initial, calls=(*initial.calls, call("call-1b"))))
         assert first is not None
         assert first.earlier_calls == ()
         claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
-        calls = (
-            ApprovalCall(
-                tool_call_id="call-2",
-                tool_name="write_file",
-                invoking_agent="agent",
-                expires_at_ns=time.time_ns() + 60_000_000_000,
-            ),
-        )
+        second = await advance(claimed.generation, (call("call-2"),))
+        assert second.earlier_calls == first.calls
+        assert await alice.activate_approval_continuation("approval-1", expected_generation=second.generation)
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        latest = (call("call-3", decision=None),)
 
-        advanced = await advance_continuation(
-            alice,
-            "approval-1",
-            claimant_generation=claimed.generation,
-            run_id="run-2",
-            session_id="session-1",
-            calls=calls,
-        )
+        third = await advance(claimed.generation, latest)
 
-        assert advanced is not None
         [paged] = [continuation for _principal, continuation in await journal_store.approval_continuations()]
         assert [
             (continuation.calls, continuation.earlier_calls)
-            for continuation in (advanced, *await alice.pending_approvals(), paged)
-        ] == [(calls, first.calls)] * 3
+            for continuation in (third, *await alice.pending_approvals(), paged)
+        ] == [(latest, (*first.calls, *second.calls))] * 3
 
     async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
         self,
