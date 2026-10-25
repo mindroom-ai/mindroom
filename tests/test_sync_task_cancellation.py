@@ -75,6 +75,7 @@ from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
     ORDERLY_SHUTDOWN,
+    RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
     SYNC_RESTART_SHUTDOWN,
     SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
     RuntimeShutdownIntent,
@@ -4271,7 +4272,8 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
     bot._release_stopped_resources.assert_not_awaited()
 
     release_proof.set()
-    await asyncio.wait_for(finalizing, timeout=SETTLE_TIMEOUT_SECONDS)
+    # Below the default finalization budget, so a stop that drops its explicit budget fails.
+    await asyncio.wait_for(finalizing, timeout=RESPONSE_FINALIZATION_TIMEOUT_SECONDS / 2)
 
     bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
     assert not bot.deferred_stop_required
@@ -4367,7 +4369,8 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
         bot._release_stopped_resources.assert_not_awaited()
 
         release_first_proof.set()
-        await asyncio.wait_for(finalizing, timeout=SETTLE_TIMEOUT_SECONDS)
+        # Below the default finalization budget, so a stop that drops its explicit budget fails.
+        await asyncio.wait_for(finalizing, timeout=RESPONSE_FINALIZATION_TIMEOUT_SECONDS / 2)
 
     assert proof_calls == 2
     bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
@@ -4483,13 +4486,14 @@ async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -
 
     try:
         with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+            # Below the default finalization budget, so a stop that drops its explicit budget fails.
             await asyncio.wait_for(
                 AgentBot.finish_deferred_stop(
                     bot,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                     timeout_seconds=0.02,
                 ),
-                timeout=SETTLE_TIMEOUT_SECONDS,
+                timeout=RESPONSE_FINALIZATION_TIMEOUT_SECONDS / 2,
             )
         assert proof_started.is_set()
         bot._release_stopped_resources.assert_not_awaited()
