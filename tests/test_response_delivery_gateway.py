@@ -3116,8 +3116,9 @@ class TestTurnDeliverySerialization:
             await publication_started.wait()
             assert (
                 await runner.drain_inbox_responses(
-                    # Exercise repeated cancellation without imposing a 50 ms database deadline.
-                    cancel_after_seconds=0.5,
+                    # Exercise repeated cancellation without imposing a database deadline: the cleanup window
+                    # must outlast the publication's writes on a loaded host, which can take over 0.4 s.
+                    cancel_after_seconds=2.0,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                 )
                 is True
