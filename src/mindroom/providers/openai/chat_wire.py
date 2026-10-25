@@ -77,7 +77,8 @@ class ChatWire:
     route: str
     # TODO(simplify): the ``groq`` and ``cerebras`` dialects format messages, tools, parameters, and usage by rules of
     # their own, and neither reads reasoning. Collapse them into ``openai``, with per-route data for real API
-    # differences (#3113). Groq and Cerebras request bodies would change, and their reasoning would show.
+    # differences (#3113). Models would notice changed Groq and Cerebras request bodies, and stored runs would record
+    # their reasoning.
     dialect: ChatDialect
 
 

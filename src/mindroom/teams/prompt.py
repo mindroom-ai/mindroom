@@ -3,7 +3,7 @@
 
 A team has no description, role, or instructions of its own, so the ``<team>`` block (the capability sentence, the
 member roster, and the mode's ``<delegation>`` block) opens the prompt. Texts and layout are part of every leader
-request's prompt-cache prefix, so each change to them costs every team one prompt-cache miss.
+request's prompt-cache prefix: changing them changes the cacheable prefix and may prevent reuse of cached tokens.
 """
 
 from __future__ import annotations

@@ -88,6 +88,8 @@ class ToolExecution:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict: every field, None included, under its stored key."""
+        # TODO(simplify): every field is stored, None defaults included. Store only the fields that hold a value,
+        # with the storage redesign (#3107, #3095). Stored data would change: new rows would omit unset fields.
         values = asdict(self)
         values["metrics"] = self.metrics.to_dict() if self.metrics is not None else None
         return {_STORED_TOOL_KEYS.get(name, name): value for name, value in values.items()}

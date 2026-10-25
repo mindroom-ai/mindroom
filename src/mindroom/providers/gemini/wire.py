@@ -357,7 +357,8 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:  #
 
 def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
     """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes."""
-    # A tool without a description sends an empty one.
+    # TODO(simplify): a tool without a description sends an empty one. Leave it out, as Chat, Responses, and Ollama do
+    # (#3113). Models would notice: Gemini tool declarations change for tools without a description.
     declarations = [
         _without_none(name=tool.name, description=tool.description or "", parameters=convert_schema(tool.parameters))
         for tool in sorted(tools, key=lambda tool: tool.name)

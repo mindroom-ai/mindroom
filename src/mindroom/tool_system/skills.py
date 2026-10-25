@@ -63,7 +63,9 @@ _GET_SKILL_REFERENCE_DESCRIPTION = (
 _GET_SKILL_SCRIPT_DESCRIPTION = (
     "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
 )
-# The fixed header of the system prompt's skills section; get_skill_script only reads scripts.
+# TODO(simplify): the fixed header of the system prompt's skills section is Agno's text, which calls scripts
+# "Executable code templates" though get_skill_script only reads them. Write MindRoom's own skills prompt (#3105).
+# Models would notice.
 _PROMPT_HEADER = (
     "<skills_system>",
     "",
@@ -397,8 +399,8 @@ def _unlisted_file_error(
 
 
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-# Configured skill roots read files by path, so a reference or script path resolves only inside its skill folder,
-# through segments every platform can name.
+# Configured skill roots read files by path, so a reference or script path resolves only inside its skill folder, and
+# its segments lose trailing dots and spaces and may not hold control characters, a drive, or a Windows device name.
 _WINDOWS_RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)", re.IGNORECASE)
 _WINDOWS_PATH_PREFIX = re.compile(r"^([A-Za-z]:|\\\\)")
 

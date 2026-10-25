@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Render an agent's system message from its prompt inputs.
 
-The layout is part of every provider's prompt-cache prefix, so each change to its section order, tags, or blank lines
-costs every conversation one prompt-cache miss.
+The layout is part of every provider's prompt-cache prefix: changing its section order, tags, or blank lines changes
+the cacheable prefix and may prevent reuse of cached tokens.
 """
 
 from __future__ import annotations

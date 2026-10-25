@@ -93,8 +93,7 @@ class ToolFunction:
         """Return the execution a call of this function starts as, before it runs.
 
         The call is paused when the function requires confirmation or external execution, and a paused call carries
-        the function's approval type and silence, which decide how its pause is approved and whether the run reports
-        it without text.
+        the function's approval type, which decides how its pause is approved, and its silence flag.
         """
         # Deferred so that these tool values import no pydantic, which run records pull in through redaction.
         from mindroom.llm.runs import ToolExecution  # noqa: PLC0415
