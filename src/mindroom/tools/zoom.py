@@ -63,7 +63,6 @@ if TYPE_CHECKING:
         "get_meeting",
         "get_meeting_recordings",
         "get_upcoming_meetings",
-        "instructions",
         "list_meetings",
         "schedule_meeting",
     ),
