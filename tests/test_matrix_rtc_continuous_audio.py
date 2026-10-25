@@ -195,6 +195,10 @@ async def test_live_cancelled_consumer_keeps_real_frame_and_close_ends_pending_r
     pending = asyncio.create_task(anext(audio))
     try:
         await asyncio.wait_for(microphone.reading.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        # The first frame is due at once, so cancel a read that waits for the next frame's deadline.
+        await pending
+        pending = asyncio.create_task(anext(audio))
+        await asyncio.sleep(0)
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending

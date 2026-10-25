@@ -100,6 +100,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6.1-sol",
+      "stream": true,
       "context_management": [
         {
           "type": "compaction",
@@ -128,10 +130,8 @@
         }
       ],
       "instructions": "You are a helpful assistant.",
-      "model": "gpt-6.1-sol",
       "reasoning": {},
-      "store": false,
-      "stream": true
+      "store": false
     },
     "headers": {
       "accept": "application/json",

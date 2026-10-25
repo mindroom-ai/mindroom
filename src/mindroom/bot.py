@@ -185,7 +185,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
-    from mindroom.reply_lifecycle import Reply
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_jobs.conversation import ConversationKey
@@ -806,7 +805,10 @@ class AgentBot:
                     **ownership,
                 ),
                 settle_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
-                stop_reply=self._stop_reply_for_edit,
+                stop_reply=lambda reply, receipt_order: self._delivery_gateway.stop_reply_by_id(
+                    reply.reply_id,
+                    receipt_order,
+                ),
                 receipt_order=self._journal_dispatcher.receipt_order,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
@@ -2933,11 +2935,6 @@ class AgentBot:
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""
         return await self._response_runner.generate_response(request)
-
-    async def _stop_reply_for_edit(self, reply: Reply, receipt_order: int) -> None:
-        """Stop a reply that still runs before an edit regenerates it, as a Stop reaction would."""
-        assert reply.event_id is not None, "an edit regenerates only a reply that showed something"
-        await self._user_stop_reconciler.finalize(reply.event_id, receipt_order, room_id=reply.room_id)
 
     async def _later_human_message(self, record: TurnRecord) -> bool:
         """Return whether a human wrote in the turn's conversation after it, so an edit of it regenerates nothing."""

@@ -76,6 +76,24 @@ async def run_blocking_until_complete[Result](
     return await run_coroutine_until_complete(asyncio.to_thread(operation, *args))
 
 
+async def run_blocking_or_compensate[Result](
+    operation: Callable[[], Result],
+    compensate: Callable[[Result], object],
+) -> Result:
+    """Run one blocking operation off the loop; when cancelled, finish it and compensate for its result.
+
+    The cancelled caller never receives the result, so ``compensate`` undoes what nobody can see, on a thread
+    and before the cancellation propagates. An operation that raised needs no compensation.
+    """
+    running = asyncio.ensure_future(asyncio.to_thread(operation))
+    try:
+        return await wait_for_future_until_complete(running)
+    except asyncio.CancelledError:
+        if running.exception() is None:
+            await run_blocking_until_complete(compensate, running.result())
+        raise
+
+
 def create_background_task(
     coro: Coroutine[Any, Any, Any],
     name: str | None = None,

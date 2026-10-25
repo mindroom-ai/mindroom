@@ -89,9 +89,21 @@ class _EditedSource:
     reply_event_id: str | None
 
 
-def _regenerable(reply: Reply | None) -> bool:
-    """Return whether an edit regenerates this reply: one that showed something and is not gone."""
-    return reply is not None and reply.event_id is not None and reply.state is not ReplyState.GONE
+def _not_regenerable(reply: Reply | None) -> str | None:
+    """Return why an edit regenerates no reply, or ``None`` for one that may show something and is not gone.
+
+    A create Matrix has not acknowledged yet may show. A reply that recorded
+    nothing yet, as a participation turn that has not sent anything yet, is
+    not stopped: it would leave a cancel note where nothing showed, and its
+    regeneration would answer without the participation decision.
+    """
+    if reply is None:
+        return "no_reply"
+    if reply.state is ReplyState.GONE:
+        return "gone"
+    if reply.event_id is None and reply.possibly_shown is None:
+        return "reply_not_shown"
+    return None
 
 
 @dataclass
@@ -155,9 +167,17 @@ class EditRegenerator:
         # Every decision below is taken from the record's own conversation target, never from the thread the
         # edit names.
         turn_record = await self.deps.turn_store.load_turn(original_event_id)
+        if turn_record is None:
+            # Usually this agent never took the message; it may also still wait for media or voice before its turn.
+            logger.info(
+                "edit_not_regenerated",
+                room_id=room.room_id,
+                source_event_id=original_event_id,
+                reason="no_turn_record",
+            )
+            return None
         if (
-            turn_record is None
-            or turn_record.conversation_target is None
+            turn_record.conversation_target is None
             or turn_record.history_scope is None
             or turn_record.response_owner != self.deps.agent_name
         ):
@@ -174,8 +194,11 @@ class EditRegenerator:
         if original_event_id in turn_record.redacted_source_event_ids:
             return None
         reply = await self.deps.reply_for_sources(turn_record.source_event_ids)
-        if not _regenerable(reply) or await self.deps.later_human_message(turn_record):
-            logger.info("edit_not_regenerated", room_id=room.room_id, source_event_id=original_event_id)
+        reason = _not_regenerable(reply) or (
+            "later_human_message" if await self.deps.later_human_message(turn_record) else None
+        )
+        if reason is not None:
+            logger.info("edit_not_regenerated", room_id=room.room_id, source_event_id=original_event_id, reason=reason)
             return None
         assert reply is not None
 

@@ -50,6 +50,7 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
       "messages": [
         {
           "role": "system",
@@ -59,8 +60,7 @@
           "role": "user",
           "content": "What should I pack for Paris tomorrow?"
         }
-      ],
-      "model": "gpt-6-astra"
+      ]
     },
     "headers": {
       "accept": "application/json",

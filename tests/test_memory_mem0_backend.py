@@ -847,7 +847,7 @@ async def test_conversation_memory_extraction_records_its_token_usage(storage_pa
     assert message.role == "assistant"
     assert message.metrics is not None
     assert message.metrics.tokens.total_tokens == 150
-    assert message.provider_data == {"mindroom_model": {"id": "gpt-6-luna", "provider": "OpenAI"}}
+    assert message.provider_data == {"mindroom_model": {"id": "gpt-6-luna", "provider": "OpenAI Chat"}}
 
 
 @pytest.mark.asyncio

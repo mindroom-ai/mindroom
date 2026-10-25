@@ -138,6 +138,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "include": [
         "reasoning.encrypted_content"
       ],
@@ -151,12 +153,10 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {
         "effort": "medium"
       },
       "store": false,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",

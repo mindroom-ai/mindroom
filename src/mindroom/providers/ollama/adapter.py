@@ -132,11 +132,15 @@ class OllamaProvider:
         yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        """Return the chat parameters of one request; authored ``request_params`` override the settings and tools."""
+        """Return the chat parameters of one request; authored ``request_params`` override the settings and tools.
+
+        A request's temperature override, such as a thread summary's, replaces an authored ``options.temperature``.
+        """
         settings = self.settings
-        # TODO(simplify): a request's temperature override, such as a thread summary's, is ignored. Send it as
-        # ``options.temperature``, as other routes apply theirs. Models would notice (#3075).
-        authored = {"format": settings.format, "options": settings.options or None, "keep_alive": settings.keep_alive}
+        options = dict(settings.options or {})
+        if request.overrides.temperature is not None:
+            options["temperature"] = request.overrides.temperature
+        authored = {"format": settings.format, "options": options or None, "keep_alive": settings.keep_alive}
         kwargs: dict[str, Any] = {key: value for key, value in authored.items() if value is not None}
         # TODO(simplify): ``tool_choice: "none"`` still sends the tools, so the model can call them; only a decision
         # request drops them. Drop the tools whenever ``tool_choice`` is "none". Models would notice (#3075).

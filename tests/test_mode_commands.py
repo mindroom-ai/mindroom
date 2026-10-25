@@ -538,6 +538,38 @@ def test_local_shell_agent_selects_minimal_mode_without_setup(tmp_path: Path, ap
     )
 
 
+def test_a_shell_a_preset_brings_in_selects_minimal_mode(tmp_path: Path) -> None:
+    """The shell `openclaw_compat` brings in is the agent's shell, for `!mode` and for minimal subagents alike."""
+    context = _runtime_context(tmp_path)
+    context.config.administrators = [context.requester_id]
+    context.config.agents["helper"] = AgentConfig(
+        display_name="Helper",
+        tools=["openclaw_compat"],
+        memory_backend="file",
+    )
+    identity = build_execution_identity_from_runtime_context(context)
+    root = resolve_agent_storage("helper", context.config, context.runtime_paths, identity).state_root
+
+    result = mode_commands.handle_mode_command(
+        "helper minimal",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        target=context.target,
+        requester_id=context.requester_id,
+        membership_index=context.agent_reply_memberships,
+    )
+
+    assert "uses `minimal`" in result, result
+    assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "minimal"
+    candidates = minimal_mode_preflight.minimal_subagent_candidates(
+        context.config,
+        context.runtime_paths,
+        ["helper"],
+        identity,
+    )
+    assert candidates == ["helper"]
+
+
 def test_docker_worker_callback_url_is_derived_from_the_running_api(tmp_path: Path) -> None:
     """Docker workers reach an API listening on every interface through the host alias, without a URL setting."""
     context = _runtime_context(tmp_path)

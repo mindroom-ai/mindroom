@@ -68,7 +68,7 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeReso
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
+from mindroom.llm.provider import ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
@@ -4465,7 +4465,7 @@ class TestTeamCompletion:
             "member-model": 44,
         }
 
-    def test_a_claude_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
+    def test_a_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
         self,
         team_app_client: TestClient,
     ) -> None:
@@ -4481,10 +4481,9 @@ class TestTeamCompletion:
             answer("I will split the work."),
             members=[("general", "GeneralAgent", member)],
         )
-        leader = replace(built.spec.leader.model, capabilities=Capabilities(claude_family=True))
-        team = replace(built, spec=replace(built.spec, leader=replace(built.spec.leader, model=leader)))
+        leader = built.spec.leader.model
 
-        with patch("mindroom.api.openai_compat._build_team", return_value=team):
+        with patch("mindroom.api.openai_compat._build_team", return_value=built):
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={"model": "team/super_team", "messages": [{"role": "user", "content": "Write it all"}]},
@@ -4553,8 +4552,8 @@ class TestTeamCompletion:
         ]
 
     @pytest.mark.asyncio
-    async def test_prepare_openai_team_execution_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
-        """OpenAI team prep should recover notice facts and preserve assistant-role rendering."""
+    async def test_prepare_openai_team_execution_scrubs_queued_notices_and_renders_the_messages_as_sent(self) -> None:
+        """OpenAI team prep should recover notice facts and render the leader's messages as they are sent."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
@@ -4669,7 +4668,7 @@ class TestTeamCompletion:
                 execution_identity=_team_identity("general", runtime_paths, session_id="session-openai-team-prep"),
             )
 
-        assert prepared.prompt_text == "assistant: Previous team reply\n\nAnalyze this."
+        assert prepared.prompt_text == "Previous team reply\n\nAnalyze this."
         assert prepared.run_metadata is not None
         assert "tools_schema" not in prepared.run_metadata
         assert prepared.run_metadata["model_params"] == {"temperature": 0.7}

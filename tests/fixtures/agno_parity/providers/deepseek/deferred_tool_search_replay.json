@@ -200,6 +200,8 @@
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -229,8 +231,6 @@
           "tool_call_id": "call_parity_order"
         }
       ],
-      "model": "deepseek-flash",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

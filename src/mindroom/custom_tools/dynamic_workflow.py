@@ -17,6 +17,7 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.authorization import responder_candidate_entities_from_cached_room
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
@@ -272,13 +273,16 @@ class DynamicWorkflowTools(Toolkit):
             return self._spec_errors_payload(spec_errors)
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            summary = store.create_workflow(
-                spec=spec,
-                scope=scope,
-                owner_id=owner_id,
-                created_by=context.agent_name,
-                reason=reason,
-                spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
+            summary = await run_blocking_until_complete(
+                partial(
+                    store.create_workflow,
+                    spec=spec,
+                    scope=scope,
+                    owner_id=owner_id,
+                    created_by=context.agent_name,
+                    reason=reason,
+                    spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
+                ),
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
@@ -318,14 +322,17 @@ class DynamicWorkflowTools(Toolkit):
             return self._context_error()
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            summary = store.update_workflow(
-                workflow_id=workflow_id,
-                scope=scope,
-                owner_id=owner_id,
-                patch=patch,
-                updated_by=context.agent_name,
-                reason=reason,
-                spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
+            summary = await run_blocking_until_complete(
+                partial(
+                    store.update_workflow,
+                    workflow_id=workflow_id,
+                    scope=scope,
+                    owner_id=owner_id,
+                    patch=patch,
+                    updated_by=context.agent_name,
+                    reason=reason,
+                    spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
+                ),
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
@@ -350,11 +357,8 @@ class DynamicWorkflowTools(Toolkit):
             return self._context_error()
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            run = store.get_workflow_run(
-                workflow_id=workflow_id,
-                scope=scope,
-                owner_id=owner_id,
-                run_id=run_id,
+            run = await run_blocking_until_complete(
+                partial(store.get_workflow_run, workflow_id=workflow_id, scope=scope, owner_id=owner_id, run_id=run_id),
             )
             authorize_dynamic_workflow_run(context, run)
         except DynamicWorkflowError as exc:
@@ -368,7 +372,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._context_error()
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            workflows = store.list_workflows(scope=scope, owner_id=owner_id)
+            workflows = await run_blocking_until_complete(partial(store.list_workflows, scope=scope, owner_id=owner_id))
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
         return self._payload(
@@ -394,10 +398,8 @@ class DynamicWorkflowTools(Toolkit):
             return self._context_error()
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            revisions = store.list_workflow_revisions(
-                workflow_id=workflow_id,
-                scope=scope,
-                owner_id=owner_id,
+            revisions = await run_blocking_until_complete(
+                partial(store.list_workflow_revisions, workflow_id=workflow_id, scope=scope, owner_id=owner_id),
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
@@ -471,15 +473,29 @@ async def _execute_room_agent_participant(
     context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
     participant_id = _required_participant_text(participant, "id")
-    active_model_name = _budgeted_model(context, _runtime_model_name(context, agent_name))
     session_id = f"{context.session_id}:dynamic_workflow:{run_scope}:{participant_id}"
+    participant_context, build = await run_blocking_until_complete(
+        _build_room_agent_participant,
+        context,
+        agent_name,
+        session_id,
+    )
+    return await _run_room_agent_turn(participant_context, build, prompt)
+
+
+def _build_room_agent_participant(
+    context: ToolRuntimeContext,
+    agent_name: str,
+    session_id: str,
+) -> tuple[ToolRuntimeContext, AgentBuild]:
+    """Resolve a room agent's model and build it; both walk the filesystem, so callers run this off the event loop."""
+    active_model_name = _budgeted_model(context, _runtime_model_name(context, agent_name))
     participant_context = replace(
         context,
         agent_name=agent_name,
         active_model_name=active_model_name,
         target=replace(context.target, session_id=session_id),
     )
-    execution_identity = build_execution_identity_from_runtime_context(participant_context)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import create_agent  # noqa: PLC0415
 
@@ -487,7 +503,7 @@ async def _execute_room_agent_participant(
         agent_name,
         context.config,
         context.runtime_paths,
-        execution_identity=execution_identity,
+        execution_identity=build_execution_identity_from_runtime_context(participant_context),
         hook_registry=context.hook_registry,
         knowledge=None,
         active_model_name=active_model_name,
@@ -495,7 +511,7 @@ async def _execute_room_agent_participant(
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
     )
-    return await _run_room_agent_turn(participant_context, build, prompt)
+    return participant_context, build
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
