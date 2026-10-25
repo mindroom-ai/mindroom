@@ -14,6 +14,7 @@ from unittest.mock import patch
 import nio
 import pytest
 
+from mindroom.authorization import get_available_responders_in_room
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -63,7 +64,10 @@ async def _select_team_mode_for_test(message: str, agent_names: list[str], confi
 
 
 def decide_team_formation_for_test(*, config: Config, room: nio.MatrixRoom, **kwargs: object) -> TeamResolution:
-    """Run team-formation logic for a main-timeline message in a group room, with the options a test names."""
+    """Run team-formation logic for a main-timeline message in a group room, with the options a test names.
+
+    The sender sees every responder in ``room`` unless a test names ``available_responders_in_room``.
+    """
     runtime_paths = runtime_paths_for(config)
     if not room.users:
         # Team-formation tests should default to all configured agents being visible in the room.
@@ -71,8 +75,13 @@ def decide_team_formation_for_test(*, config: Config, room: nio.MatrixRoom, **kw
             room,
             [agent_id.full_id for agent_id in entity_ids(config, runtime_paths).values() if agent_id is not None],
         )
-    turn_context: dict[str, object] = {"is_dm_room": False, "is_thread": False, "materializable_agent_names": None}
-    return decide_team_formation(config=config, room=room, runtime_paths=runtime_paths, **(turn_context | kwargs))
+    turn_context: dict[str, object] = {
+        "is_dm_room": False,
+        "is_thread": False,
+        "available_responders_in_room": get_available_responders_in_room(room, config, runtime_paths),
+        "materializable_agent_names": None,
+    }
+    return decide_team_formation(config=config, runtime_paths=runtime_paths, **(turn_context | kwargs))
 
 
 def _agent_names(ids: list[object], config: Config) -> list[str]:

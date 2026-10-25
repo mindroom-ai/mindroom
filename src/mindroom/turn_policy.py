@@ -672,7 +672,6 @@ class TurnPolicy:
             context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
-            room=room,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             is_dm_room=is_dm,
