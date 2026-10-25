@@ -177,6 +177,9 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         # The control ends the run after its batch, so no further request is sent.
         assert record.content is None
         assert [item.stop_after_call for item in results] == [True, True]
+        # The second Bash call never ran, so it answers as a failed call, as a call over the limit does.
+        assert [item.is_error for item in results] == [False, True]
+        assert results[1].result == "Bash cancelled before dispatch: continuation requires a rebuilt tool catalog."
         first, second = [await owner.get_call(item["call_id"]) for item in receipts]
         assert first["status"] == ("failed" if raises else "completed")
         assert first["outcome"] == ("switch rejected" if raises else payload)
@@ -339,13 +342,15 @@ async def _allow(key, arguments) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("saved_gate", [True, False])
 @pytest.mark.parametrize("approved", [True, False])
 async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_id(
     tmp_path,
     monkeypatch,
     approved,
+    saved_gate,
 ) -> None:
-    """The CLI caller chooses call IDs, so an approval saved under one in the run never admits a new call."""
+    """The CLI caller chooses call IDs, so a decision saved under one in the run never decides a new call."""
     config = _delegation_config()
     config.tool_approval.default = "require_approval"
     paths = _runtime_paths(tmp_path)
@@ -370,9 +375,9 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         approval_handler=decide,
     )
     call_id = uuid4()
-    # A recovered follow-up turn inherits the run metadata that approved an earlier call under this ID.
+    # A recovered follow-up turn inherits the run metadata that decided an earlier call under this ID.
     assert catalog.record is not None
-    catalog.record.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): True}).to_dict()}
+    catalog.record.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): saved_gate}).to_dict()}
     children = []
 
     async def child_response(child, **kwargs):
@@ -687,8 +692,9 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     memory = adapt_toolkit(MemoryTools("helper", paths.storage_root, config, paths))
     catalog = await _catalog(tmp_path, [memory])
     identity = build_execution_identity_from_runtime_context(catalog.runtime_context)
-    compact = adapt_toolkit(CompactContextTools("helper", config, paths, identity))
-    await catalog.prepare([compact], {"compact_context": "compact_context"})
+    await catalog.prepare(
+        [adapt_toolkit(CompactContextTools("helper", config, paths, identity), key="compact_context")],
+    )
     binding = await catalog.bind(ToolKey("memory", "add_memory"))
     events = [
         event

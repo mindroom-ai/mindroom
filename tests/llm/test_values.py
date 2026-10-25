@@ -220,27 +220,27 @@ def test_message_from_dict_requires_a_role() -> None:
 
 
 def test_tool_execution_is_paused_for_confirmation_or_external_execution() -> None:
-    assert ToolExecution(tool_name="t").is_paused is False
-    assert ToolExecution(tool_name="t", requires_confirmation=True).is_paused is True
-    assert ToolExecution(tool_name="t", external_execution_required=True).is_paused is True
+    assert ToolExecution(tool_call_id="call-t", tool_name="t").is_paused is False
+    assert ToolExecution(tool_call_id="call-t", tool_name="t", requires_confirmation=True).is_paused is True
+    assert ToolExecution(tool_call_id="call-t", tool_name="t", external_execution_required=True).is_paused is True
 
 
 def test_run_requirement_rejects_decisions_it_does_not_need() -> None:
-    plain = RunRequirement(ToolExecution(tool_name="t"))
+    plain = RunRequirement(ToolExecution(tool_call_id="call-t", tool_name="t"))
     assert plain.is_resolved() is True
     with pytest.raises(ValueError, match="does not require confirmation"):
         plain.confirm()
     with pytest.raises(ValueError, match="does not require external execution"):
         plain.set_external_execution_result("x")
 
-    confirmation = RunRequirement(ToolExecution(tool_name="t", requires_confirmation=True))
+    confirmation = RunRequirement(ToolExecution(tool_call_id="call-t", tool_name="t", requires_confirmation=True))
     confirmation.confirm()
     with pytest.raises(ValueError, match="does not require confirmation"):
         confirmation.reject("twice")
 
 
 def test_run_requirement_positional_tool_execution_and_defaults() -> None:
-    execution = ToolExecution(tool_name="t", requires_confirmation=True)
+    execution = ToolExecution(tool_call_id="call-t", tool_name="t", requires_confirmation=True)
     first, second = RunRequirement(execution), RunRequirement(execution)
 
     assert first.id != second.id

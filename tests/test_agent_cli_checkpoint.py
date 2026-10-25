@@ -23,7 +23,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to, write_with_session_state
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.invocation import ToolOutcome
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: lis
     ]
     state = LoopState(
         messages=messages,
-        offered=PreparedTools(functions={}, instructions=()),
+        offered=PreparedTools(functions={}),
         tools=(),
         run=checkpoint.catalog.run,
         record=record,
@@ -191,7 +191,7 @@ async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_ch
     await _capture(checkpoint, record, messages)
     await checkpoint.persist("bash-1")
     session.session_state["cwd"] = "/repo/sub"
-    checkpoint.complete("bash-1", "moved")
+    checkpoint.complete("bash-1", ToolOutcome(content="moved"))
     messages = [*messages, _assistant("bash-2")]
     await _capture(checkpoint, record, messages)
     await checkpoint.persist("bash-2")
@@ -216,42 +216,46 @@ async def test_checkpoint_retains_only_the_current_provider_batch(tmp_path: Path
     for index in range(3):
         messages.append(_assistant(f"bash-{index}"))
         await _capture(checkpoint, _record(), messages)
-        checkpoint.complete(f"bash-{index}", "done")
+        checkpoint.complete(f"bash-{index}", ToolOutcome(content="done"))
         for earlier in range(index):
             with pytest.raises(ValueError, match="captured"):
-                checkpoint.complete(f"bash-{earlier}", "late")
+                checkpoint.complete(f"bash-{earlier}", ToolOutcome(content="late"))
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("media", [False, True])
-async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path, media: bool) -> None:
+@pytest.mark.parametrize(
+    ("media", "failed"),
+    [(False, False), (True, False), (True, True)],
+    ids=["text", "media", "failed"],
+)
+async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path, media: bool, failed: bool) -> None:
+    """A finished sibling's result is saved as the loop answers it: a failed one marked failed and without media."""
     catalog = await _stored_catalog(tmp_path)
     checkpoint = BatchCheckpoint(catalog)
     await _capture(checkpoint, _record(), [_assistant("done", "waiting")])
     await checkpoint.persist("done")
-    result = (
-        ToolValue(
-            content="real sibling result",
-            images=(Image(content=b"sibling-image", mime_type="image/png"),),
-            audios=(Audio(url="https://example.test/sibling.wav"),),
-        )
-        if media
-        else "real sibling result"
+    outcome = ToolOutcome(
+        content="real sibling result",
+        images=(Image(content=b"sibling-image", mime_type="image/png"),) if media else (),
+        audios=(Audio(url="https://example.test/sibling.wav"),) if media else (),
+        is_error=failed,
     )
-    checkpoint.complete("done", result)
+    checkpoint.complete("done", outcome)
     await checkpoint.persist_approval("waiting")
     assert catalog.store is not None
     saved = catalog.store.get_run("run")
     assert saved is not None
     assert saved.messages[-1].tool_call_id == "done"
-    assert saved.messages[-1].content == "real sibling result"
-    assert [(tool.tool_call_id, tool.result) for tool in saved.tools or ()] == [
-        ("done", "real sibling result"),
-        ("waiting", None),
+    assert (saved.messages[-1].content, saved.messages[-1].tool_call_error) == ("real sibling result", failed)
+    assert [(tool.tool_call_id, tool.result, tool.is_error) for tool in saved.tools or ()] == [
+        ("done", "real sibling result", failed),
+        ("waiting", None, None),
     ]
-    if media:
+    if media and not failed:
         assert saved.messages[-1].images[0].content == b"sibling-image"
         assert saved.messages[-1].audio[0].url == "https://example.test/sibling.wav"
+    else:
+        assert (saved.messages[-1].images, saved.messages[-1].audio) == (None, None)
 
 
 @pytest.mark.asyncio

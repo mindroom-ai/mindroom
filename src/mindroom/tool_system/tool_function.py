@@ -49,9 +49,17 @@ class ToolFunction:
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
+    ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, tool
+    jobs, and the agent CLI's eager bindings name it by; for an implied or preset tool that is the tool that brings it
+    in. The agent CLI binds a deferred toolkit's functions under that toolkit's registered tool name instead, which
+    differs for an implied tool. None for a
+    function generated for the agent, such as the knowledge search, the skill readers, and a team's delegation, and
+    for one adapted alone (``adapt_function``), as the MCP gateway and the script broker adapt the function a call
+    names and name its toolkit beside it.
     """
 
     name: str
+    toolkit: str | None = None
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None = None
@@ -81,7 +89,7 @@ class ToolFunction:
             approval_type=self.approval_type,
         )
 
-    def planned_execution(self, call_id: str | None, arguments: dict[str, Any] | None) -> ToolExecution:
+    def planned_execution(self, call_id: str, arguments: dict[str, Any] | None) -> ToolExecution:
         """Return the execution a call of this function starts as, before it runs.
 
         The call is paused when the function requires confirmation or external execution, and a paused call carries
@@ -107,6 +115,10 @@ class AdaptedToolkit:
 
     ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
     it describes the toolkit's functions and minimal mode offers as a context document.
+    ``function_instructions`` holds, by function name, the instructions a function asks the prompt to show, which
+    only tool search shows, for a deferred toolkit; an agent refuses an eager toolkit that offers such a function.
+    ``refused`` holds, by function name, why MindRoom refuses a function that sets a field the owned loop cannot
+    honor, such as an Agno hook; an agent refuses a toolkit that still offers such a function.
     ``connect`` is set for a toolkit that holds a connection for one run, which whoever offers its functions to a
     run connects before the run and closes after it; it returns how to close the connection, or None when the run
     owns none because the toolkit was connected before it or connecting failed.
@@ -116,25 +128,9 @@ class AdaptedToolkit:
     functions: tuple[ToolFunction, ...]
     instructions: str | None
     guidance: str | None = None
+    function_instructions: Mapping[str, str] = field(default_factory=dict)
+    refused: Mapping[str, str] = field(default_factory=dict)
     connect: ToolkitConnect | None = None
-
-
-def first_of_each_name[T](
-    pairs: Iterable[tuple[T, ToolFunction]],
-    on_dropped: Callable[[T, ToolFunction], None] | None = None,
-) -> Iterator[tuple[T, ToolFunction]]:
-    """Yield the pairs whose function is the first of its name, in order, the selection a run offers.
-
-    Each later pair of a taken name is dropped, kept as main behaves, and passed to ``on_dropped``.
-    """
-    names: set[str] = set()
-    for source, function in pairs:
-        if function.name in names:
-            if on_dropped is not None:
-                on_dropped(source, function)
-            continue
-        names.add(function.name)
-        yield source, function
 
 
 async def connect_toolkits(toolkits: Iterable[AdaptedToolkit], closes: list[ToolkitClose]) -> None:

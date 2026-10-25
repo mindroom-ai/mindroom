@@ -72,24 +72,28 @@ _ASK_INSTEAD: frozenset[ScheduledCallRefusal] = frozenset({"not_approved", "not_
 
 @dataclass(frozen=True, slots=True)
 class LiveFunction:
-    """One of a live agent's functions that a scheduled call can run."""
+    """One of a live agent's functions that a scheduled call can run, which names the toolkit it is offered from."""
 
-    toolkit_name: str
     function: ToolFunction
     # A tool that asks for its own confirmation is approved only for the exact call the requester saw.
     authored_confirmation: bool
 
+    @property
+    def toolkit_name(self) -> str:
+        """Return the authored toolkit the run offers the function from."""
+        assert self.function.toolkit is not None, "a scheduled call runs only a function of a configured toolkit"
+        return self.function.toolkit
+
 
 @dataclass(frozen=True, slots=True)
 class _LiveTools:
-    """The functions one agent's run offers, their authored toolkits, and how the run calls them.
+    """The functions one agent's run offers and how the run calls them.
 
     ``middleware`` is the run's tool-call policy, and ``context`` is the run's context for the call that is
     running, so a stored call runs exactly as the model's own call of it would.
     """
 
     functions: Mapping[str, ToolFunction]
-    owners: Mapping[str, str]
     middleware: tuple[ToolMiddleware, ...]
     context: ToolCallContext
 
@@ -99,21 +103,20 @@ _LIVE_TOOLS: ContextVar[_LiveTools | None] = ContextVar("mindroom_scheduled_call
 
 def bind_live_tools(
     functions: Mapping[str, ToolFunction],
-    owners: Mapping[str, str],
     middleware: Sequence[ToolMiddleware],
 ) -> tuple[ToolMiddleware, ...]:
     """Return ``middleware`` behind a first step that shows each call the run's functions, for scheduled calls.
 
-    ``functions`` are the ones the run offers, by name, and ``owners`` maps each to its authored toolkit; a generated
-    function has none, so no stored call can name it; a stored call runs under the returned policy, this step
-    included. A run that offers no scheduler function reading them gets ``middleware`` as it is.
+    ``functions`` are the ones the run offers, by name; a generated function names no toolkit, so no stored call can
+    name it; a stored call runs under the returned policy, this step included. A run that offers no scheduler
+    function reading them gets ``middleware`` as it is.
     """
     if _LIVE_FUNCTION_READERS.isdisjoint(functions):
         return tuple(middleware)
     policy: tuple[ToolMiddleware, ...]
 
     async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
-        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, owners=owners, middleware=policy, context=call.context))
+        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=policy, context=call.context))
         try:
             return await call_next(call.arguments)
         finally:
@@ -148,10 +151,9 @@ def _resolve_live_function(
 ) -> LiveFunction | str:
     """Find the function a scheduled call can run, the one the run offers by that name, or return why it cannot."""
     function = None if live is None else live.functions.get(tool_name)
-    owner = None if live is None else live.owners.get(tool_name)
-    if function is None or owner is None or owner == _SCHEDULER_TOOLKIT:
+    if function is None or function.toolkit in {None, _SCHEDULER_TOOLKIT}:
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
-    if toolkit_name is not None and owner != toolkit_name:
+    if toolkit_name is not None and function.toolkit != toolkit_name:
         return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
     # A tool that takes the run's media gets None for it in a live call too, but scheduling it stays refused, as it
     # was when live runs carried media that a stored call lacked.
@@ -161,7 +163,6 @@ def _resolve_live_function(
     if function.external_execution or function.stop_after_call or takes_media:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
-        toolkit_name=owner,
         function=function,
         authored_confirmation=function.requires_confirmation is True
         and function.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE,

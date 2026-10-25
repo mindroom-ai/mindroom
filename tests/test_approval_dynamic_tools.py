@@ -10,7 +10,6 @@ import pytest
 from agno.tools.function import ToolResult
 
 from mindroom import agents
-from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.ai import ai_response
 from mindroom.config.main import Config
 from mindroom.config.models import ToolConfigEntry
@@ -435,7 +434,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         history_storage=storage,
         supports_native_tool_approval=True,
     )
-    offered = prepare_run_tools(initial.spec).functions
+    offered = initial.spec.functions
     original_names = set(offered)
     if plugin_path is not None:
         assert TOOL_METADATA[unrelated_tool_name or tool_name].function_names == ()

@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.tools import Toolkit
+from agno.tools.function import Function
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
@@ -35,8 +37,6 @@ from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from agno.tools import Toolkit
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -94,6 +94,81 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
         ScriptToolGrant("attachments", "get_attachment"),
     )
     assert all(grant.toolkit_name != "dynamic_workflow" for grant in grants)
+
+
+def _echo(text: str) -> str:
+    return text
+
+
+def test_launch_and_call_filters_see_the_toolkit_each_function_is_granted_from(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context's filter reads the authored toolkit of each granted function, not Agno's name for the toolkit."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(
+        context,
+        tool_function_filter=lambda function: (function.toolkit, function.name) == ("calculator", "echo"),
+    )
+
+    def build_toolkit(_tool_name: str, **_kwargs: object) -> Toolkit:
+        # Agno's own name for the toolkit differs from the configured one the grant names.
+        return Toolkit(name="arithmetic", tools=[Function(name="echo", entrypoint=_echo)])
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "echo")) is not None
+
+
+def test_script_filters_see_an_implied_tools_function_under_the_authored_toolkit(tmp_path: Path) -> None:
+    """An implied tool's functions name the authored tool that implies it, as an agent's build offers them."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["matrix_message"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(
+        context,
+        tool_function_filter=lambda function: (function.toolkit, function.name) == ("matrix_message", "get_attachment"),
+    )
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("attachments", "get_attachment"),)
+    assert resolve_current_script_tool(context, ScriptToolGrant("attachments", "get_attachment")) is not None
+
+
+def test_launch_grants_skip_a_refused_function_the_filter_leaves_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function setting a field MindRoom refuses costs the grants nothing when the context's filter drops it."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(context, tool_function_filter=lambda function: function.name != "hooked")
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        hooked = Function(name="hooked", entrypoint=_echo, pre_hook=_echo)
+        return Toolkit(name=tool_name, tools=[hooked, Function(name="echo", entrypoint=_echo)])
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
 
 
 @pytest.mark.parametrize(

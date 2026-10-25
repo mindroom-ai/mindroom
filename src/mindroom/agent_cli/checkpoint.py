@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.tools import PlannedCall
     from mindroom.llm.messages import Message
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
-    from mindroom.tool_system.tool_function import ToolValue
+    from mindroom.tool_system.invocation import ToolOutcome
 
 __all__ = ["BatchCheckpoint"]
 
@@ -54,7 +54,7 @@ class BatchCheckpoint:
         self.catalog.record = record
         self._batch = _Batch(
             messages=deepcopy(state.messages),
-            calls={call.execution.tool_call_id: call for call in planned if call.execution.tool_call_id},
+            calls={call.execution.tool_call_id: call for call in planned},
         )
 
     def resume_saved_parent(self, parent_call_id: str) -> None:
@@ -77,19 +77,18 @@ class BatchCheckpoint:
             raise ValueError(message)
         return self._batch
 
-    def complete(self, call_id: str, result: str | ToolValue) -> None:
-        """Keep a finished Bash result in its batch, in case a sibling later waits for approval."""
+    def complete(self, call_id: str, outcome: ToolOutcome) -> None:
+        """Keep a finished Bash call's outcome in its batch, in case a sibling later waits for approval."""
         batch = self._batch_of(call_id, "Provider Bash result has no captured real batch")
         call = batch.calls[call_id]
-        media = None if isinstance(result, str) else result
         execution = ToolExecution(
             tool_call_id=call_id,
             tool_name=call.function.name,
             tool_args=deepcopy(call.execution.tool_args),
-            is_error=False,
-            result=result if isinstance(result, str) else result.content,
+            is_error=outcome.is_error,
+            result=outcome.content,
         )
-        batch.messages.append(tool_result_message(execution, media=media))
+        batch.messages.append(tool_result_message(execution, media=outcome))
 
     async def persist_approval(self, parent_call_id: str) -> None:
         """Refresh the saved batch and session state immediately before an approval wait."""

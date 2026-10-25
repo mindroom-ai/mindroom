@@ -29,10 +29,10 @@ def approval_calls_for_cli_pause(paused: PausedAttempt, agent_name: str) -> tupl
     invoking_agent = paused.approval_agent_name or agent_name
     return tuple(
         ApprovalCall(
-            tool_call_id=str(tool.tool_call_id),
-            tool_name=str(tool.tool_name),
+            tool_call_id=tool.tool_call_id,
+            tool_name=tool.tool_name,
             invoking_agent=invoking_agent,
-            toolkit_name=paused.toolkit_owners.get((invoking_agent, str(tool.tool_name))),
+            toolkit_name=paused.toolkit_owners.get((invoking_agent, tool.tool_name)),
             arguments_digest=approval_arguments_digest(tool.tool_args),
             expires_at_ns=0,
         )
@@ -81,7 +81,7 @@ async def advance_cli_delegation(
     if decisions is None:
         # A CLI requirement has no member agent, so its gate key is the bare call ID, which the CLI caller
         # chooses; a fresh call therefore never inherits an approval saved under the same ID.
-        state.gates.pop(str(tool.tool_call_id), None)
+        state.gates.pop(tool.tool_call_id, None)
     persist = partial(persist_delegation_state, catalog.store, catalog.session, response)
 
     # Same mutation/authorization owner as ordinary prepared dispatch. The parent never resumes, and no hidden
@@ -124,7 +124,7 @@ async def advance_cli_delegation(
             toolkit=binding.key.toolkit,
             function=binding.key.function,
             arguments=deepcopy(tool.tool_args or {}),
-            call_id=str(tool.tool_call_id),
+            call_id=tool.tool_call_id,
             parent_bash_call_id=parent_bash_call_id,
             requirements=paused.requirements,
             external_requirement=requirement,

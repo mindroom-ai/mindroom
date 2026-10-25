@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import PersonaSourceKind
-    from mindroom.tool_system.agno_toolkits import Function
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _MAX_PERSONA_PROMPT_BYTES = 64 << 10
 _PROFILE_DIRNAME = "subagents"
@@ -548,9 +548,9 @@ def _capped_names(
 def persona_tool_policy(
     persona_tools: tuple[str, ...] | None,
     available_toolkits: Callable[[], Sequence[str]],
-    tool_function_filter: Callable[[Function], bool] | None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
     disabled_tool_names: frozenset[str],
-) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
+) -> tuple[Callable[[ToolFunction], bool] | None, frozenset[str]]:
     """Narrow an agent's own tools to an authored persona's explicit list; its principal is unchanged.
 
     Toolkits the list never names are not built, nor is the deferred-tool manager, since a persona
@@ -563,8 +563,8 @@ def persona_tool_policy(
     named = {entry.partition(".")[0] for entry in persona_tools}
     unused = {toolkit for toolkit in available_toolkits() if toolkit not in named}
 
-    def visible(function: Function) -> bool:
-        return (function.owning_toolkit is not None or function.name in _GENERATED_PERSONA_FUNCTIONS) and (
+    def visible(function: ToolFunction) -> bool:
+        return (function.toolkit is not None or function.name in _GENERATED_PERSONA_FUNCTIONS) and (
             tool_function_filter is None or tool_function_filter(function)
         )
 

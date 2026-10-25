@@ -205,11 +205,9 @@ def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, 
     independently, so a call id alone does not name a call, as the driver's own keys say.
     """
     return {
-        (requirement.member_agent_id, call_id): answer
+        (requirement.member_agent_id, requirement.tool_execution.tool_call_id): answer
         for requirement in response.requirements or ()
-        if _delegation_call(requirement)
-        and (call_id := requirement.tool_execution.tool_call_id) is not None
-        and (answer := requirement.external_execution_result) is not None
+        if _delegation_call(requirement) and (answer := requirement.external_execution_result) is not None
     }
 
 
@@ -528,14 +526,14 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
     child_state = DelegationState.from_metadata(response.metadata)
     for tool in paused.tools:
         projected = deepcopy(tool)
-        projected.tool_call_id = child_card_id(child.delegation_id, str(tool.tool_call_id))
+        projected.tool_call_id = child_card_id(child.delegation_id, tool.tool_call_id)
         state.pending_tools.append(projected.to_dict())
         state.pending_tool_sources[projected.tool_call_id] = deepcopy(
-            child_state.pending_tool_sources.get(str(tool.tool_call_id))
+            child_state.pending_tool_sources.get(tool.tool_call_id)
             or DelegationPendingTool(
                 child=child,
-                tool_call_id=str(tool.tool_call_id),
-                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, str(tool.tool_name))),
+                tool_call_id=tool.tool_call_id,
+                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, tool.tool_name)),
             ),
         )
         state.pending_requirements.append(RunRequirement(projected).to_dict())
@@ -551,7 +549,7 @@ async def _complete_approved_child_tools(
 ) -> None:
     """Publish each resumed tool's result, read from its exact approved attempt, in the parent's live trace."""
     for pending_tool in pending_tools:
-        call_id = str(pending_tool["tool_call_id"])
+        call_id = ToolExecution.from_dict(pending_tool).tool_call_id
         source = tool_sources[call_id]
         response = await read_child_run(source.child, config, runtime_paths)
         for tool in (response.tools or ()) if response is not None else ():
@@ -1017,9 +1015,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # Bind this exact parent call and its presentation before resolving the target.
     tool = requirement.tool_execution
     tool_name = tool.tool_name
-    if not tool.tool_call_id or not tool_name:
-        msg = "Delegation requirement has no exact tool-call identity"
-        raise RuntimeError(msg)
     requirement_key = delegation_card_id(requirement.member_agent_id, tool.tool_call_id)
 
     def emit_call(event: ToolStarted | ToolCompleted) -> None:

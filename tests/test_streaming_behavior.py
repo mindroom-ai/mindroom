@@ -918,7 +918,13 @@ class TestStreamingBehavior:
 
             async def response_stream() -> AsyncIterator[object]:
                 yield "Hello, this is a partial wo"
-                yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
+                yield ToolStarted(
+                    call=ToolExecution(
+                        tool_call_id="call-search_web",
+                        tool_name="search_web",
+                        tool_args={"q": "mindroom"},
+                    ).call,
+                )
 
             with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.0, 100.0, 100.0]):
                 await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
@@ -967,7 +973,13 @@ class TestStreamingBehavior:
 
         async def response_stream() -> AsyncIterator[object]:
             yield "x" * 40
-            yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-search_web",
+                    tool_name="search_web",
+                    tool_args={"q": "mindroom"},
+                ).call,
+            )
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 105.0, 105.0, 105.0]):
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
@@ -1015,9 +1027,21 @@ class TestStreamingBehavior:
         streaming.stream_started_at = 100.0
 
         async def response_stream() -> AsyncIterator[object]:
-            yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-search_web",
+                    tool_name="search_web",
+                    tool_args={"q": "mindroom"},
+                ).call,
+            )
             second_yield_started.set()
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
 
         delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
         delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
@@ -1066,8 +1090,20 @@ class TestStreamingBehavior:
         streaming.stream_started_at = 100.0
 
         async def response_stream() -> AsyncIterator[object]:
-            yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-search_web",
+                    tool_name="search_web",
+                    tool_args={"q": "mindroom"},
+                ).call,
+            )
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
 
         delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
         delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
@@ -1125,9 +1161,21 @@ class TestStreamingBehavior:
         streaming.stream_started_at = 100.0
 
         async def response_stream() -> AsyncIterator[object]:
-            yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-search_web",
+                    tool_name="search_web",
+                    tool_args={"q": "mindroom"},
+                ).call,
+            )
             await first_send_started.wait()
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
 
         delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
         delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
@@ -1183,13 +1231,25 @@ class TestStreamingBehavior:
         streaming.stream_started_at = 100.0
 
         async def first_response_stream() -> AsyncIterator[object]:
-            yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-search_web",
+                    tool_name="search_web",
+                    tool_args={"q": "mindroom"},
+                ).call,
+            )
 
         with patch("mindroom.streaming.time.time", return_value=100.0):
             await _consume_streaming_chunks_for_test(mock_client, first_response_stream(), streaming)
 
         async def second_response_stream() -> AsyncIterator[object]:
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
 
         with patch("mindroom.streaming.time.time", return_value=100.1):
             await _consume_streaming_chunks_for_test(mock_client, second_response_stream(), streaming)
@@ -1228,13 +1288,25 @@ class TestStreamingBehavior:
         streaming.last_update = float("-inf")
 
         async def response_stream() -> AsyncIterator[object]:
-            yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-search_web",
+                    tool_name="search_web",
+                    tool_args={"q": "mindroom"},
+                ).call,
+            )
             await asyncio.sleep(0)
             await asyncio.sleep(0)
             yield "x"
             await asyncio.sleep(0)
             await asyncio.sleep(0)
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
 
         await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
 
@@ -1296,7 +1368,13 @@ class TestStreamingBehavior:
 
         async def response_stream() -> AsyncIterator[object]:
             yield "x"
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
             second_yield_started.set()
             yield "after"
 
@@ -1398,7 +1476,12 @@ class TestStreamingBehavior:
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
 
-        tool = ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok")
+        tool = ToolExecution(
+            tool_call_id="call-search_web",
+            tool_name="search_web",
+            tool_args={"q": "mindroom"},
+            result="ok",
+        )
 
         async def response_stream() -> AsyncIterator[object]:
             yield ToolStarted(call=tool.call)
@@ -1615,7 +1698,12 @@ class TestStreamingBehavior:
             visible_progress_callback=lambda _body, _trace: first_send_landed.set(),
         )
         streaming.last_update = float("-inf")
-        tool = ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok")
+        tool = ToolExecution(
+            tool_call_id="call-search_web",
+            tool_name="search_web",
+            tool_args={"q": "mindroom"},
+            result="ok",
+        )
 
         async def response_stream() -> AsyncIterator[object]:
             yield ToolStarted(call=tool.call)
@@ -1878,7 +1966,13 @@ class TestStreamingBehavior:
 
         async def response_stream() -> AsyncIterator[object]:
             yield "x" * 40
-            yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-search_web",
+                    tool_name="search_web",
+                    tool_args={"q": "mindroom"},
+                ).call,
+            )
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.1, 100.1, 100.1]):
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
@@ -4347,7 +4441,13 @@ class TestStreamingBehavior:
         )
 
         async def response_stream() -> AsyncIterator[object]:
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
 
         await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
         await streaming.finalize(mock_client)
@@ -4390,7 +4490,13 @@ class TestStreamingBehavior:
         )
 
         async def response_stream() -> AsyncIterator[object]:
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
 
         with patch("mindroom.streaming.time.time", return_value=100.25):
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
@@ -4455,7 +4561,13 @@ class TestStreamingBehavior:
 
         async def response_stream() -> AsyncIterator[object]:
             await first_send_started.wait()
-            yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+            yield ToolStarted(
+                call=ToolExecution(
+                    tool_call_id="call-save_file",
+                    tool_name="save_file",
+                    tool_args={"file": "a.py"},
+                ).call,
+            )
 
         streaming_times = iter([100.1, 100.2, 100.3])
         with patch("mindroom.streaming.time.time", side_effect=lambda: next(streaming_times, 100.3)):

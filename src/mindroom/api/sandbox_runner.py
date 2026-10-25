@@ -908,7 +908,8 @@ def _resolve_entrypoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    function = toolkit.functions.get(function_name) or toolkit.async_functions.get(function_name)
+    # The function a primary run offers under this name: the async variant of a toolkit that registers both.
+    function = toolkit.get_async_functions().get(function_name)
     if function is None or function.entrypoint is None:
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' does not expose '{function_name}'.")
     return toolkit, function.entrypoint

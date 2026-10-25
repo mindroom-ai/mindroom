@@ -7,13 +7,14 @@ decode without migration; keys the records do not model are ignored on read.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from time import time
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from mindroom.llm.events import ReportedCall
 from mindroom.llm.messages import Message
@@ -23,6 +24,11 @@ from mindroom.redaction import redact_sensitive_text
 
 def _new_id() -> str:
     return str(uuid4())
+
+
+def _stored_call_id(stored: Mapping[str, Any]) -> str:
+    """Return the call id of an entry stored without one, derived from what it stores so every read agrees."""
+    return str(uuid5(NAMESPACE_URL, json.dumps(["mindroom-stored-tool-call", dict(stored)], sort_keys=True)))
 
 
 def _now() -> int:
@@ -54,11 +60,8 @@ _STORED_TOOL_KEYS = {"is_error": "tool_call_error", "stop_after_call": "stop_aft
 class ToolExecution:
     """One tool call the model requested, with its outcome or pause state."""
 
-    # TODO(simplify): The call's id and name are optional though every writer sets them, so readers guard both. Make
-    # them required, the legacy requirement reader supplying values. Stored data would notice: a tool execution read
-    # without an id, such as that reader's placeholder, writes an id back instead of null.
-    tool_call_id: str | None = None
-    tool_name: str | None = None
+    tool_call_id: str
+    tool_name: str
     tool_args: dict[str, Any] | None = None
     is_error: bool | None = None
     result: str | None = None
@@ -91,9 +94,28 @@ class ToolExecution:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
-        """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default."""
+        """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default.
+
+        A call stored without an id reads with one derived from what it stores, the same on every read.
+        """
         values = {_TOOL_FIELDS[key]: value for key, value in data.items() if key in _TOOL_FIELDS}
         metrics = values.pop("metrics", None)
+        # LEGACY_COMPAT: Tool executions stored without a call id.
+        # Legacy format: a stored tool execution whose ``tool_call_id`` is null, empty, or absent. Agno 2.4.7 stored
+        # Ollama's calls so, since Ollama sends no call ids; the ``unknown`` placeholder that ``RunRequirement``
+        # reads for a requirement stored without its tool execution was written back so too.
+        # Last legacy release: v2026.4.35, the last release on Agno 2.4.7; v2026.4.36 moved to Agno 2.5.13, which
+        # gives an id-less call a uuid4 id. For the ``unknown`` placeholder, v2026.10.513, whose typed model wrote it
+        # back with a null id; the next release writes its derived id. The requirements it stands in for, stored
+        # without a tool execution, are unversioned external input.
+        # Handling: the execution reads with an id derived from its stored keys and values, so every read of its
+        # row gives the same id and its readers need no missing-id case; two entries storing exactly the same keys
+        # and values share it. A row written back stores that id, and every other key reads as stored.
+        # Coverage: tests/llm/test_codecs.py::test_a_tool_execution_stored_without_a_call_id_reads_with_the_same_id,
+        #   tests/llm/test_codecs.py::test_a_run_whose_tool_executions_have_no_call_ids_still_loads,
+        #   tests/llm/test_codecs.py::test_run_requirement_reads_rows_agno_read_leniently
+        if not values.get("tool_call_id"):
+            values["tool_call_id"] = _stored_call_id(data)
         return cls(**values, metrics=ToolCallMetrics.from_dict(metrics) if metrics else None)
 
 
@@ -194,22 +216,24 @@ class RunRequirement:
     def from_dict(cls, data: Mapping[str, Any]) -> RunRequirement:
         """Rebuild from a stored dict, ignoring keys this type does not model, such as older rows' user-input keys.
 
-        A missing tool execution becomes an ``unknown`` placeholder, an unreadable ``created_at`` becomes now, and a
-        decision recorded only on the requirement reaches its tool execution, which is what a resume runs from.
+        A missing tool execution becomes an ``unknown`` placeholder with a call id derived from the entry, an
+        unreadable ``created_at`` becomes now, and a decision recorded only on the requirement reaches its tool
+        execution, which is what a resume runs from.
         """
         # LEGACY_COMPAT: Run requirements stored without a tool execution or with an unreadable timestamp.
         # Legacy format: ``requirements`` entries lacking ``tool_execution``, or whose ``created_at`` is not
         # ISO 8601, which Agno's reader accepted as legacy data.
         # Last legacy release: unversioned external input; no MindRoom release is known to write them, and
         # agno 3.0.9 always wrote both.
-        # Handling: the entry reads with an ``unknown`` placeholder tool execution and the current time, as
-        # Agno's reader did, so one such entry never fails the load of its session.
+        # Handling: the entry reads with an ``unknown`` placeholder tool execution, under a call id derived from the
+        # entry's stored keys, and the current time, as Agno's reader did apart from the id, so one such entry never
+        # fails the load of its session and every read gives its placeholder the same id.
         # Coverage: tests/llm/test_codecs.py::test_run_requirement_reads_rows_agno_read_leniently
         tool_data = data.get("tool_execution")
         requirement = cls(
             ToolExecution.from_dict(tool_data)
             if isinstance(tool_data, Mapping)
-            else ToolExecution(tool_name="unknown", tool_args={}),
+            else ToolExecution(tool_call_id=_stored_call_id(data), tool_name="unknown", tool_args={}),
             id=identifier if isinstance(identifier := data.get("id"), str) else _new_id(),
             created_at=_datetime_or_now(data.get("created_at")),
             confirmation=data.get("confirmation"),

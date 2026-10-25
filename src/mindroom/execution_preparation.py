@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.attachments.storage import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import (
@@ -873,7 +873,7 @@ async def prepare_agent_execution_context(
     )
     static_token_estimator = build_static_token_estimator(
         system_message,
-        prepare_run_tools(build.spec).specs(),
+        PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
     )
     compaction_config = config.resolve_entity(agent_name).compaction_config
