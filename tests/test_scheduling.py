@@ -1495,6 +1495,75 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("schedule", ["once", "cron"])
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("homeserver down"), "homeserver down"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_task_whose_run_raises_reports_why_it_failed(
+    tmp_path: Path,
+    schedule: str,
+    error: Exception,
+    text: str,
+) -> None:
+    """A task whose run raises posts a notice with the exception's text, or its type name when it has none."""
+    client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.homeserver = "https://example.org"
+    client.user_id = "@router:example.org"
+    client.device_id = "TEST_DEVICE"
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type=schedule,
+        execute_at=datetime.now(UTC) - timedelta(seconds=1) if schedule == "once" else None,
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        if schedule == "cron"
+        else None,
+        message="Check the queue",
+        description="Queue check",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    occurrence = RecurringOccurrence(
+        tmp_path / "checkpoint.json",
+        _RecurringCheckpoint("workflow", datetime.now(UTC) - timedelta(seconds=1)),
+    )
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        return _record("task_failing", workflow, status="pending")
+
+    with (
+        patch("mindroom.scheduling.tasks.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=AsyncMock(side_effect=error)),
+        patch("mindroom.scheduling.tasks.plan_recurring_occurrence", return_value=occurrence),
+        patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as failure_notice,
+    ):
+        if schedule == "once":
+            await _run_once_task(
+                client,
+                "task_failing",
+                workflow,
+                Config(),
+                _test_runtime_paths(tmp_path),
+                _conversation_reader(),
+            )
+        else:
+            await _run_cron_task(
+                client,
+                "task_failing",
+                workflow,
+                {},
+                Config(),
+                _test_runtime_paths(tmp_path),
+                _conversation_reader(),
+            )
+
+    failure_notice.assert_awaited_once()
+    assert failure_notice.await_args.args[3].endswith(f"\nTask ID: task_failing\nError: {text}")
+
+
+@pytest.mark.asyncio
 async def test_run_cron_task_keeps_pending_state_after_success(tmp_path: Path) -> None:
     """Recurring tasks should keep their pending state after firing."""
     client = AsyncMock()

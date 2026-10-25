@@ -115,7 +115,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.dynamic_workflows"
-depends_on = ["mindroom.durable_write", "mindroom.file_locks"]
+depends_on = ["mindroom.durable_write", "mindroom.file_locks", "mindroom.tool_system.failure_text"]
 
 [[modules]]
 path = "mindroom.private_storage.private_instance_identity"
@@ -941,6 +941,7 @@ depends_on = [
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.toolkit_connections",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -2897,6 +2898,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.model_usage",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -3746,6 +3748,7 @@ depends_on = [
     "mindroom.mcp.surface_projection",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.filters",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -4675,6 +4678,7 @@ depends_on = [
     "mindroom.matrix_rtc.focus",
     "mindroom.matrix_rtc.live_voice_agent",
     "mindroom.matrix_rtc.voice_agent",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -5193,6 +5197,7 @@ depends_on = [
     "mindroom.scheduling.recurring_schedule",
     "mindroom.requester_identity",
     "mindroom.approval.tool_approval",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -5202,6 +5207,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.hooks",
     "mindroom.scheduling.recurring_schedule",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -6029,6 +6035,7 @@ depends_on = [
     "mindroom.system_prompt",
     "mindroom.token_budget",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -6052,6 +6059,7 @@ depends_on = [
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -7960,7 +7968,7 @@ depends_on = ["mindroom.llm"]
 
 [[modules]]
 path = "mindroom.providers.errors"
-depends_on = ["mindroom.llm"]
+depends_on = ["mindroom.llm", "mindroom.tool_system.failure_text"]
 
 [[modules]]
 path = "mindroom.providers.remote_media"
@@ -8754,6 +8762,7 @@ depends_on = [
     "mindroom.agent_loop.build",
     "mindroom.hooks",
     "mindroom.llm",
+    "mindroom.tool_system.failure_text",
 ]
 visibility = [
     "mindroom.ai",

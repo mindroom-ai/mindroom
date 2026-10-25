@@ -66,6 +66,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
+from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
@@ -1975,7 +1976,7 @@ class MCPServerManager:
             nested_text = "; ".join(message for message in nested_messages if message)
             if nested_text:
                 return f"{exc.message}: {nested_text}"
-        return str(exc)
+        return failure_text(exc)
 
     async def _oauth_transport_rejection(
         self,

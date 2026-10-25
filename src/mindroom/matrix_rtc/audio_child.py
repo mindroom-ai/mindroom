@@ -29,6 +29,7 @@ from mindroom.matrix_rtc.audio_protocol import AudioProtocolError, decode_key, e
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse, LiveVoiceAgentOptions
+from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -104,7 +105,7 @@ class _AudioChild:
             try:
                 await operation
             except Exception as error:
-                self._send({"type": "Error", "id": request_id, "message": str(error) or type(error).__name__})
+                self._send({"type": "Error", "id": request_id, "message": failure_text(error)})
             else:
                 self._send({"type": "Ok", "id": request_id})
 

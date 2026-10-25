@@ -13,6 +13,7 @@ import httpx
 
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.tool_system.failure_text import failure_text
 
 __all__ = [
     "error_body_error",
@@ -56,7 +57,7 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
     if isinstance(error, openai.APIError):
         # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.
         return error_body_error(error.body, provider=provider, default_message=error.message)
-    return ProviderError(str(error) or type(error).__name__, provider=provider)
+    return ProviderError(failure_text(error), provider=provider)
 
 
 def error_body_error(body: object, *, provider: str, default_message: str) -> ProviderError:

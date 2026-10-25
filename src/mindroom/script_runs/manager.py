@@ -52,6 +52,7 @@ from mindroom.shell.supervisor import (
     parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
+from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
@@ -1421,8 +1422,7 @@ def _validated_name(name: str | None) -> str | None:
 
 
 def _bounded_error(exc: BaseException) -> str:
-    value = str(exc) or exc.__class__.__name__
-    return value.encode("utf-8")[: 64 * 1024].decode("utf-8", errors="ignore")
+    return failure_text(exc).encode("utf-8")[: 64 * 1024].decode("utf-8", errors="ignore")
 
 
 def _bounded_output(output: str) -> str:

@@ -77,6 +77,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     defer_toolkit,
     visible_tool_surface,
 )
+from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
@@ -1506,7 +1507,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             # One toolkit's construction or adaptation failure must never stop the agent.
             if minimal_mode:
                 raise MinimalModeUnavailableError(
-                    minimal_mode_failure_message(str(exc), agent_name, subagent=delegation_depth > 0),
+                    minimal_mode_failure_message(failure_text(exc), agent_name, subagent=delegation_depth > 0),
                 ) from exc
             logger.warning(
                 "Could not load tool for agent construction",

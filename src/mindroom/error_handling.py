@@ -20,6 +20,7 @@ from mindroom.llm.errors import (
 from mindroom.logging_config import get_logger
 from mindroom.providers.errors import classify_provider_error, is_credential_error, whole_words
 from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -122,7 +123,7 @@ def get_user_friendly_error_message(
     error would; only one without a payload is matched by the whole words in its text. ``runtime_paths`` points a
     missing-key reply at the dashboard URL.
     """
-    safe_error = redact_sensitive_text(str(error))
+    safe_error = redact_sensitive_text(failure_text(error))
     agent_prefix = f"[{agent_name}] " if agent_name else ""
 
     logger.error(

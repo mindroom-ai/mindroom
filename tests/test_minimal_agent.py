@@ -160,13 +160,18 @@ def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Pat
 
 @pytest.mark.parametrize("delegation_depth", [0, 1])
 @pytest.mark.parametrize(
-    "failure",
-    [ImportError("No module named 'praw'"), ValueError("Tool requires a separate service.")],
+    ("failure", "reason"),
+    [
+        (ImportError("No module named 'praw'"), "No module named 'praw'"),
+        (ValueError("Tool requires a separate service."), "Tool requires a separate service"),
+        (TimeoutError(), "TimeoutError"),
+    ],
 )
 def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
     tmp_path,
     monkeypatch,
     failure,
+    reason,
     delegation_depth,
 ) -> None:
     runtime = _runtime_context(tmp_path)
@@ -196,7 +201,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
         )
 
     message = get_user_friendly_error_message(raised.value, "helper")
-    assert str(failure) in message
+    assert f"Error: {reason}. " in message
     # A minimal subagent's caller starts a standard child; a conversation switches mode.
     assert ("Start a new subagent without minimal." if delegation_depth else "!mode helper standard") in message
     assert raised.value.__cause__ is failure

@@ -36,6 +36,7 @@ from mindroom.scheduling.recurring_schedule import (
     prepare_recurring_delivery,
     recurring_delivery_content,
 )
+from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     import nio
@@ -337,7 +338,7 @@ async def execute_scheduled_workflow(
             logger.exception("Failed to execute scheduled workflow")
             outcome = ScheduledWorkflowOutcome(
                 status="retry" if occurrence is not None else "failed",
-                failure_reason=str(error),
+                failure_reason=failure_text(error),
             )
         if outcome.status in {"retry", "held"}:
             logger.warning(

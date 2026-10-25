@@ -162,6 +162,41 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(OSError("disk full"), "disk full"), (MemoryError(), "MemoryError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_result_that_cannot_be_saved_fails_its_call_with_the_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    text: str,
+) -> None:
+    """A call whose result cannot be encoded fails with why, or the exception's type name when it has no text."""
+
+    async def tool() -> str:
+        return "ran"
+
+    def encode(_payload: ToolResultPayload) -> dict[str, object]:
+        raise error
+
+    context, runtime = await _managed_context(tmp_path)
+    actor = job_actor(job_tool(tool))
+    monkeypatch.setattr(execution, "encode_result_payload", encode)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                outcome = await call_job_tool(actor, "tool", call_id="unsaved-call", run_id="unsaved-run")
+        assert outcome == ToolOutcome(
+            content=f"The call ran, but its result could not be saved ({text}). Its effects stand: do not call it again.",
+            is_error=True,
+        )
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("shutdown", [False, True])
 async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_value(
     tmp_path: Path,

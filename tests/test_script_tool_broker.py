@@ -1037,6 +1037,51 @@ async def test_script_broker_closes_toolkit_after_connect_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "kind", "retryable"),
+    [("connect", "runtime_failure", True), ("call", "tool_failure", False)],
+)
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("calculator broke"), "calculator broke"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_script_broker_reports_why_a_call_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    kind: str,
+    retryable: bool,
+    error: Exception,
+    text: str,
+) -> None:
+    """A call whose toolkit or tool raises fails with the exception's text, or its type name when it has none."""
+
+    class FailingToolkit(Toolkit):
+        _requires_connect = stage == "connect"
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            raise error
+
+        def close(self) -> None:
+            pass
+
+        def add(self, a: int, b: int) -> int:  # noqa: ARG002 - The script calls it with both arguments.
+            raise error
+
+    _replace_calculator_toolkit(monkeypatch, FailingToolkit)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(call_id=f"failed-{stage}"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {"kind": kind, "message": text, "retryable": retryable}
+
+
+@pytest.mark.asyncio
 async def test_cancelled_sync_connect_closes_only_after_connect_returns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

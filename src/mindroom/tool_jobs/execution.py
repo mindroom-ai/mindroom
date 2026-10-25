@@ -512,9 +512,10 @@ def _saved_outcome(
     except Exception as error:
         # Whatever fails here fails after the call ran, so its lost result must not read as a call that did not
         # take effect.
+        reason = failure_text(error)
         return BackgroundOutcome(
             "failed",
-            f"The call ran, but its result could not be saved ({error}). Its effects stand: do not call it again.",
+            f"The call ran, but its result could not be saved ({reason}). Its effects stand: do not call it again.",
         )
     if failure is not None:
         return BackgroundOutcome("failed", result=failure, result_payload=encoded)

@@ -35,6 +35,7 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
+from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -193,7 +194,7 @@ class _PreparedExecution:
 
 @dataclass(frozen=True, slots=True)
 class _ToolFailure:
-    """A tool call that raised; ``message`` is the exception's text."""
+    """A tool call that raised; ``message`` is the exception's ``failure_text``."""
 
     message: str
 
@@ -540,7 +541,7 @@ class ScriptToolBroker:
                     if isinstance(result, BackgroundToolApprovalDenied)
                     else {
                         "kind": "tool_failure",
-                        "message": sanitize_failure_text(result.message or "Tool execution failed."),
+                        "message": sanitize_failure_text(result.message),
                         "retryable": False,
                     }
                 )
@@ -568,7 +569,7 @@ class ScriptToolBroker:
             error = (
                 _INDETERMINATE_ERROR
                 if execution_started
-                else {"kind": kind, "message": sanitize_failure_text(str(exc)), "retryable": True}
+                else {"kind": kind, "message": sanitize_failure_text(failure_text(exc)), "retryable": True}
             )
             return await self._publish_async(call, state=state, error=error)
 
@@ -654,7 +655,7 @@ class ScriptToolBroker:
                 try:
                     return await run_tool_call(function, arguments, call_context, middleware=(policy,))
                 except Exception as error:
-                    return _ToolFailure(str(error))
+                    return _ToolFailure(failure_text(error))
 
         try:
             return await run_with_tool_execution_identity(

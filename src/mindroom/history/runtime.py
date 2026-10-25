@@ -64,6 +64,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.timing import timed
+from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -481,11 +482,11 @@ async def _run_scope_compaction_with_lifecycle(
         outcome = await compact(_progress if lifecycle is not None else None, _complete)
     except asyncio.CancelledError as error:
         if not completed_successfully:
-            await _fail("failed", str(error) or type(error).__name__)
+            await _fail("failed", failure_text(error))
         raise
     except Exception as error:
         status = "timeout" if is_summary_timeout(error) else "failed"
-        await _fail(status, str(error) or type(error).__name__)
+        await _fail(status, failure_text(error))
         logger.exception(
             "Compaction failed; continuing without compaction",
             session_id=session_id,

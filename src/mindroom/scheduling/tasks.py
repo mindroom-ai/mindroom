@@ -51,6 +51,7 @@ from mindroom.scheduling.recurring_schedule import (
 )
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
+from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -1399,7 +1400,7 @@ async def _parse_workflow_schedule(
     except Exception as e:
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
         return _WorkflowParseError(
-            error=f"Error parsing schedule: {e!s}",
+            error=f"Error parsing schedule: {failure_text(e)}",
             suggestion="Try a simpler format like 'Daily at 9am, check my email'",
         )
 
@@ -1559,7 +1560,9 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         with bound_log_context(**current_target.log_context):
             logger.exception("cron_task_failed", task_id=task_id)
             if workflow.room_id:
-                error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+                error_message = (
+                    f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
+                )
                 await scheduling_executor.send_scheduled_failure_notice(
                     client,
                     workflow,
@@ -1696,7 +1699,9 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             if approval_state == "armed":
                 await _withdraw_unsent_scheduled_call(task_id)
             if workflow.room_id:
-                error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+                error_message = (
+                    f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
+                )
                 await scheduling_executor.send_scheduled_failure_notice(
                     client,
                     workflow,
