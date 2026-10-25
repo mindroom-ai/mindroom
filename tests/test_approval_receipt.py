@@ -180,9 +180,42 @@ def test_approval_receipt_omits_invalid_provider_tool_call_ids() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("tool_call_id", "shown"),
+    [
+        ("functions.save_file:0", True),
+        (f"{'a' * 32}:{'b' * 32}:toolu_01A09q90qw90lq917835lq9", True),
+        ("c" * 256, True),
+        ("c" * 257, False),
+    ],
+    ids=["dotted-provider-id", "nested-card-id", "at-cap", "past-cap"],
+)
+def test_approval_receipt_shows_provider_and_card_call_ids_whole_up_to_its_length_cap(
+    tool_call_id: str,
+    shown: bool,
+) -> None:
+    """Dotted provider ids and nested delegation card ids render whole; an id past 256 characters does not."""
+    receipt = build_approval_receipt(
+        (
+            ApprovalCall(
+                tool_call_id=tool_call_id,
+                tool_name="publish_report",
+                invoking_agent="writer",
+                expires_at_ns=1,
+                decision=ApprovalDecision.DENIED,
+            ),
+        ),
+    )
+
+    label = f"tool call id `{tool_call_id}`" if shown else "invalid tool call id"
+    assert receipt.splitlines()[1:] == [
+        f"- `publish_report` ({label}): approval was denied; the tool was not executed.",
+    ]
+
+
 def test_approval_receipt_rejects_unsettled_calls() -> None:
     """Continuation execution must fail closed before rendering pending state as trusted provenance."""
-    with pytest.raises(ValueError, match="pending approval call"):
+    with pytest.raises(ValueError, match="pending approval call 'call-pending'"):
         build_approval_receipt(
             (
                 ApprovalCall(
