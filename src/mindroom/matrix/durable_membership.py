@@ -12,6 +12,15 @@ from mindroom.event_journal.models import RoomMembershipPosition
 _OPERATION_NAMESPACE = UUID("0bd4e975-c3e9-5b10-8d46-68fdda1adc07")
 
 
+def _require_command(room_id: str, target_membership: str) -> None:
+    if type(room_id) is not str or not room_id:
+        message = "room_id must be a nonempty str"
+        raise TypeError(message)
+    if type(target_membership) is not str or target_membership not in {"join", "leave"}:
+        message = "target_membership must be exactly 'join' or 'leave'"
+        raise TypeError(message)
+
+
 async def change_local_membership(
     session: DurableSync,
     *,
@@ -20,6 +29,7 @@ async def change_local_membership(
     target_membership: str,
     read_position: Callable[[str], Awaitable[RoomMembershipPosition | None]],
     admission_progress: asyncio.Event,
+    subscribe_joined_room: Callable[[str], Awaitable[None]],
     is_authorized: Callable[[], bool] | None = None,
 ) -> bool:
     """Wait for retained source work and retry commands whose position changed.
@@ -32,14 +42,12 @@ async def change_local_membership(
     A join, including one the producer already reports, returns True only once
     nio can send to the room, and False if the room's membership ends first:
     nio refuses plaintext sends into a joined room until a sync delivers the
-    room's complete state.
+    room's complete state. A join this command sends first passes the room to
+    ``subscribe_joined_room``: Sliding Sync delivers only rooms in its room list
+    or subscriptions, and a joined room may be in neither, while a room the
+    producer already reports reached it through one of them.
     """
-    if type(room_id) is not str or not room_id:
-        message = "room_id must be a nonempty str"
-        raise TypeError(message)
-    if type(target_membership) is not str or target_membership not in {"join", "leave"}:
-        message = "target_membership must be exactly 'join' or 'leave'"
-        raise TypeError(message)
+    _require_command(room_id, target_membership)
     while True:
         await session.wait_for_membership_idle()
         admission_progress.clear()
@@ -72,6 +80,8 @@ async def change_local_membership(
             previous_epoch=position.membership_epoch,
             current_membership=target_membership,
         ):
+            if target_membership == "join":
+                await subscribe_joined_room(room_id)
             break
         # nio can finish captured input while taking command ownership. Retry
         # only when admission moved or still owes that producer work; an HTTP

@@ -67,4 +67,5 @@ Synapse expires stored transaction mappings on a periodic cleanup, so a determin
 Nio's durable producer keeps one successful local membership intent until its outcome is acknowledged and an authoritative sync boundary observes it.
 A later local command waits for that observation, and shutdown may leave the acknowledged observation marker for the next start.
 A join command returns only once nio can send to the room, including a room the producer already reports as joined, because nio refuses plaintext sends into a joined room until a sync delivers its complete state, which neither the client's first sync under MindRoom's sync filter nor an incremental sync that first reports a room does.
+Under Sliding Sync a join MindRoom sends first subscribes its room, because a room outside both the room list window and the configured subscriptions never receives that state.
 When nio restores decrypted to-device events, it never restores their application subtypes.

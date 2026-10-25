@@ -61,7 +61,7 @@ from mindroom.matrix.presence import build_agent_status_message, set_presence_st
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_continuity import SyncContinuityStore
-from mindroom.matrix.sync_loop import bot_ingestion_config, sliding_sync_room_subscriptions
+from mindroom.matrix.sync_loop import bot_ingestion_config, subscribe_sliding_rooms
 from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.message_target import MessageTarget  # noqa: TC001
@@ -1329,6 +1329,11 @@ class AgentBot:
                 target_membership=target_membership,
                 read_position=self.journal_principal().ingestion_membership_position,
                 admission_progress=self._ingestion_admission_progress,
+                subscribe_joined_room=lambda joined: subscribe_sliding_rooms(
+                    session,
+                    self.config,
+                    (*self.rooms, joined),
+                ),
                 is_authorized=is_authorized,
             )
         if changed and target_membership == "join" and self.client is not None:
@@ -1734,10 +1739,11 @@ class AgentBot:
         """
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
-        if self.config.matrix_sync.mode == "sliding" and self._ingestion_session is not None:
-            await self._ingestion_session.update_sliding_subscriptions(
-                sliding_sync_room_subscriptions(self.rooms, self.config.matrix_sync.sliding_timeline_limit),
-            )
+        session = self._ingestion_session
+        if session is not None:
+            # A join waiting for its room's state holds this lock with that room subscribed.
+            async with self._local_membership_lock:
+                await subscribe_sliding_rooms(session, self.config, self.rooms)
 
     async def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""

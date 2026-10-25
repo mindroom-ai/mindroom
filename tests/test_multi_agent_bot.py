@@ -743,35 +743,6 @@ class TestAgentBot(AgentBotTestBase):
         ]
 
     @pytest.mark.asyncio
-    async def test_local_membership_gateway_fails_a_join_that_ends_before_nio_accepts_sends(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A room the bot leaves again before nio can send to it is not joined."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(
-            mock_agent_user,
-            tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
-        room_id = "!membership-ended:localhost"
-        principal = SimpleNamespace(
-            ingestion_membership_position=AsyncMock(return_value=RoomMembershipPosition("join", 0)),
-        )
-        session = SimpleNamespace(
-            wait_for_membership_idle=AsyncMock(),
-            next_batch=AsyncMock(return_value=None),
-            wait_for_room_ready=AsyncMock(return_value=False),
-        )
-        bot.journal_principal = MagicMock(return_value=principal)
-        bot._ingestion_session = session
-
-        assert await bot.change_local_membership(room_id, "join") is False
-        session.wait_for_room_ready.assert_awaited_once_with(room_id)
-
-    @pytest.mark.asyncio
     async def test_local_membership_gateway_follows_reported_join_leave_rejoin_chain(
         self,
         mock_agent_user: AgentMatrixUser,

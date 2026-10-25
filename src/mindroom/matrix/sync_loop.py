@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING
 from nio.durable import DurableSyncConfig, SlidingSyncConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from nio.durable import DurableSync
+
     from mindroom.config.main import Config
 
 
@@ -27,9 +31,17 @@ def _sliding_room_config(timeline_limit: int) -> dict[str, object]:
     }
 
 
-def sliding_sync_room_subscriptions(room_ids: list[str], timeline_limit: int) -> dict[str, object]:
+def _sliding_sync_room_subscriptions(room_ids: Iterable[str], timeline_limit: int) -> dict[str, object]:
     """Subscribe to configured resolved rooms, including rooms outside discovery."""
     return {room_id: _sliding_room_config(timeline_limit) for room_id in room_ids if room_id.startswith("!")}
+
+
+async def subscribe_sliding_rooms(session: DurableSync, config: Config, room_ids: Iterable[str]) -> None:
+    """Make a Sliding source deliver exactly these rooms beyond its room list; a Classic source syncs every room."""
+    if config.matrix_sync.mode == "sliding":
+        await session.update_sliding_subscriptions(
+            _sliding_sync_room_subscriptions(room_ids, config.matrix_sync.sliding_timeline_limit),
+        )
 
 
 def bot_ingestion_config(
@@ -47,7 +59,7 @@ def bot_ingestion_config(
         sliding = SlidingSyncConfig(
             conn_id=f"mindroom-{agent_name}",
             lists={"mindroom": {"ranges": [[0, 99]], **_sliding_room_config(timeline_limit)}},
-            room_subscriptions=sliding_sync_room_subscriptions(room_ids, timeline_limit),
+            room_subscriptions=_sliding_sync_room_subscriptions(room_ids, timeline_limit),
             extensions={
                 "to_device": {"enabled": True},
                 "e2ee": {"enabled": True},
