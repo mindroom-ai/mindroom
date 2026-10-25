@@ -4508,7 +4508,6 @@ class TestTeamCompletion:
             TeamRunRecord(
                 run_id="run-queued-notice",
                 team_id=scope_context.session.owner_id,
-                team_name="General Team",
                 session_id="session-openai-team-prep",
                 content="done",
                 messages=[notice(True)],

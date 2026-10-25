@@ -102,7 +102,6 @@ def run_team(
         metrics=RunMetrics(),
         metadata=ctx.metadata,
         team_id=leader.id,
-        team_name=leader.name,
     )
     messages = [*([] if leader.system_message is None else [leader.system_message]), *run_input]
     return _drive_team(spec, record, messages, ctx=ctx, hooks=hooks, persist=persist, template=request_template)

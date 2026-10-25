@@ -45,7 +45,7 @@ SQUAD = "!room:example.org:$squad"
 SQUAD_APPROVED = "!room:example.org:$squad-approved"
 PANEL = "!room:example.org:$panel"
 REQUESTER = "@alice:example.org"
-TEAM_NAME = "Team-writer-checker"
+TEAM_LABEL = "Team (Writer, Checker)"
 PROVIDER = "Synthetic"
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
@@ -160,7 +160,7 @@ def squad(
     checker_tools = (calculator(gate_multiply=True),) if checker_toolkits is None else tuple(checker_toolkits)
     return team_spec(
         team_id,
-        TEAM_NAME,
+        TEAM_LABEL,
         leader,
         system,
         (

@@ -61,8 +61,8 @@ class TeamMember:
 class TeamSpec:
     """One team as the leader loop runs it: the leader, which works its ``members`` as ``mode`` says.
 
-    ``leader.id`` and ``leader.name`` are stored on every team run as ``team_id`` and ``team_name``.
-    ``leader.system_message`` is the rendered leader prompt (``prompt.render_leader_system_message``);
+    ``leader.id`` is the team's id, stored on every team run as ``team_id``; ``leader.name`` is the team's label, which
+    no run stores. ``leader.system_message`` is the rendered leader prompt (``prompt.render_leader_system_message``);
     ``leader.toolkits`` are the leader's own tools, to which each run adds the delegation tool for ``mode``;
     ``leader.max_tool_calls_per_turn`` bounds the leader's calls, delegations included.
     """

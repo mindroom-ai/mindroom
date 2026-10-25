@@ -305,7 +305,10 @@ def resolve_team_turn_models(
 
 
 def materialized_team_label(display_names: Sequence[str]) -> str:
-    """Return the entity label an ad hoc team's turn and resume carry in their logs and notices."""
+    """Return the label of a team of these members, its leader's name.
+
+    An ad hoc team's turn and resume carry it as their entity label in logs and notices.
+    """
     return f"Team ({', '.join(display_names)})"
 
 
@@ -396,10 +399,11 @@ def build_team_spec(
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
-    The team is named for its requested members, as Agno named it. The leader prompt holds each
-    member's roster role, the leader's tool instructions in offer order, the provider family's note, and the date
-    context with ``system_enrichment`` appended; the team's own history settings and call budget come from the
-    configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
+    The leader is named by the team's label (``materialized_team_label``) and identified by the team's history scope,
+    or by that label for a team that names no member and so has no scope. The leader prompt holds each member's
+    roster role, the leader's tool instructions in offer order, the provider family's note, and the date context with
+    ``system_enrichment`` appended; the team's own history settings and call budget come from the configured team
+    ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
     model = provider_registry.build_model_provider(
         config,
@@ -407,7 +411,7 @@ def build_team_spec(
         model_name,
         execution_identity=execution_identity,
     )
-    team_display_name = f"Team-{'-'.join(members.requested_agent_names)}"
+    label = materialized_team_label(members.display_names)
     team_view = config.resolve_entity(configured_team_name)
     if scope_context is not None:
         team_id = scope_context.scope.scope_id
@@ -418,7 +422,7 @@ def build_team_spec(
             team_name=configured_team_name,
             execution_identity=execution_identity,
         )
-        team_id = scope.scope_id if scope is not None else team_display_name
+        team_id = scope.scope_id if scope is not None else label
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
     team_members = tuple(
         _team_member(
@@ -432,7 +436,7 @@ def build_team_spec(
     )
     leader = AgentSpec(
         id=team_id,
-        name=team_display_name,
+        name=label,
         model=model,
         system_message=None,
         toolkits=() if jobs is None else (jobs.controls,),

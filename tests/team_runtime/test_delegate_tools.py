@@ -53,7 +53,7 @@ def test_collaborate_result_text_labels_content_and_a_failed_member_only_without
         RunRecord(run_id="w", status=RunStatus.completed, content="42"),
         RunRecord(run_id="c", status=RunStatus.error, content="I will check.", error="Checker overloaded"),
     ]
-    record = TeamRunRecord(run_id="t", team_id="squad", team_name="Squad")
+    record = TeamRunRecord(run_id="t", team_id="squad")
 
     blocking = collaborate_result_text(members, children, record, stream=False)
     streamed = collaborate_result_text(members, children, record, stream=True)
