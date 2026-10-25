@@ -35,6 +35,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
     ResolvedHistoryExecutionPlan,
+    ResolvedHistorySettings,
     ResolvedReplayPlan,
     ScopeSummary,
 )
@@ -53,6 +54,11 @@ from tests.history_helpers import (
     folded_run_ids,
     replay_settings,
 )
+
+
+def _agent_settings(config: Config) -> ResolvedHistorySettings:
+    """Return the test agent's resolved history settings, which hold its compaction config."""
+    return config.resolve_entity("test_agent").history_settings
 
 
 def _viewed_image_message(index: int) -> Message:
@@ -252,8 +258,8 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=1_000_000,
         static_prompt_tokens=10,
@@ -409,7 +415,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
         runtime_paths,
     )
 
-    resolved = config.resolve_entity("test_agent").compaction_config
+    resolved = _agent_settings(config).compaction_config
 
     assert resolved.enabled is True
     assert resolved.threshold_tokens is None
@@ -464,8 +470,8 @@ def test_authored_empty_defaults_compaction_enables_text_compaction(tmp_path: Pa
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -499,8 +505,8 @@ def test_omitted_defaults_compaction_enables_text_compaction(tmp_path: Path) -> 
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -538,8 +544,8 @@ def test_empty_agent_compaction_override_stays_disabled_with_disabled_defaults(t
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -704,7 +710,7 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_cl
         runtime_paths,
     )
 
-    compaction_config = config.resolve_entity("test_agent").compaction_config
+    compaction_config = _agent_settings(config).compaction_config
 
     assert compaction_config.enabled is False
     assert compaction_config.model is None
@@ -783,7 +789,7 @@ def _fallback_inheritance_config(tmp_path: Path, *, override: CompactionOverride
 def test_resolved_compaction_config_inherits_fallback_model_from_defaults(tmp_path: Path) -> None:
     config = _fallback_inheritance_config(tmp_path, override=CompactionOverrideConfig(enabled=True))
 
-    compaction_config = config.resolve_entity("test_agent").compaction_config
+    compaction_config = _agent_settings(config).compaction_config
 
     assert compaction_config.enabled is True
     assert compaction_config.model == "summary-model"
@@ -798,7 +804,7 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_fi
     ):
         config = _fallback_inheritance_config(tmp_path, override=override)
 
-        compaction_config = config.resolve_entity("test_agent").compaction_config
+        compaction_config = _agent_settings(config).compaction_config
 
         assert compaction_config.enabled is False
         assert compaction_config.fallback_model is None
@@ -809,7 +815,7 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
         has_authored_compaction_config=True,
         active_model_name="default",
         active_context_window=48_000,
@@ -847,7 +853,7 @@ def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
         has_authored_compaction_config=True,
         active_model_name="default",
         active_context_window=1_000_000,
@@ -977,8 +983,8 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=None,
         static_prompt_tokens=2_000,
@@ -1078,8 +1084,8 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=4_096,
         static_prompt_tokens=500,
@@ -1111,8 +1117,8 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=context_window_tokens,
         static_prompt_tokens=10,
@@ -1156,8 +1162,8 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=1_000,
         static_prompt_tokens=10,
@@ -1188,8 +1194,8 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=active_context_window,
         static_prompt_tokens=10_000,
