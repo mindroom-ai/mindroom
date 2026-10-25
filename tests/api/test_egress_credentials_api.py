@@ -65,6 +65,7 @@ from tests.api.test_oauth_api import (
     _runtime_paths,
     _use_runtime_auth_settings,
 )
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.oauth_test_utils import corrupt_oauth_credential_payload
 
 if TYPE_CHECKING:
@@ -1621,51 +1622,36 @@ def test_listing_and_state_read_no_oauth_client_on_the_event_loop(
     assert not any(on_loop)
 
 
-def require_concurrent_calls(monkeypatch: pytest.MonkeyPatch, module: object, name: str, expected: int) -> list[str]:
-    """Make each call of `module.name`, an `egress_service_status`, wait until `expected` calls have started.
+def track_concurrent_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    module: object,
+    name: str,
+    *,
+    limit: int,
+    total: int,
+) -> list[int]:
+    """Hold each call of the async `module.name` and return `[running, peak]` concurrent calls.
 
-    Return the names of the services they load. Calls that run one after another never get there, so the first one
-    fails after a short wait.
+    A call waits until `limit` calls run at once or all `total` have started, so the calls a shared limit admits
+    together overlap however long each one's earlier work takes, and then stays a moment longer so a call a too-wide
+    limit admits late still overlaps them. A narrower limit, or calls that run one after another, never get there,
+    so the calls fail at the settle deadline.
     """
     real = getattr(module, name)
-    started: list[str] = []
-    all_started: list[asyncio.Event] = []
-
-    async def gated(manager: object, target: object, service: object, service_name: str, oauth_part: object) -> object:
-        if not all_started:
-            all_started.append(asyncio.Event())
-        started.append(service_name)
-        if len(started) == expected:
-            all_started[0].set()
-        async with asyncio.timeout(5):
-            await all_started[0].wait()
-        return await real(manager, target, service, service_name, oauth_part)
-
-    monkeypatch.setattr(module, name, gated)
-    return started
-
-
-def test_listing_loads_the_rows_of_every_agent_at_once(
-    egress_portal: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every row awaits several thread hops, so rows one after another would keep a busy server's page loading."""
-    started = require_concurrent_calls(monkeypatch, egress_credentials, "egress_service_status", expected=4)
-    agents = _listed_agents(egress_portal, "alice")
-    assert list(agents) == ["personal", "shared_dev"]
-    assert [[row["name"] for row in agent["services"]] for agent in agents.values()] == [["github", "openai"]] * 2
-    assert sorted(started) == ["github", "github", "openai", "openai"]
-
-
-def track_concurrent_calls(monkeypatch: pytest.MonkeyPatch, module: object, name: str) -> list[int]:
-    """Hold each call of the async `module.name` briefly and return `[running, peak]` concurrent calls."""
-    real = getattr(module, name)
     counts = [0, 0]
+    started = 0
+    changed = asyncio.Condition()
 
     async def tracked(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        nonlocal started
+        started += 1
         counts[0] += 1
         counts[1] = max(counts)
         try:
+            async with changed:
+                changed.notify_all()
+                async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                    await changed.wait_for(lambda: counts[0] >= limit or started == total)
             await asyncio.sleep(0.02)
             return await real(*args, **kwargs)
         finally:
@@ -1675,6 +1661,18 @@ def track_concurrent_calls(monkeypatch: pytest.MonkeyPatch, module: object, name
     return counts
 
 
+def test_listing_loads_the_rows_of_every_agent_at_once(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every row awaits several thread hops, so rows one after another would keep a busy server's page loading."""
+    counts = track_concurrent_calls(monkeypatch, egress_credentials, "egress_service_status", limit=4, total=4)
+    agents = _listed_agents(egress_portal, "alice")
+    assert list(agents) == ["personal", "shared_dev"]
+    assert [[row["name"] for row in agent["services"]] for agent in agents.values()] == [["github", "openai"]] * 2
+    assert counts == [0, 4]
+
+
 @pytest.mark.asyncio
 async def test_overlapping_listings_share_one_limit_on_status_loads(
     egress_portal: dict[str, Any],
@@ -1682,7 +1680,7 @@ async def test_overlapping_listings_share_one_limit_on_status_loads(
 ) -> None:
     """Two listings on one loop load at most `_STATUS_LOAD_LIMIT` service statuses at once between them, in order."""
     monkeypatch.setattr(egress_status, "_STATUS_LOAD_LIMIT", 3)
-    counts = track_concurrent_calls(monkeypatch, egress_credentials, "egress_service_status")
+    counts = track_concurrent_calls(monkeypatch, egress_credentials, "egress_service_status", limit=3, total=8)
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="https://portal.example.org") as client:
         responses = await asyncio.gather(

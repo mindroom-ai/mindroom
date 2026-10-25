@@ -149,8 +149,10 @@ from .scheduling.tasks import (
     clear_scheduled_task_runner_owner,
     drain_deferred_overdue_tasks,
     has_deferred_overdue_tasks,
+    register_scheduled_task_state_writer,
     restore_scheduled_tasks,
     set_scheduled_task_runner_owner,
+    unregister_scheduled_task_state_writer,
 )
 from .startup_errors import PermanentStartupError
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
@@ -1939,6 +1941,7 @@ class AgentBot:
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
             if self.agent_name == ROUTER_AGENT_NAME:
                 set_scheduled_task_runner_owner(ScheduledTaskRunnerOwner(client, self._conversation_reader))
+            register_scheduled_task_state_writer(client)
         except BaseException:
             await self._close_owned_matrix_after_start_failure()
             raise
@@ -2295,6 +2298,8 @@ class AgentBot:
     ) -> None:
         """Release resources after every response owner is terminal."""
         try:
+            if self.client is not None:
+                unregister_scheduled_task_state_writer(self.client)
             if self.agent_name == ROUTER_AGENT_NAME:
                 self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
                 clear_scheduled_task_runner_owner()

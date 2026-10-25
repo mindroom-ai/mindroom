@@ -213,6 +213,7 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
+        "mindroom_system_sha256": "c42f69107359512c8d893cd0b07ac175dfaf2350efdcb89dae9fadc3b9c983ca",
         "response_id": "resp_parity",
         "response_status": "completed"
       },

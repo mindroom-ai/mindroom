@@ -110,17 +110,6 @@
           }
         ],
         "mindroom_response_stored": false,
-        "reasoning_output": {
-          "encrypted_content": "parity-encrypted-reasoning",
-          "id": "rs_parity",
-          "summary": [
-            {
-              "text": "Check the forecast first.",
-              "type": "summary_text"
-            }
-          ],
-          "type": "reasoning"
-        },
         "response_id": "resp_parity"
       },
       "reasoning_content": "Check the forecast first.",

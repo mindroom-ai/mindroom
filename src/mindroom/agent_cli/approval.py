@@ -11,7 +11,10 @@ from mindroom.llm.runs import RunRequirement
 
 @dataclass(frozen=True)
 class CliApprovalCall:
-    """One exact hidden call; the journal retains its existing JSON wire shape."""
+    """One exact hidden call; the journal retains its existing JSON wire shape.
+
+    ``toolkit`` is the toolkit the call is approved under, which the resumed agent offers ``function`` from.
+    """
 
     toolkit: str
     function: str

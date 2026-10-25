@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import SendRequest
@@ -15,10 +16,8 @@ from mindroom.llm.messages import Message
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
-    from mindroom.llm.provider import Capabilities
+    from mindroom.agent_loop.model_loop import LoopState, RequestDecision
 
-_MARKER_KEY = "mindroom_approval_receipt"
 _SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 # Provider and card call ids, such as ``toolu_01…``, ``functions.save_file:0``, or ``member_id:call_id``.
 _SAFE_TOOL_CALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
@@ -62,84 +61,57 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
     return "\n".join(lines)
 
 
-def _is_response_chain_boundary(message: Message) -> bool:
-    provider_data = message.provider_data
-    return (
-        message.role == "assistant"
-        and isinstance(provider_data, dict)
-        and isinstance(provider_data.get("response_id"), str)
-    )
-
-
-def messages_with_approval_receipt(
-    messages: Sequence[Message],
-    receipt_text: str,
-    *,
-    after_response_id: bool,
-) -> list[Message]:
+def messages_with_approval_receipt(messages: Sequence[Message], receipt_text: str) -> list[Message]:
     """Return the request's messages with the trusted receipt projected in, leaving ``messages`` as they are.
 
     The receipt is appended to the first prompt message as a copy; a request without one gets a system message of
-    its own, placed after the latest response-chain boundary when the provider continues stored responses, so the
-    provider still sees it.
+    its own, first.
     """
     outbound = list(messages)
-    response_chain_index = (
-        next(
-            (index for index in range(len(outbound) - 1, -1, -1) if _is_response_chain_boundary(outbound[index])),
-            None,
-        )
-        if after_response_id
-        else None
-    )
-    system_index = (
-        None
-        if response_chain_index is not None
-        else next(
-            (
-                index
-                for index, message in enumerate(outbound)
-                if message.role == "system" and isinstance(message.content, str)
-            ),
-            None,
-        )
+    system_index = next(
+        (
+            index
+            for index, message in enumerate(outbound)
+            if message.role == "system" and isinstance(message.content, str)
+        ),
+        None,
     )
     if system_index is None:
-        receipt_message = Message(
-            role="system",
-            content=receipt_text,
-            provider_data={_MARKER_KEY: True},
-            add_to_agent_memory=False,
-        )
-        outbound.insert(0 if response_chain_index is None else response_chain_index + 1, receipt_message)
-        return outbound
+        return [Message(role="system", content=receipt_text, add_to_agent_memory=False), *outbound]
     receipt_message = deepcopy(outbound[system_index])
     receipt_message.content = f"{receipt_message.content}\n\n{receipt_text}"
-    receipt_message.provider_data = {**(receipt_message.provider_data or {}), _MARKER_KEY: True}
     outbound[system_index] = receipt_message
     return outbound
 
 
-def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
-    """Return the pre-request hook that sends the bound receipt with a reader run's first request, once per run.
+def _sent_call_id(messages: Sequence[Message], call_id: str) -> str:
+    """Return the id a request for ``messages`` sends for their call ``call_id``.
+
+    That is a Responses call's ``call_id``, which its result references and a replay keeps when it drops the call's
+    ``fc_`` item id, and any other call's own id.
+    """
+    return next(
+        (
+            tool_call["call_id"]
+            for message in messages
+            for tool_call in message.tool_calls or ()
+            if tool_call.get("id") == call_id and tool_call.get("call_id")
+        ),
+        call_id,
+    )
+
+
+async def approval_receipt_hook(state: LoopState) -> RequestDecision:
+    """Send the bound receipt with a reader run's first request, once per run.
 
     The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt, and under which
-    ids it names their calls. It is projected into the request only, so no run's history holds it.
+    ids it names their calls, each as the request sends it. It is projected into the request only, so no run's
+    history holds it.
     """
-
-    async def hook(state: LoopState) -> RequestDecision:
-        calls = take_unsent_receipt(state.run.run_id)
-        if calls is None:
-            return SendRequest()
-        return SendRequest(
-            messages=messages_with_approval_receipt(
-                state.messages,
-                build_approval_receipt(calls),
-                after_response_id=capabilities.continues_stored_responses,
-            ),
-        )
-
-    return hook
+    calls = take_unsent_receipt(state.run.run_id, partial(_sent_call_id, state.messages))
+    if calls is None:
+        return SendRequest()
+    return SendRequest(messages=messages_with_approval_receipt(state.messages, build_approval_receipt(calls)))
 
 
 __all__ = [

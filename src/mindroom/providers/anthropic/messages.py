@@ -267,7 +267,10 @@ class ClaudeProvider:
                 yield usage
                 yield completed
                 return
-            manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
+            # Opening the stream runs the SDK's param transform, which walks the whole conversation.
+            manager = await asyncio.to_thread(
+                lambda: client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs),
+            )
             async with manager as events:
                 async for event in events:
                     if event.type in _USAGE_EVENT_TYPES:

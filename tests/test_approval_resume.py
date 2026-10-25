@@ -20,6 +20,7 @@ from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecutio
 from mindroom.response_turn import CompletedApprovalRun
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
+from tests.approval_continuation_helpers import receipt_call_ids
 from tests.approval_resume_helpers import AGENT_RESUMES, ROOM, CodeResume, resume_case, setup_case, setup_resume
 from tests.team_runtime.squad import comparable, golden_run, scripted
 
@@ -63,7 +64,7 @@ async def test_a_paused_approval_resumes_into_the_rows_agno_stored(
     # The resumed request carries the stored prompt, the turn, the decided call's result, and the receipt once.
     [request] = run.code.requests
     assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool"]
-    assert request.messages[0].provider_data == {"mindroom_approval_receipt": True}
+    assert receipt_call_ids(request) == [f"call-{run_id}"]
     assert request.messages[-1].tool_call_id == f"call-{run_id}"
 
 
