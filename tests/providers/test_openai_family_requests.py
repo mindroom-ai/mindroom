@@ -122,7 +122,6 @@ def _streamed(
         store=store,
         portable_replay=portable_replay,
         native_compaction=native_compaction,
-        text_as_reasoning=False,
     )
     events: list[dict[str, Any]] = []
     for index, item in enumerate(response.output):

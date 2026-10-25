@@ -1277,23 +1277,20 @@ def _reasoning_reply(*, summary: bool) -> dict[str, Any]:
     ("extra_kwargs", "summary", "stored"),
     [
         ({}, False, None),
-        ({"reasoning": {"effort": "low"}}, False, _PACK),
-        ({"reasoning": {"effort": "low", "summary": "auto"}}, True, f"Think. {_PACK}"),
+        ({"reasoning": {"effort": "low"}}, False, None),
+        ({"reasoning": {"effort": "low", "summary": "auto"}}, True, "Think. "),
         ({"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
     ],
     ids=["unset", "authored", "authored-summary-in-reasoning", "reasoning-summary"],
 )
-async def test_authored_reasoning_stores_the_output_text_as_reasoning_without_a_reasoning_summary(
+async def test_a_response_stores_only_the_reasoning_summary_it_returns_as_reasoning(
     tmp_path: Path,
     *,
     extra_kwargs: dict[str, Any],
     summary: bool,
     stored: str | None,
 ) -> None:
-    """With ``reasoning`` authored, the output text is also stored as reasoning unless ``reasoning_summary`` is set.
-
-    The copy follows any summary text, in event order.
-    """
+    """Authored ``reasoning`` settings never make the output text a reply's stored reasoning."""
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs}, _reasoning_reply(summary=summary))
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))

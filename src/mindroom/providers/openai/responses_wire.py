@@ -481,15 +481,14 @@ class ResponsesStream:
     """Fold streamed Responses events into deltas and one finished turn.
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
-    its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
-    event order with any summary text. ``provider`` is the metrics provider name a failed response's error carries.
+    its start is reported as such. The turn's reasoning is the reasoning summary text the response returns.
+    ``provider`` is the metrics provider name a failed response's error carries.
     """
 
     provider: str
     store: bool | None
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
-    text_as_reasoning: bool
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     # Whether the response ended, completed or incomplete; a stream that stops before then did not finish the turn.
     ended: bool = False
@@ -508,7 +507,7 @@ class ResponsesStream:
             provider=self.provider,
         )
 
-    def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:  # noqa: C901 - one branch per event type
+    def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:
         """Fold one event and return the deltas it carried; failure events raise."""
         current = cast("Any", event)
         if event.type in {"error", "response.failed"}:
@@ -518,8 +517,6 @@ class ResponsesStream:
             events.append(hosted_tool_started(current.item.type))
         if event.type == "response.output_text.delta":
             self._content.append(current.delta)
-            if self.text_as_reasoning:
-                self._reasoning.append(current.delta)
             events.append(TextDelta(current.delta))
         elif event.type == "response.reasoning_summary_text.delta":
             self._reasoning.append(current.delta)
