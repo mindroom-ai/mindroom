@@ -11,7 +11,7 @@ from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
     capture_embedder_health_recorder,
 )
-from mindroom.embeddings.errors import EmbedderRequestError, classified_embedder_error
+from mindroom.embeddings.errors import as_embedder_error, classified_embedder_error
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage, record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
@@ -80,10 +80,12 @@ async def _run_mem0_embedder_mutation(
     try:
         result = await operation()
     except Exception as exc:
-        detail = _record_classified_embedder_failure(exc, health_recorder)
-        if detail is None:
+        error = as_embedder_error(exc)
+        if error is None:
             raise
-        raise EmbedderRequestError(detail) from None
+        health_recorder.record(str(error))
+        # Raise the classified error itself, so it keeps its retry judgment, without the raw provider exception.
+        raise error from None
     health_recorder.record(None)
     return result
 

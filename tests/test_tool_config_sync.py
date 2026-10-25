@@ -273,6 +273,14 @@ def test_daytona_verifies_tls_certificates_unless_explicitly_disabled(
     assert fields["verify_ssl"].default is True
 
 
+def test_zoom_never_offers_its_access_token_to_the_model() -> None:
+    """The account-wide Zoom bearer token stays inside the toolkit, while the meeting tools remain."""
+    toolkit = cast("Any", TOOL_REGISTRY["zoom"]())()
+
+    assert "get_access_token" not in toolkit.functions
+    assert "schedule_meeting" in toolkit.functions
+
+
 def test_tool_metadata_lists_only_model_callable_functions() -> None:
     """Tool metadata must not advertise internal toolkit helpers."""
     assert TOOL_METADATA["pubmed"].function_names == ("search_pubmed",)

@@ -238,9 +238,12 @@ class ToolRuntimeContext:
         OAuth MCP sessions, scoped credentials — resolves identically.
 
         Raises:
-            ValueError: For team and router dispatches, whose contexts carry
-                the entity name and therefore have no single agent execution
-                scope for a composed toolkit to mirror.
+            ValueError: When the context names a configured team or the
+                router rather than an agent, which only a configured team's
+                leader and router dispatches do. They offer no plugin tools and
+                have no single agent execution scope for a composed toolkit to
+                mirror; a team member's calls run under the member's own
+                context.
 
         """
         if self.agent_name not in self.config.agents:

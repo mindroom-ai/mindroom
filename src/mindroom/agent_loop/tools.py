@@ -44,8 +44,13 @@ class PreparedTools:
     functions: Mapping[str, ToolFunction]
 
     def specs(self) -> tuple[ToolSpec, ...]:
-        """Return the model-facing definitions sorted by name, a stable order for prompt caches."""
-        return tuple(sorted((function.definition() for function in self.functions.values()), key=lambda s: s.name))
+        """Return the model-facing definitions in the order a request sends them (``sorted_specs``)."""
+        return sorted_specs(function.definition() for function in self.functions.values())
+
+
+def sorted_specs(definitions: Iterable[ToolSpec]) -> tuple[ToolSpec, ...]:
+    """Return ``definitions`` sorted by name, the order a request sends them in, which is stable for prompt caches."""
+    return tuple(sorted(definitions, key=lambda definition: definition.name))
 
 
 def offered_toolkits(toolkits: Sequence[AdaptedToolkit], *, agent: str) -> tuple[AdaptedToolkit, ...]:
@@ -260,6 +265,7 @@ __all__ = [
     "offered_toolkits",
     "plan_tool_batch",
     "prepare_run_tools",
+    "sorted_specs",
     "tool_result_message",
     "toolkit_instructions",
 ]

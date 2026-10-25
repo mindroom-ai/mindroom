@@ -1655,17 +1655,19 @@ async def test_ollama_stop_reasons(chunks: list[dict[str, Any]], stop: str, tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("response", "error_type"),
+    ("response", "error_type", "status_code"),
     [
-        (httpx.Response(404, json={"error": "model 'qwen' not found"}), InvalidRequest),
-        (httpx.Response(500, json={"error": "llama runner process has terminated"}), ProviderUnavailable),
-        (httpx.ConnectError("connection refused"), ProviderUnavailable),
-        (ollama_ndjson({"error": "model runner has unexpectedly stopped"}), ProviderError),
+        (httpx.Response(404, json={"error": "model 'qwen' not found"}), InvalidRequest, 404),
+        (httpx.Response(500, json={"error": "llama runner process has terminated"}), ProviderUnavailable, 500),
+        (httpx.ConnectError("connection refused"), ProviderUnavailable, None),
+        # An error streamed after a 200 response carries the SDK status -1, which is not an HTTP status.
+        (ollama_ndjson({"error": "model runner has unexpectedly stopped"}), ProviderError, None),
     ],
 )
 async def test_ollama_errors_are_normalized(
     response: httpx.Response | Exception,
     error_type: type[ProviderError],
+    status_code: int | None,
     tmp_path: Path,
 ) -> None:
     """Ollama response errors and connection failures become normalized provider errors."""
@@ -1674,6 +1676,18 @@ async def test_ollama_errors_are_normalized(
 
     assert type(raised.value) is error_type
     assert raised.value.provider == "Ollama"
+    assert raised.value.status_code == status_code
+
+
+@pytest.mark.asyncio
+async def test_ollama_exceptions_that_are_not_provider_failures_propagate_unchanged(tmp_path: Path) -> None:
+    """An exception that is neither a transport failure nor an Ollama response error is not typed as a provider error."""
+    bug = ValueError("not a provider failure")
+
+    with pytest.raises(ValueError, match="not a provider failure") as raised:
+        await run_adapter(OLLAMA, _request(), tmp_path, bug)
+
+    assert raised.value is bug
 
 
 @pytest.mark.asyncio

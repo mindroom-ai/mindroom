@@ -16118,7 +16118,7 @@ context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
 ```
 
-`resolve_worker_target()` raises `ValueError` in team and router dispatches, which have no single agent scope; catch it if the tool can run inside a team.
+A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
 
 ## OAuth providers
 
@@ -20592,7 +20592,7 @@ Skill reviews also log this record under the reviewed agent's name, with a fixed
 
 ## Debug Logging
 
-Every completed model request logs an `LLM usage` event with provider and model identifiers and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
+When a request to a model under `models` ends, completed or not, MindRoom logs an `LLM usage` event with provider and model identifiers and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
 
 To record full provider requests, enable `debug.log_llm_requests`:
 

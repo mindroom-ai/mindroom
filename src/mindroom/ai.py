@@ -50,7 +50,7 @@ from mindroom.hooks import (
     render_transient_context,
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
-from mindroom.llm.events import RequestCompleted, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -128,7 +128,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
-    from mindroom.llm.usage import MessageMetrics, RunMetrics
+    from mindroom.llm.usage import RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import (
         EmptyRunDiscard,
@@ -275,7 +275,6 @@ class _StreamingAttemptState:
     tool_count: int = 0
     observed_tool_calls: int = 0
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
-    latest_request_usage: MessageMetrics | None = None
     terminal: TerminalRecord[RunRecord] = field(default_factory=partial(TerminalRecord, RunRecord))
     finished: bool = False
     first_token_logged: bool = False
@@ -540,8 +539,8 @@ def _own_assistant_text(record: AnyRunRecord | None) -> str:
     return next((part for answer in reversed(own_answers(record)) if (part := answer.strip())), "")
 
 
-def _reported_tokens(usage: RunMetrics | MessageMetrics | None) -> TokenCounts:
-    """Return the token counters a run or a request reported, all zero when it reported none."""
+def _reported_tokens(usage: RunMetrics | None) -> TokenCounts:
+    """Return the token counters a run reported, all zero when it reported none."""
     return usage.tokens if usage is not None else TokenCounts()
 
 
@@ -555,15 +554,13 @@ def agent_run_metadata_content(
     session_id: str,
     status: RunStatus,
     prepared_history: PreparedHistoryState | None,
-    last_request: MessageMetrics | None = None,
 ) -> dict[str, Any]:
     """Return the run metadata an agent reply or approval resume publishes for its run ``record``.
 
     ``prepared_history`` is the history the run was prepared with, None for an approval resume, which prepares none.
-    A streamed reply also passes its last request's usage, whose counts describe the context. The tool calls counted
-    are the ones the record holds: a run that reported a tool call hands over its record however it ends.
+    The tool calls counted are the ones the record holds: a run that reported a tool call hands over its record
+    however it ends.
     """
-    metrics = record.metrics if record is not None else None
     return build_ai_run_metadata_content(
         config=config,
         prices=model_prices(config, runtime_paths),
@@ -573,12 +570,8 @@ def agent_run_metadata_content(
         status=status,
         model=record.model if record is not None else None,
         model_provider=record.model_provider if record is not None else None,
-        metrics=metrics,
-        context_metrics=metrics,
-        context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
-        context_raw_input_tokens=_reported_tokens(last_request).input_tokens or None,
-        context_cache_read_tokens=_reported_tokens(last_request).cache_read_tokens or None,
-        context_cache_write_tokens=_reported_tokens(last_request).cache_write_tokens or None,
+        metrics=record.metrics if record is not None else None,
+        context_run=record,
         tool_count=len(record.tools or ()) if record is not None else 0,
         prepared_history=prepared_history,
     )
@@ -591,7 +584,6 @@ def _attempt_run_metadata(
     status: RunStatus,
     *,
     run_id: str,
-    last_request: MessageMetrics | None = None,
 ) -> dict[str, Any] | None:
     """Return the run metadata one attempt publishes, or None when its caller collects none."""
     if collector is None:
@@ -606,7 +598,6 @@ def _attempt_run_metadata(
         session_id=run_context.session_id,
         status=status,
         prepared_history=prepared.prepared_history,
-        last_request=last_request,
     )
 
 
@@ -1745,10 +1736,6 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                 yield event
                 continue
 
-            if isinstance(event, RequestCompleted):
-                state.latest_request_usage = event.usage
-                continue
-
             if isinstance(event, RunFinished):
                 state.finished = True
                 state.terminal.keep(event.record)
@@ -2005,7 +1992,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                             record,
                             RunStatus.error,
                             run_id=attempt.run_id,
-                            last_request=state.latest_request_usage,
                         ),
                     ),
                 )
@@ -2073,7 +2059,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     record,
                     final_status,
                     run_id=record.run_id,
-                    last_request=state.latest_request_usage,
                 ),
             ),
         )

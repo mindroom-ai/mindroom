@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
@@ -108,7 +107,7 @@ class _Resume:
         decision = ApprovalDecision.APPROVED if approve else ApprovalDecision.DENIED
         reason = None if approve else "Alice declined the multiplication."
         decided = tuple(replace(call, decision=decision, reason=reason) for call in calls)
-        with approval_receipt_context(build_approval_receipt(decided), run_id=self.paused.run_id):
+        with approval_receipt_context(decided, run_id=self.paused.run_id):
             return await resume(
                 approval_executor(self.config, self.paths),
                 self.attempt,
