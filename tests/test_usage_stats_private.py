@@ -80,7 +80,7 @@ def seed_private_usage(
     stored_requester: str | None,
     owner_record: bool = True,
 ) -> Path:
-    """Seed real Agno storage without storing conversation content."""
+    """Seed the agent's real conversation store without storing conversation content."""
     identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=agent,
