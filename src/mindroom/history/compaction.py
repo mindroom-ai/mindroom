@@ -337,7 +337,7 @@ async def compact_scope_history(
     threshold_tokens: int | None,
     progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    replay_model: PortableReplayEstimator | None,
+    replay_estimator: PortableReplayEstimator | None,
 ) -> CompactionOutcome | None:
     """Compact one scope by appending summary rows that fold its oldest runs, chunk by chunk.
 
@@ -377,7 +377,7 @@ async def compact_scope_history(
             session=working_session,
             scope=scope,
             history_settings=history_settings,
-            replay_model=replay_model,
+            replay_estimator=replay_estimator,
         )
         await progress(
             CompactionLifecycleProgress(
@@ -434,7 +434,7 @@ async def compact_scope_history(
             session=session,
             scope=scope,
             history_settings=history_settings,
-            replay_model=replay_model,
+            replay_estimator=replay_estimator,
         )
         outcome = CompactionOutcome(
             mode=mode,

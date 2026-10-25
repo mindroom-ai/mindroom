@@ -150,7 +150,7 @@ async def test_history_sizing_allows_loop_progress(
                 threshold_tokens=1000,
                 progress=None,
                 complete=_reported,
-                replay_model=model,
+                replay_estimator=model,
             )
             assert outcome is not None
         await heartbeat
@@ -214,7 +214,7 @@ async def test_history_storage_work_allows_loop_progress(
             threshold_tokens=1000,
             progress=None,
             complete=_reported,
-            replay_model=model,
+            replay_estimator=model,
         )
         assert outcome is not None
         await heartbeat
@@ -334,7 +334,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
                 resolved_inputs=resolved,
                 history_budget=1000,
                 before_tokens=11,
-                replay_model=model,
+                replay_estimator=model,
                 config=config,
                 runtime_paths=paths,
             ),

@@ -159,7 +159,7 @@ def test_request_estimate_matches_the_replay_estimate_for_the_same_messages() ->
     session = _owned_session(None)
     messages = [message for run in session.runs for message in run.messages]
 
-    assert estimate_request_messages_tokens(messages, replay_model=None) == estimate_prompt_visible_history_tokens(
+    assert estimate_request_messages_tokens(messages, replay_estimator=None) == estimate_prompt_visible_history_tokens(
         session=session,
         scope=_AGENT_SCOPE,
         history_settings=_ALL_HISTORY,

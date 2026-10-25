@@ -93,7 +93,7 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
             resolved_inputs=inputs,
             history_budget=None,
             before_tokens=0,
-            replay_model=None,
+            replay_estimator=None,
             config=turn.config,
             runtime_paths=turn.runtime_paths,
         )

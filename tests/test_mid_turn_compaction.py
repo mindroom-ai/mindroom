@@ -469,7 +469,7 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     pdf = File(content=b"%PDF-1.7\n" + b"x" * 300_000, mime_type="application/pdf", filename="report.pdf")
     message = Message(role="user", content="Summarize the attached report.", files=[pdf])
 
-    tokens = estimate_request_messages_tokens([message], replay_model=model)
+    tokens = estimate_request_messages_tokens([message], replay_estimator=model)
 
     assert tokens < 10_000
 
@@ -520,7 +520,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     replays only references that the provider expands.
     """
     if provider == "openai":
-        replay_model = responses_adapter(tmp_path, "gpt-6-luna", store=False)
+        replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
         provider_data: dict[str, Any] = {
             "tool_search_items": [
                 {
@@ -544,7 +544,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
             ],
         }
     else:
-        replay_model = None
+        replay_estimator = None
         provider_data = {
             "server_tool_blocks": [
                 {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
@@ -563,7 +563,10 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
         Message(role="assistant", provider_data=provider_data),
     ]
 
-    total = estimate_request_messages_tokens(searched, replay_model=replay_model) + mid_turn_compaction._tool_tokens(
+    total = estimate_request_messages_tokens(
+        searched,
+        replay_estimator=replay_estimator,
+    ) + mid_turn_compaction._tool_tokens(
         [BIG_TOOL],
         searched,
         frozenset({"big_tool"}),
@@ -1402,7 +1405,7 @@ async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_i
     # The first request after the fold carries its summary.
     rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
     rewritten_tokens = (
-        estimate_request_messages_tokens(rewritten.messages, replay_model=None)
+        estimate_request_messages_tokens(rewritten.messages, replay_estimator=None)
         + mid_turn_compaction._thinking_tokens(rewritten.messages)
         + mid_turn_compaction._tool_tokens(rewritten.request.tools, rewritten.messages, frozenset())
     )

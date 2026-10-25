@@ -231,7 +231,7 @@ async def prepare_scope_history(
         session=session,
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
-        replay_model=replay_estimator,
+        replay_estimator=replay_estimator,
     )
     # Large provider projections spend seconds in tokenizers that release the GIL.
     estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
@@ -317,7 +317,7 @@ async def prepare_scope_history(
                 resolved_inputs=resolved_inputs,
                 history_budget=compaction_budget,
                 before_tokens=current_history_tokens,
-                replay_model=replay_estimator,
+                replay_estimator=replay_estimator,
                 config=config,
                 runtime_paths=runtime_paths,
             ),
@@ -389,7 +389,7 @@ def _reported_history_tokens(
     reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
     if reported is None:
         return None
-    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=model.replay_estimator)
+    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_estimator=model.replay_estimator)
     return reported + newer_tokens - non_prompt_tokens
 
 
@@ -536,7 +536,7 @@ async def _compact_before_reply(
     resolved_inputs: HistoryPreparationInputs,
     history_budget: int | None,
     before_tokens: int,
-    replay_model: PortableReplayEstimator | None,
+    replay_estimator: PortableReplayEstimator | None,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> CompactionOutcome | None:
@@ -561,7 +561,7 @@ async def _compact_before_reply(
             threshold_tokens=resolved_inputs.execution_plan.trigger_threshold_tokens,
             progress=progress,
             complete=complete,
-            replay_model=replay_model,
+            replay_estimator=replay_estimator,
         )
     except ConversationChangedError:
         # A request the conversation outran stays, so the next reply compacts what the conversation holds then.
@@ -711,7 +711,7 @@ def finalize_history_preparation(
             session=session,
             scope=scope,
             history_settings=history_settings,
-            replay_model=replay_estimator,
+            replay_estimator=replay_estimator,
         )
         current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
         if history_budget is not None and current_history_tokens > history_budget:
@@ -727,7 +727,7 @@ def finalize_history_preparation(
                 history_settings=history_settings,
                 available_history_budget=history_budget,
                 current_history_tokens=current_history_tokens,
-                replay_model=replay_estimator,
+                replay_estimator=replay_estimator,
             )
             log_replay_plan(
                 replay_plan=replay_plan,

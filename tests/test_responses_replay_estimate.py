@@ -122,7 +122,7 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
             session=session,
             scope=_SCOPE,
             history_settings=resolved.history_settings,
-            replay_model=adapter,
+            replay_estimator=adapter,
         )
         decision = classify_compaction_decision(
             plan=resolved.execution_plan,
@@ -193,7 +193,7 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
         scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
-        replay_model=adapter,
+        replay_estimator=adapter,
     )
     assert tokens == expected_tokens
     assert session == before
@@ -304,7 +304,7 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
                 scope=_SCOPE,
                 history_settings=_ALL_HISTORY,
                 native_route=native.route,
-                replay_model=adapter,
+                replay_estimator=adapter,
             ),
         )
     assert estimates[0] == estimates[1]
@@ -542,7 +542,7 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         session=session,
         scope=_SCOPE,
         history_settings=inputs.history_settings,
-        replay_model=adapter,
+        replay_estimator=adapter,
     )
     canonical_estimate = estimate_prompt_visible_history_tokens(
         session=session,

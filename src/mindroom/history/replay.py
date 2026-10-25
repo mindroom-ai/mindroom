@@ -52,7 +52,7 @@ def estimate_prompt_visible_history_tokens(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     native_route: str | None = None,
-    replay_model: PortableReplayEstimator | None = None,
+    replay_estimator: PortableReplayEstimator | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run.
 
@@ -67,7 +67,11 @@ def estimate_prompt_visible_history_tokens(
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
     )
-    tokens, has_checkpoint = _route_tokens(history_messages, replay_model=replay_model, native_route=native_route)
+    tokens, has_checkpoint = _route_tokens(
+        history_messages,
+        replay_estimator=replay_estimator,
+        native_route=native_route,
+    )
     # A checkpoint covers the summary message before it, which native projection drops.
     return tokens if has_checkpoint else estimate_summary_tokens(session) + tokens
 
@@ -75,7 +79,7 @@ def estimate_prompt_visible_history_tokens(
 def _route_tokens(
     messages: list[Message],
     *,
-    replay_model: PortableReplayEstimator | None,
+    replay_estimator: PortableReplayEstimator | None,
     native_route: str | None,
 ) -> tuple[int, bool]:
     """Estimate messages as a route replays them, and report whether a native checkpoint replaced their prefix."""
@@ -88,27 +92,27 @@ def _route_tokens(
                 checkpoint_tokens += checkpoint_estimated_tokens(items)
             else:
                 messages.append(message)
-    tokens = _estimate_messages_tokens(messages, replay_model=replay_model, native_route=native_route)
+    tokens = _estimate_messages_tokens(messages, replay_estimator=replay_estimator, native_route=native_route)
     return checkpoint_tokens + tokens, checkpoint_tokens > 0
 
 
 def estimate_request_messages_tokens(
     messages: Sequence[Message],
     *,
-    replay_model: PortableReplayEstimator | None,
+    replay_estimator: PortableReplayEstimator | None,
     native_route: str | None = None,
 ) -> int:
     """Estimate one provider request's messages the way replay planning estimates history."""
-    return _route_tokens(list(messages), replay_model=replay_model, native_route=native_route)[0]
+    return _route_tokens(list(messages), replay_estimator=replay_estimator, native_route=native_route)[0]
 
 
 def _estimate_messages_tokens(
     history_messages: list[Message],
     *,
-    replay_model: PortableReplayEstimator | None,
+    replay_estimator: PortableReplayEstimator | None,
     native_route: str | None,
 ) -> int:
-    uses_visual_tokens = replay_model is not None and replay_model.portable_replay_uses_visual_tokens()
+    uses_visual_tokens = replay_estimator is not None and replay_estimator.portable_replay_uses_visual_tokens()
     attachment_tokens = _attachment_fallback_tokens(history_messages)
     history_messages = [_without_attachments(message) for message in history_messages]
     estimation_messages = (
@@ -117,8 +121,8 @@ def _estimate_messages_tokens(
         else [_without_image_transport(message, strip_content_blocks=False) for message in history_messages]
     )
     provider_estimate = (
-        replay_model.estimate_portable_replay_tokens(estimation_messages)
-        if replay_model is not None and (estimation_messages or native_route is None)
+        replay_estimator.estimate_portable_replay_tokens(estimation_messages)
+        if replay_estimator is not None and (estimation_messages or native_route is None)
         else None
     )
     provider_accounts_for_images = uses_visual_tokens and provider_estimate is not None
@@ -213,7 +217,7 @@ def plan_replay_that_fits(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
-    replay_model: PortableReplayEstimator | None = None,
+    replay_estimator: PortableReplayEstimator | None = None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
     summary_tokens = estimate_summary_tokens(session)
@@ -237,7 +241,7 @@ def plan_replay_that_fits(
         available_history_budget=available_history_budget,
         limit_mode=limit_mode,
         max_limit=max_limit,
-        replay_model=replay_model,
+        replay_estimator=replay_estimator,
     )
     if fitting_limit > 0:
         policy = HistoryPolicy(mode=limit_mode, limit=fitting_limit)
@@ -279,7 +283,7 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
-    replay_model: PortableReplayEstimator | None = None,
+    replay_estimator: PortableReplayEstimator | None = None,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
@@ -294,7 +298,7 @@ def _find_fitting_history_limit_for_budget(
             session=session,
             scope=scope,
             history_settings=replace(history_settings, policy=HistoryPolicy(mode=limit_mode, limit=mid)),
-            replay_model=replay_model,
+            replay_estimator=replay_estimator,
         )
         if candidate_tokens <= available_history_budget:
             best = mid

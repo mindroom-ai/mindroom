@@ -1187,7 +1187,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -1989,7 +1989,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -2060,7 +2060,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
         == 1
     )
     progress_events: list[CompactionLifecycleProgress] = []
-    replay_model = responses_adapter(tmp_path) if portable else None
+    replay_estimator = responses_adapter(tmp_path) if portable else None
 
     async def record_progress(event: CompactionLifecycleProgress) -> None:
         persisted = storage.load_session("session-1", "agent")
@@ -2084,13 +2084,13 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
                 session=working_session,
                 scope=scope,
                 history_settings=history_settings,
-                replay_model=replay_model,
+                replay_estimator=replay_estimator,
             ),
             replay_window_tokens=None,
             threshold_tokens=None,
             progress=record_progress,
             complete=_reported,
-            replay_model=replay_model,
+            replay_estimator=replay_estimator,
         )
 
     assert outcome is not None
@@ -2209,7 +2209,7 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
             threshold_tokens=None,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert appended == [True, False]
@@ -2246,7 +2246,7 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
             threshold_tokens=None,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is None

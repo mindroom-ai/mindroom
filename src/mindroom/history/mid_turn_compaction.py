@@ -432,7 +432,7 @@ def _request_tokens(
         return (
             estimate_request_messages_tokens(
                 messages,
-                replay_model=compaction.model.replay_estimator,
+                replay_estimator=compaction.model.replay_estimator,
                 native_route=policy.native_route,
             )
             # Thinking before the latest checkpoint is part of that checkpoint, not of the request.
@@ -460,7 +460,7 @@ def _request_tokens(
             newer = messages[anchor:]
             return (
                 reported
-                + estimate_request_messages_tokens(newer, replay_model=compaction.model.replay_estimator)
+                + estimate_request_messages_tokens(newer, replay_estimator=compaction.model.replay_estimator)
                 + _thinking_tokens(newer)
             )
     return _estimated_request_tokens(compaction, policy, messages, tools)
@@ -473,7 +473,7 @@ def _estimated_request_tokens(
     tools: Sequence[ToolSpec],
 ) -> int:
     return (
-        estimate_request_messages_tokens(messages, replay_model=compaction.model.replay_estimator)
+        estimate_request_messages_tokens(messages, replay_estimator=compaction.model.replay_estimator)
         + _thinking_tokens(messages)
         + _tool_tokens(tools, messages, policy.deferred_tool_names)
     )
@@ -501,7 +501,7 @@ def _thinking_tokens(messages: Sequence[Message]) -> int:
         if not is_own_model_message(message):
             continue
         text = estimate_text_tokens((message.reasoning_content or "") + (message.redacted_reasoning_content or ""))
-        visible = estimate_request_messages_tokens([message], replay_model=None)
+        visible = estimate_request_messages_tokens([message], replay_estimator=None)
         total += max(text, message.metrics.tokens.output_tokens - visible, 0)
     return total
 

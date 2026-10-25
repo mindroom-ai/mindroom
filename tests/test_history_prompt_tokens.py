@@ -225,7 +225,7 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
-    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, replay_model=None)
+    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, replay_estimator=None)
 
 
 def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_removes_all_runs() -> None:
