@@ -337,6 +337,7 @@ depends_on = [
 path = "mindroom.agent_cli.projection"
 depends_on = [
     "mindroom.tool_system.output_files",
+    "mindroom.tool_system.tool_function",
     "mindroom.llm",
 ]
 visibility = [
@@ -1349,10 +1350,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.llm",
 ]
-visibility = [
-    "mindroom.loop_hooks",
-    "mindroom.response_runner",
-]
+visibility = ["mindroom.loop_hooks"]
 
 [[modules]]
 path = "mindroom.approval.receipt_readers"
@@ -3183,7 +3181,6 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval.execution",
-    "mindroom.approval.receipt",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.response",
     "mindroom.automations.steps",
@@ -3378,7 +3375,6 @@ depends_on = [
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
-    "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
@@ -3551,6 +3547,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.history.conversation_text",
     "mindroom.history.session_runs",
+    "mindroom.llm",
     "mindroom.session_storage.agent_storage",
     "mindroom.logging_config",
     "mindroom.memory._prompting",

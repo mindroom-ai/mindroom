@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
@@ -31,6 +30,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.ai_run_golden_helpers import golden_metadata, published_as_compared
+from tests.approval_continuation_helpers import carries_approval_receipt
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, approval_calls_for, approval_executor, resume
 from tests.fakes.scripted_model import answer, usage
@@ -108,7 +108,7 @@ class _Resume:
         decision = ApprovalDecision.APPROVED if approve else ApprovalDecision.DENIED
         reason = None if approve else "Alice declined the multiplication."
         decided = tuple(replace(call, decision=decision, reason=reason) for call in calls)
-        with approval_receipt_context(build_approval_receipt(decided), run_id=self.paused.run_id):
+        with approval_receipt_context(decided, run_id=self.paused.run_id):
             return await resume(
                 approval_executor(self.config, self.paths),
                 self.attempt,
@@ -229,7 +229,7 @@ async def test_a_paused_approval_resumes_into_the_rows_agno_stored(
     # The resumed request carries the stored prompt, the turn, the decided call's result, and the receipt once.
     [request] = code.requests
     assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool"]
-    assert str(request.messages[0].content).count("TOOL APPROVAL RECEIPT") == 1
+    assert carries_approval_receipt(request)
     assert request.messages[-1].tool_call_id == f"call-{run_id}"
 
 

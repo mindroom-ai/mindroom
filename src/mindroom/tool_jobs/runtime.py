@@ -53,7 +53,10 @@ _JOB_SUMMARY_MAX_CHARS = 500
 # A reattaching call must name exactly the operation its job was admitted for.
 _ADMITTED_OPERATION = attrgetter("tool_name", "toolkit_name", "kind", "source_event_id", "source_kind", "adapter")
 # Ended jobs, read or not, are deleted this long after their last change, once their originating turn has finished.
-ENDED_JOB_RETENTION = timedelta(days=30)
+_ENDED_JOB_RETENTION = timedelta(days=30)
+# A job whose own call returned its result inline is never listed or reported once it ended, so after its turn only a
+# reread by its exact ID reads it; it is deleted after this shorter margin instead.
+_INLINE_JOB_RETENTION = timedelta(days=1)
 logger = get_logger(__name__)
 # A ToolResultPayload encoded by `tool_jobs.results`; the runtime stores it without reading it.
 type EncodedResultPayload = dict[str, Any]
@@ -862,7 +865,7 @@ class ToolJobRuntime:
     async def expire_ended(
         self,
         *,
-        before: datetime,
+        now: datetime,
         source_finished: Callable[[BackgroundJob], Awaitable[bool]],
     ) -> list[BackgroundJob]:
         """Delete old ended jobs, read or not, whose originating turn has finished, which never lets their call run again.
@@ -877,7 +880,7 @@ class ToolJobRuntime:
             if self._closed or self._shutdown_task is not None:
                 return deleted
             candidates = [
-                await self._snapshot(entry) for entry in self._entries.values() if self._expirable(entry, before)
+                await self._snapshot(entry) for entry in self._entries.values() if self._expirable(entry, now)
             ]
         for job in candidates:
             if not await source_finished(job):
@@ -886,7 +889,7 @@ class ToolJobRuntime:
                 if self._closed or self._shutdown_task is not None:
                     return deleted
                 entry = self._entries.get(job.job_id)
-                if entry is None or entry.job.updated_at != job.updated_at or not self._expirable(entry, before):
+                if entry is None or entry.job.updated_at != job.updated_at or not self._expirable(entry, now):
                     continue
                 # A cancelled caller cannot separate the landed deletion from forgetting the job.
                 await run_coroutine_until_complete(self._store.delete(job.job_id))
@@ -894,13 +897,14 @@ class ToolJobRuntime:
                 deleted.append(job)
         return deleted
 
-    def _expirable(self, entry: _Entry, before: datetime) -> bool:
+    def _expirable(self, entry: _Entry, now: datetime) -> bool:
         job = entry.job
+        retention = _INLINE_JOB_RETENTION if job.returned_inline else _ENDED_JOB_RETENTION
         return (
             job.status in TERMINAL_STATUSES
             and entry.claim is None
             and entry.saved
-            and datetime.fromisoformat(job.updated_at) < before
+            and datetime.fromisoformat(job.updated_at) < now - retention
         )
 
     async def quiesce(self) -> None:

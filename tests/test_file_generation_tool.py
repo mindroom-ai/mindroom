@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.providers.openai.media import chat_file_part
+from mindroom.tool_system.agno_toolkits import tool_value
 from mindroom.tools.file_generation import file_generation_tools
 
 if TYPE_CHECKING:
@@ -33,6 +36,26 @@ def test_file_generation_saves_only_inside_the_workspace(tmp_path: Path, monkeyp
     assert outside.read_text(encoding="utf-8") == "untouched\n"
     assert not (workspace / "notes.txt").is_symlink()
     assert (workspace / "notes.txt").read_text(encoding="utf-8") == "generated\n"
+
+
+def test_saved_file_reaches_the_model_as_the_bytes_the_tool_returned(tmp_path: Path) -> None:
+    """Worker code can swap a saved file for a link later, so the model gets the returned bytes, not the path."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("primary only\n", encoding="utf-8")
+    toolkit = file_generation_tools()(tool_output_workspace_root=workspace, save_files=True)
+    result = toolkit.generate_text_file(content="generated\n", filename="notes.txt")
+    (workspace / "notes.txt").unlink()
+    (workspace / "notes.txt").symlink_to(outside)
+
+    file = tool_value(result).files[0]
+    part = chat_file_part(file)
+
+    assert file.filepath is None
+    assert part is not None
+    assert part["file"]["filename"] == "notes.txt"
+    assert base64.b64decode(part["file"]["file_data"].split(",", 1)[1]) == b"generated\n"
 
 
 @pytest.mark.parametrize("output_directory", ["/etc", "../outside"])

@@ -65,7 +65,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
-from tests.approval_continuation_helpers import approval_continuation, carries_approval_receipt
+from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
 from tests.conftest import install_model_providers, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import store_fold
@@ -300,7 +300,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
         ),
     )
-    with approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id):
+    with approval_receipt_context(RECEIPT_CALLS, run_id=continuation.run_id):
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
@@ -319,7 +319,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     else:
         assert "Recovered with knowledge." in result.response_text
         assert len(model.requests) == 1
-        assert carries_approval_receipt(model.requests[0], "Trusted approval receipt.")
+        assert carries_approval_receipt(model.requests[0])
         assert len(builds) == 2
         # The fresh minimal turn is built with the knowledge the recovery resolved.
         assert [source.description for source in builds[-1].surface.knowledge_sources] == ["Saved notes"]
@@ -1093,7 +1093,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 
     with (
         tool_runtime_context(runtime),
-        approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id),
+        approval_receipt_context(RECEIPT_CALLS, run_id=continuation.run_id),
     ):
         if missing_shell_function:
             saved_before = stored_runs()
@@ -1128,7 +1128,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     assert published[0].tool_trace
     assert any("finished" in chunk.content for chunk in published)
     assert len(provider.requests) == (2 if nested == "approval" else 1)
-    assert [carries_approval_receipt(request, "Trusted approval receipt.") for request in provider.requests] == (
+    assert [carries_approval_receipt(request) for request in provider.requests] == (
         [True, False] if nested == "approval" else [True]
     )
     first = provider.requests[0]

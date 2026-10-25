@@ -119,9 +119,9 @@ def leader_loop_hooks(
     jobs = built.leader_jobs
     return _loop_hooks(
         turn,
-        model=built.spec.model,
+        model=built.spec.leader.model,
         entity_name=entity_name,
-        scope_id=built.spec.id,
+        scope_id=built.spec.leader.id,
         is_team=True,
         history_settings=built.history_settings,
         deferred_tools=DeferredTools(),

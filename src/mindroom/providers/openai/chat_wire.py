@@ -15,7 +15,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
-from uuid import uuid4
 
 from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
@@ -23,7 +22,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
-from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
+from mindroom.providers.openai.tool_ids import chat_call_id, reformat_tool_call_ids
 from mindroom.providers.tool_policy import disable_tool_selection, provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -485,11 +484,16 @@ def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> N
             target[key] = value
 
 
-def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Give id-less calls (local servers) a generated id, so their results can reference them."""
+def _completed_tool_calls(calls: list[dict[str, Any]], dialect: ChatDialect) -> list[dict[str, Any]]:
+    """Store each call under the id its later requests send, so its result and approval receipt name that id.
+
+    The ``openai`` dialect's requests rewrite an id outside the Chat rule, so there a call whose server sent such an
+    id, or none, gets a new id that fits the rule. Groq and Cerebras requests send stored ids unchanged, so there a
+    call keeps its server's id and only an id-less call gets a new one.
+    """
     for call in calls:
-        if not call.get("id"):
-            call["id"] = str(uuid4())
+        if dialect == "openai" or not call.get("id"):
+            call["id"] = chat_call_id(call.get("id"))
     return calls
 
 
@@ -609,13 +613,13 @@ class ChatStream:
         calls = [self._calls[index] for index in sorted(self._calls)]
         if self.wire.dialect == "cerebras":
             calls = [call for call in calls if call.get("id") and call["function"].get("name")]
-        self.parts.tool_calls = _completed_tool_calls(calls)
+        self.parts.tool_calls = _completed_tool_calls(calls, self.wire.dialect)
         return self.parts
 
 
 def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]:  # noqa: ANN401 - SDK message model
     if wire.dialect != "cerebras":
-        return _completed_tool_calls([call.model_dump() for call in message.tool_calls or []])
+        return _completed_tool_calls([call.model_dump() for call in message.tool_calls or []], wire.dialect)
     return _completed_tool_calls(
         [
             {
@@ -625,6 +629,7 @@ def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]
             }
             for call in message.tool_calls or []
         ],
+        wire.dialect,
     )
 
 

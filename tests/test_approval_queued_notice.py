@@ -25,6 +25,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus
 from mindroom.mid_turn import QueuedMessage
 from tests.agent_loop.helpers import collect, context, gated, spec
+from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 
 if TYPE_CHECKING:
@@ -102,7 +103,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
         assert paused.status is RunStatus.paused
         assert len(paused.requirements or []) == 2
         assert not executed
-        with approval_receipt_context("Trusted approval receipt.", run_id=paused.run_id):
+        with approval_receipt_context(RECEIPT_CALLS, run_id=paused.run_id):
             _events, resumed = await collect(
                 resume_agent(
                     agent,
@@ -122,7 +123,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
     assert executed == [1, 2]
     [_, request] = model.requests
     messages = request.messages
-    assert any(message.role == "system" and "Trusted approval receipt." in str(message.content) for message in messages)
+    assert any(message.role == "system" and RECEIPT_TEXT in str(message.content) for message in messages)
     assert [message.tool_call_id for message in messages if message.role == "tool"] == ["call-1", "call-2"]
     assert sum(message.content == _NOTICE for message in messages) == 1
     assert messages[-1].content == _NOTICE

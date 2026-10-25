@@ -32,6 +32,7 @@ DROPPED_RUN_KEYS = frozenset(
         "citations",
         "followups",
         "events",
+        "team_name",
     },
 )
 

@@ -30389,34 +30389,6 @@
     "add_instructions": false,
     "functions": [
       {
-        "name": "get_access_token",
-        "description": "Get a valid access token, refreshing if necessary using Zoom's Server-to-Server OAuth.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
-        "stop_after_tool_call": false,
-        "show_result": false
-      },
-      {
         "name": "schedule_meeting",
         "description": "Schedule a new Zoom meeting.",
         "parameters": {

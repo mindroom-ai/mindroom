@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.tools.function import Function
+from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
@@ -422,6 +422,16 @@ async def test_wrapped_tool_executes_async_entrypoint() -> None:
 
     async def add(a: int, b: int) -> str:
         return f"sum={a + b}"
+
+    assert await _wrap(_function(add))({"a": 1, "b": 1}) == "sum=2"
+
+
+@pytest.mark.asyncio
+async def test_wrapped_tool_gives_the_realtime_model_the_text_of_a_tool_result() -> None:
+    """A tool that returns a tool result, as MCP-backed tools do, gives the voice model its text, not its repr."""
+
+    async def add(a: int, b: int) -> ToolResult:
+        return ToolResult(content=f"sum={a + b}")
 
     assert await _wrap(_function(add))({"a": 1, "b": 1}) == "sum=2"
 
