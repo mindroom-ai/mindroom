@@ -28,7 +28,7 @@ from tests.agent_loop.helpers import add, echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
 from tests.providers.golden_support import hide_provider_environment
-from tests.team_runtime.squad import (
+from tests.teams.squad import (
     PANEL,
     SQUAD,
     Store,

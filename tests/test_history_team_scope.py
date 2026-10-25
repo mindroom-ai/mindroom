@@ -47,8 +47,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
-from tests.team_runtime.squad import start_team
 from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, member_approval, squad_turn
+from tests.teams.squad import start_team
 
 if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest

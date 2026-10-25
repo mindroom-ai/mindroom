@@ -2,7 +2,7 @@
 
 Helper call sites, Matrix replies, and voice calls send their requests through the owned provider layer, so one
 recorder compares every request they send, byte for byte, with the golden, beside whatever a voice call exports to
-the realtime model. The team goldens are compared in ``tests/team_runtime/test_prompt_parity.py``.
+the realtime model. The team goldens are compared in ``tests/teams/test_prompt_parity.py``.
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ TEAM = [name for name in GOLDENS if name.startswith("team_")]
 RECORDED = [name for name in GOLDENS if name not in TEAM]
 
 
-def test_every_golden_is_compared_here_or_by_the_team_runtime() -> None:
-    """Each prompt golden is compared by this module or by the team runtime."""
+def test_every_golden_is_compared_here_or_by_the_team_prompt_tests() -> None:
+    """Each prompt golden is compared by this module or by ``tests/teams/test_prompt_parity.py``."""
     assert set(GOLDENS) == set(SCENARIOS)
     assert sorted({*RECORDED, *TEAM}) == GOLDENS
 

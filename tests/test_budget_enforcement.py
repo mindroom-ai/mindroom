@@ -44,7 +44,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
-from tests.team_runtime.squad import built_team, team_spec
+from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
 from tests.test_dynamic_workflow_subagents import _config as _subagent_workflow_config

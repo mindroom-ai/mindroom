@@ -18,7 +18,7 @@ from mindroom.teams.members import BuiltTeam
 from mindroom.tool_jobs.execution import JobActor
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
-from tests.team_runtime.squad import team_spec
+from tests.teams.squad import team_spec
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

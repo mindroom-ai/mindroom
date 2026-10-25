@@ -22,7 +22,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.approval_continuation_helpers import receipt_call_ids
 from tests.approval_resume_helpers import AGENT_RESUMES, ROOM, CodeResume, resume_case, setup_case, setup_resume
-from tests.team_runtime.squad import comparable, golden_run, scripted
+from tests.teams.squad import comparable, golden_run, scripted
 
 if TYPE_CHECKING:
     from pathlib import Path

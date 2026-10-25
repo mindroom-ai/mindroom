@@ -29,7 +29,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, approval_calls_for, approval_executor, resume
 from tests.fakes.scripted_model import ScriptStep, answer, usage
-from tests.team_runtime.squad import STORAGE, scripted
+from tests.teams.squad import STORAGE, scripted
 
 if TYPE_CHECKING:
     from pathlib import Path

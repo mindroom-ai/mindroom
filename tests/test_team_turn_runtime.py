@@ -69,7 +69,6 @@ from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.scripted_agent_helpers import registered_toolkit
-from tests.team_runtime.squad import member as squad_member
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
@@ -85,6 +84,7 @@ from tests.team_turn_helpers import (
     rendered,
     squad_turn,
 )
+from tests.teams.squad import member as squad_member
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 

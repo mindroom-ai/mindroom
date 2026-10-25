@@ -17,7 +17,7 @@ from mindroom.teams.delegate_tools import (
 )
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
-from tests.team_runtime.squad import member, scripted
+from tests.teams.squad import member, scripted
 
 if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMember

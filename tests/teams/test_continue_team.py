@@ -23,7 +23,7 @@ from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
-from tests.team_runtime.squad import (
+from tests.teams.squad import (
     PROVIDER,
     SQUAD,
     SQUAD_APPROVED,
