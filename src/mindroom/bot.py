@@ -501,7 +501,7 @@ class AgentBot:
                 ),
             )
 
-        self._personal_agent_provisioning_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._personal_agents_provisioning: set[tuple[str, str]] = set()
         self.personal_rooms = PersonalRoomService(
             self.agent_name,
             self._runtime_view,
@@ -2796,8 +2796,12 @@ class AgentBot:
         client = self.client
         assert client is not None
         # A live join and a reconciliation pass can both reach one user; only one may register the account.
-        lock = self._personal_agent_provisioning_locks.setdefault((template, user_id), asyncio.Lock())
-        async with lock:
+        # A second call returns at once, so the caller treats the user as pending and retries without waiting.
+        key = (template, user_id)
+        if key in self._personal_agents_provisioning:
+            return
+        self._personal_agents_provisioning.add(key)
+        try:
             profile = await client.get_displayname(user_id)
             _, changed = await provision_personal_agent(
                 self.config,
@@ -2810,6 +2814,8 @@ class AgentBot:
                 source_user_id=source_user_id,
                 source_room_id=source_room_id,
             )
+        finally:
+            self._personal_agents_provisioning.discard(key)
         # This runs only while the live config lacks the agent, so an existing entry still needs a reload,
         # but re-requesting a queued one would restart its debounce and response drain on every retry.
         orchestrator = self.orchestrator
