@@ -348,7 +348,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             runtime,
             runtime_paths=paths,
             config=config,
-            orchestrator=SimpleNamespace(agent_cli_registry=registry),
+            orchestrator=SimpleNamespace(agent_cli_registry=registry, budgets=None),
             cli_approval_handler=approve,
         )
         from mindroom.api.main import app, initialize_api_app  # noqa: PLC0415 - resolve runtime before app setup
@@ -445,9 +445,10 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             "approved:exact value",
             "child done",
             "same-agent persistent note",
-            "image_url",
         ):
             assert expected in projection, expected
+        # The provider layer, not the loop, serializes images, so the loop's request carries them as `Message.images`.
+        assert any(message.images and message.files for message in provider.requests[3].messages)
         results["steps"].extend(
             [
                 "minimal Bash-only requests",
@@ -501,7 +502,6 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         failures.append(exc)
     finally:
         for operation in (
-            storage.close if "storage" in locals() else lambda: None,
             shutdown_primary_worker_manager,
             patch.undo,
             clear_api_server_address,
