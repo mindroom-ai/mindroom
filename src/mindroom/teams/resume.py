@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom import ai_runtime
@@ -21,7 +22,7 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import member_delegation_card, pending_call_slot
+from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
@@ -188,7 +189,10 @@ class TeamResume:
         for requirement in paused.requirements or ():
             key = (requirement.member_agent_id, requirement.tool_execution.tool_call_id)
             if requirement.member_run_id is not None and key in decided:
-                add_approval_receipt_reader(requirement.member_run_id)
+                add_approval_receipt_reader(
+                    requirement.member_run_id,
+                    partial(member_call_id, requirement.member_agent_id),
+                )
         session = self.storage.session
         # The leader's resume request: its stored system message, the summary and history ``plan`` replays, the rest.
         history, summary = replayed_history(session, self.storage.scope, self.built.history_settings, self.plan)

@@ -1349,10 +1349,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.llm",
 ]
-visibility = [
-    "mindroom.loop_hooks",
-    "mindroom.response_runner",
-]
+visibility = ["mindroom.loop_hooks"]
 
 [[modules]]
 path = "mindroom.approval.receipt_readers"
@@ -3183,7 +3180,6 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval.execution",
-    "mindroom.approval.receipt",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.response",
     "mindroom.automations.steps",

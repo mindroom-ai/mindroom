@@ -37,7 +37,7 @@ from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt_readers as approval_receipt
 from mindroom.approval.auto_approve_windows import start_auto_approve
-from mindroom.approval.receipt import messages_with_approval_receipt
+from mindroom.approval.receipt import build_approval_receipt, messages_with_approval_receipt
 from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
@@ -4806,10 +4806,10 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         receipt = approval_receipt._context.get()
         assert receipt is not None
         # The paused run the continuation names reads the receipt.
-        assert receipt.readers == {continuation.run_id}
+        assert set(receipt.readers) == {continuation.run_id}
         projected = messages_with_approval_receipt(
             [LoopMessage(role="system", content="base rules"), LoopMessage(role="tool", content="published")],
-            receipt.receipt_text,
+            build_approval_receipt(receipt.readers[continuation.run_id]),
             after_response_id=False,
         )
         model_messages.extend((message.role, message.content) for message in projected)
@@ -4907,10 +4907,12 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
     assert second is not None
     assert (second.state, second.generation, second.calls) == ("ready", 1, second_calls)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    receipts: list[str | None] = []
+    receipts: list[str] = []
 
     async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
-        receipts.append(take_unsent_receipt(second.run_id))
+        receipt_calls = take_unsent_receipt(second.run_id)
+        assert receipt_calls is not None
+        receipts.append(build_approval_receipt(receipt_calls))
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with (

@@ -28,7 +28,13 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, context, echo, gated, spec, toolkit
-from tests.approval_continuation_helpers import carries_approval_receipt
+from tests.approval_continuation_helpers import (
+    RECEIPT_CALLS,
+    RECEIPT_TEXT,
+    carries_approval_receipt,
+    receipt_call_ids,
+    request_call_ids,
+)
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import (
     ScriptedAgents,
@@ -218,19 +224,19 @@ def test_approval_receipt_shows_provider_and_card_call_ids_whole_up_to_its_lengt
 
 
 def test_approval_receipt_rejects_unsettled_calls() -> None:
-    """Continuation execution must fail closed before rendering pending state as trusted provenance."""
-    with pytest.raises(ValueError, match="pending approval call 'call-pending'"):
-        build_approval_receipt(
-            (
-                ApprovalCall(
-                    tool_call_id="call-pending",
-                    tool_name="publish_report",
-                    invoking_agent="writer",
-                    expires_at_ns=1,
-                    human_approval_required=True,
-                ),
-            ),
-        )
+    """Continuation execution must fail closed, before anything runs, rather than record pending state as provenance."""
+    pending = ApprovalCall(
+        tool_call_id="call-pending",
+        tool_name="publish_report",
+        invoking_agent="writer",
+        expires_at_ns=1,
+        human_approval_required=True,
+    )
+    with (
+        pytest.raises(ValueError, match="pending approval call 'call-pending'"),
+        approval_receipt_context((*RECEIPT_CALLS, pending), run_id="run-1"),
+    ):
+        pytest.fail("A receipt with a pending call was bound")
 
 
 def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None:
@@ -293,7 +299,7 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
     model = ScriptedModel([calls(tool_call("echo", "call-1", text="x")), answer("first"), answer("second")])
     hook = approval_receipt_hook(Capabilities())
 
-    with approval_receipt_context("trusted approval receipt", run_id="run-1"):
+    with approval_receipt_context(RECEIPT_CALLS, run_id="run-1"):
         _, first = await collect(
             run_agent(
                 spec(model, toolkit(echo)),
@@ -316,13 +322,11 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
         )
 
     assert [request.messages[0].content for request in model.requests] == [
-        "You are Code.\n\ntrusted approval receipt",
+        f"You are Code.\n\n{RECEIPT_TEXT}",
         "You are Code.",
         "You are Code.",
     ]
-    assert all(
-        "trusted approval receipt" not in str(message.content) for message in [*first.messages, *second.messages]
-    )
+    assert all(RECEIPT_TEXT not in str(message.content) for message in [*first.messages, *second.messages])
 
 
 def _chat_echo_call_reply(server_id: str | None) -> dict[str, Any]:
@@ -356,7 +360,8 @@ async def test_a_chat_resume_sends_the_call_under_the_id_its_receipt_names(
 ) -> None:
     """A Chat server's call reaches the model under the receipt's id, though the server omitted it or broke Chat's rule.
 
-    Chat requests send only ``call_`` ids of at most 40 characters, so the server's own id cannot be the one named.
+    Requests of the ``openai`` Chat dialect, which llama.cpp uses, send only ``call_`` ids of at most 40 characters,
+    so the server's own id cannot be the one named.
     """
     built = golden_provider(
         {
@@ -394,7 +399,7 @@ async def test_a_chat_resume_sends_the_call_under_the_id_its_receipt_names(
         arguments_digest=approval_arguments_digest({"text": "x"}),
     )
 
-    with approval_receipt_context(build_approval_receipt((approval,)), run_id=paused.run_id):
+    with approval_receipt_context((approval,), run_id=paused.run_id):
         await collect(
             resume_agent(
                 agent,
@@ -490,7 +495,7 @@ async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receip
         assert isinstance(paused, PausedAttempt)
         approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
         decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
-        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+        with approval_receipt_context(decided, run_id=paused.run_id):
             result = await resume(
                 approval_executor(config, paths),
                 paused,
@@ -531,7 +536,7 @@ async def test_an_approved_child_and_the_parent_it_answers_each_read_the_receipt
         assert isinstance(paused, PausedAttempt)
         approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
         decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
-        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+        with approval_receipt_context(decided, run_id=paused.run_id):
             result = await resume(
                 approval_executor(config, paths),
                 paused,
@@ -545,6 +550,10 @@ async def test_an_approved_child_and_the_parent_it_answers_each_read_the_receipt
     # Each model's fresh request, then its first request after the approval.
     assert _receipt_flags(code) == [False, True]
     assert _receipt_flags(leader) == [False, True]
+    # The card names the child's call ``<delegation-id>:call-1``; the child reads it under its own id.
+    assert [call.tool_call_id.rpartition(":")[2] for call in approvals] == ["call-1"]
+    assert receipt_call_ids(code.requests[1]) == ["call-1"]
+    assert request_call_ids(code.requests[1]) == ["call-1"]
 
 
 @pytest.mark.asyncio
@@ -579,7 +588,7 @@ async def test_every_run_between_the_card_and_a_nested_child_s_approved_call_rea
         assert isinstance(paused, PausedAttempt)
         approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
         decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
-        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+        with approval_receipt_context(decided, run_id=paused.run_id):
             result = await resume(
                 approval_executor(config, paths),
                 paused,
@@ -593,6 +602,10 @@ async def test_every_run_between_the_card_and_a_nested_child_s_approved_call_rea
     assert len(report.written) == 1
     # Each model's fresh request, then its first request after the approval.
     assert _receipt_flags(helper) == [False, True]
+    # The card names the helper's call ``<delegation-id>:<delegation-id>:call-1``; the helper reads it under its own id.
+    assert [call.tool_call_id.count(":") for call in approvals] == [2]
+    assert receipt_call_ids(helper.requests[1]) == ["call-1"]
+    assert request_call_ids(helper.requests[1]) == ["call-1"]
     assert _receipt_flags(code) == [False, True]
     assert _receipt_flags(leader) == [False, True]
 
@@ -628,7 +641,7 @@ async def test_a_fresh_turn_the_receipt_names_sends_it_once_across_its_delegatio
 
     with (
         registered_report_tool(),
-        approval_receipt_context("Trusted approval receipt.", run_id="turn-run"),
+        approval_receipt_context(RECEIPT_CALLS, run_id="turn-run"),
         tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
     ):
         chunks = [
@@ -670,7 +683,7 @@ async def test_a_background_job_an_approval_continuation_starts_never_reads_its_
         return BackgroundOutcome("completed", str(record.content))
 
     try:
-        with approval_receipt_context("Trusted approval receipt.", run_id="turn-run"):
+        with approval_receipt_context(RECEIPT_CALLS, run_id="turn-run"):
             job = await start_job(
                 runtime,
                 "job-1",

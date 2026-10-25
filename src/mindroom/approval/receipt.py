@@ -40,12 +40,9 @@ def _receipt_call_label(call: ApprovalCall) -> str:
 
 
 def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
-    """Render trusted model context for the decided ``calls`` of the response's approvals so far, in pause order."""
+    """Render trusted model context for decided ``calls``, as one reader sees what ``approval_receipt_context`` binds."""
     lines = [_APPROVAL_RECEIPT_HEADER]
     for call in calls:
-        if call.decision is None:
-            msg = f"Cannot build trusted receipt for pending approval call {call.tool_call_id!r}"
-            raise ValueError(msg)
         call_label = _receipt_call_label(call)
         if call.decision is ContinuationDecision.APPROVED:
             if call.human_approval_required is True:
@@ -126,18 +123,18 @@ def messages_with_approval_receipt(
 def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
     """Return the pre-request hook that sends the bound receipt with a reader run's first request, once per run.
 
-    The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt. It is projected
-    into the request only, so no run's history holds it.
+    The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt, and under which
+    ids it names their calls. It is projected into the request only, so no run's history holds it.
     """
 
     async def hook(state: LoopState) -> RequestDecision:
-        receipt_text = take_unsent_receipt(state.run.run_id)
-        if receipt_text is None:
+        calls = take_unsent_receipt(state.run.run_id)
+        if calls is None:
             return SendRequest()
         return SendRequest(
             messages=messages_with_approval_receipt(
                 state.messages,
-                receipt_text,
+                build_approval_receipt(calls),
                 after_response_id=capabilities.continues_stored_responses,
             ),
         )
