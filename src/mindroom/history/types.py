@@ -121,6 +121,11 @@ class ScopeSummary:
     updated_at: datetime
 
 
+def replayed_summary_text(text: str | None) -> str | None:
+    """Return a stored summary as replay reads it: stripped, or None when it is missing or blank."""
+    return (text or "").strip() or None
+
+
 @dataclass(frozen=True)
 class HistoryScopeState:
     """Persisted compaction control state stored in session metadata.

@@ -40,7 +40,7 @@ from mindroom.constants import (
 )
 from mindroom.history import summary_rows
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.types import HistoryScope, HistoryScopeState, replayed_summary_text
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -400,11 +400,11 @@ def _latest_summary_row(
     session: ConversationSession,
     scope: HistoryScope,
 ) -> tuple[int | None, str | None]:
-    """Return the id of the scope's latest summary row and the summary it replays, or ``None`` for each it lacks."""
+    """Return the id of the scope's latest summary row and its text as replay reads it, or ``None`` for each it lacks."""
     latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
     if latest is None:
         return None, None
-    return latest.id, (latest.summary or "").strip() or None
+    return latest.id, replayed_summary_text(latest.summary)
 
 
 @dataclass(frozen=True)

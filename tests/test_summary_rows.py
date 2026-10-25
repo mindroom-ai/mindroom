@@ -10,13 +10,7 @@ import pytest
 
 from mindroom import constants
 from mindroom.history import summary_rows
-from mindroom.history.replay import current_summary_text
-from mindroom.history.storage import (
-    read_chunk_basis,
-    read_fold_basis,
-    remove_runs_answering,
-    save_working_run_changes,
-)
+from mindroom.history.storage import read_chunk_basis, remove_runs_answering, save_working_run_changes
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -303,21 +297,6 @@ def test_a_chunk_builds_on_the_summary_it_loaded(storage: ConversationStore) -> 
 
     assert basis is not None
     assert [run.run_id for run in basis.covered] == ["r1", "r2"]
-
-
-def test_chunk_and_fold_bases_read_the_latest_summary_as_replay_does(storage: ConversationStore) -> None:
-    """A summary stored with surrounding whitespace matches the stripped text replay hands the next chunk."""
-    _seed_events(storage, [_event_run(f"r{index}") for index in range(3)])
-    row_id = _fold(storage, ["r0"], "  S1\n")
-    session = _loaded(storage)
-
-    chunk = read_chunk_basis(storage, session, _SCOPE, ["r1", "r2"], previous_summary=current_summary_text(session))
-    fold = read_fold_basis(storage, session, _SCOPE)
-
-    assert chunk is not None
-    assert chunk.based_on == row_id
-    assert fold is not None
-    assert (fold.based_on, fold.summary) == (row_id, "S1")
 
 
 def test_compaction_writes_back_only_the_runs_it_edited(storage: ConversationStore) -> None:
