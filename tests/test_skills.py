@@ -89,14 +89,16 @@ def _build_skills(
     """Build the toolkit with ``roots`` as the default skill roots, only ``env`` in the environment, and stored keys.
 
     ``credentials`` names the keys a stored credential carries; without ``roots`` the default roots stay as they are.
+    The agent has no workspace unless ``kwargs`` names its ``workspace_root``.
     """
     runtime_paths = replace(runtime_paths, process_env=dict(env or {}), env_file_values={})
     if credentials:
         get_runtime_credentials_manager(runtime_paths).save_credentials("skill_test", dict.fromkeys(credentials, "set"))
+    options = {"workspace_root": None} | kwargs
     if roots is None:
-        return build_skills_toolkit(agent_name, config, runtime_paths, **kwargs)
+        return build_skills_toolkit(agent_name, config, runtime_paths, **options)
     with patch.object(skills_module, "_get_default_skill_roots", return_value=list(roots)):
-        return build_skills_toolkit(agent_name, config, runtime_paths, **kwargs)
+        return build_skills_toolkit(agent_name, config, runtime_paths, **options)
 
 
 def _base_config(skills: list[str]) -> Config:

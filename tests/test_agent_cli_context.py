@@ -41,6 +41,8 @@ def _minimal_build(runtime: ToolRuntimeContext, *, tools: tuple[str, ...] = ("sh
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
     )
 
 

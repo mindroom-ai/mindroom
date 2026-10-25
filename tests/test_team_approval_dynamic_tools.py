@@ -107,6 +107,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
                 target=target,
                 tool_trace_collector=[],
                 progress=progress,
+                cli_approval_handler=None,
             )
     assert isinstance(result, CompletedApprovalRun)
     assert continued.await_args.kwargs["progress"] is progress
@@ -287,5 +288,5 @@ async def _exercise_team_member_assembly(
             prior_tool_trace=(),
             prior_presentation_state=None,
             show_tool_calls=True,
-            tool_trace_collector=None,
+            tool_trace_collector=[],
         )

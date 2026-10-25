@@ -119,10 +119,10 @@ async def suggest_responder_for_message(
     available_entities: list[MatrixID],
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_context: Sequence[ResolvedVisibleMessage] | None = None,
+    thread_context: Sequence[ResolvedVisibleMessage],
     *,
-    room_id: str | None = None,
-    thread_id: str | None = None,
+    room_id: str,
+    thread_id: str | None,
 ) -> str | None:
     """Use AI to suggest which configured responder should answer a message.
 

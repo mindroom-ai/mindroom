@@ -225,19 +225,19 @@ def decide_team_formation(
     room: nio.MatrixRoom | None,
     runtime_paths: RuntimePaths,
     config: Config,
-    is_dm_room: bool = False,
-    is_thread: bool = False,
+    *,
+    is_dm_room: bool,
+    is_thread: bool,
     available_responders_in_room: list[MatrixID] | None = None,
-    materializable_agent_names: set[str] | None = None,
-    allow_explicit_private_agents: bool = False,
+    materializable_agent_names: set[str] | None,
 ) -> TeamResolution:
     """Determine if a team should form, purely from mention, thread, and room context.
 
     ``available_responders_in_room`` are the room's responders the sender may see and ``materializable_agent_names``
-    the live agents that can answer now, each when known; ``allow_explicit_private_agents`` lets explicitly tagged
-    requester-private agents join. A team carries a heuristic provisional mode: COORDINATE when agents are explicitly
-    tagged (they likely have different roles), COLLABORATE when agents come from thread history (likely discussing the
-    same topic). The execution layer may refine it with ``select_ad_hoc_team_mode``.
+    the live agents that can answer now, each when known; explicitly tagged requester-private agents may join. A team
+    carries a heuristic provisional mode: COORDINATE when agents are explicitly tagged (they likely have different
+    roles), COLLABORATE when agents come from thread history (likely discussing the same topic). The execution layer
+    may refine it with ``select_ad_hoc_team_mode``.
     """
     team_request = _select_team_request(
         tagged_agents,
@@ -253,7 +253,7 @@ def decide_team_formation(
     if team_request is None:
         return TeamResolution.none()
 
-    allow_direct_private_agents = allow_explicit_private_agents and team_request.intent is TeamIntent.EXPLICIT_MEMBERS
+    allow_direct_private_agents = team_request.intent is TeamIntent.EXPLICIT_MEMBERS
     materializable_agent_names = resolve_team_materializable_agent_names(
         config,
         materializable_agent_names,

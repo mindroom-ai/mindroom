@@ -45,7 +45,7 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, seed_session
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call, usage
 from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
 from tests.team_runtime.squad import start_team
 from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, member_approval, squad_turn
@@ -175,6 +175,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
             prepared_scope_history=prepared_scope_history,
             config=config,
             static_prompt_tokens=expected_static_prompt_tokens,
+            pipeline_timing=None,
         )
 
     assert prepared.replays_persisted_history is True
@@ -442,7 +443,7 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
     ) as mock_prepare:
         await prepare_bound_scope_history(
             member_names=["private_worker", "shared"],
-            model=None,
+            model=estimate_only_model(),
             runtime_paths=runtime_paths,
             config=config,
             history_settings=config.resolve_entity(None).history_settings,

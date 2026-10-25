@@ -1814,6 +1814,8 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             runtime_paths_for(config),
             execution_identity=execution_identity,
             hook_registry=bot.hook_registry,
+            knowledge=None,
+            active_model_name=None,
         )
         echo = prepare_run_tools(build.spec).functions["echo"]
 
@@ -2050,6 +2052,8 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             runtime_paths_for(config),
             execution_identity=None,
             hook_registry=registry,
+            knowledge=None,
+            active_model_name=None,
         )
 
         echo = prepare_run_tools(build.spec).functions["echo"]

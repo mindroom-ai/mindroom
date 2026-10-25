@@ -26,7 +26,7 @@ def ad_hoc_team_scope_id(
     member_names: Iterable[str | None],
     agent_configs: Mapping[str, AgentConfig],
     *,
-    requester_user_id: str | None = None,
+    requester_user_id: str | None,
 ) -> str | None:
     """Return the stable history scope id for one exact ad hoc team, partitioned by requester when a member is private."""
     stable_member_names = tuple(sorted(name for name in member_names if name))

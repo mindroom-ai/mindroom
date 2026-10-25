@@ -293,6 +293,8 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
             runtime.runtime_paths,
             build_execution_identity_from_runtime_context(runtime),
             agent_mode="minimal",
+            knowledge=None,
+            active_model_name=None,
         )
         session = ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper")
         with tool_runtime_context(runtime):
@@ -349,7 +351,15 @@ def test_the_primary_neither_lists_nor_connects_a_toolkit_a_worker_runs(tmp_path
         )
         persist_entity_accounts(config, runtime_paths, usernames={"router": "router", "worker": "worker"})
         with capture_logs() as logs:
-            build = create_agent("worker", config, runtime_paths, execution_identity=None, persist_runtime_state=False)
+            build = create_agent(
+                "worker",
+                config,
+                runtime_paths,
+                execution_identity=None,
+                persist_runtime_state=False,
+                knowledge=None,
+                active_model_name=None,
+            )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
     assert "server" not in toolkits

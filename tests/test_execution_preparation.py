@@ -33,7 +33,6 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import current_entity_id
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
-    _build_unseen_context_messages,
     _fallback_static_token_budget,
     _messages_with_current_prompt,
     _prepare_bound_team_execution_context,
@@ -61,7 +60,12 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
-from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message
+from tests.conftest import (
+    bind_runtime_paths,
+    build_unseen_context_messages_for_test,
+    make_turn_context,
+    make_visible_message,
+)
 from tests.fakes.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
@@ -109,7 +113,14 @@ def _bound_agent_config(tmp_path: Path, *, tools: tuple[str, ...] = ()) -> tuple
 
 def _build(config: Config, runtime_paths: RuntimePaths) -> AgentBuild:
     """Build the test agent as a reply does."""
-    return create_agent("test_agent", config, runtime_paths, execution_identity=None)
+    return create_agent(
+        "test_agent",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
 
 async def _prepare_agent_execution_context_for_test(
@@ -897,7 +908,7 @@ async def test_prepare_agent_execution_context_names_the_current_prompts_sender_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The current prompt carries the sender, event id, and timestamp the turn hands in, as its history messages do."""
+    """The current prompt carries the sender, event id, and timestamp the turn hands in."""
     config, runtime_paths = _bound_agent_config(tmp_path)
     monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
     monkeypatch.setattr(
@@ -1653,7 +1664,7 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "What happened?",
         thread_history,
         seen_event_ids=set(),
@@ -1676,7 +1687,7 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
 
 @pytest.mark.parametrize("relayed_sender", ["You (interrupted reply draft)", "You (partial reply)"])
 def test_unseen_context_names_a_relayed_sender_that_reads_like_a_draft_label_as_written(relayed_sender: str) -> None:
-    """Only the agent's own in-progress draft renders under its account; a relayed sender keeps the name it carries."""
+    """A relayed sender named like a draft label keeps that name instead of rendering under the agent's account."""
     thread_history = [
         make_visible_message(
             sender="@mindroom_code:localhost",
@@ -1687,7 +1698,7 @@ def test_unseen_context_names_a_relayed_sender_that_reads_like_a_draft_label_as_
         make_visible_message(sender="@alice:localhost", body="What happened?", event_id="$question"),
     ]
 
-    turn, _unseen_event_ids = _build_unseen_context_messages(
+    turn, _unseen_event_ids = build_unseen_context_messages_for_test(
         "What happened?",
         thread_history,
         seen_event_ids=set(),
@@ -1728,7 +1739,7 @@ def test_unseen_context_stops_at_current_thread_event() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "Current message",
         thread_history,
         seen_event_ids=set(),
@@ -1766,7 +1777,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "What happened?",
         thread_history,
         seen_event_ids=set(),
@@ -1798,7 +1809,7 @@ def test_unseen_context_keeps_other_agent_message_tagged() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "What did the agents find?",
         thread_history,
         seen_event_ids=set(),
@@ -1834,7 +1845,7 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "What next?",
         thread_history,
         seen_event_ids={"$answer"},
@@ -1891,7 +1902,7 @@ def test_unseen_context_never_presents_own_hook_output_as_assistant_turns(source
         make_visible_message(sender="@alice:localhost", body="Status?", event_id="$question"),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "Status?",
         thread_history,
         seen_event_ids={"$ask", "$answer"},
@@ -1951,7 +1962,7 @@ def test_unseen_context_labels_relayed_hook_prompt_under_its_requester() -> None
         make_visible_message(sender="@alice:localhost", body="Thanks", event_id="$question"),
     ]
 
-    turn, _ = _build_unseen_context_messages(
+    turn, _ = build_unseen_context_messages_for_test(
         "Thanks",
         thread_history,
         seen_event_ids=set(),

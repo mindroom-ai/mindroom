@@ -103,7 +103,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
                 tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)),
                 tool_execution_identity(owner),
             ):
-                build = create_agent("lead", config, paths, owner, knowledge=knowledge)
+                build = create_agent("lead", config, paths, owner, knowledge=knowledge, active_model_name=None)
                 record = await run_built_turn(
                     build,
                     config=config,

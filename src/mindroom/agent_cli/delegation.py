@@ -49,7 +49,7 @@ async def advance_cli_delegation(
     decisions: dict[str, bool] | None,
     denial_reasons: dict[str, str | None] | None,
     approval_calls: Sequence[ApprovalCall],
-    on_event: Callable[[object], None] | None,
+    on_event: Callable[[object], None],
 ) -> PausedAttempt | ToolExecution:
     """Advance one child, persisting state on the real parent run without resuming it."""
     from mindroom.ai import run_delegated_child_response  # noqa: PLC0415 - envelope creation cycle

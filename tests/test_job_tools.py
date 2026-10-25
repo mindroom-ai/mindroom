@@ -149,7 +149,15 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     try:
-        build = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
+        build = create_agent(
+            "leader",
+            config,
+            paths,
+            execution_identity=owner,
+            persist_runtime_state=False,
+            knowledge=None,
+            active_model_name=None,
+        )
         names = [function.name for toolkit in build.spec.toolkits for function in toolkit.functions]
         assert names.count("job") == 1
         assert build.tool_jobs is not None

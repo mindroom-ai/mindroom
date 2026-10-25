@@ -62,6 +62,7 @@ def _build(
             AGENT_NAME,
             config,
             runtime_paths,
+            workspace_root=None,
             output_file_policy=ToolOutputFilePolicy(workspace_root=_workspace(tmp_path)) if output_files else None,
         )
     assert toolkit is not None
@@ -336,7 +337,7 @@ async def test_workspace_loads_record_usage_and_configured_skills_do_not(tmp_pat
 
 
 def test_a_workspace_skill_wins_its_name_over_a_default_root_skill(tmp_path: Path) -> None:
-    """The workspace loads after the default roots, so its skill of a shared name is the one offered."""
+    """Of two skills that share a name, the workspace's is the one offered, not the default root's."""
     _write_skill(_workspace(tmp_path) / "skills", "alpha", "Workspace alpha")
     _write_skill(tmp_path / "global", "alpha", "Default alpha")
 

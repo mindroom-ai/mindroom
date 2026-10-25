@@ -1478,7 +1478,7 @@ def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:
 
 def _provider_env_template(  # noqa: PLR0911
     provider_preset: _ProviderPreset,
-    provider_api_key: str | None = None,
+    provider_api_key: str | None,
 ) -> str:
     """Return the provider-specific section of the starter .env file.
 

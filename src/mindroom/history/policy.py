@@ -90,7 +90,7 @@ def classify_compaction_decision(  # noqa: PLR0911
     *,
     plan: ResolvedHistoryExecutionPlan,
     force_compact_before_next_run: bool,
-    current_history_tokens: int | None,
+    current_history_tokens: int,
     allow_native_compaction: bool,
     summary_tokens: int,
 ) -> CompactionDecision:
@@ -113,13 +113,16 @@ def classify_compaction_decision(  # noqa: PLR0911
     if force_compact_before_next_run:
         if not plan.text_compaction_available:
             return decision(mode="none", reason="forced_unavailable")
-        fitted_tokens = 0 if current_history_tokens is None else min(current_history_tokens, hard_budget or 0)
-        return decision(mode="required", reason="forced", fitted_replay_tokens=fitted_tokens)
+        return decision(
+            mode="required",
+            reason="forced",
+            fitted_replay_tokens=min(current_history_tokens, hard_budget or 0),
+        )
     if not plan.authored_compaction_enabled:
         return decision(mode="none", reason="auto_disabled")
     if not plan.text_compaction_available:
         return decision(mode="none", reason="compaction_unavailable")
-    if current_history_tokens is None or trigger_budget is None:
+    if trigger_budget is None:
         return decision(mode="none", reason="missing_budget")
     if current_history_tokens <= trigger_budget:
         return decision(mode="none", reason="under_trigger", fitted_replay_tokens=current_history_tokens)

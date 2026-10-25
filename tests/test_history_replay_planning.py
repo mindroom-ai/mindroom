@@ -1238,7 +1238,7 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=True,
-        current_history_tokens=None,
+        current_history_tokens=5_000,
         allow_native_compaction=True,
         summary_tokens=0,
     )

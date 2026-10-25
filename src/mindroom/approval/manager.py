@@ -290,7 +290,7 @@ class ApprovalManager:
         continuation_id: str,
         continuation_generation: int,
         entity_name: str,
-        response_event_id: str | None,
+        response_event_id: str,
         tool_call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
@@ -298,7 +298,7 @@ class ApprovalManager:
         requester_id: str,
         approver_user_id: str,
         expires_at_ns: int,
-        agent_name: str | None,
+        agent_name: str,
         thread_id: str | None,
         grant_operation: ApprovalOperation | None,
     ) -> ApprovalCardReservation | None:

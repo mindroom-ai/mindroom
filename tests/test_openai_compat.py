@@ -469,6 +469,8 @@ def test_openai_compatible_agent_hides_approval_gated_tools(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -510,6 +512,8 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path, m
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -567,6 +571,8 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
@@ -619,6 +625,8 @@ def test_openai_compatible_agent_hides_script_gated_tools(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -1825,6 +1833,7 @@ class TestStreamingCompletion:
             ],
         )
 
+        runtime_paths = _runtime_paths()
         with (
             patch("mindroom.providers.registry._build_adapter", return_value=model),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
@@ -1834,11 +1843,20 @@ class TestStreamingCompletion:
                 "Hello",
                 "session-123",
                 test_config,
-                _runtime_paths(),
+                runtime_paths,
                 None,
                 model_name="default",
                 knowledge=None,
-                execution_identity=None,
+                execution_identity=build_tool_execution_identity(
+                    channel="openai_compat",
+                    agent_name="general",
+                    session_id="session-123",
+                    runtime_paths=runtime_paths,
+                    requester_id=None,
+                    room_id=None,
+                    thread_id=None,
+                    resolved_thread_id=None,
+                ),
                 refresh_scheduler=None,
             )
 
@@ -4650,7 +4668,7 @@ class TestTeamCompletion:
             execution_identity=None,
             scope_context=scope_context,
             models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
-            unavailable_bases=None,
+            unavailable_bases={},
             refresh_scheduler=None,
         )
 
@@ -4696,7 +4714,7 @@ class TestTeamCompletion:
             execution_identity=execution_identity,
             scope_context=scope_context,
             models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
-            unavailable_bases=None,
+            unavailable_bases={},
             refresh_scheduler=None,
         )
 
@@ -4743,7 +4761,7 @@ class TestTeamCompletion:
                 execution_identity=None,
                 scope_context=scope_context,
                 models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
-                unavailable_bases=None,
+                unavailable_bases={},
                 refresh_scheduler=None,
             )
 
@@ -4801,7 +4819,7 @@ class TestTeamCompletion:
                 execution_identity=None,
                 scope_context=scope_context,
                 models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
-                unavailable_bases=None,
+                unavailable_bases={},
                 refresh_scheduler=None,
             )
 

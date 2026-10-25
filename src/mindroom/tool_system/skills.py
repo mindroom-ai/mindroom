@@ -451,7 +451,7 @@ def build_skills_toolkit(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Path | None,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: Collection[str] | None = None,
     refused: list[RefusedWorkspaceSkill] | None = None,

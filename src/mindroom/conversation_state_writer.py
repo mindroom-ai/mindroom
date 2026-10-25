@@ -50,7 +50,7 @@ class ConversationStateWriter:
         self,
         team_agents: list[MatrixID],
         *,
-        requester_user_id: str | None = None,
+        requester_user_id: str | None,
     ) -> HistoryScope:
         """Return the persisted team-history scope for one team response."""
         config = self.deps.runtime.config

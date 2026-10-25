@@ -58,7 +58,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
-from tests.fakes.scripted_model import ScriptedModel
+from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
@@ -860,7 +860,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
         prepared = await prepare_scope_history(
             compaction_lifecycle=RecordingCompactionLifecycle(),
-            model=None,
+            model=estimate_only_model(),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
             runtime_paths=runtime_paths,
@@ -953,7 +953,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            model=_native_model() if native_model else None,
+            model=_native_model() if native_model else estimate_only_model(),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
             runtime_paths=runtime_paths,

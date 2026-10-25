@@ -686,7 +686,6 @@ class TurnPolicy:
             is_thread=context.is_thread,
             available_responders_in_room=available_responders_in_room,
             materializable_agent_names=availability.materializable_agent_names,
-            allow_explicit_private_agents=True,
         )
 
     async def _plan_router_dispatch(

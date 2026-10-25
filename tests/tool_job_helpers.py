@@ -762,6 +762,8 @@ class DelegatingLeader:
             delegation_depth=self.depth,
             supports_native_tool_approval=True,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
         hooks = agent_loop_hooks(
             build,

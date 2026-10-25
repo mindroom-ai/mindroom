@@ -124,6 +124,8 @@ def test_create_agent_replays_the_configured_number_of_runs(tmp_path: Path) -> N
         runtime_paths,
         execution_identity=None,
         include_interactive_questions=False,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert build.history_settings.policy == HistoryPolicy(mode="runs", limit=2)
@@ -180,6 +182,7 @@ def test_create_agent_uses_active_model_override(tmp_path: Path, provider: _Prov
         execution_identity=None,
         active_model_name="large",
         include_interactive_questions=False,
+        knowledge=None,
     )
 
     assert provider.model_names == ["large"]

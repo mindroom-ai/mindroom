@@ -63,7 +63,7 @@ async def _select_team_mode_for_test(message: str, agent_names: list[str], confi
 
 
 def decide_team_formation_for_test(*, config: Config, room: nio.MatrixRoom, **kwargs: object) -> TeamResolution:
-    """Run team-formation logic with the test config's bound runtime context."""
+    """Run team-formation logic for a main-timeline message in a group room, with the options a test names."""
     runtime_paths = runtime_paths_for(config)
     if not room.users:
         # Team-formation tests should default to all configured agents being visible in the room.
@@ -71,7 +71,8 @@ def decide_team_formation_for_test(*, config: Config, room: nio.MatrixRoom, **kw
             room,
             [agent_id.full_id for agent_id in entity_ids(config, runtime_paths).values() if agent_id is not None],
         )
-    return decide_team_formation(config=config, room=room, runtime_paths=runtime_paths, **kwargs)
+    turn_context: dict[str, object] = {"is_dm_room": False, "is_thread": False, "materializable_agent_names": None}
+    return decide_team_formation(config=config, room=room, runtime_paths=runtime_paths, **(turn_context | kwargs))
 
 
 def _agent_names(ids: list[object], config: Config) -> list[str]:

@@ -135,3 +135,8 @@ __all__ = [
     "tool_call",
     "usage",
 ]
+
+
+def estimate_only_model() -> ScriptedModel:
+    """Return a provider that answered no stored run and keeps no history itself, so history is sized by estimate alone."""
+    return ScriptedModel([], identity=ModelIdentity(id="estimate-only", provider="Estimate", provider_name="Estimate"))

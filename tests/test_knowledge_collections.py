@@ -408,18 +408,20 @@ async def test_published_metadata_lookup_does_not_consume_search_capacity(
     monkeypatch.setattr(read_process, "_read_slots", slots)
     config, runtime_paths = published_lookup
     if cached:
-        assert (await resolve_knowledge_base_access_async("docs", config, runtime_paths)).knowledge is not None
+        assert (
+            await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
+        ).knowledge is not None
 
     # A running search holds the only reader slot.
     assert slots.acquire(blocking=False)
     try:
-        available = await resolve_knowledge_base_access_async("docs", config, runtime_paths)
+        available = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
         assert available.knowledge is not None
         assert available.availability is KnowledgeAvailability.READY
     finally:
         slots.release()
 
-    recovered = await resolve_knowledge_base_access_async("docs", config, runtime_paths)
+    recovered = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
     assert recovered.knowledge is not None
     assert recovered.availability is KnowledgeAvailability.READY
 
@@ -431,7 +433,9 @@ async def test_cached_published_lookup_reports_probe_timeout(
 ) -> None:
     """A cached probe timeout must not escape knowledge availability resolution."""
     config, runtime_paths = published_lookup
-    assert (await resolve_knowledge_base_access_async("docs", config, runtime_paths)).knowledge is not None
+    assert (
+        await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
+    ).knowledge is not None
 
     def timeout(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
         message = "Knowledge read timed out"
@@ -439,10 +443,10 @@ async def test_cached_published_lookup_reports_probe_timeout(
 
     with monkeypatch.context() as patch:
         patch.setattr("mindroom.knowledge.read_proxy.collection_exists", timeout)
-        unavailable = await resolve_knowledge_base_access_async("docs", config, runtime_paths)
+        unavailable = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
         assert unavailable.knowledge is None
         assert unavailable.availability is KnowledgeAvailability.REFRESH_FAILED
 
     assert (
-        await resolve_knowledge_base_access_async("docs", config, runtime_paths)
+        await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
     ).availability is KnowledgeAvailability.READY

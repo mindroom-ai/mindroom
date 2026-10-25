@@ -88,6 +88,8 @@ async def test_reserved_controls_run_without_approval_and_emit_plugin_hooks(
                 hook_registry=registry,
                 supports_native_tool_approval=True,
                 persist_runtime_state=False,
+                knowledge=None,
+                active_model_name=None,
             )
             response = await run_built_turn(
                 build,

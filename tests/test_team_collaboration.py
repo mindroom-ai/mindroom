@@ -505,6 +505,8 @@ class TestRouterTeamFormation:
             config=config,
             is_dm_room=True,  # This is a DM room
             room=room,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         # Should form a team with both agents
@@ -523,6 +525,8 @@ class TestRouterTeamFormation:
             config=config,
             is_dm_room=True,
             room=room,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         # Should not form a team with single agent
@@ -568,6 +572,7 @@ class TestRouterTeamFormation:
             is_dm_room=True,
             is_thread=True,
             room=room,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.NONE
@@ -607,6 +612,8 @@ class TestRouterTeamFormation:
             config=config,
             is_dm_room=True,
             room=room,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -644,6 +651,8 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             is_thread=True,
+            is_dm_room=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -697,6 +706,8 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             is_thread=True,
+            is_dm_room=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.TEAM
@@ -743,6 +754,8 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             is_thread=True,
+            is_dm_room=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -779,6 +792,9 @@ class TestRouterTeamFormation:
             runtime_paths=runtime_paths_for(config),
             config=config,
             room=room,
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -824,6 +840,9 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             available_responders_in_room=[],
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -865,6 +884,8 @@ class TestRouterTeamFormation:
                 entity_ids(config, runtime_paths)["general"],
             ],
             materializable_agent_names={"calculator", "general"},
+            is_dm_room=False,
+            is_thread=False,
         )
 
         assert result.outcome is TeamOutcome.TEAM
@@ -904,6 +925,8 @@ class TestRouterTeamFormation:
             room=room,
             available_responders_in_room=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             materializable_agent_names={"calculator"},
+            is_dm_room=False,
+            is_thread=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -954,7 +977,9 @@ class TestRouterTeamFormation:
             runtime_paths=runtime_paths_for(config),
             config=config,
             room=room,
-            allow_explicit_private_agents=True,
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.TEAM
@@ -974,10 +999,11 @@ class TestRouterTeamFormation:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "alpha": AgentConfig(
-                        display_name="Alpha",
+                    "alpha": AgentConfig(display_name="Alpha", role="Assistant", delegate_to=["vault"]),
+                    "vault": AgentConfig(
+                        display_name="Vault",
                         role="Private assistant",
-                        private=AgentPrivateConfig(per="user", root="alpha_data"),
+                        private=AgentPrivateConfig(per="user", root="vault_data"),
                     ),
                     "calculator": AgentConfig(display_name="Calculator", role="Math"),
                 },
@@ -1008,6 +1034,8 @@ class TestRouterTeamFormation:
                 entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             materializable_agent_names={"calculator"},
+            is_dm_room=False,
+            is_thread=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -1025,10 +1053,11 @@ class TestRouterTeamFormation:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "alpha": AgentConfig(
-                        display_name="Alpha",
+                    "alpha": AgentConfig(display_name="Alpha", role="Assistant", delegate_to=["vault"]),
+                    "vault": AgentConfig(
+                        display_name="Vault",
                         role="Private assistant",
-                        private=AgentPrivateConfig(per="user", root="alpha_data"),
+                        private=AgentPrivateConfig(per="user", root="vault_data"),
                     ),
                     "general": AgentConfig(display_name="General", role="General"),
                     "calculator": AgentConfig(display_name="Calculator", role="Math"),
@@ -1062,12 +1091,14 @@ class TestRouterTeamFormation:
                 entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             materializable_agent_names={"alpha", "calculator"},
+            is_dm_room=False,
+            is_thread=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT
         assert result.reason == (
             "Team request cannot be satisfied: "
-            "agent 'alpha' is private and can only join explicit Matrix ad hoc teams with requester identity; "
+            "agent 'alpha' reaches private agent 'vault' via delegation and private delegation is not supported for teams; "
             "agent 'general' could not be materialized for this request"
         )
 
@@ -1118,6 +1149,9 @@ class TestRouterTeamFormation:
             runtime_paths=runtime_paths_for(config),
             config=config,
             room=room,
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -1149,6 +1183,8 @@ def _decide(
         config=config,
         is_thread=bool(mentioned_in_thread),
         available_responders_in_room=None if sender_visible is None else [ids[name] for name in sender_visible],
+        is_dm_room=False,
+        materializable_agent_names=None,
     )
 
 

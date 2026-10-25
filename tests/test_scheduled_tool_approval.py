@@ -2036,7 +2036,15 @@ def configured_slack_pair(configured_slack: list[dict[str, object]]) -> Iterator
 def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: str = _AGENT) -> AgentBuild:
     """Build the configured agent as a turn does, on a model that is never called."""
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    return create_agent(agent_name, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+    return create_agent(
+        agent_name,
+        config,
+        runtime_paths_for(config),
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
 
 
 async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Config) -> object:
@@ -2072,7 +2080,15 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
 
-    build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+    build = create_agent(
+        _AGENT,
+        config,
+        runtime_paths_for(config),
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     functions = prepare_run_tools(build.spec).functions
     assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())

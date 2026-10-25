@@ -312,6 +312,8 @@ async def test_suggest_responder_for_message_returns_aliases_for_actual_ids(
         config,
         runtime_paths,
         [make_visible_message(sender="@actual_facts:localhost", body="Prior context")],
+        room_id="!room:localhost",
+        thread_id="$thread",
     )
 
     assert result == "news"
@@ -347,6 +349,8 @@ async def test_suggest_responder_for_message_keeps_each_human_senders_matrix_id(
             make_visible_message(sender="@alice:example.org", body="Did the deploy finish?"),
             make_visible_message(sender="@bob:example.org", body="Not yet."),
         ],
+        room_id="!room:localhost",
+        thread_id="$thread",
     )
 
     context = mock_suggest_responder.await_args.args[4]

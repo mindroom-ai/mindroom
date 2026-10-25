@@ -99,7 +99,7 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         supports_native_tool_approval=True,
-        **options,
+        **({"knowledge": None, "active_model_name": None} | options),
     )
 
 

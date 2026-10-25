@@ -1536,7 +1536,7 @@ class TestConfigInit:
             lambda provider: "OPENAI_API_KEY" if provider == "openrouter" else None,
         )
 
-        env_content = config_cli._provider_env_template("openrouter")
+        env_content = config_cli._provider_env_template("openrouter", None)
 
         assert "\nOPENAI_API_KEY=your-openai-key-here" in f"\n{env_content}"
         assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in f"\n{env_content}"

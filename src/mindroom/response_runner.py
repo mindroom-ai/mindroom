@@ -2599,7 +2599,7 @@ class ResponseRunner:
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
         progress: ProgressPublisher | None,
-        cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
+        cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = continuation.execution_identity
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
@@ -4507,10 +4507,9 @@ class ResponseRunner:
         team_request: _TeamResponseRequest,
         *,
         resolved_target: MessageTarget,
-        early_placeholder_state: _EarlyPlaceholderState | None = None,
+        early_placeholder_state: _EarlyPlaceholderState,
     ) -> str | None:
         """Generate a team response once the per-thread lifecycle lock is held."""
-        placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         request = team_request.request
         retry_execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=resolved_target,
@@ -4571,7 +4570,7 @@ class ResponseRunner:
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
             placeholder_message=(None if _is_silent_schedule_response(request) else TEAM_PROGRESS_PLACEHOLDER),
-            early_placeholder_state=placeholder_state,
+            early_placeholder_state=early_placeholder_state,
         )
         if request is None:
             return None
@@ -5013,7 +5012,7 @@ class ResponseRunner:
                 thread_summary_entity_name=self.deps.agent_name,
             )
 
-        placeholder_state.settlement_started = True
+        early_placeholder_state.settlement_started = True
         return await self._run_and_settle_locked_response(
             request,
             target=delivery_target,
@@ -5049,7 +5048,7 @@ class ResponseRunner:
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
         existing_event_id: str | None,
         user_id: str | None,
-        on_cancelled: Callable[[str], None] | None,
+        on_cancelled: Callable[[str], None],
         show_stop_button: bool,
     ) -> None:
         """Run one response-generation attempt with cancellation support."""

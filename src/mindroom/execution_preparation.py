@@ -216,16 +216,12 @@ def _context_message_from_visible_message(
     message: ResolvedVisibleMessage,
     *,
     response_sender_id: str | None,
-    missing_sender_label: str | None = None,
-    body: str | None = None,
-    attachment_records: Sequence[AttachmentRecord] = (),
-    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
+    missing_sender_label: str | None,
+    body: str,
+    attachment_records: Sequence[AttachmentRecord],
+    member_display_names: Mapping[str, str],
 ) -> Message:
-    """Convert one visible Matrix message into a structured prompt message."""
-    # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
-    # Those markers are display chrome, not conversation content; if we replay
-    # them to the model it can continue the pattern as plain text with no trace.
-    body = _context_body_from_visible_message(message, response_sender_id=response_sender_id) if body is None else body
+    """Convert one visible Matrix message, whose prompt text is ``body``, into a structured prompt message."""
     annotation = format_attachment_annotation(list(attachment_records))
     if _is_own_reply(message, response_sender_id):
         if message.content.get("msgtype") == "m.audio":
@@ -376,18 +372,18 @@ def _build_unseen_context_messages(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
-    transient_context_messages: Sequence[Message] = (),
+    transient_context_messages: Sequence[Message],
     seen_event_ids: set[str],
     current_event_id: str,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
-    current_sender_id: str | None = None,
-    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
-    current_timestamp_ms: float | None = None,
-    prompt_event_id: str | None = None,
-    current_prompt_is_structured: bool = False,
+    current_sender_id: str | None,
+    member_display_names: Mapping[str, str],
+    current_timestamp_ms: float | None,
+    prompt_event_id: str | None,
+    current_prompt_is_structured: bool,
     config: Config,
-    attachment_context: _ThreadAttachmentContext | None = None,
+    attachment_context: _ThreadAttachmentContext | None,
 ) -> tuple[TurnMessages, list[str]]:
     """Return the canonical turn for unseen thread context plus the current prompt, and the unseen event ids."""
     history_before_current = _thread_history_before_current_event(thread_history, current_event_id)

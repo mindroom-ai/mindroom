@@ -207,7 +207,7 @@ def materialize_team_members(
     *,
     configured_team_name: str | None,
     reason_prefix: str,
-    active_model_names: Mapping[str, str] | None,
+    active_model_names: Mapping[str, str],
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set from the live orchestrator without silent fallback."""

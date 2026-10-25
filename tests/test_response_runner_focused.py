@@ -33,7 +33,6 @@ from mindroom.agent_cli import cli_approval_waits
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
 from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, TurnToolRegistry
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt_readers as approval_receipt
 from mindroom.approval.auto_approve_windows import start_auto_approve
@@ -178,6 +177,7 @@ from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     install_model_providers,
+    live_turn_tools_for_test,
     make_matrix_client_mock,
     make_visible_message,
     message_origin,
@@ -4671,6 +4671,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
                 target=target,
                 tool_trace_collector=[],
                 progress=None,
+                cli_approval_handler=None,
             )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -4796,6 +4797,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
                 target=request.response_envelope.target,
                 tool_trace_collector=[],
                 progress=progress,
+                cli_approval_handler=None,
             )
 
     assert observed == ["correlation-original"]
@@ -4896,6 +4898,7 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
                 target=request.response_envelope.target,
                 tool_trace_collector=[],
                 progress=None,
+                cli_approval_handler=None,
             )
 
     granted = (
@@ -8223,7 +8226,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
             async with response_cli_lifetime() as lifetime:
                 lifetime.grant_expires_at_ns = clock.now + 86400 * 10**9 if live else 1
                 catalog = await _catalog(tmp_path / "owner", [])
-                owner = LiveTurnTools(
+                owner = live_turn_tools_for_test(
                     CliTurnOwner(
                         build_execution_identity_from_runtime_context(catalog.runtime_context),
                         "turn",

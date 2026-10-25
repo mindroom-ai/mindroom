@@ -237,7 +237,16 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
     )
     ScriptedAgents({"leader": model}).install(monkeypatch)
     store = create_session_storage("leader", config, paths, identity)
-    build = create_agent("leader", config, paths, identity, history_storage=store, supports_native_tool_approval=True)
+    build = create_agent(
+        "leader",
+        config,
+        paths,
+        identity,
+        history_storage=store,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
     session = new_scope_session(session_id=identity.session_id or "", scope_id="leader", is_team=False)
     ctx = RunContext(run_id="parent-run", session=UnstoredSession(session.session_id), user_id=identity.requester_id)
     request = [prompt_for_turn(build), Message(role="user", content="Delegate")]

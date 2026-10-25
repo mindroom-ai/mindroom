@@ -106,7 +106,15 @@ async def output_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Async
     register_background_runtime(paths, runtime)
     model = ScriptedModel([])
     ScriptedAgents({"leader": model}).install(monkeypatch)
-    build = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
+    build = create_agent(
+        "leader",
+        config,
+        paths,
+        execution_identity=owner,
+        persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
+    )
     workspace = resolve_agent_runtime("leader", config, paths, execution_identity=owner).workspace
     assert workspace is not None
     try:

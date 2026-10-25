@@ -413,7 +413,7 @@ async def resolve_knowledge_base_access_async(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> KnowledgeBaseAccessResolution:
     """Resolve one knowledge base, without going through an agent assignment or blocking the loop on index I/O."""
     source, availability, last_error = await _resolve_base_knowledge_async(

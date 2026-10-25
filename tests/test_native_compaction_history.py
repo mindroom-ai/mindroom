@@ -150,6 +150,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         prepared_scope_history=prepared,
         config=config,
         static_prompt_tokens=100,
+        pipeline_timing=None,
     )
 
     assert final.replay_plan is not None
@@ -297,6 +298,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         prepared_scope_history=prepared,
         config=config,
         static_prompt_tokens=100,
+        pipeline_timing=None,
     )
     assert final.replay_plan is not None
     assert final.replay_plan.add_history_to_context
@@ -361,6 +363,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         prepared_scope_history=prepared,
         config=config,
         static_prompt_tokens=100,
+        pipeline_timing=None,
     )
     assert final.replay_plan is not None
     if auto_compact:

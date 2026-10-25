@@ -365,7 +365,7 @@ async def continue_paused_team_run(
     prior_tool_trace: Sequence[ToolTraceEntry],
     prior_presentation_state: Mapping[str, object] | None,
     show_tool_calls: bool,
-    tool_trace_collector: list[ToolTraceEntry] | None,
+    tool_trace_collector: list[ToolTraceEntry],
     progress: ProgressPublisher | None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
@@ -512,7 +512,7 @@ async def continue_paused_team_run(
             return continued_team_pause(presentation, paused)
         if continued.status is not RunStatus.completed:
             raise RuntimeError(continued.handover_content or "Team continuation did not complete")
-        if tool_trace_collector is not None and show_tool_calls:
+        if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
         # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
         # note. The document already holds what each run handed over beyond what it carried over, so rendering the

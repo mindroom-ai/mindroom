@@ -973,7 +973,7 @@ def _compute_resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
     *,
-    tolerate_plugin_load_errors: bool = False,
+    tolerate_plugin_load_errors: bool,
 ) -> _ResolvedToolState:
     """Resolve registry and metadata for one runtime config by executing its plugins."""
     # Deferred: the built-in tools register themselves through this module, and the MCP registry loads Agno's tool

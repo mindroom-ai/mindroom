@@ -182,6 +182,7 @@ async def test_knowledge_base_lookup_runs_off_event_loop(
             "docs",
             config,
             test_runtime_paths(tmp_path),
+            execution_identity=None,
         ),
     )
     try:

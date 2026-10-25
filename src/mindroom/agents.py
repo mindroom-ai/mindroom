@@ -1853,10 +1853,10 @@ def create_agent(
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    knowledge: AgentKnowledge | None,
+    active_model_name: str | None,
     hook_registry: HookRegistry | None = None,
-    knowledge: AgentKnowledge | None = None,
     history_storage: ConversationStore | None = None,
-    active_model_name: str | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
     persist_runtime_state: bool = True,
@@ -1879,12 +1879,12 @@ def create_agent(
         runtime_paths: Explicit runtime context for paths, env, and credentials.
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
+        knowledge: The shared knowledge of a RAG-enabled agent, or None; for a persona, callers resolve
+            it narrowed to the persona's kept knowledge bases.
+        active_model_name: The runtime-selected model name overriding the configured model, or None.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
-        knowledge: Optional shared knowledge for RAG-enabled agents; for a persona, callers resolve
-            it narrowed to the persona's kept knowledge bases.
         history_storage: Optional already-open conversation store to reuse for this agent.
-        active_model_name: Optional runtime-selected model name overriding the configured model.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.

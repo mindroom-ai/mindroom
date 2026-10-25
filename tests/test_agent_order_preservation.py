@@ -294,6 +294,9 @@ class TestIntegrationWithTeamFormation:
             room=None,
             runtime_paths=runtime_paths,
             config=mock_config,
+            is_dm_room=False,
+            is_thread=False,
+            materializable_agent_names=None,
         )
 
         # Agents should be in the same order as tagged

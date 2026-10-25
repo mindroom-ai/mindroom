@@ -618,7 +618,12 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         compaction_lifecycle=None,
         pipeline_timing=None,
     )
-    final = finalize_history_preparation(prepared_scope_history=prepared, config=config, static_prompt_tokens=0)
+    final = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=0,
+        pipeline_timing=None,
+    )
 
     assert route_estimate > canonical_estimate
     assert prepared.compaction_decision.current_history_tokens == route_estimate

@@ -150,16 +150,14 @@ class PreparedScopeHistory:
 
 
 def _native_history(
-    model: ModelProvider | None,
+    model: ModelProvider,
     resolved_inputs: HistoryPreparationInputs,
     session: ConversationSession | None,
     *,
     allowed: bool,
     runs: Sequence[AnyRunRecord] = (),
 ) -> NativeHistory | None:
-    """Return the native settings of the run's requests; a run sized by estimate alone sends none."""
-    if model is None:
-        return None
+    """Return the native settings of the run's requests, or None when the provider route keeps no history itself."""
     return configure_native_history(
         model,
         plan=resolved_inputs.execution_plan,
@@ -173,7 +171,7 @@ def _native_history(
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_scope_history(
     *,
-    model: ModelProvider | None,
+    model: ModelProvider,
     resolved_inputs: HistoryPreparationInputs,
     non_prompt_tokens: int,
     runtime_paths: RuntimePaths,
@@ -183,12 +181,8 @@ async def prepare_scope_history(
     pipeline_timing: DispatchPipelineTiming | None,
     allow_native_compaction: bool,
 ) -> PreparedScopeHistory:
-    """Prepare durable scope history before final replay planning.
-
-    ``model`` is the provider the run's requests go to; None sizes history by estimate alone and sends no native
-    settings.
-    """
-    replay_estimator = model.replay_estimator if model is not None else None
+    """Prepare durable scope history before final replay planning; ``model`` is the provider the run's requests go to."""
+    replay_estimator = model.replay_estimator
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             scope=None,
@@ -353,7 +347,7 @@ def _reported_history_tokens(
     latest_run: AnyRunRecord,
     resolved_inputs: HistoryPreparationInputs,
     config: Config,
-    model: ModelProvider | None,
+    model: ModelProvider,
     non_prompt_tokens: int,
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
@@ -363,9 +357,8 @@ def _reported_history_tokens(
     prompt and tools share, ``non_prompt_tokens``, converts the count to their units.
     """
     if (
-        model is None
         # Replay limits drop the oldest content as runs accrue, so that request held more than will replay.
-        or not resolved_inputs.history_settings.replays_whole_history
+        not resolved_inputs.history_settings.replays_whole_history
         # Another model counts with another tokenizer.
         or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
     ):
@@ -675,7 +668,7 @@ def finalize_history_preparation(
     prepared_scope_history: PreparedScopeHistory,
     config: Config,
     static_prompt_tokens: int,
-    pipeline_timing: DispatchPipelineTiming | None = None,
+    pipeline_timing: DispatchPipelineTiming | None,
 ) -> PreparedHistoryState:
     """Return the final persisted-replay decision after durable history prep, under the freshly resolved budget."""
     if pipeline_timing is not None:
@@ -771,7 +764,7 @@ def finalize_history_preparation(
 async def prepare_bound_scope_history(
     *,
     member_names: Sequence[str],
-    model: ModelProvider | None,
+    model: ModelProvider,
     runtime_paths: RuntimePaths,
     config: Config,
     history_settings: ResolvedHistorySettings,

@@ -867,7 +867,7 @@ def _worker_call_arguments(
     args: tuple[object, ...],
     kwargs: dict[str, object],
     *,
-    entrypoint: Callable[..., object] | None,
+    entrypoint: Callable[..., object],
     inert_agent: bool,
 ) -> tuple[list[object], dict[str, object]]:
     """Serialize one call's arguments for the worker, keeping the call shape.
@@ -875,7 +875,7 @@ def _worker_call_arguments(
     A function declared to leave its injected ``agent`` unused receives None there, since the primary's run state
     stays on the primary.
     """
-    if inert_agent and entrypoint is not None:
+    if inert_agent:
         bound = inspect.signature(entrypoint).bind(*args, **kwargs)
         if "agent" in bound.arguments:
             if "agent" in kwargs:
@@ -894,13 +894,13 @@ def _call_proxy_sync(
     args: tuple[object, ...],
     kwargs: dict[str, object],
     credentials_manager: CredentialsManager | None,
-    function_entrypoint: Callable[..., object] | None = None,
-    shared_storage_root_path: Path | None = None,
-    tool_config_overrides: dict[str, object] | None = None,
-    tool_init_overrides: dict[str, object] | None = None,
-    execution_env: dict[str, str] | None = None,
-    extra_env_passthrough: str | None = None,
-    worker_target: ResolvedWorkerTarget | None = None,
+    function_entrypoint: Callable[..., object],
+    shared_storage_root_path: Path | None,
+    tool_config_overrides: dict[str, object] | None,
+    tool_init_overrides: dict[str, object] | None,
+    execution_env: dict[str, str] | None,
+    extra_env_passthrough: str | None,
+    worker_target: ResolvedWorkerTarget | None,
     cancellation: WorkerCallCancellation | None = None,
 ) -> object:
     metadata = TOOL_METADATA.get(tool_name)
