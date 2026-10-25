@@ -24,6 +24,19 @@ class ResponseContext:
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
 
+    @property
+    def cache_read_input_tokens(self) -> int:
+        """Return the context's tokens read from cache, at most its size.
+
+        An OpenAI-compatible server can report more cached tokens than prompt tokens.
+        """
+        return min(self.cache_read_tokens or 0, self.tokens)
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        """Return the context's tokens not read from cache; tokens written to cache were not read from it."""
+        return self.tokens - self.cache_read_input_tokens
+
 
 def provider_reports_cache_tokens_outside_input(
     *,

@@ -923,6 +923,26 @@ async def test_usage_telemetry_logs_no_context_for_a_request_that_reported_no_in
 
 
 @pytest.mark.asyncio
+async def test_usage_telemetry_bounds_over_reported_cache_reads_to_the_context(tmp_path: Path) -> None:
+    """An OpenAI-compatible server can report more cached tokens than prompt tokens; the log splits as the meter does."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5, cache_read_tokens=150))
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+    log = _request_log(tmp_path, enabled=False)
+
+    with capture_logs() as logs:
+        await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), _request())
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    fields = ("cache_read_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
+    assert {field: usage_log[field] for field in fields} == {
+        "cache_read_tokens": 150,
+        "context_input_tokens": 100,
+        "uncached_input_tokens": 0,
+        "cache_read_ratio": 1.0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_a_request_without_usage_is_reported_and_writes_no_response_record(tmp_path: Path) -> None:
     served = Message(role="assistant", content="ok", provider_data={"model_extra": {"provider": "OpenInference"}})
     inner = _ScriptedProvider([[TurnCompleted(message=served, stop_reason="end")]])

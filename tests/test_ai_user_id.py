@@ -367,6 +367,29 @@ def test_ai_run_metadata_context_uses_raw_input_for_non_cache_token_providers() 
     assert "cache_write_input_tokens" not in context
 
 
+def test_ai_run_metadata_context_of_a_request_that_only_wrote_the_cache_shows_its_split() -> None:
+    """A Claude request that wrote the prompt cache and read none of it shows its whole context as uncached input."""
+    metadata = build_ai_run_metadata_content(
+        prices={},
+        config=_metadata_config("anthropic", "claude-sonnet-5"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="claude-sonnet-5",
+        model_provider="Anthropic",
+        context_run=_answered("claude-sonnet-5", "Anthropic", input_tokens=200, cache_write_tokens=1_000),
+        prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
+    )
+
+    assert metadata[AI_RUN_METADATA_KEY]["context"] == {
+        "input_tokens": 1_200,
+        "window_tokens": 200_000,
+        "uncached_input_tokens": 1_200,
+        "cache_write_input_tokens": 1_000,
+    }
+
+
 def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counters() -> None:
     """Without any provider usage counters, the pre-flight estimate still populates the context block."""
     metadata = build_ai_run_metadata_content(

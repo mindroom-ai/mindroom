@@ -80,29 +80,18 @@ def _build_context_payload(context: ResponseContext | None, model_config: ModelC
     context_window = model_config.context_window
     if context_window <= 0:
         return None
-    cache_read_tokens = context.cache_read_tokens
-    cache_write_tokens = context.cache_write_tokens
     payload = {
         "input_tokens": context.tokens,
         "window_tokens": context_window,
     }
-    bounded_cache_read_tokens: int | None = None
-    if cache_read_tokens is not None and cache_read_tokens > 0:
-        bounded_cache_read_tokens = min(cache_read_tokens, context.tokens)
-        if bounded_cache_read_tokens > 0:
-            payload["cache_read_input_tokens"] = bounded_cache_read_tokens
-    uncached_input_tokens: int | None = None
-    if cache_read_tokens is not None or cache_write_tokens is not None:
-        # Cache writes were not read from cache, so they remain in the non-cache-read bucket.
-        uncached_input_tokens = context.tokens - (bounded_cache_read_tokens or 0)
-        if uncached_input_tokens >= 0:
-            payload["uncached_input_tokens"] = uncached_input_tokens
-    if (
-        cache_write_tokens is not None
-        and cache_write_tokens > 0
-        and uncached_input_tokens is not None
-        and cache_write_tokens <= uncached_input_tokens
-    ):
+    if context.cache_read_input_tokens > 0:
+        payload["cache_read_input_tokens"] = context.cache_read_input_tokens
+    # The split into cache reads and the rest is shown only when the provider reported a cache counter.
+    if context.cache_read_tokens is None and context.cache_write_tokens is None:
+        return payload
+    payload["uncached_input_tokens"] = context.uncached_input_tokens
+    cache_write_tokens = context.cache_write_tokens
+    if cache_write_tokens is not None and 0 < cache_write_tokens <= context.uncached_input_tokens:
         payload["cache_write_input_tokens"] = cache_write_tokens
     return payload
 

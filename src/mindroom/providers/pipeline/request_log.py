@@ -147,7 +147,6 @@ def _log_usage(
             configured_provider=log.configured_provider,
             model_id=identity.id,
         )
-        cached = (held.cache_read_tokens or 0) if held is not None else 0
         payload |= {
             "input_tokens": counts.input_tokens,
             "context_input_tokens": held.tokens if held is not None else None,
@@ -155,8 +154,8 @@ def _log_usage(
             "reasoning_tokens": counts.reasoning_tokens,
             "cache_read_tokens": counts.cache_read_tokens,
             "cache_write_tokens": counts.cache_write_tokens,
-            "uncached_input_tokens": held.tokens - cached if held is not None else None,
-            "cache_read_ratio": round(cached / held.tokens, 6) if held is not None else 0.0,
+            "uncached_input_tokens": held.uncached_input_tokens if held is not None else None,
+            "cache_read_ratio": round(held.cache_read_input_tokens / held.tokens, 6) if held is not None else 0.0,
         }
     logger.info("LLM usage", **payload)
 
