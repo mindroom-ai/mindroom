@@ -306,7 +306,7 @@ class StreamCollector:
 
 
 def tool_value(result: object) -> ToolValue:
-    """Read a tool's return value: a ``ToolResult`` carries text and media, anything else is its text."""
+    """Read a tool's return value: a ``ToolResult`` or ``ToolValue`` gives its text and media, anything else its text."""
     value = read_tool_value(result)
     return ToolValue(content=str(result)) if value is None else value
 
