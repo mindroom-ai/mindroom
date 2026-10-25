@@ -118,12 +118,12 @@ def _connect_by_name(path: Path, timeout: float) -> sqlite3.Connection:
     """Connect to the file ``path`` names itself, never to a link's target, which ``sqlite3.connect`` would open or create.
 
     A link at the database or its sessions directory is refused before connecting. The name SQLite resolves for the
-    file, every link followed, must then be ``path`` with only the directories above the sessions directory resolved,
-    so a link swapped in at either place before SQLite resolves the path is refused before anything is written, though
+    file, every link followed, must then be ``path`` with only the directories above the sessions directory resolved, so
+    a link swapped in at either place before SQLite resolves the path is refused before anything is written, though
     SQLite's open can have created an empty file at the link's target. Two residuals remain: a sessions directory
     swapped for a link inside SQLite's own resolve-then-open window opens the link's target under the expected name, and
-    a missing or empty file there gets the v2 tables (one with tables stops at the backup's no-follow walk); and links above the sessions directory are
-    followed, as the store follows them.
+    a missing or empty file there gets the v2 tables (one with tables stops at the backup's no-follow walk); and links
+    above the sessions directory are followed, as the store follows them.
     """
     if path.parent.is_symlink() or path.is_symlink():
         msg = f"Refusing to convert {path} to storage v2: the database or its directory is a link"
