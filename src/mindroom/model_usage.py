@@ -1,4 +1,4 @@
-"""Leaf helpers for normalizing provider usage counters."""
+"""Normalize provider usage counters, and read the context tokens one model request held."""
 
 from __future__ import annotations
 
