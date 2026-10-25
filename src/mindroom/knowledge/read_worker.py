@@ -71,16 +71,11 @@ def _query_collection(collection: Collection, embedding: Sequence[float], *, lim
 
 def _read(request: ReadRequest) -> ReadResult:
     with (
-        read_collection(request) as collection_name,
+        read_collection(request.path, request.collection, request.published_settings) as collection_name,
         closing(KnowledgeCollection(path=request.path, name=collection_name)) as collection,
     ):
-        # TODO(simplify): production reads always send an embedding, so this probe and ``ReadResult.exists`` serve
-        # only tests. Require the embedding and drop both. Only the reader tests that send bare requests would notice.
-        if request.embedding is None:
-            return ReadResult(exists=collection.exists())
         # ``get_collection`` raises for a vanished collection instead of recreating it.
-        hits = _query_collection(collection.collection(), request.embedding, limit=request.limit)
-        return ReadResult(exists=True, hits=hits)
+        return ReadResult(hits=_query_collection(collection.collection(), request.embedding, limit=request.limit))
 
 
 def _main() -> None:
