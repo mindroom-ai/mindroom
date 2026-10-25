@@ -228,8 +228,8 @@ def decide_team_formation(
     *,
     is_dm_room: bool,
     is_thread: bool,
-    available_responders_in_room: list[MatrixID] | None = None,
     materializable_agent_names: set[str] | None,
+    available_responders_in_room: list[MatrixID] | None = None,
 ) -> TeamResolution:
     """Determine if a team should form, purely from mention, thread, and room context.
 

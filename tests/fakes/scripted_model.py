@@ -124,6 +124,11 @@ def calls(
     return steps
 
 
+def estimate_only_model() -> ScriptedModel:
+    """Return a provider that answered no stored run and keeps no history itself, so history is sized by estimate alone."""
+    return ScriptedModel([], identity=ModelIdentity(id="estimate-only", provider="Estimate", provider_name="Estimate"))
+
+
 __all__ = [
     "SYNTHETIC",
     "Await",
@@ -131,12 +136,8 @@ __all__ = [
     "ScriptedModel",
     "answer",
     "calls",
+    "estimate_only_model",
     "raw_tool_call",
     "tool_call",
     "usage",
 ]
-
-
-def estimate_only_model() -> ScriptedModel:
-    """Return a provider that answered no stored run and keeps no history itself, so history is sized by estimate alone."""
-    return ScriptedModel([], identity=ModelIdentity(id="estimate-only", provider="Estimate", provider_name="Estimate"))
