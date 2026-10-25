@@ -3287,7 +3287,8 @@ def hide_developer_google_credentials(environ: MutableMapping[str, str], gcloud_
     """Point google-auth at an empty gcloud config, skip the GCE metadata server, and drop inherited Google keys.
 
     google-genai reads ``GOOGLE_API_KEY`` and ``GEMINI_API_KEY`` itself, and its async client uses aiohttp, which the
-    network guard does not see either; MindRoom also reads their ``_FILE`` variants.
+    network guard does not see either; MindRoom also reads their ``_FILE`` variants, and its Google Workspace tools
+    sign in with ``GOOGLE_SERVICE_ACCOUNT_FILE`` and ``GOOGLE_DELEGATED_USER``.
     """
     environ["CLOUDSDK_CONFIG"] = gcloud_config
     environ["NO_GCE_CHECK"] = "true"
@@ -3297,6 +3298,8 @@ def hide_developer_google_credentials(environ: MutableMapping[str, str], gcloud_
         "GOOGLE_API_KEY_FILE",
         "GEMINI_API_KEY",
         "GEMINI_API_KEY_FILE",
+        "GOOGLE_SERVICE_ACCOUNT_FILE",
+        "GOOGLE_DELEGATED_USER",
     ):
         environ.pop(name, None)
 
