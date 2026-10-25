@@ -63,8 +63,7 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "pydantic_model": "ScheduledWorkflow",
+      "output_schema": {
         "json_schema": {
           "$defs": {
             "CronSchedule": {
@@ -239,7 +238,8 @@
           ],
           "title": "ScheduledWorkflow",
           "type": "object"
-        }
+        },
+        "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
       },
       "deferred_tool_names": []
     }

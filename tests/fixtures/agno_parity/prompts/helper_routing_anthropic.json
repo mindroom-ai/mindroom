@@ -63,8 +63,7 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "pydantic_model": "_RoutingSuggestion",
+      "output_schema": {
         "json_schema": {
           "description": "Structured output for routing decisions.",
           "properties": {
@@ -85,7 +84,8 @@
           ],
           "title": "_RoutingSuggestion",
           "type": "object"
-        }
+        },
+        "model": "mindroom.routing:_RoutingSuggestion"
       },
       "deferred_tool_names": []
     }

@@ -63,8 +63,7 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "pydantic_model": "ExtractedEntities",
+      "output_schema": {
         "json_schema": {
           "$defs": {
             "ExtractedEntity": {
@@ -111,7 +110,8 @@
           ],
           "title": "ExtractedEntities",
           "type": "object"
-        }
+        },
+        "model": "graphiti_core.prompts.extract_nodes:ExtractedEntities"
       },
       "deferred_tool_names": []
     }

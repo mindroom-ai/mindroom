@@ -63,8 +63,7 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "pydantic_model": "_RoomTopic",
+      "output_schema": {
         "json_schema": {
           "description": "Structured room topic response.",
           "properties": {
@@ -79,7 +78,8 @@
           ],
           "title": "_RoomTopic",
           "type": "object"
-        }
+        },
+        "model": "mindroom.topic_generator:_RoomTopic"
       },
       "deferred_tool_names": []
     }

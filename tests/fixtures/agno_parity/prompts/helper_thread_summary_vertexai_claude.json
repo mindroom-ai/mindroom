@@ -64,8 +64,24 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "type": "json_object"
+      "output_schema": {
+        "json_schema": {
+          "description": "Structured thread summary response.",
+          "properties": {
+            "summary": {
+              "description": "One-line summary of the thread conversation",
+              "maxLength": 300,
+              "title": "Summary",
+              "type": "string"
+            }
+          },
+          "required": [
+            "summary"
+          ],
+          "title": "_ThreadSummary",
+          "type": "object"
+        },
+        "model": "mindroom.thread_summary:_ThreadSummary"
       },
       "deferred_tool_names": []
     }

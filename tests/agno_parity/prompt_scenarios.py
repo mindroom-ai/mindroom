@@ -30,7 +30,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
-from pydantic import BaseModel
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
@@ -92,6 +91,8 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
+    from pydantic import BaseModel
+
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.read_protocol import SearchHit
@@ -103,7 +104,6 @@ if TYPE_CHECKING:
         NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
-        StructuredOutput,
         ToolChoice,
         ToolSpec,
     )
@@ -170,8 +170,7 @@ class ModelCall:
     messages: list[OwnedMessage]
     tools: list[ToolSpec]
     tool_choice: ToolChoice | None
-    # The goldens hold the format Agno's agent resolved for the route (``agno_response_format``).
-    response_format: dict[str, Any] | type[BaseModel] | None
+    output_schema: type[BaseModel] | None
     # Routes with native tool search send these tools with defer_loading below the recorder, so the record names them.
     deferred_tool_names: list[str]
 
@@ -208,7 +207,7 @@ class Recorder:
             messages=deepcopy(list(request.messages)),
             tools=list(request.tools),
             tool_choice=request.tool_choice,
-            response_format=agno_response_format(request.output_schema, adapter.capabilities.structured_output),
+            output_schema=request.output_schema,
             deferred_tool_names=sorted(request.deferred_tools.names),
         )
         self.calls.append(call)
@@ -305,27 +304,11 @@ def message_dict(message: OwnedMessage) -> dict[str, Any]:
     return {key: value for key, value in turn_message(message).items() if key != "metrics"}
 
 
-def agno_response_format(
-    schema: type[BaseModel] | None,
-    structured_output: StructuredOutput,
-) -> dict[str, Any] | type[BaseModel] | None:
-    """Return the response format Agno's agent resolved for ``schema`` on a route with ``structured_output`` support.
-
-    Agno passed models with native structured output the class, JSON-schema models a ``json_schema`` format, and
-    every other model JSON mode; the owned request carries only the schema, which each adapter renders.
-    """
-    if schema is None or structured_output == "native":
-        return schema
-    if structured_output == "json_schema":
-        return {"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()}}
-    return {"type": "json_object"}
-
-
-def response_format_dict(response_format: object) -> object:
-    """Return a request's response format as the prompt goldens record it."""
-    if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-        return {"pydantic_model": response_format.__name__, "json_schema": response_format.model_json_schema()}
-    return response_format
+def output_schema_dict(schema: type[BaseModel] | None) -> dict[str, Any] | None:
+    """Return a request's output schema as the goldens record it: its class and its JSON schema."""
+    if schema is None:
+        return None
+    return {"json_schema": schema.model_json_schema(), "model": f"{schema.__module__}:{schema.__qualname__}"}
 
 
 def call_dict(call: ModelCall) -> dict[str, Any]:
@@ -336,7 +319,7 @@ def call_dict(call: ModelCall) -> dict[str, Any]:
         "messages": [message_dict(message) for message in call.messages],
         "tools": [tool_definition(tool) for tool in call.tools],
         "tool_choice": call.tool_choice,
-        "response_format": response_format_dict(call.response_format),
+        "output_schema": output_schema_dict(call.output_schema),
         "deferred_tool_names": call.deferred_tool_names,
     }
 

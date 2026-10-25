@@ -496,7 +496,7 @@
         }
       ],
       "tool_choice": null,
-      "response_format": null,
+      "output_schema": null,
       "deferred_tool_names": []
     },
     {
@@ -955,7 +955,7 @@
         }
       ],
       "tool_choice": null,
-      "response_format": null,
+      "output_schema": null,
       "deferred_tool_names": []
     },
     {
@@ -1443,7 +1443,7 @@
         }
       ],
       "tool_choice": null,
-      "response_format": null,
+      "output_schema": null,
       "deferred_tool_names": []
     },
     {
@@ -1627,7 +1627,7 @@
         }
       ],
       "tool_choice": null,
-      "response_format": null,
+      "output_schema": null,
       "deferred_tool_names": []
     },
     {
@@ -1885,7 +1885,7 @@
         }
       ],
       "tool_choice": null,
-      "response_format": null,
+      "output_schema": null,
       "deferred_tool_names": []
     }
   ],

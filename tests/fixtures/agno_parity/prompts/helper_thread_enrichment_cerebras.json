@@ -63,38 +63,35 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "type": "json_schema",
+      "output_schema": {
         "json_schema": {
-          "name": "_ThreadEnrichment",
-          "schema": {
-            "description": "Structured second-summary response with one-shot topic tags.",
-            "properties": {
-              "summary": {
-                "description": "One-line summary of the thread conversation",
-                "maxLength": 300,
-                "title": "Summary",
+          "description": "Structured second-summary response with one-shot topic tags.",
+          "properties": {
+            "summary": {
+              "description": "One-line summary of the thread conversation",
+              "maxLength": 300,
+              "title": "Summary",
+              "type": "string"
+            },
+            "tags": {
+              "description": "1-3 durable topic tags, most relevant first",
+              "items": {
                 "type": "string"
               },
-              "tags": {
-                "description": "1-3 durable topic tags, most relevant first",
-                "items": {
-                  "type": "string"
-                },
-                "maxItems": 3,
-                "minItems": 1,
-                "title": "Tags",
-                "type": "array"
-              }
-            },
-            "required": [
-              "summary",
-              "tags"
-            ],
-            "title": "_ThreadEnrichment",
-            "type": "object"
-          }
-        }
+              "maxItems": 3,
+              "minItems": 1,
+              "title": "Tags",
+              "type": "array"
+            }
+          },
+          "required": [
+            "summary",
+            "tags"
+          ],
+          "title": "_ThreadEnrichment",
+          "type": "object"
+        },
+        "model": "mindroom.thread_summary:_ThreadEnrichment"
       },
       "deferred_tool_names": []
     }

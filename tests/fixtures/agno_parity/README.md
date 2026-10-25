@@ -129,7 +129,7 @@ Each file has these keys:
 
 - `scenario` and `description` name what the file pins.
 - `input` records what the scenario ran: the authored `config.yaml` mapping, workspace files, the turn's prompt and thread history, and the entry point.
-- `requests` lists each request with the model `id` and `provider` string, whether it was a streaming call, its `messages`, its `tools`, its `tool_choice`, its `response_format`, and its `deferred_tool_names`.
+- `requests` lists each request with the model `id` and `provider` string, whether it was a streaming call, its `messages`, its `tools`, its `tool_choice`, its `output_schema`, and its `deferred_tool_names`.
 - `exported` appears only where MindRoom hands model-visible values to a model outside its own loop: the realtime voice model's instructions and tool schemas, and the Live voice model's system prompt.
 
 The recorder replaces the provider call, so it sees every request hook MindRoom wraps around that call, such as portable tool search, but not the provider's own wire conversion, which the `providers/` goldens pin.
@@ -137,7 +137,7 @@ Messages are turns encoded as the provider goldens' `input.messages` are, withou
 `tools` holds each tool's model-visible definition, its `name`, `description`, and `parameters` as `tool_definition` (`tool_system/tool_access.py`) gives them, in the order the request loop passed them to the provider call; how each route formats them, approval flags included, is the provider goldens' to pin.
 `deferred_tool_names` lists, sorted, the tools Claude's wire hook sends with `defer_loading`; below the recorder, that hook also adds the server-side tool search entry and moves the deferred tools after the others, so on that path `tools` is not the wire order.
 It is empty when no tool is natively deferred, including on models whose deferred tools use portable tool search, which appears in `tools` itself.
-A pydantic `response_format` is recorded as `{"pydantic_model": <class name>, "json_schema": <model_json_schema()>}`; a dict format is recorded as passed.
+An `output_schema` is recorded as `{"json_schema": <model_json_schema()>, "model": "<module>:<class>"}`, the same on every route; how a route renders it is the provider goldens' to pin.
 
 Normalization:
 
@@ -150,7 +150,7 @@ Normalization:
 - Collaborate-mode members all answer `ok`, because Agno's streaming broadcast result concatenates member output in arrival order, which is not deterministic.
 
 Scenarios use Claude (`anthropic`, `claude-sonnet-5-5`) unless named otherwise.
-Structured-output helpers run on each of the three structured-output paths: on `anthropic`, which receives the schema as `response_format`; on `vertexai_claude`, which is asked for JSON in the system message with `{"type": "json_object"}`; and on `cerebras`, which receives `{"type": "json_schema", "json_schema": {"name", "schema"}}` and no JSON prompt.
+Structured-output helpers run on each of the three structured-output paths: `anthropic` and `cerebras` receive the schema natively or as a JSON schema, and `vertexai_claude` is also asked for JSON at the end of its system message.
 
 ## Tool goldens (`tools/`)
 

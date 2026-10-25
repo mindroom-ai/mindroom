@@ -63,36 +63,33 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "type": "json_schema",
+      "output_schema": {
         "json_schema": {
-          "name": "_TeamModeDecision",
-          "schema": {
-            "description": "AI decision for team collaboration mode.",
-            "properties": {
-              "mode": {
-                "description": "coordinate for delegation and synthesis, collaborate for all working on same task",
-                "enum": [
-                  "coordinate",
-                  "collaborate"
-                ],
-                "title": "Mode",
-                "type": "string"
-              },
-              "reasoning": {
-                "description": "Brief explanation of why this mode was chosen",
-                "title": "Reasoning",
-                "type": "string"
-              }
+          "description": "AI decision for team collaboration mode.",
+          "properties": {
+            "mode": {
+              "description": "coordinate for delegation and synthesis, collaborate for all working on same task",
+              "enum": [
+                "coordinate",
+                "collaborate"
+              ],
+              "title": "Mode",
+              "type": "string"
             },
-            "required": [
-              "mode",
-              "reasoning"
-            ],
-            "title": "_TeamModeDecision",
-            "type": "object"
-          }
-        }
+            "reasoning": {
+              "description": "Brief explanation of why this mode was chosen",
+              "title": "Reasoning",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "reasoning"
+          ],
+          "title": "_TeamModeDecision",
+          "type": "object"
+        },
+        "model": "mindroom.teams.formation:_TeamModeDecision"
       },
       "deferred_tool_names": []
     }

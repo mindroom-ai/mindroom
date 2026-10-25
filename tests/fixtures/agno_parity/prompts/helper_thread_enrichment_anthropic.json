@@ -63,8 +63,7 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "pydantic_model": "_ThreadEnrichment",
+      "output_schema": {
         "json_schema": {
           "description": "Structured second-summary response with one-shot topic tags.",
           "properties": {
@@ -91,7 +90,8 @@
           ],
           "title": "_ThreadEnrichment",
           "type": "object"
-        }
+        },
+        "model": "mindroom.thread_summary:_ThreadEnrichment"
       },
       "deferred_tool_names": []
     }

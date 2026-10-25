@@ -63,8 +63,7 @@
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": {
-        "pydantic_model": "_TeamModeDecision",
+      "output_schema": {
         "json_schema": {
           "description": "AI decision for team collaboration mode.",
           "properties": {
@@ -89,7 +88,8 @@
           ],
           "title": "_TeamModeDecision",
           "type": "object"
-        }
+        },
+        "model": "mindroom.teams.formation:_TeamModeDecision"
       },
       "deferred_tool_names": []
     }
