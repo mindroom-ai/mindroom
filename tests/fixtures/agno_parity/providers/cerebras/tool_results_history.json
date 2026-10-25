@@ -133,6 +133,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -162,8 +164,6 @@
           "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}"
         }
       ],
-      "model": "gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

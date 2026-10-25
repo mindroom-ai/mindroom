@@ -301,6 +301,8 @@
   },
   "request": {
     "body": {
+      "model": "k3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -311,8 +313,6 @@
           "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
         }
       ],
-      "model": "k3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

@@ -79,6 +79,8 @@
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -97,8 +99,6 @@
           "content": "And for the evening?"
         }
       ],
-      "model": "openai/gpt-oss-120b",
-      "stream": true,
       "tools": []
     },
     "headers": {

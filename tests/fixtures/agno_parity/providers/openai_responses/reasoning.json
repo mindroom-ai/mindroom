@@ -55,6 +55,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "role": "developer",
@@ -65,12 +67,10 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {
         "effort": "medium"
       },
-      "store": true,
-      "stream": true
+      "store": true
     },
     "headers": {
       "accept": "application/json",

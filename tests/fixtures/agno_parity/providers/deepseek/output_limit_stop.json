@@ -48,6 +48,7 @@
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
       "messages": [
         {
           "role": "system",
@@ -58,7 +59,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "deepseek-flash",
       "thinking": {
         "type": "enabled"
       }

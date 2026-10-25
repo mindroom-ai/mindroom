@@ -18,7 +18,8 @@ dynamic = [ "version" ]
 dependencies = [
   "agno==3.0.9",
   "aiohttp>=3.13.3",
-  "anthropic>=0.120.2",
+  # Claude SDK 2 moves requests to API version 2026-10-21, a migration of its own.
+  "anthropic>=1.17,<2",
   "anyio>=4.10",
   "authlib>=1.6",
   "certifi>=2026.4.22",
@@ -31,7 +32,8 @@ dependencies = [
   "google-genai>=2",
   "h11>=0.16",
   "httpx>=0.27",
-  "httpx2>=2.13",
+  # 2.15.1 stops a long-lived client's TLS handshakes from growing slower on Linux.
+  "httpx2>=2.15.1",
   "humanize>=4.12.3",
   "idna>=3.13",
   "jinja2>=3.1",
@@ -44,7 +46,8 @@ dependencies = [
   # Owned to-device transport requires the durable NIO API.
   "mindroom-nio[e2e]==1.1.6",
   "ollama>=0.6.1",
-  "openai>=2.54",
+  # 3.30 returns a streamed Chat Completions connection to the pool.
+  "openai>=3.30",
   "packaging>=24",
   "pillow>=10.2",
   "pydantic>=2.12.5",

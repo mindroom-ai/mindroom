@@ -49,6 +49,8 @@
   },
   "request": {
     "body": {
+      "model": "k3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -59,8 +61,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "k3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       }

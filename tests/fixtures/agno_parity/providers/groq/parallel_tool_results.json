@@ -164,6 +164,8 @@
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -205,8 +207,6 @@
           "tool_call_id": "call_parity_notes"
         }
       ],
-      "model": "openai/gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

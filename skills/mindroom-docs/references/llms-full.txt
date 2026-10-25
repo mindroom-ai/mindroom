@@ -20978,7 +20978,7 @@ mindroom run --log-level DEBUG
 To debug MindRoom alone, keep the global level at `INFO` and set per-logger overrides with [`MINDROOM_LOGGER_LEVELS`](https://docs.mindroom.chat/configuration/#environment-variables):
 
 ```bash
-LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
+LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpx2:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
 ```
 
 Matrix decrypt warnings from `nio.crypto` are hidden by default; add `nio.crypto:WARNING` to `MINDROOM_LOGGER_LEVELS` to see them while debugging encryption.

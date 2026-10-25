@@ -196,6 +196,8 @@
   },
   "request": {
     "body": {
+      "model": "glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -225,8 +227,6 @@
           "tool_call_id": "call_parity_order"
         }
       ],
-      "model": "glm-5.3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

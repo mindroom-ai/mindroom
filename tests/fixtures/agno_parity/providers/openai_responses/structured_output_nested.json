@@ -230,6 +230,7 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
       "input": [
         {
           "role": "developer",
@@ -240,7 +241,6 @@
           "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
       "store": true,
       "text": {

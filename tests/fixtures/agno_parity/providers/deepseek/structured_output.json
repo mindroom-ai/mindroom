@@ -53,6 +53,7 @@
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
       "messages": [
         {
           "role": "system",
@@ -63,7 +64,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "deepseek-flash",
       "response_format": {
         "type": "json_object"
       },

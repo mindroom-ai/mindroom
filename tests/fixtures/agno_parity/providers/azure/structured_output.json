@@ -76,6 +76,7 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
       "messages": [
         {
           "role": "system",
@@ -86,7 +87,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-6-astra",
       "response_format": {
         "type": "json_schema",
         "json_schema": {

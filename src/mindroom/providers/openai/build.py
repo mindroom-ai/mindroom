@@ -60,7 +60,7 @@ from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    import httpx
+    import httpx2
     from openai import AsyncOpenAI
 
     from mindroom.config.models import ModelConfig
@@ -184,7 +184,7 @@ class ProviderRuntime:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
     codex_default_instructions: str
-    http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
+    http_client: httpx2.AsyncClient = MODEL_HTTP_CLIENT
 
 
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
@@ -232,7 +232,7 @@ def _client_options(
 def _sdk_client_kwargs(
     configured: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> dict[str, Any]:
     """Return SDK client keywords: the configured values that are set, with ``client_params`` merged over them.
 
@@ -264,7 +264,7 @@ def _openai_client(
     api_key: str,
     options: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> AsyncOpenAI:
     from openai import AsyncOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 

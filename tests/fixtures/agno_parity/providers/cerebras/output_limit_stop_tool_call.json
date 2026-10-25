@@ -104,6 +104,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -114,8 +116,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

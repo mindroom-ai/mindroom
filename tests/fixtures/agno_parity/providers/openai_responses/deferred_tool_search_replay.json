@@ -190,6 +190,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "type": "function_call_output",
@@ -197,11 +199,9 @@
           "output": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}"
         }
       ],
-      "model": "gpt-6-astra",
       "previous_response_id": "resp_parity",
       "reasoning": {},
       "store": true,
-      "stream": true,
       "tools": [
         {
           "type": "tool_search"

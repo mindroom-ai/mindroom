@@ -166,6 +166,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "role": "developer",
@@ -197,10 +199,8 @@
           "content": "And for the evening?"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
       "store": true,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",

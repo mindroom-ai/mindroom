@@ -74,6 +74,7 @@
   },
   "request": {
     "body": {
+      "model": "k3",
       "messages": [
         {
           "role": "system",
@@ -84,7 +85,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "k3",
       "response_format": {
         "type": "json_schema",
         "json_schema": {

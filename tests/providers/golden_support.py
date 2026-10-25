@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 from pydantic import BaseModel
 
 from mindroom.config.models import DebugConfig
@@ -81,6 +82,8 @@ _VOLATILE_HEADERS = frozenset(
 )
 _UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 GENERATED_ID = "<uuid4>"
+# A request as an httpx or an httpx2 client sent it; both packages give it the same fields.
+type SentRequest = httpx.Request | httpx2.Request
 _VOLATILE_MESSAGE_KEYS = ("id", "created_at")
 _TIMING_METRIC_KEYS = ("duration", "time_to_first_token")
 _STOP_KEYS = ("stop_reason", "finish_reason", "response_status")
@@ -132,19 +135,63 @@ class PacedBytes(httpx.AsyncByteStream):
             raise httpx.ReadError(msg)
 
 
+def _httpx2_error(error: httpx.TransportError) -> httpx2.TransportError:
+    """Return the httpx2 error of the same name, the one an httpx2 transport raises for this failure."""
+    return getattr(httpx2, type(error).__name__)(str(error))
+
+
+class _Httpx2Body(httpx2.AsyncByteStream):
+    """An httpx reply body read through httpx2, its transport failure raised as the httpx2 one."""
+
+    def __init__(self, body: httpx.AsyncByteStream) -> None:
+        self._body = body
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield the body's chunks."""
+        try:
+            async for chunk in self._body:
+                yield chunk
+        except httpx.TransportError as error:
+            raise _httpx2_error(error) from error
+
+
+def httpx2_transport(handler: Callable[[httpx2.Request], httpx.Response | httpx2.Response]) -> httpx2.MockTransport:
+    """Answer the httpx2 requests the OpenAI and Claude SDKs send with ``handler``'s httpx replies and failures.
+
+    The reply builders here and the Gemini and Ollama SDKs use httpx, and httpx2 is its fork with the same API, so a
+    reply converts by its fields and a transport failure by its class name.
+    """
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        try:
+            reply = handler(request)
+        except httpx.TransportError as error:
+            raise _httpx2_error(error) from error
+        if isinstance(reply, httpx2.Response):
+            return reply
+        headers = reply.headers.multi_items()
+        if isinstance(reply.stream, httpx.ByteStream):
+            return httpx2.Response(reply.status_code, headers=headers, content=reply.read())
+        return httpx2.Response(reply.status_code, headers=headers, stream=_Httpx2Body(reply.stream))
+
+    return httpx2.MockTransport(respond)
+
+
 class Wire:
     """Records the requests providers send and answers each from a queue; the last answer repeats.
 
     A callable answer is called with the request, for replies that depend on it or must be built fresh.
+    ``client`` is the httpx2 client OpenAI and Claude models send through, and ``transport`` the httpx transport
+    Gemini and Ollama SDK clients take.
     """
 
-    def __init__(self, *replies: httpx.Response | Callable[[httpx.Request], httpx.Response]) -> None:
-        self.requests: list[httpx.Request] = []
+    def __init__(self, *replies: httpx.Response | Callable[[SentRequest], httpx.Response]) -> None:
+        self.requests: list[SentRequest] = []
         self.replies = list(replies)
         self.transport = httpx.MockTransport(self.respond)
-        self.client = httpx.AsyncClient(transport=self.transport)
+        self.client = httpx2.AsyncClient(transport=httpx2_transport(self.respond))
 
-    def respond(self, request: httpx.Request) -> httpx.Response:
+    def respond(self, request: SentRequest) -> httpx.Response:
         """Record ``request`` and return the next answer."""
         self.requests.append(request)
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
@@ -283,7 +330,7 @@ def scrub_generated_ids(value: object) -> Any:  # noqa: ANN401 - arbitrary JSON
     return value
 
 
-def normalized_request(request: httpx.Request) -> dict[str, Any]:
+def normalized_request(request: SentRequest) -> dict[str, Any]:
     """Return the method, URL, stable headers, and JSON body of one SDK request, as C1 recorded them."""
     headers = {
         name: value

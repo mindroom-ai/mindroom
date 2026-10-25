@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, cast, get_args
 from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import httpx
+import httpx2
 import pytest
 import structlog
 import typer
@@ -62,6 +63,7 @@ from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import load_config_yaml, normalize_console_output
+from tests.providers.golden_support import httpx2_transport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -3622,16 +3624,16 @@ def _vertex_ok(_request: httpx.Request) -> httpx.Response:
 
 def _vertex_wire(
     monkeypatch: pytest.MonkeyPatch,
-    respond: Callable[[httpx.Request], httpx.Response],
-) -> list[httpx.Request]:
+    respond: Callable[[httpx2.Request], httpx.Response],
+) -> list[httpx2.Request]:
     """Answer the model requests doctor sends through the shared model HTTP client, recording each one."""
-    requests: list[httpx.Request] = []
+    requests: list[httpx2.Request] = []
 
-    def record(request: httpx.Request) -> httpx.Response:
+    def record(request: httpx2.Request) -> httpx.Response:
         requests.append(request)
         return respond(request)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(record))
+    client = httpx2.AsyncClient(transport=httpx2_transport(record))
     monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", client.send)
     return requests
 

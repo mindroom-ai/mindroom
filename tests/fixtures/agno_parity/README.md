@@ -51,7 +51,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 
 - Files are pretty-printed with sorted keys, except `request.body`, which keeps the key order the SDK sent; capture runs from that same key-sorted input, so a key order the body takes from the input is the sorted one.
 - The parity tests compare each request body's serialized text, so a reordered key fails parity, because chat templates and prompt caches see key order.
-- `cerebras` bodies list `messages` before `model`, edited by hand: the OpenAI SDK, which now sends them, puts `messages` first, where the Cerebras SDK put `model` first.
+- OpenAI-family bodies, Cerebras's included, start with `model` and `stream`, reordered by hand: OpenAI SDK 3 sends those keys first, where the SDKs of the capture placed them among the other keys.
 - Agno closed the Cerebras structured-output schema in place, so the capture recorded the closed schema as its input; `cerebras/structured_output` and `cerebras/structured_output_nested` hold the schema Agno received.
 - Request headers are dropped when they carry credentials (`authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, AWS `x-amz-*` signing headers) or SDK, platform, and transport details (`x-stainless-*`, `amz-sdk-*`, `user-agent`, `x-goog-api-client`, `host`, `content-length`, `accept-encoding`, `connection`); every other header, such as `anthropic-beta`, `anthropic-version`, `chatgpt-account-id`, and the Codex session headers, is kept.
 - `id` and `created_at` are dropped from `parsed.message`, and the wall-clock `duration` and `time_to_first_token` from `parsed.metrics`.

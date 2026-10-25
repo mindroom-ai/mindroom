@@ -45,6 +45,7 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
       "messages": [
         {
           "role": "system",
@@ -54,8 +55,7 @@
           "role": "user",
           "content": "What should I pack for Paris tomorrow?"
         }
-      ],
-      "model": "gpt-oss-120b"
+      ]
     },
     "headers": {
       "accept": "application/json",

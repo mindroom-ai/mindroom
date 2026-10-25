@@ -126,6 +126,8 @@
   },
   "request": {
     "body": {
+      "model": "z-ai/glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -136,8 +138,6 @@
           "content": "Email the invoice for order A-1001."
         }
       ],
-      "model": "z-ai/glm-5.3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

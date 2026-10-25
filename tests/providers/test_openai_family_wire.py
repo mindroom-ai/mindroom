@@ -1109,7 +1109,7 @@ async def test_a_temperature_override_is_sent_as_the_models_temperature(
     await _turn(built, ModelRequest(messages=[_user()], tools=[tool], overrides=RequestOverrides(temperature=0.2)))
 
     body = built.body()
-    assert list(body) == ["messages", "model", "stream", "stream_options", "temperature", "tools"]
+    assert list(body) == ["model", "stream", "messages", "stream_options", "temperature", "tools"]
     assert body["temperature"] == temperature
 
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 import pytest
 
 from mindroom.error_handling import get_user_friendly_error_message
@@ -39,6 +40,7 @@ from tests.providers.gemini_ollama_support import build_adapter
 from tests.providers.golden_support import (
     PacedBytes,
     hide_provider_environment,
+    httpx2_transport,
     ndjson_response,
     pipeline_provider,
     sse_response,
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
+    from tests.providers.golden_support import SentRequest
 
 type Reply = Callable[[], httpx.Response | Exception]
 
@@ -107,10 +110,10 @@ _GEMINI_OLLAMA_ROUTES: dict[str, dict[str, Any]] = {
 }
 
 
-def _adapter(route: str, root: Path, respond: Callable[[httpx.Request], httpx.Response]) -> ModelProvider:
+def _adapter(route: str, root: Path, respond: Callable[[SentRequest], httpx.Response]) -> ModelProvider:
     """Build one route's adapter as the registry does, with its HTTP traffic answered by ``respond``."""
     if route in ROUTE_CONFIGS:
-        return provider_for(ROUTE_CONFIGS[route], root, httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+        return provider_for(ROUTE_CONFIGS[route], root, httpx2.AsyncClient(transport=httpx2_transport(respond)))
     if route in _GEMINI_OLLAMA_ROUTES:
         return build_adapter(_GEMINI_OLLAMA_ROUTES[route], root, respond)
     return openai_family_adapter(_OPENAI_ROUTES[route], root, respond)

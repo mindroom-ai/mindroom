@@ -303,6 +303,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "role": "developer",
@@ -313,10 +315,8 @@
           "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
       "store": true,
-      "stream": true,
       "tools": [
         {
           "name": "calendar_create_event",

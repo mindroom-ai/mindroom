@@ -192,6 +192,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -221,8 +223,6 @@
           "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}"
         }
       ],
-      "model": "gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

@@ -300,6 +300,8 @@
   },
   "request": {
     "body": {
+      "model": "z-ai/glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -310,8 +312,6 @@
           "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
         }
       ],
-      "model": "z-ai/glm-5.3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

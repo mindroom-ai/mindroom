@@ -59,6 +59,8 @@
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -80,8 +82,6 @@
           ]
         }
       ],
-      "model": "openai/gpt-oss-120b",
-      "stream": true,
       "tools": []
     },
     "headers": {

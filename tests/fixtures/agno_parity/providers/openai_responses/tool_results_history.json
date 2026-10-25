@@ -143,6 +143,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "type": "function_call_output",
@@ -150,11 +152,9 @@
           "output": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}"
         }
       ],
-      "model": "gpt-6-astra",
       "previous_response_id": "resp_parity",
       "reasoning": {},
       "store": true,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",

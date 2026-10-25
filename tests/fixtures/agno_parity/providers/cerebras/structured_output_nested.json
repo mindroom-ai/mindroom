@@ -228,6 +228,7 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
       "messages": [
         {
           "role": "system",
@@ -238,7 +239,6 @@
           "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
-      "model": "gpt-oss-120b",
       "response_format": {
         "json_schema": {
           "name": "ScheduledWorkflow",

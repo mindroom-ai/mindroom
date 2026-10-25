@@ -140,6 +140,8 @@
   },
   "request": {
     "body": {
+      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -169,8 +171,6 @@
           "tool_call_id": "call_parity_weather"
         }
       ],
-      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },
