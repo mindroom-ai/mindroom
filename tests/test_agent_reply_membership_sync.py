@@ -182,7 +182,7 @@ def test_non_reported_departure_carriers_do_not_change_reply_memberships(
 
 
 @pytest.mark.asyncio
-async def test_live_transition_retries_unfinished_effects_after_event_replay(tmp_path: Path) -> None:
+async def test_live_transition_retries_unfinished_effects_after_event_replay() -> None:
     """A no-op replay must retry effects left pending by an earlier failure."""
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     memberships.apply_member_event.side_effect = [True, False, False]
@@ -210,7 +210,6 @@ async def test_live_transition_retries_unfinished_effects_after_event_replay(tmp
     async def apply_transition() -> None:
         await membership_sync.apply_live_transition(
             Config(),
-            test_runtime_paths(tmp_path),
             "!grant:localhost",
             event,
             control_user_id="@router:localhost",
