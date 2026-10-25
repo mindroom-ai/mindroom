@@ -121,7 +121,7 @@ class AgentToolCallMedia:
     media: ToolValue
 
 
-AgentToolCallEvent = AgentToolCallStep | AgentToolCallWaiting | AgentToolCallMedia
+type AgentToolCallEvent = AgentToolCallStep | AgentToolCallWaiting | AgentToolCallMedia
 
 
 @dataclass
