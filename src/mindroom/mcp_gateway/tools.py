@@ -61,6 +61,7 @@ _MESSAGES: dict[GatewayErrorCode, str] = {
     GatewayErrorCode.UNAUTHORIZED: "Agent access has changed. Check your selection in Connections.",
     GatewayErrorCode.APPROVAL_REQUIRED: "This tool requires approval and cannot run through this gateway.",
     GatewayErrorCode.TOOL_UNAVAILABLE: "This tool is currently unavailable.",
+    GatewayErrorCode.TOOL_DECLINED: "A MindRoom plugin declined this call, so it did not run.",
     GatewayErrorCode.INVALID_ARGUMENTS: "Tool arguments are invalid or exceed the allowed size.",
     GatewayErrorCode.RESULT_TOO_LARGE: "The tool result exceeds the allowed size.",
     GatewayErrorCode.SCHEMA_TOO_LARGE: "The tool schema exceeds the allowed size.",

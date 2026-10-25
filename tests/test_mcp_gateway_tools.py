@@ -32,7 +32,7 @@ from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.selection import GatewaySelections
-from mindroom.mcp_gateway.types import GatewayOwner
+from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
@@ -977,6 +977,13 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
             "result": "fresh",
         }
     assert events == [("before", "@alice:example.org"), ("body", "called"), ("after", "@alice:example.org")] * 2
+
+
+def test_a_declined_call_without_a_reason_still_reads_why(context: AgentToolContext) -> None:
+    """A decline error that carries no message of its own falls back to the code's message, as every code does."""
+    assert gateway._error(context, GatewayErrorCode.TOOL_DECLINED) == {
+        "error": {"code": "tool_declined", "message": "A MindRoom plugin declined this call, so it did not run."},
+    }
 
 
 @pytest.mark.asyncio
