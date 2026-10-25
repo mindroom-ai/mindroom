@@ -205,11 +205,9 @@ def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, 
     independently, so a call id alone does not name a call, as the driver's own keys say.
     """
     return {
-        (requirement.member_agent_id, call_id): answer
+        (requirement.member_agent_id, requirement.tool_execution.tool_call_id): answer
         for requirement in response.requirements or ()
-        if _delegation_call(requirement)
-        and (call_id := requirement.tool_execution.tool_call_id) is not None
-        and (answer := requirement.external_execution_result) is not None
+        if _delegation_call(requirement) and (answer := requirement.external_execution_result) is not None
     }
 
 
@@ -528,14 +526,14 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
     child_state = DelegationState.from_metadata(response.metadata)
     for tool in paused.tools:
         projected = deepcopy(tool)
-        projected.tool_call_id = child_card_id(child.delegation_id, str(tool.tool_call_id))
+        projected.tool_call_id = child_card_id(child.delegation_id, tool.tool_call_id)
         state.pending_tools.append(projected.to_dict())
         state.pending_tool_sources[projected.tool_call_id] = deepcopy(
-            child_state.pending_tool_sources.get(str(tool.tool_call_id))
+            child_state.pending_tool_sources.get(tool.tool_call_id)
             or DelegationPendingTool(
                 child=child,
-                tool_call_id=str(tool.tool_call_id),
-                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, str(tool.tool_name))),
+                tool_call_id=tool.tool_call_id,
+                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, tool.tool_name)),
             ),
         )
         state.pending_requirements.append(RunRequirement(projected).to_dict())
@@ -551,7 +549,7 @@ async def _complete_approved_child_tools(
 ) -> None:
     """Publish each resumed tool's result, read from its exact approved attempt, in the parent's live trace."""
     for pending_tool in pending_tools:
-        call_id = str(pending_tool["tool_call_id"])
+        call_id = ToolExecution.from_dict(pending_tool).tool_call_id
         source = tool_sources[call_id]
         response = await read_child_run(source.child, config, runtime_paths)
         for tool in (response.tools or ()) if response is not None else ():
@@ -614,13 +612,19 @@ def _resolve_delegation_requirement(
     emit_call: Callable[[ToolStarted | ToolCompleted], None],
     *,
     output_request: ToolOutputFileRequest | None = None,
+    refused: bool = False,
 ) -> str:
     """Answer one external call with its finished result and close its live tool trace, including rejections.
 
+    A ``refused`` call answers with its refusal, marked failed so Claude and Gemini read it as a failure; only a
+    result the call produced goes to its ``output_request``'s file.
     The answer stays on the parent's requirement, so a later entry never advances the call again; the parent's
     continuation hands every answer to the loop's own decision check.
     """
-    result = _finalize_delegation_output(result, output_request)
+    if refused:
+        requirement.tool_execution.is_error = True
+    else:
+        result = _finalize_delegation_output(result, output_request)
     requirement.set_external_execution_result(result)
     emit_call(ToolCompleted(requirement.tool_execution.call))
     return result
@@ -1017,9 +1021,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # Bind this exact parent call and its presentation before resolving the target.
     tool = requirement.tool_execution
     tool_name = tool.tool_name
-    if not tool.tool_call_id or not tool_name:
-        msg = "Delegation requirement has no exact tool-call identity"
-        raise RuntimeError(msg)
     requirement_key = delegation_card_id(requirement.member_agent_id, tool.tool_call_id)
 
     def emit_call(event: ToolStarted | ToolCompleted) -> None:
@@ -1061,16 +1062,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # An excluded delegate toolkit runs its child natively, outside the job runtime.
         background = None
         if BACKGROUND_AFTER in (tool.tool_args or {}):
-            tool.is_error = True
-            return resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.")
+            return resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.", refused=True)
     try:
         background_after = read_background_after(
             tool.tool_args,
             owned_execution=job_owns_execution() or delegation_depth > 0,
         )
     except ValueError as error:
-        tool.is_error = True
-        return resolve_result(str(error))
+        return resolve_result(str(error), refused=True)
     args = application_arguments(tool.tool_args)
     target = await _resolve_delegation_target(
         tool,
@@ -1081,7 +1080,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         depth=delegation_depth,
     )
     if isinstance(target, str):
-        return resolve_result(target)
+        return resolve_result(target, refused=True)
 
     # Recheck current authorization and output policy, including resumed calls.
     authorization = authorize_delegation(
@@ -1122,7 +1121,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
             if waited_child is not None and on_event is not None:
                 _settle_pending_child_tools(previous_state.pending_tools, on_event, reason=authorization)
-        result = resolve_result(authorization)
+        result = resolve_result(authorization, refused=True)
         if requirement.id in state.hooks:
             await after_delegation(
                 state.hooks[requirement.id],
@@ -1152,7 +1151,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         await persist(state)
         return None
     if state.gates.get(requirement_key) is False:
-        return resolve_result("Delegation denied by requester; child was not executed.")
+        return resolve_result("Delegation denied by requester; child was not executed.", refused=True)
     if card_decision is not None:
         # The approved gate card shows the projected call; the child starts from this separate requirement.
         call = next((call for call in approval_calls if call.tool_call_id == requirement_key), None)
@@ -1171,7 +1170,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         await persist(state)
     hook_state = state.hooks[requirement.id]
     if hook_state.blocked_result is not None:
-        blocked_result = resolve_result(hook_state.blocked_result)
+        blocked_result = resolve_result(hook_state.blocked_result, refused=True)
         await after_delegation(
             hook_state,
             config=config,

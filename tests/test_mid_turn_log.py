@@ -455,7 +455,8 @@ def test_a_runs_summary_rows_name_every_tool_call_its_folds_summarized(storage: 
     second = Message(role="assistant", tool_calls=[{"id": "c2", "type": "function", "function": {"name": "probe"}}])
     _seed(storage, [])
     running = _run("live")
-    assert _fold(storage, running, "S1", folded=[first], tools=[ToolExecution(tool_call_id="execution-call")])
+    folded_tool = ToolExecution(tool_call_id="execution-call", tool_name="probe")
+    assert _fold(storage, running, "S1", folded=[first], tools=[folded_tool])
     assert _fold(storage, running, "S2", folded=[second])
 
     assert segment_tool_call_ids(storage, session_id="session", run_id="live") == {"c1", "execution-call", "c2"}

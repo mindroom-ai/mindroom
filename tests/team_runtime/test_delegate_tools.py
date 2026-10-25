@@ -22,7 +22,11 @@ from tests.team_runtime.squad import member, scripted
 if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMember
 
-_TOOLS = [ToolExecution(result="first"), ToolExecution(result=None), ToolExecution(result="second")]
+_TOOLS = [
+    ToolExecution(tool_call_id="c1", tool_name="t", result="first"),
+    ToolExecution(tool_call_id="c2", tool_name="t", result=None),
+    ToolExecution(tool_call_id="c3", tool_name="t", result="second"),
+]
 
 
 def test_member_result_text_follows_agno_for_text_tool_results_and_silence() -> None:

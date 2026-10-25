@@ -274,7 +274,6 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
         assert isinstance(leave, nio.RoomMemberEvent)
         memberships.apply_member_event(
             bot.config,
-            bot.runtime_paths,
             "!grant:localhost",
             leave,
             control_user_id="@mindroom_router:localhost",

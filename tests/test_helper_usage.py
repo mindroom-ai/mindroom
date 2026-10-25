@@ -23,7 +23,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.custom_tools.calculator import CalculatorTools
-from mindroom.custom_tools.dynamic_workflow import _aexecute_participant, _arun_agent, _WorkflowRun
+from mindroom.custom_tools.dynamic_workflow import _execute_participant, _run_room_agent_turn, _WorkflowRun
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
 from mindroom.history.session_context import (
@@ -163,7 +163,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
 
     async def add(self: CalculatorTools, a: float, b: float) -> str:
         helper = create_agent("helper", config, paths, identity)
-        helper_results.append(await _arun_agent(helper_context, helper, "Sample task."))
+        helper_results.append(await _run_room_agent_turn(helper_context, helper, "Sample task."))
         if outcome == "cancel":
             raise asyncio.CancelledError
         return original_add(self, a, b)
@@ -509,7 +509,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
     with helper_usage_context(scope_context):
         assert scope_context is not None
         storage = scope_context.storage
-        result = await _aexecute_participant(
+        result = await _execute_participant(
             context,
             {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
             "Sample task.",
@@ -590,7 +590,7 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
     scope_context = load_scope()
     with helper_usage_context(scope_context):
         participant = asyncio.create_task(
-            _aexecute_participant(
+            _execute_participant(
                 context,
                 {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
                 "Sample task.",

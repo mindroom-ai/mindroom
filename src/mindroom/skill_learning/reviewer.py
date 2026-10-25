@@ -142,7 +142,7 @@ def _review_tools(definitions: Sequence[ToolSpec], tools: SkillTools) -> tuple[P
         )
         for name, definition in answered.items()
     }
-    return PreparedTools(functions=functions, instructions=()), runnable
+    return PreparedTools(functions=functions), runnable
 
 
 def _listing(names: Sequence[str]) -> str:

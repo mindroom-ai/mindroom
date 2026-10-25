@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
-from mindroom.agent_loop.tools import offered_functions, prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.llm.events import RunFinished
@@ -195,9 +195,8 @@ def resume_planned(
 
 def check_approved_tools_offered(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> None:
     """Refuse a resume with an approved call whose tool the spec no longer offers."""
-    offered = {function.name for _toolkit, function in offered_functions(spec)}
     for call in approved:
-        if call.tool_name not in offered:
+        if call.tool_name not in spec.functions:
             msg = f"Approved tool {call.tool_name!r} is no longer offered to agent {spec.id!r}"
             raise ValueError(msg)
 
@@ -227,8 +226,7 @@ def resumed_record[R: AnyRunRecord](paused: R) -> R:
     by_call = {
         requirement.tool_execution.tool_call_id: requirement.tool_execution
         for requirement in record.requirements
-        if requirement.tool_execution.tool_call_id is not None
-        and (requirement.member_agent_id is None or requirement.member_run_id == paused.run_id)
+        if requirement.member_agent_id is None or requirement.member_run_id == paused.run_id
     }
     record.tools = [by_call.get(tool.tool_call_id) or tool for tool in record.tools or []]
     return record
@@ -245,11 +243,7 @@ def decide_requirements(
 
     Anything but exact coverage of the waiting calls is refused before any decision is recorded.
     """
-    requirements = {
-        requirement.tool_execution.tool_call_id: requirement
-        for requirement in record.requirements or ()
-        if requirement.tool_execution.tool_call_id is not None
-    }
+    requirements = {requirement.tool_execution.tool_call_id: requirement for requirement in record.requirements or ()}
     waiting = [*(record.tools or ()), *(requirement.tool_execution for requirement in record.requirements or ())]
     confirmations = {tool.tool_call_id for tool in waiting if tool.requires_confirmation}
     externals = {tool.tool_call_id for tool in waiting if tool.external_execution_required}
@@ -305,7 +299,7 @@ async def drive_run[R: AnyRunRecord](
 ) -> AsyncIterator[RunEvent]:
     """Run ``entry`` and then the loop over ``messages``, ending the record exactly once however the run ends.
 
-    ``spec`` supplies the model, the tools (``prepare_run_tools``), and the tool-call limit; ``record`` is the agent
+    ``spec`` supplies the model, the tools (its ``functions``), and the tool-call limit; ``record`` is the agent
     or team run the loop fills; ``entry`` is work the run does before the loop (a team resume's paused members), and
     ``resumed`` holds a resume's decided requirements, which the loop answers before its first request. A run that
     ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
@@ -323,7 +317,7 @@ async def drive_run[R: AnyRunRecord](
         loop = run_model_loop(
             spec.model,
             messages,
-            prepare_run_tools(spec),
+            PreparedTools(functions=spec.functions),
             record=record,
             run=ctx,
             hooks=hooks,

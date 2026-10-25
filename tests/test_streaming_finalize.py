@@ -734,7 +734,12 @@ async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_pa
 
     async def tool_then_final_content() -> AsyncIterator[object]:
         yield TextDelta("Let me search...\n\n")
-        tool = ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="ok")
+        tool = ToolExecution(
+            tool_call_id="call-run_shell_command",
+            tool_name="run_shell_command",
+            tool_args={"cmd": "pwd"},
+            result="ok",
+        )
         yield ToolStarted(call=tool.call)
         yield ToolCompleted(call=tool.call)
         yield RunFinished(RunRecord(run_id="run-final", content="Final answer"))

@@ -379,23 +379,21 @@ def test_streaming_tool_tracker_records_hidden_pending_and_completion() -> None:
 
 
 def test_streaming_tool_tracker_uses_scope_for_name_fallback_matching() -> None:
-    """Fallback matching by tool name must not cross team/member scopes."""
+    """A slot restored from a trace that kept no call ids matches by tool name, never across team/member scopes."""
+    member_trace = ToolTraceEntry(type="tool_call_started", tool_name="search", scope_key="agent:code")
+    team_trace = ToolTraceEntry(type="tool_call_started", tool_name="search", scope_key="team")
     tracker = StreamingToolTracker()
-    _member_msg, member_trace = tracker.start(
-        ToolExecution(tool_name="search", tool_args={"q": "member"}).call,
-        scope_key="agent:code",
-    )
-    _team_msg, team_trace = tracker.start(
-        ToolExecution(tool_name="search", tool_args={"q": "team"}).call,
+    tracker.restore_pending([member_trace, team_trace])
+
+    completed = tracker.complete(
+        ToolExecution(tool_call_id="call-search", tool_name="search", result="team result").call,
         scope_key="team",
     )
-
-    completed = tracker.complete(ToolExecution(tool_name="search", result="team result").call, scope_key="team")
 
     assert completed is not None
     _tool_name, _result, matched_pending_tool, _completed_trace = completed
     assert matched_pending_tool is not None
-    assert matched_pending_tool.trace_entry == team_trace
+    assert matched_pending_tool.trace_entry is team_trace
     assert [pending.trace_entry for pending in tracker.pending_tools] == [member_trace]
 
 
@@ -446,13 +444,13 @@ def test_streaming_tool_tracker_updates_visible_trace_slot() -> None:
     tracker = StreamingToolTracker()
     visible_trace: list[ToolTraceEntry] = []
     _tool_msg, trace_entry = tracker.start(
-        ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call,
+        ToolExecution(tool_call_id="call-save_file", tool_name="save_file", tool_args={"file": "a.py"}).call,
         tool_index=1,
     )
     assert trace_entry is not None
     visible_trace.append(trace_entry)
 
-    completed = tracker.complete(ToolExecution(tool_name="save_file", result="ok").call)
+    completed = tracker.complete(ToolExecution(tool_call_id="call-save_file", tool_name="save_file", result="ok").call)
 
     assert completed is not None
     _tool_name, _result, pending_tool, completed_trace = completed
@@ -610,7 +608,7 @@ def test_complete_pending_tool_block_roundtrip_with_multiline_args() -> None:
 
 def test_format_tool_completed_event_formats_combined_block() -> None:
     """Completion event helper should render canonical plain marker."""
-    tool = ToolExecution(tool_name="run_shell", tool_args={"cmd": "pwd"}, result="/app")
+    tool = ToolExecution(tool_call_id="call-run_shell", tool_name="run_shell", tool_args={"cmd": "pwd"}, result="/app")
     text, trace = format_tool_completed_event(tool.call, tool_index=1)
     assert text == "\n\n🔧 `run_shell` [1]\n\n"
     assert trace.type == "tool_call_completed"

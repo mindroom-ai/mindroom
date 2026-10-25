@@ -39,7 +39,7 @@ from mindroom.api.main import initialize_api_app
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.dynamic_workflow import _aexecute_room_agent_participant
+from mindroom.custom_tools.dynamic_workflow import _execute_room_agent_participant
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
@@ -1051,7 +1051,7 @@ async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
     context = replace(_tool_runtime(config, runtime_paths, "assistant"), room=room)
     participant = {"id": "writer_a", "kind": "room_agent", "agent": "researcher"}
     prompt = "Summarize the travel policy."
-    output = await _aexecute_room_agent_participant(context, participant, prompt, run_scope="travel-report:run_1")
+    output = await _execute_room_agent_participant(context, participant, prompt, run_scope="travel-report:run_1")
     assert output == "ok", output
     return ScenarioOutput(
         {
@@ -1059,7 +1059,7 @@ async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
             "participant": participant,
             "prompt": prompt,
             "run_scope": "travel-report:run_1",
-            "entry_point": "mindroom.custom_tools.dynamic_workflow._aexecute_room_agent_participant",
+            "entry_point": "mindroom.custom_tools.dynamic_workflow._execute_room_agent_participant",
         },
     )
 

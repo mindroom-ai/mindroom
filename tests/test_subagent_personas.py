@@ -8,7 +8,6 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.tools.function import Function
 
 import mindroom.tools  # noqa: F401 - registers built-in tool metadata, including function names
 from mindroom.delegation.personas import (
@@ -34,6 +33,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolMetadata,
 )
+from mindroom.tool_system.tool_function import ToolFunction
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,10 +58,8 @@ def _profile_file(root: Path, name: str, content: str) -> None:
     (directory / name).write_text(content)
 
 
-def _function(name: str, toolkit: str | None) -> Function:
-    function = Function(name=name)
-    function.owning_toolkit = toolkit
-    return function
+def _function(name: str, toolkit: str | None) -> ToolFunction:
+    return ToolFunction(name=name, toolkit=toolkit, description=None, parameters={}, entrypoint=lambda: None)
 
 
 def test_inline_persona_keeps_prompt_bytes() -> None:
@@ -389,7 +387,7 @@ def test_persona_allows_whole_toolkits_and_single_functions() -> None:
 def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
     """An explicit list hides generated functions, keeps the caller's filter, and skips unnamed toolkits."""
 
-    def caller_filter(function: Function) -> bool:
+    def caller_filter(function: ToolFunction) -> bool:
         return function.name != "write_file"
 
     visible, disabled = persona_tool_policy(

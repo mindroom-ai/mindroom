@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.llm.provider import TextDelta
@@ -363,7 +364,7 @@ def test_members_built_without_a_resumable_driver_leave_out_their_approval_gated
             execution_identity=team.identity,
             **kwargs,
         )
-        return set(members.builds[0].tool_owners)
+        return {name for _agent, name in tool_owners_by_agent(members.builds[0])}
 
     assert "touch" not in tool_names()
     assert {"touch", "scope"} <= tool_names(supports_native_tool_approval=True)

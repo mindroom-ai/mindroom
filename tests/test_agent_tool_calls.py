@@ -18,6 +18,7 @@ from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
+from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -26,10 +27,10 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
-from mindroom.tool_system.invocation import ToolCall, ToolOutcome, current_tool_call
+from mindroom.tool_system.invocation import ToolCall, current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
-from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -44,7 +45,8 @@ if TYPE_CHECKING:
 
 
 def _toolkit(name: str, *tools: Callable[..., object], instructions: str | None = None) -> AdaptedToolkit:
-    return adapt_toolkit(Toolkit(name=name, tools=list(tools), instructions=instructions))
+    """Adapt a toolkit of ``tools`` an agent is offered under its own name."""
+    return adapt_toolkit(Toolkit(name=name, tools=list(tools), instructions=instructions), key=name)
 
 
 def _function(entrypoint: Callable[..., object], **flags: object) -> AdaptedToolkit:
@@ -67,6 +69,25 @@ def _runtime(tmp_path: Path) -> ToolRuntimeContext:
     )
 
 
+def _authored(toolkits: Sequence[AdaptedToolkit], owners: Mapping[str, str] | None) -> list[AdaptedToolkit]:
+    """Return ``toolkits`` with each function naming its authored toolkit, as agent assembly names them.
+
+    ``owners`` maps each function to its authored toolkit, and a function it leaves out is generated for the agent;
+    without it every function is authored under its own toolkit's name. The run's first function of a name is kept.
+    """
+    authored = [
+        replace(
+            toolkit,
+            functions=tuple(
+                replace(function, toolkit=toolkit.name if owners is None else owners.get(function.name))
+                for function in toolkit.functions
+            ),
+        )
+        for toolkit in toolkits
+    ]
+    return list(offered_toolkits(authored, agent="helper"))
+
+
 async def _catalog(
     tmp_path: Path,
     toolkits: Sequence[AdaptedToolkit],
@@ -85,9 +106,7 @@ async def _catalog(
         middleware=middleware,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
     )
-    if owners is None:
-        owners = {function.name: toolkit.name for toolkit in toolkits for function in toolkit.functions}
-    await catalog.prepare(toolkits, owners, include=include)
+    await catalog.prepare(_authored(toolkits, owners), include=include)
     return catalog
 
 
@@ -359,6 +378,8 @@ async def test_catalog_keeps_qualified_names_and_rejects_collisions(tmp_path: Pa
     assert (await _events(catalog, "two", "other"))[-1].call.result == "other"
     with pytest.raises(UnknownToolError):
         await catalog.bind(ToolKey("two", "action"))
+    with pytest.raises(ValueError, match=r"^Duplicate qualified tool: one\.action$"):
+        await catalog.prepare([_toolkit("one", action)])
     with pytest.raises(ValueError, match="reserved"):
         await _catalog(tmp_path, [_toolkit("agent", action)])
     with pytest.raises(ValueError, match="reserved"):

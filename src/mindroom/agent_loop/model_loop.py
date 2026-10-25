@@ -327,7 +327,6 @@ async def _answer_resumed(
     for requirement in decided:
         execution = requirement.tool_execution
         if requirement.confirmation is True:
-            assert execution.tool_name is not None
             function = state.offered.functions[execution.tool_name]
             # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
             execution.requires_confirmation = False

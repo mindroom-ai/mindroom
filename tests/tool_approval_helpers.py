@@ -18,19 +18,24 @@ def gated_functions(
     config: Config,
     *,
     registered_tool_name: str | None = None,
+    authored_as: str | None = None,
+    resumable: bool = True,
     approvals_as_jobs: bool = False,
 ) -> dict[str, ToolFunction]:
-    """Return ``toolkit``'s adapted functions by name, with the approval flags a native-approval agent sets.
+    """Return the adapted functions of ``toolkit`` an agent is offered, by name, with the approval flags it sets.
 
-    The toolkit is registered as ``registered_tool_name``, or under its own name. A toolkit named like a tool the gate
-    special-cases (``scheduler``, ``delegate``, a Matrix room-runtime tool) therefore gets that tool's rules unless it
-    is registered under another name.
+    The toolkit is registered as ``registered_tool_name``, or under its own name, and authored as ``authored_as``, or
+    under its registered name. A toolkit named like a tool the gate special-cases (``scheduler``, ``delegate``, a
+    Matrix room-runtime tool) therefore gets that tool's rules unless it is registered under another name. A caller
+    that cannot resume a paused run (``resumable`` False) is offered none of the functions that ask for approval.
     """
+    registered = registered_tool_name or toolkit.name
     adapted = apply_tool_approval_capability(
-        adapt_toolkit(toolkit),
+        adapt_toolkit(toolkit, key=authored_as or registered),
         toolkit,
         config,
-        registered_tool_name=registered_tool_name or toolkit.name,
+        registered_tool_name=registered,
+        resumable=resumable,
         approvals_as_jobs=approvals_as_jobs,
     )
     return {function.name: function for function in adapted.functions}

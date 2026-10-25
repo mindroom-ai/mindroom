@@ -150,7 +150,6 @@ def test_membership_revocation_during_preparation_stops_tool_body(
             assert isinstance(event, nio.RoomMemberEvent)
             memberships.apply_member_event(
                 config,
-                snapshot.runtime_paths,
                 "!project:example.com",
                 event,
                 control_user_id="@router:example.org",

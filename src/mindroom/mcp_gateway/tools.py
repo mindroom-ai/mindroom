@@ -29,7 +29,7 @@ from mindroom.mcp_gateway.types import (
     ToolSchemaResult,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
@@ -106,12 +106,12 @@ def _require_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
     return entry
 
 
-def _blocked(context: AgentToolContext, function: Function) -> bool:
+def _blocked(context: AgentToolContext, function: Function | ToolFunction) -> bool:
     return function.requires_confirmation is True or tool_may_require_approval(context.config, function.name)
 
 
 def _function(context: AgentToolContext, toolkit: Toolkit, name: str) -> Function:
-    function = {**toolkit.functions, **toolkit.async_functions}.get(name)
+    function = toolkit.get_async_functions().get(name)
     if function is None:
         raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     if _blocked(context, function):
@@ -208,6 +208,8 @@ async def search_tools(
             selected_toolkit = toolkit
 
             async def selected(built: Toolkit) -> SearchResponse:
+                # Adapted, each function carries the description ``get_tool`` shows, which Agno derives from its
+                # docstring when the tool sets none.
                 items: list[SearchItem] = [
                     {
                         "agent": context.agent_name,
@@ -215,7 +217,7 @@ async def search_tools(
                         "function": function.name,
                         "description": (function.description or "")[:256],
                     }
-                    for function in {**built.functions, **built.async_functions}.values()
+                    for function in adapt_toolkit(built).functions
                     if _handle(function.name) and not _blocked(context, function)
                 ]
                 return _search_results(items, query, limit)

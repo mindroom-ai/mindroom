@@ -23,6 +23,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     import asyncio
     import json
     import sys
+    from dataclasses import replace
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -71,8 +72,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             worker_target=None,
         )
         tool = JobTool(
-            function=adapt_function(toolkit.get_async_functions()["stable_echo"]),
-            toolkit_name="stable_plugin",
+            function=replace(adapt_function(toolkit.get_async_functions()["stable_echo"]), toolkit="stable_plugin"),
             toolkit=toolkit,
             authority=toolkit_authority(authority_snapshot(config, "lead"), toolkit),
         )
