@@ -109,7 +109,9 @@ def _with_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
     """Return ``build`` also offering ``toolkit``, each of its functions authored under its name."""
     authored = replace(
         toolkit,
-        functions=tuple(replace(function, toolkit=toolkit.name) for function in toolkit.functions),
+        functions=tuple(
+            replace(function, toolkit=toolkit.name, registered_toolkit=toolkit.name) for function in toolkit.functions
+        ),
     )
     return replace(build, spec=replace(build.spec, toolkits=(*build.spec.toolkits, authored)))
 
@@ -858,9 +860,10 @@ async def _checkpointed_batch(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize(
-    ("shell", "missing_shell_function", "nested"),
-    [(shell, missing, None) for shell in (False, True) for missing in (None, "run_shell_command")]
-    + [(True, None, "media"), (True, None, "approval"), (True, None, "suspend")],
+    ("shell", "missing_shell_function", "nested", "preset"),
+    [(shell, missing, None, False) for shell in (False, True) for missing in (None, "run_shell_command")]
+    + [(True, None, "media", False), (True, None, "approval", False), (True, None, "suspend", False)]
+    + [(True, None, None, True)],
 )
 async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
     tmp_path: Path,
@@ -868,12 +871,14 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     shell: bool,
     missing_shell_function: str | None,
     nested: str | None,
+    preset: bool,
 ) -> None:
     """An approved saved call keeps its exact owner, and its old Bash stays interrupted.
 
-    The follow-up turn sends the approval receipt the runner binds with its first request only.
+    The follow-up turn sends the approval receipt the runner binds with its first request only. A shell that
+    ``openclaw_compat`` brings in is approved under the preset and still runs as the agent's shell.
     """
-    runtime = _helper_runtime(tmp_path, tools=["shell"])
+    runtime = _helper_runtime(tmp_path, tools=["openclaw_compat"] if preset else ["shell"])
     registry = TurnToolRegistry()
     runtime = replace(
         runtime,
@@ -935,6 +940,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     media_toolkit = adapt_toolkit(toolkit)
     name = "run_shell_command" if shell else "media"
     namespace = "shell" if shell else "media"
+    approval_toolkit = "openclaw_compat" if preset else namespace
     arguments = {"args": "exact approved shell"} if shell else {"value": "exact approved media"}
     tool = ToolExecution(tool_call_id="hidden", tool_name=name, tool_args=arguments, requires_confirmation=True)
     requirement = RunRequirement(tool)
@@ -969,13 +975,13 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
                 "helper",
                 100,
                 decision=ApprovalDecision.APPROVED,
-                toolkit_name=namespace,
+                toolkit_name=approval_toolkit,
                 arguments_digest=approval_arguments_digest(arguments),
             ),
         ),
         cli_call={
             "kind": "agent_cli",
-            "toolkit": namespace,
+            "toolkit": approval_toolkit,
             "function": name,
             "arguments": arguments,
             "call_id": "hidden",
@@ -1247,16 +1253,26 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
-async def test_an_approved_call_of_a_deferred_implied_toolkit_runs_after_its_bash_stopped(
+@pytest.mark.parametrize(
+    ("deferred", "saved_trace"),
+    [(True, True), (False, True), (False, False)],
+    ids=["deferred", "eager", "eager-without-saved-trace"],
+)
+async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stopped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    deferred: bool,
+    saved_trace: bool,
 ) -> None:
-    """A deferred toolkit an authored tool brings in is approved under that tool, which the resume restores.
+    """A toolkit an authored tool brings in is called under its own name and approved under that tool.
 
-    The model calls ``attachments`` while ``matrix_message`` is deferred, and the approval arrives after its Bash
-    stopped waiting, so the call runs in the rebuilt agent, where ``matrix_message`` offers it.
+    The model calls ``attachments``, which ``matrix_message`` brings in, and the approval arrives after its Bash
+    stopped waiting, so the call runs in the rebuilt agent, which attaches ``matrix_message`` and offers the call as
+    ``attachments`` again. The saved approval names ``matrix_message`` as approvals saved before toolkits answered
+    to their own tool name did, so those resume the same way. The resumed call keeps that name in the reply's tool
+    trace, also when the reply's records lost the paused trace.
     """
-    runtime = _helper_runtime(tmp_path, tools=["shell", {"matrix_message": {"defer": True}}])
+    runtime = _helper_runtime(tmp_path, tools=["shell", {"matrix_message": {"defer": deferred}}])
     runtime.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="list_attachments", action="require_approval")],
     )
@@ -1301,9 +1317,10 @@ async def test_an_approved_call_of_a_deferred_implied_toolkit_runs_after_its_bas
     paused = raised.value.paused
     assert paused.cli_call is not None
     call_id = paused.cli_call["call_id"]
-    # The call stays shown under the toolkit the model called; its approval names the tool that brings it in.
+    # The call is shown under the toolkit the model called; its approval names the tool that brings it in.
     assert [entry.toolkit_name for entry in paused.tool_trace] == ["attachments"]
     assert paused.toolkit_owners == {("helper", "list_attachments"): "matrix_message"}
+    assert (paused.cli_call["toolkit"], paused.cli_call["function"]) == ("matrix_message", "list_attachments")
     continuation = approval_continuation(
         approval_id="implied-approval",
         run_id=paused.run_id,
@@ -1325,7 +1342,7 @@ async def test_an_approved_call_of_a_deferred_implied_toolkit_runs_after_its_bas
     with tool_runtime_context(runtime):
         result = await execution.continue_run(
             continuation,
-            paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
+            paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace if saved_trace else ()),
             execution_identity=identity,
             tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
             decisions={call_id: True},
@@ -1337,7 +1354,8 @@ async def test_an_approved_call_of_a_deferred_implied_toolkit_runs_after_its_bas
 
     assert result.response_text == "Listed"
     [follow_up] = response.await_args.args[0].transient_enrichment_items
-    assert "Exact saved tool matrix_message.list_attachments decision/result:" in follow_up.text
+    assert "Exact saved tool attachments.list_attachments decision/result:" in follow_up.text
+    assert [entry.toolkit_name for entry in response.await_args.args[1].tool_trace] == ["attachments"]
     assert '"status": "ok"' in follow_up.text
 
 

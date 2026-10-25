@@ -155,5 +155,9 @@ def _visible_function_names(
         return tuple(toolkit.get_async_functions())
     # Each function names its authored toolkit, the one an agent's build offers it from, which for an implied or
     # preset tool is the tool that brings it in.
-    functions = adapt_toolkit(toolkit, key=tool_entry.authored_name or tool_entry.name).functions
+    functions = adapt_toolkit(
+        toolkit,
+        key=tool_entry.authored_name or tool_entry.name,
+        registered=tool_entry.name,
+    ).functions
     return tuple(function.name for function in functions if context.tool_function_filter(function))

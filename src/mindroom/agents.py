@@ -1325,10 +1325,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             delegation_depth=delegation_depth,
             include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         )
+        # A preset offers no functions of its own, so it is no toolkit to materialize.
         deferred_configs = {
             entry.name: entry
             for entry in complete.runtime_tool_configs
-            if entry.name not in resolved_tool_configs and entry.name not in excluded_tool_names
+            if entry.name not in resolved_tool_configs
+            and entry.name not in excluded_tool_names
+            and not config.is_tool_preset(entry.name)
         }
     with _agent_create_timing("resolve_worker_tools"):
         worker_tools = resolve_runtime_worker_tools(
@@ -1390,7 +1393,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             return None
         _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
-        adapted = adapt_toolkit(toolkit, key=authored_name)
+        adapted = adapt_toolkit(toolkit, key=authored_name, registered=tool_name)
         if persona_tools is not None:
             # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
             adapted = _keep_functions(adapted, lambda function: persona_allows(persona_tools, tool_name, function.name))
@@ -2082,9 +2085,14 @@ def create_agent(
         output_file_policy=output_file_policy,
     )
     if agent_mode == "minimal":
+        # The roster names each toolkit by the registered tool the agent CLI reaches it under, which a preset is not.
         # A persona's roster names the toolkits it actually built, deferred ones it named included.
         roster = (
-            [entry.name for entry in visible_tool_surface(agent_name=agent_name, config=config).runtime_tool_configs]
+            [
+                entry.name
+                for entry in visible_tool_surface(agent_name=agent_name, config=config).runtime_tool_configs
+                if not config.is_tool_preset(entry.name)
+            ]
             if persona is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]
         )
