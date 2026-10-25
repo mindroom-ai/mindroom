@@ -56,6 +56,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
             call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
+                tool_call_id="call-2",
             ).call,
         )
         yield ToolCompleted(
@@ -99,7 +100,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 "phase": "tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
-                "tool_call_id": None,
+                "tool_call_id": "call-2",
                 "show_tool_calls": True,
             },
         ),

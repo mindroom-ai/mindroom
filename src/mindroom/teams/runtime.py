@@ -27,7 +27,7 @@ from mindroom.agent_loop.run import (
     resumed_record,
     run_agent,
 )
-from mindroom.agent_loop.tools import prepare_run_tools, sorted_specs
+from mindroom.agent_loop.tools import PreparedTools, sorted_specs
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
@@ -184,7 +184,7 @@ def team_paused_content(record: TeamRunRecord) -> str:
     The only externally executed calls are the silent delegation calls, so a pause on delegations alone has no text.
     """
     parts = [
-        f"- {r.member_display_name or 'team'}: {r.tool_execution.tool_name or 'unknown'} requires confirmation"
+        f"- {r.member_display_name or 'team'}: {r.tool_execution.tool_name} requires confirmation"
         for r in record.requirements or ()
         if r.needs_confirmation
     ]
@@ -237,9 +237,9 @@ class TeamDecisions:
     external_results: Mapping[TeamCallKey, str]
     consumed: set[TeamCallKey] = field(default_factory=set, init=False)
 
-    def take(self, member_id: str | None, call_ids: set[str | None]) -> _Decided:
+    def take(self, member_id: str | None, call_ids: set[str]) -> _Decided:
         """Return the decisions on ``member_id``'s calls among ``call_ids`` (None names the leader's own)."""
-        keys = {(member_id, call_id) for call_id in call_ids if call_id is not None}
+        keys = {(member_id, call_id) for call_id in call_ids}
         self.consumed |= keys
         return _Decided(
             approved=tuple(call for key, call in self.approved.items() if key in keys),
@@ -327,7 +327,7 @@ def _answer_delegations(
     # earlier, or a member completed in an earlier chained resume, never reaches the leader. Hand the leader every
     # member's result. Models would notice (#3075).
     text = "\n".join(["Member results after human-in-the-loop resolution:", *results])
-    answered: set[str | None] = set()
+    answered: set[str] = set()
     for tool in record.tools or ():
         if any(waited_on_member(tool, member) for member in resumed):
             tool.result = text
@@ -353,7 +353,7 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
     The delegation tool's definition is the one ``DELEGATION_TOOLS`` declares for the team's mode, whichever run binds
     it.
     """
-    return sorted_specs((*prepare_run_tools(spec.leader).specs(), DELEGATION_TOOLS[spec.mode]))
+    return sorted_specs((*PreparedTools(functions=spec.leader.functions).specs(), DELEGATION_TOOLS[spec.mode]))
 
 
 @dataclass(frozen=True, slots=True)

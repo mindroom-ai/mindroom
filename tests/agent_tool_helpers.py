@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, execute_tool_call
@@ -24,7 +23,7 @@ if TYPE_CHECKING:
 
 def offered_function(build: AgentBuild, name: str) -> ToolFunction:
     """Return the function of ``name`` a run of ``build`` offers the model."""
-    function = prepare_run_tools(build.spec).functions.get(name)
+    function = build.spec.functions.get(name)
     if function is None:
         pytest.fail(f"The agent does not offer {name}")
     return function

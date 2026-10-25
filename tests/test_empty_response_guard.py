@@ -106,7 +106,14 @@ def test_is_empty_completed_run_ignores_runs_with_content_tools_or_other_status(
     assert not is_empty_completed_run(_completed_run("r1", "hello"))
 
     tool_run = _completed_run("r1", None)
-    tool_run.tools = [ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="/app")]
+    tool_run.tools = [
+        ToolExecution(
+            tool_call_id="call-run_shell_command",
+            tool_name="run_shell_command",
+            tool_args={"cmd": "pwd"},
+            result="/app",
+        ),
+    ]
     assert not is_empty_completed_run(tool_run)
 
     errored = _completed_run("r1", None)

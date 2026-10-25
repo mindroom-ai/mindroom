@@ -111,7 +111,7 @@ def _blocked(context: AgentToolContext, function: Function) -> bool:
 
 
 def _function(context: AgentToolContext, toolkit: Toolkit, name: str) -> Function:
-    function = {**toolkit.functions, **toolkit.async_functions}.get(name)
+    function = toolkit.get_async_functions().get(name)
     if function is None:
         raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     if _blocked(context, function):
@@ -215,7 +215,7 @@ async def search_tools(
                         "function": function.name,
                         "description": (function.description or "")[:256],
                     }
-                    for function in {**built.functions, **built.async_functions}.values()
+                    for function in built.get_async_functions().values()
                     if _handle(function.name) and not _blocked(context, function)
                 ]
                 return _search_results(items, query, limit)

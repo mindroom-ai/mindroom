@@ -184,7 +184,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
 
     def on_child_event(event: object) -> None:
         if isinstance(event, ToolStarted | ToolCompleted):
-            child_id = str(event.call.tool_call_id)
+            child_id = event.call.tool_call_id
             if child_id not in child_toolkits:
                 return
             origin = ToolCallOrigin(payload.parent_bash_call_id, child_toolkits[child_id])
@@ -215,7 +215,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                 for tool in outcome.tools:
                     if not any(entry.tool_call_id == tool.tool_call_id for entry in presentation.tool_trace):
                         toolkit_name = outcome.toolkit_owners.get(
-                            (outcome.approval_agent_name or continuation.entity_name, str(tool.tool_name)),
+                            (outcome.approval_agent_name or continuation.entity_name, tool.tool_name),
                         )
                         presentation.start_tool(
                             tool.call,

@@ -40,7 +40,7 @@
       },
       "timezone": "UTC"
     },
-    "entry_point": "mindroom.custom_tools.dynamic_workflow._aexecute_room_agent_participant",
+    "entry_point": "mindroom.custom_tools.dynamic_workflow._execute_room_agent_participant",
     "participant": {
       "agent": "researcher",
       "id": "writer_a",

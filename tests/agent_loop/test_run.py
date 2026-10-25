@@ -206,8 +206,13 @@ async def test_a_silent_external_pause_has_empty_content() -> None:
 
 
 def test_paused_content_follows_agno_for_a_pending_confirmation() -> None:
-    confirm = ToolExecution(requires_confirmation=True)
-    silent = ToolExecution(external_execution_required=True, external_execution_silent=True)
+    confirm = ToolExecution(tool_call_id="c1", tool_name="t", requires_confirmation=True)
+    silent = ToolExecution(
+        tool_call_id="c2",
+        tool_name="t",
+        external_execution_required=True,
+        external_execution_silent=True,
+    )
 
     def paused(*tools: ToolExecution) -> RunRecord:
         return RunRecord(run_id="r", status=RunStatus.paused, tools=list(tools))
@@ -215,7 +220,8 @@ def test_paused_content_follows_agno_for_a_pending_confirmation() -> None:
     assert paused_content(paused(confirm)) == "I have tools to execute, but I need confirmation."
     assert paused_content(paused(silent)) == ""
     assert paused_content(paused(confirm, silent)) == "I have tools to execute, but I need confirmation."
-    assert paused_content(paused(ToolExecution(requires_confirmation=True, confirmed=True))) == ""
+    decided = ToolExecution(tool_call_id="c3", tool_name="t", requires_confirmation=True, confirmed=True)
+    assert paused_content(paused(decided)) == ""
     assert paused_content(RunRecord(run_id="r", status=RunStatus.paused)) == ""
 
 

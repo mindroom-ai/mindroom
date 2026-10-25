@@ -64,7 +64,7 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
 from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
 from tests.conftest import install_model_providers, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -105,11 +105,11 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
 
 def _with_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
     """Return ``build`` also offering ``toolkit``, each of its functions authored under its name."""
-    return replace(
-        build,
-        spec=replace(build.spec, toolkits=(*build.spec.toolkits, toolkit)),
-        tool_owners={**build.tool_owners, **{function.name: toolkit.name for function in toolkit.functions}},
+    authored = replace(
+        toolkit,
+        functions=tuple(replace(function, toolkit=toolkit.name) for function in toolkit.functions),
     )
+    return replace(build, spec=replace(build.spec, toolkits=(*build.spec.toolkits, authored)))
 
 
 def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tuple[RunRecord, ConversationSession]:
@@ -835,7 +835,7 @@ async def _checkpointed_batch(
     ]
     state = LoopState(
         messages=[assistant],
-        offered=PreparedTools(functions={}, instructions=()),
+        offered=PreparedTools(functions={}),
         tools=(),
         run=catalog.run,
         record=record,
@@ -844,7 +844,7 @@ async def _checkpointed_batch(
         request_template=EMPTY_REQUEST,
     )
     await checkpoint.capture(state, planned)
-    checkpoint.complete("call_completed", ToolValue(content="completed sibling result", images=(sibling_image,)))
+    checkpoint.complete("call_completed", ToolOutcome(content="completed sibling result", images=(sibling_image,)))
     await checkpoint.persist_approval("old-bash")
     persisted = store.get_run("saved-run")
     saved_session = store.load_session(runtime.session_id, "agent")

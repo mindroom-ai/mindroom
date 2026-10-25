@@ -26,12 +26,12 @@ from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolDescriptor, ToolKey, UnknownToolError, validate_tool_arguments
-from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits, first_of_each_name
+from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.runs import RunRecord
@@ -180,28 +180,21 @@ class PreparedAgentToolCatalog:
     async def prepare(
         self,
         toolkits: Sequence[AdaptedToolkit],
-        owners: Mapping[str, str],
         *,
         include: Callable[[ToolFunction], bool] | None = None,
     ) -> None:
-        """Bind the run's functions under their authored toolkit; skip functions ``include`` rejects.
+        """Bind the run's functions under the toolkit each is offered from; skip functions ``include`` rejects.
 
-        ``owners`` maps each function the run offers to its authored toolkit; a function it does not name was
+        ``toolkits`` are a run's, which offer each function name once. A function that names no toolkit was
         generated for the agent, such as the knowledge search and the skill readers, and is reached as ``agent``.
-        Only the functions ``first_of_each_name`` selects are bound, because only those are what the run offers.
         """
         async with self._lock:
             self._check_open()
-            offered = list(
-                first_of_each_name((toolkit, function) for toolkit in toolkits for function in toolkit.functions),
-            )
             for toolkit in toolkits:
-                functions = [
-                    function
-                    for owner, function in offered
-                    if owner is toolkit and (include is None or include(function))
-                ]
-                self._prepare(toolkit, functions, owners)
+                self._prepare(
+                    toolkit,
+                    [function for function in toolkit.functions if include is None or include(function)],
+                )
 
     async def connect(self, toolkits: Sequence[AdaptedToolkit]) -> None:
         """Connect the toolkits among ``toolkits`` that hold a connection for one run, until the catalog closes.
@@ -216,19 +209,18 @@ class PreparedAgentToolCatalog:
         self,
         toolkit: AdaptedToolkit,
         functions: Sequence[ToolFunction],
-        owners: Mapping[str, str],
+        namespace: str | None = None,
     ) -> None:
-        """Bind ``functions`` of ``toolkit`` under their owner from ``owners``, or as ``agent`` when it names none."""
+        """Bind ``functions`` of ``toolkit`` under ``namespace``, or each under its own toolkit, as ``agent`` for none."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
         instructions = (toolkit.guidance,) if toolkit.guidance else ()
         for function in functions:
-            namespace = owners.get(function.name, "agent")
-            if namespace == "agent" and function.name in owners:
+            if namespace is None and function.toolkit == "agent":
                 msg = "The agent toolkit namespace is reserved for generated functions"
                 raise ValueError(msg)
-            key = ToolKey(namespace, function.name)
+            key = ToolKey(namespace or function.toolkit or "agent", function.name)
             if key in bindings or key in self._bindings:
-                msg = f"Duplicate qualified tool: {namespace}.{function.name}"
+                msg = f"Duplicate qualified tool: {key.toolkit}.{key.function}"
                 raise ValueError(msg)
             bindings[key] = PreparedAgentToolBinding(key, function, self, instructions)
         # Nothing is recorded until every function is bound, so a refused toolkit leaves the catalog unchanged.
@@ -266,9 +258,9 @@ class PreparedAgentToolCatalog:
                 with self.execution_context():
                     toolkit = await deferred.materialize()
                 await connect_toolkits((toolkit,), self._closes)
-                # Every function a deferred toolkit materializes is authored in it.
-                owners = dict.fromkeys((function.name for function in toolkit.functions), deferred.name)
-                self._prepare(toolkit, toolkit.functions, owners)
+                # Every function a deferred toolkit materializes is reached under the deferred toolkit's registered
+                # name, not the function's authored ``toolkit``, which differs for an implied tool.
+                self._prepare(toolkit, toolkit.functions, deferred.name)
                 del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
             if binding is None:

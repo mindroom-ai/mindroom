@@ -15,7 +15,6 @@ import nio
 import pytest
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
@@ -1854,7 +1853,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity=execution_identity,
             hook_registry=bot.hook_registry,
         )
-        echo = prepare_run_tools(build.spec).functions["echo"]
+        echo = build.spec.functions["echo"]
 
         with tool_runtime_context(tool_context), tool_execution_identity(execution_identity):
             result = await execute_tool_call(
@@ -2091,7 +2090,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             hook_registry=registry,
         )
 
-        echo = prepare_run_tools(build.spec).functions["echo"]
+        echo = build.spec.functions["echo"]
         outcome = await execute_tool_call(
             echo,
             {"text": "hello"},

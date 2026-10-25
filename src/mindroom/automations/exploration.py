@@ -77,7 +77,7 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> tuple[l
             if run.status != RunStatus.completed or (run.created_at or 0) <= since:
                 continue
             for execution in run.tools or []:
-                if not execution.tool_name or not is_evidence(execution):
+                if not is_evidence(execution):
                     continue
                 key = (execution.tool_name, tool_arguments(execution)[:_MAX_ARGUMENT_CHARS])
                 count, last_seen = seen.get(key, (0, 0))

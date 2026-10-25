@@ -2805,7 +2805,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         patch("mindroom.approval.response.evaluate_tool_approval", side_effect=evaluate_policy),
     ):
         await plan_approval_calls(
-            ((tool, "call-1", "dangerous", "general"),),
+            ((tool, "general"),),
             config=runner.deps.runtime.config,
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
@@ -2875,7 +2875,7 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         plan = await plan_approval_calls(
-            ((tool, "call-1", "dangerous", "general"),),
+            ((tool, "general"),),
             config=runner.deps.runtime.config,
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
@@ -2908,8 +2908,8 @@ async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -
     ):
         plan = await plan_approval_calls(
             (
-                (human_tool, "call-human", "publish_report", "general"),
-                (policy_tool, "call-policy", "read_report", "general"),
+                (human_tool, "general"),
+                (policy_tool, "general"),
             ),
             config=runner.deps.runtime.config,
             runtime_paths=runner.deps.runtime_paths,
@@ -2941,8 +2941,8 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
     ):
         plan = await plan_approval_calls(
             (
-                (automatic, "call-auto", "conditional_read", "general"),
-                (gated, "call-gated", "conditional_write", "general"),
+                (automatic, "general"),
+                (gated, "general"),
             ),
             config=runner.deps.runtime.config,
             runtime_paths=runner.deps.runtime_paths,
@@ -3002,8 +3002,8 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
     ):
         plan = await plan_approval_calls(
             (
-                (first, "call-1", "dangerous_one", "general"),
-                (second, "call-2", "dangerous_two", "general"),
+                (first, "general"),
+                (second, "general"),
             ),
             config=runner.deps.runtime.config,
             runtime_paths=runner.deps.runtime_paths,
@@ -4171,7 +4171,7 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
         return_value="@user:localhost",
     ):
         plan = await plan_approval_calls(
-            ((tool, "call-native", "native_confirmation", "general"),),
+            ((tool, "general"),),
             config=runner.deps.runtime.config,
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
@@ -4210,7 +4210,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         return_value="@user:localhost",
     ):
         plan = await plan_approval_calls(
-            ((tool, "call-exempt", function.name, "general"),),
+            ((tool, "general"),),
             config=runner.deps.runtime.config,
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
@@ -4263,7 +4263,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         return_value="@user:localhost",
     ):
         plan = await plan_approval_calls(
-            ((tool, "call-script", function.name, "general"),),
+            ((tool, "general"),),
             config=runner.deps.runtime.config,
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",

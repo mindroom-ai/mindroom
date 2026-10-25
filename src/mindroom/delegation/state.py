@@ -245,13 +245,13 @@ def member_delegation_card(requirement: RunRequirement, member_ids: Collection[s
     card.
     """
     card_id = requirement.tool_execution.tool_call_id
-    if requirement.member_agent_id is not None or not card_id:
+    if requirement.member_agent_id is not None:
         return None
     member_id, _, call_id = card_id.partition(":")
     return (member_id, call_id) if call_id and member_id in member_ids else None
 
 
-def pending_call_slot(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str | None, str | None]:
+def pending_call_slot(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str | None, str]:
     """Return the member whose slot shows the call ``requirement`` waits on, None for the team's, and its id there.
 
     A member's own call shows in its member's slot, and the card of a member's own delegation call shows as that

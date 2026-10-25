@@ -232,8 +232,12 @@ def build_toolkit(
     if tool_name == "dynamic_tools":
         # Tool search exists only beside a deferred toolkit, and its own functions do not depend on which one.
         calculator = build_toolkit("calculator", config, runtime_paths)
-        deferral = defer_toolkit("calculator", TOOL_METADATA["calculator"].description, calculator)
-        searched = (DeferredToolkit(deferral, adapt_toolkit(calculator).functions),)
+        deferral, deferred = defer_toolkit(
+            "calculator",
+            TOOL_METADATA["calculator"].description,
+            adapt_toolkit(calculator),
+        )
+        searched = (DeferredToolkit(deferral, deferred.functions),)
 
         def deferred_toolkits() -> tuple[DeferredToolkit, ...]:
             return searched
