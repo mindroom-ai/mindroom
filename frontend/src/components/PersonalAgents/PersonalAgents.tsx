@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { ChevronDown, UserRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -31,6 +31,8 @@ export function PersonalAgents() {
     queryKey: ["personal-agents", committedGeneration],
     queryFn: () =>
       fetchJSON<PersonalAgent[]>(API_ENDPOINTS.config.personalAgents),
+    // A save bumps the generation; keep showing the last list while it refetches.
+    placeholderData: keepPreviousData,
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -90,8 +92,11 @@ export function PersonalAgents() {
                       </span>
                     </p>
                     <p className="text-muted-foreground">
-                      Owner <span className="font-mono">{agent.user_id}</span>,
-                      template{" "}
+                      Owner{" "}
+                      <span className="break-all font-mono">
+                        {agent.user_id}
+                      </span>
+                      , template{" "}
                       <span className="font-mono">{agent.template}</span>
                     </p>
                   </div>

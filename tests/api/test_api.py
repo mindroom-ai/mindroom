@@ -1477,6 +1477,7 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     """Every roster entry is listed with its account, status, and whether its template still exists.
 
     Dave is onboarded after the config was loaded, so the loaded config has no agent for him yet.
+    Alice's account was registered under an earlier namespace on the real server name, which the listing keeps.
     """
     runtime_paths = main._app_runtime_paths(main.app)
     for entry in (
@@ -1499,6 +1500,9 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
         runtime_paths,
         personal_agent_entry("@dave:localhost", agent_name="mind_dave", user_display_name="Dave"),
     )
+    matrix_state = MatrixState.load(runtime_paths=runtime_paths)
+    matrix_state.add_account("agent_mind_alice_smith", "mindroom_mind_alice_smith_old", None, domain="example.org")
+    matrix_state.save(runtime_paths=runtime_paths)
 
     response = test_client.get("/api/config/personal-agents")
 
@@ -1508,7 +1512,7 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
             "template": "mind",
             "user_id": "@Alice.Smith:example.org",
             "agent_name": "mind_alice_smith",
-            "matrix_user_id": "@mindroom_mind_alice_smith:localhost",
+            "matrix_user_id": "@mindroom_mind_alice_smith_old:example.org",
             "display_name": "Alice's Mind",
             "pending": False,
             "template_exists": True,
