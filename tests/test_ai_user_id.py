@@ -413,15 +413,17 @@ def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counter
     assert metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 30_210}
 
 
-def test_ai_run_metadata_context_ignores_the_thread_s_earlier_reply_the_run_carried() -> None:
-    """A run that failed before its model answered shows the estimate, not the usage of a reply its input replayed."""
-    [earlier_reply] = _answered("claude-sonnet-5", "Anthropic", input_tokens=9_000).messages
-    earlier_reply.from_history = True
+def test_ai_run_metadata_context_of_a_run_that_failed_before_its_model_answered_is_the_estimate() -> None:
+    """A run that failed before its model answered shows the pre-flight estimate.
+
+    Its record holds only its input: the prompt and, before it, the thread's earlier reply as Matrix text
+    (``TurnMessages.context``), which carries no usage.
+    """
     failed = RunRecord(
         run_id="run-2",
         agent_id="general",
         status=RunStatus.error,
-        messages=[Message(role="user", content="first"), earlier_reply, Message(role="user", content="second")],
+        messages=[Message(role="assistant", content="\n\nearlier answer"), Message(role="user", content="second")],
     )
 
     metadata = build_ai_run_metadata_content(
