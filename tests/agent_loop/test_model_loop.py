@@ -224,7 +224,7 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts(
     events, record = await _run(spec(model, toolkit(add)), messages)
 
     tool_messages = [message for message in messages if message.role == "tool"]
-    assert [(m.tool_call_id, m.tool_call_error) for m in tool_messages] == [("c1", None), ("c2", True), ("c3", False)]
+    assert [(m.tool_call_id, m.tool_call_error) for m in tool_messages] == [("c1", True), ("c2", True), ("c3", False)]
     assert tool_messages[0].content == MISSING_TOOL_ERROR_TEXT
     assert "validation error" in str(tool_messages[1].content)
     assert tool_messages[2].content == '{"sum": 7}'
@@ -288,6 +288,32 @@ async def test_a_stop_after_tool_call_ends_the_loop_without_another_request() ->
     assert record.tools[0].stop_after_call is True
     assert messages[-1].role == "tool"
     assert messages[-1].stop_after_tool_call is True
+
+
+async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_its_stop_flag() -> None:
+    """A denied call is answered with its note, marked failed; a stored call that stops the run still stops it."""
+    model = ScriptedModel([answer("never sent")])
+    execution = ToolExecution(tool_call_id="c1", tool_name="echo", tool_args={"text": "switch"}, stop_after_call=True)
+    execution.requires_confirmation = True
+    requirement = RunRequirement(execution)
+    requirement.reject("Alice declined.")
+    record = _record()
+    record.requirements = [requirement]
+    messages = _prompt()
+
+    events, _ = await _run(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
+
+    assert events == [LoopEnded(paused=False)]
+    assert model.requests == []
+    denial = messages[-1]
+    assert (denial.role, denial.tool_call_id, denial.tool_name, denial.tool_args, denial.content) == (
+        "tool",
+        "c1",
+        "echo",
+        {"text": "switch"},
+        "Alice declined.",
+    )
+    assert (denial.tool_call_error, denial.stop_after_tool_call) == (True, True)
 
 
 async def test_a_batch_that_stops_the_run_skips_the_batch_hooks_as_agno_did() -> None:

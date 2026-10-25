@@ -12,6 +12,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from mindroom.llm.messages import tool_result_view
 from mindroom.llm.provider import (
     ReasoningDelta,
     StopReason,
@@ -196,9 +197,10 @@ def _input_items(replay: ResponsesReplay) -> list[Any]:
         if message.role in {"user", "system"}:
             items.append(_prompt_item(message))
         elif message.role == "tool":
-            if message.tool_call_id and message.content is not None:
-                call_id = call_ids.get(message.tool_call_id, message.tool_call_id)
-                items.append({"type": "function_call_output", "call_id": call_id, "output": message.content})
+            result = tool_result_view(message)
+            if result.call_id:
+                call_id = call_ids.get(result.call_id, result.call_id)
+                items.append({"type": "function_call_output", "call_id": call_id, "output": result.content})
         elif message.tool_calls:
             # A continued response already holds its calls; only their results are sent.
             if replay.previous_response_id is None:

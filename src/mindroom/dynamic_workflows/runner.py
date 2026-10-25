@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, cast
 
+from mindroom.failure_text import failure_text
+
 _TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
 
 
@@ -221,7 +223,7 @@ async def _execute_step_content(
     except DynamicWorkflowExecutionError:
         raise
     except Exception as exc:
-        msg = f"Agent step '{step_id}' participant '{participant_id}' failed: {exc}"
+        msg = f"Agent step '{step_id}' participant '{participant_id}' failed: {failure_text(exc)}"
         raise DynamicWorkflowExecutionError(msg) from exc
 
 

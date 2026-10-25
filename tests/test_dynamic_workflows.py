@@ -24,6 +24,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools, _WorkflowRun
+from mindroom.dynamic_workflows import service as service_module
 from mindroom.dynamic_workflows.runner import (
     DynamicWorkflowExecutionError,
     ParticipantOutput,
@@ -510,6 +511,54 @@ async def test_service_records_validation_failure_before_execution(
     assert loaded.steps == []
     assert loaded.completed_at is not None
     assert executions == []
+
+
+@pytest.mark.parametrize("stage", ["validation", "execution", "completion"])
+@pytest.mark.asyncio
+async def test_service_records_a_failure_without_text_by_its_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    """A run that fails with an exception without text records the exception's type name as its error."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    def fail(*_arguments: object, **_options: object) -> None:
+        raise TimeoutError
+
+    async def afail(*_arguments: object, **_options: object) -> None:
+        raise TimeoutError
+
+    if stage == "execution":
+        monkeypatch.setattr(service_module, "execute_workflow_spec", afail)
+    if stage == "completion":
+        monkeypatch.setattr(store, "complete_workflow_run", fail)
+    service = DynamicWorkflowService(
+        store,
+        participant_executor=lambda **_: _written(),
+        spec_validator=fail if stage == "validation" else None,
+    )
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = await service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "pricing"},
+        requested_by="general",
+    )
+
+    assert (run.status, run.error) == ("failed", "TimeoutError")
+
+
+async def _written() -> ParticipantOutput:
+    return ParticipantOutput("written")
 
 
 @pytest.mark.asyncio
@@ -1114,6 +1163,28 @@ async def test_agent_step_uses_participant_executor_instead_of_prompt_template()
 
     assert execution.status == "completed"
     assert execution.outputs["report"] == "Executed by Report Writer."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("model unavailable"), "model unavailable"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_participant_that_raises_fails_its_step_with_why(error: Exception, text: str) -> None:
+    """A participant's exception fails its step with the exception's text, or its type name when it has none."""
+    spec = _workflow_spec(
+        workflow=[
+            {"id": "write", "type": "agent_step", "participant": "writer", "prompt": "Write about {input.topic}."},
+        ],
+    )
+
+    async def fail(**_arguments: object) -> ParticipantOutput:
+        raise error
+
+    execution = await execute_workflow_spec(spec, {"topic": "pricing"}, participant_executor=fail)
+
+    assert (execution.status, execution.error) == ("failed", f"Agent step 'write' participant 'writer' failed: {text}")
 
 
 @pytest.mark.asyncio

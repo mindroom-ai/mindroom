@@ -16,6 +16,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import KnowledgeSourceDescription
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.test_agent_cli_authority import _runtime_context
 
@@ -135,3 +136,34 @@ async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_pa
             storage=RunStorage(None, session, None),
             delegation_depth=1,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("toolkit unavailable"), "toolkit unavailable"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_catalog_whose_toolkits_fail_names_why_before_the_recovery_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    text: str,
+) -> None:
+    """A failure while preparing the tools names its exception's text, or its type name when it has none."""
+    runtime = _runtime_context(tmp_path)
+    build = _minimal_build(runtime)
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
+
+    async def fail(*_arguments: object, **_options: object) -> None:
+        raise error
+
+    monkeypatch.setattr(PreparedAgentToolCatalog, "prepare", fail)
+    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError) as raised:
+        await prepare_minimal_catalog(
+            build,
+            run=RunContext(run_id="run", user_id=runtime.requester_id, session=session),
+            storage=RunStorage(None, session, None),
+            delegation_depth=0,
+        )
+    assert str(raised.value) == f"{text}. Return to standard mode with `!mode helper standard`."

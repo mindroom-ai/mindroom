@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
     clear_manual_compaction_request,
@@ -484,11 +485,11 @@ async def _run_scope_compaction_with_lifecycle(
         outcome = await compact(_progress if lifecycle is not None else None, _complete)
     except asyncio.CancelledError as error:
         if not completed_successfully:
-            await _fail("failed", str(error) or type(error).__name__)
+            await _fail("failed", failure_text(error))
         raise
     except Exception as error:
         status = "timeout" if is_summary_timeout(error) else "failed"
-        await _fail(status, str(error) or type(error).__name__)
+        await _fail(status, failure_text(error))
         logger.exception(
             "Compaction failed; continuing without compaction",
             session_id=session_id,

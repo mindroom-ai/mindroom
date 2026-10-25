@@ -2360,20 +2360,27 @@ async def test_call_that_needs_live_input_is_refused_before_spending_its_approva
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("slack is down"), "slack is down"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
 async def test_failed_call_spends_its_approval_and_records_the_failure(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
+    error: Exception,
+    text: str,
 ) -> None:
-    """A claimed call that fails is never retried; its outcome and reason are reported."""
+    """A claimed call that fails is never retried; its outcome and reason, or its type name, are reported."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
         await _armed(manager)
 
-        result = await _run(manager, _live_agent(outcome=RuntimeError("slack is down")))
+        result = await _run(manager, _live_agent(outcome=error))
 
         assert isinstance(result, str)
-        assert "failed: slack is down" in result
+        assert result.endswith(f"failed: {text}")
         assert await _binding_column(journal, "outcome") == "failed"
         assert await _claim(manager) == "used"
     finally:

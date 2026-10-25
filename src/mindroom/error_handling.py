@@ -7,6 +7,7 @@ import json
 import re
 from typing import TYPE_CHECKING
 
+from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
@@ -122,7 +123,7 @@ def get_user_friendly_error_message(
     error would; only one without a payload is matched by the whole words in its text. ``runtime_paths`` points a
     missing-key reply at the dashboard URL.
     """
-    safe_error = redact_sensitive_text(str(error))
+    safe_error = redact_sensitive_text(failure_text(error))
     agent_prefix = f"[{agent_name}] " if agent_name else ""
 
     logger.error(
@@ -168,7 +169,7 @@ def _provider_error_message(error: ProviderError, safe_error: str, runtime_paths
 
 
 def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: RuntimePaths | None) -> str:
-    error_str = str(error).lower()
+    error_str = failure_text(error).lower()
     if _MISSING_PROVIDER_KEY_PATTERN.search(error_str):
         return _missing_provider_key_message(runtime_paths)
     provider = _extract_provider_from_error(error)
