@@ -614,14 +614,18 @@ def _resolve_delegation_requirement(
     emit_call: Callable[[ToolStarted | ToolCompleted], None],
     *,
     output_request: ToolOutputFileRequest | None = None,
+    refused: bool = False,
 ) -> str:
     """Answer one external call with its finished result and close its live tool trace, including rejections.
 
+    A ``refused`` call answers as failed, so Claude and Gemini read the refusal as a failure.
     The answer stays on the parent's requirement, so a later entry never advances the call again; the parent's
     continuation hands every answer to the loop's own decision check.
     """
     result = _finalize_delegation_output(result, output_request)
     requirement.set_external_execution_result(result)
+    if refused:
+        requirement.tool_execution.is_error = True
     emit_call(ToolCompleted(requirement.tool_execution.call))
     return result
 
@@ -1061,16 +1065,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # An excluded delegate toolkit runs its child natively, outside the job runtime.
         background = None
         if BACKGROUND_AFTER in (tool.tool_args or {}):
-            tool.is_error = True
-            return resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.")
+            return resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.", refused=True)
     try:
         background_after = read_background_after(
             tool.tool_args,
             owned_execution=job_owns_execution() or delegation_depth > 0,
         )
     except ValueError as error:
-        tool.is_error = True
-        return resolve_result(str(error))
+        return resolve_result(str(error), refused=True)
     args = application_arguments(tool.tool_args)
     target = await _resolve_delegation_target(
         tool,
@@ -1081,7 +1083,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         depth=delegation_depth,
     )
     if isinstance(target, str):
-        return resolve_result(target)
+        return resolve_result(target, refused=True)
 
     # Recheck current authorization and output policy, including resumed calls.
     authorization = authorize_delegation(
@@ -1122,7 +1124,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
             if waited_child is not None and on_event is not None:
                 _settle_pending_child_tools(previous_state.pending_tools, on_event, reason=authorization)
-        result = resolve_result(authorization)
+        result = resolve_result(authorization, refused=True)
         if requirement.id in state.hooks:
             await after_delegation(
                 state.hooks[requirement.id],
@@ -1152,7 +1154,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         await persist(state)
         return None
     if state.gates.get(requirement_key) is False:
-        return resolve_result("Delegation denied by requester; child was not executed.")
+        return resolve_result("Delegation denied by requester; child was not executed.", refused=True)
     if card_decision is not None:
         # The approved gate card shows the projected call; the child starts from this separate requirement.
         call = next((call for call in approval_calls if call.tool_call_id == requirement_key), None)
@@ -1171,9 +1173,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         await persist(state)
     hook_state = state.hooks[requirement.id]
     if hook_state.blocked_result is not None:
-        # A plugin hook declined the call, which answers as a failed call.
-        tool.is_error = True
-        blocked_result = resolve_result(hook_state.blocked_result)
+        blocked_result = resolve_result(hook_state.blocked_result, refused=True)
         await after_delegation(
             hook_state,
             config=config,

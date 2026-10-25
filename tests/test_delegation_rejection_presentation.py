@@ -47,7 +47,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
     rejection: str,
     expected_result: str,
 ) -> None:
-    """Every rejection must deliver its result through the real stream presentation."""
+    """Every rejection must deliver its result through the real stream presentation, answering the call as failed."""
     config = Config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
@@ -136,6 +136,10 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
     assert completed is not None
     assert completed.status is RunStatus.completed
     assert completed.content == "Parent done"
+    # Every rejection answers the call as failed, which Claude and Gemini read as a failure.
+    [refused] = [message for message in parent_model.requests[-1].messages if message.role == "tool"]
+    assert expected_result in str(refused.content)
+    assert refused.tool_call_error is True
     assert len(presentation.tool_trace) == 1
     trace = presentation.tool_trace[0]
     assert trace.tool_name == "run_subagent"
