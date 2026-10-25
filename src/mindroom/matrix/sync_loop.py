@@ -32,7 +32,7 @@ def _sliding_room_config(timeline_limit: int) -> dict[str, object]:
 
 
 def _sliding_sync_room_subscriptions(room_ids: Iterable[str], timeline_limit: int) -> dict[str, object]:
-    """Subscribe to configured resolved rooms, including rooms outside discovery."""
+    """Subscribe to the given resolved rooms, including rooms outside discovery."""
     return {room_id: _sliding_room_config(timeline_limit) for room_id in room_ids if room_id.startswith("!")}
 
 

@@ -12,6 +12,25 @@ from mindroom.event_journal.models import RoomMembershipPosition
 _OPERATION_NAMESPACE = UUID("0bd4e975-c3e9-5b10-8d46-68fdda1adc07")
 
 
+async def _wait_until_sendable(
+    session: DurableSync,
+    room_id: str,
+    subscribe: Callable[[str], Awaitable[None]],
+) -> bool:
+    """Wait until nio can send to the joined room, subscribing the room first only when it cannot yet.
+
+    Sliding Sync delivers a room's state only through its room list or a subscription, and a joined room may be in
+    neither. nio answers at once for a room it can already send to, so a zero timeout tells that room apart without
+    touching the subscriptions.
+    """
+    try:
+        async with asyncio.timeout(0):
+            return await session.wait_for_room_ready(room_id)
+    except TimeoutError:
+        await subscribe(room_id)
+    return await session.wait_for_room_ready(room_id)
+
+
 def _require_command(room_id: str, target_membership: str) -> None:
     if type(room_id) is not str or not room_id:
         message = "room_id must be a nonempty str"
@@ -42,10 +61,9 @@ async def change_local_membership(
     A join, including one the producer already reports, returns True only once
     nio can send to the room, and False if the room's membership ends first:
     nio refuses plaintext sends into a joined room until a sync delivers the
-    room's complete state. A join this command sends first passes the room to
-    ``subscribe_joined_room``: Sliding Sync delivers only rooms in its room list
-    or subscriptions, and a joined room may be in neither, while a room the
-    producer already reports reached it through one of them.
+    room's complete state. A join whose room nio cannot send to yet first
+    passes the room to ``subscribe_joined_room``, so a Sliding source delivers
+    that state even outside its room list.
     """
     _require_command(room_id, target_membership)
     while True:
@@ -80,12 +98,10 @@ async def change_local_membership(
             previous_epoch=position.membership_epoch,
             current_membership=target_membership,
         ):
-            if target_membership == "join":
-                await subscribe_joined_room(room_id)
             break
         # nio can finish captured input while taking command ownership. Retry
         # only when admission moved or still owes that producer work; an HTTP
         # failure at the same settled position remains a failure for the caller.
         if await read_position(room_id) == admitted and await session.next_batch() is None:
             return False
-    return target_membership == "leave" or await session.wait_for_room_ready(room_id)
+    return target_membership == "leave" or await _wait_until_sendable(session, room_id, subscribe_joined_room)

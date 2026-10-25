@@ -931,6 +931,36 @@ async def test_startup_reconciles_membership_saved_before_application_admission(
             await asyncio.gather(maintenance, return_exceptions=True)
 
 
+def _welcoming_router(tmp_path: Path) -> tuple[AgentBot, list[bool]]:
+    """Build a router configured for `ROOM` whose real room-setup joins record each startup welcome's outcome."""
+    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    bot.rooms = [ROOM]
+    welcomed: list[bool] = []
+
+    async def welcome(room_id: str) -> None:
+        welcomed.append(await bot._room_lifecycle.send_welcome_message_if_empty(room_id))
+
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        change_membership=AgentBot.change_local_membership.__get__(bot),
+        on_configured_room_joined=welcome,
+    )
+    return bot, welcomed
+
+
+def _empty_listed_room(client: nio.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Let Matrix list `ROOM` as joined and empty, and return the HTTP send that records the welcome."""
+    monkeypatch.setattr(client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
+    monkeypatch.setattr(
+        client,
+        "room_messages",
+        AsyncMock(return_value=nio.RoomMessagesResponse(room_id=ROOM, chunk=[], start="", end=None)),
+    )
+    http_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$welcome", room_id=ROOM))
+    monkeypatch.setattr(client, "_send", http_send)
+    return http_send
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ordering", ["join_after_first_sync", "join_before_first_sync", "joined_before_startup"])
 async def test_startup_welcome_reaches_matrix_once_nio_accepts_sends_to_the_room(
@@ -944,18 +974,7 @@ async def test_startup_welcome_reaches_matrix_once_nio_accepts_sends_to_the_room
     router's first sync, or finds it already joined from an incremental sync. A first sync under the production filter
     and an incremental sync both leave the room's state incomplete until nio's next full-state sync.
     """
-    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
-    bot.rooms = [ROOM]
-    welcomed: list[bool] = []
-
-    async def welcome(room_id: str) -> None:
-        welcomed.append(await bot._room_lifecycle.send_welcome_message_if_empty(room_id))
-
-    bot._room_lifecycle.deps = replace(
-        bot._room_lifecycle.deps,
-        change_membership=AgentBot.change_local_membership.__get__(bot),
-        on_configured_room_joined=welcome,
-    )
+    bot, welcomed = _welcoming_router(tmp_path)
     frames = {
         "join_after_first_sync": [json.dumps({"next_batch": "initial"}).encode()],
         "join_before_first_sync": [],
@@ -965,16 +984,8 @@ async def test_startup_welcome_reaches_matrix_once_nio_accepts_sends_to_the_room
     monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=synced.release))
     config = DurableSyncConfig(sync_filter=bot_module._SYNC_FILTER) if ordering == "join_before_first_sync" else None
     async with _owned_session(bot, config) as session:
-        client = bot.client
-        assert client is not None
-        monkeypatch.setattr(client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
-        monkeypatch.setattr(
-            client,
-            "room_messages",
-            AsyncMock(return_value=nio.RoomMessagesResponse(room_id=ROOM, chunk=[], start="", end=None)),
-        )
-        http_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$welcome", room_id=ROOM))
-        monkeypatch.setattr(client, "_send", http_send)
+        assert bot.client is not None
+        http_send = _empty_listed_room(bot.client, monkeypatch)
         # The room's complete state arrives only once the startup pass waits for it.
         waiting = asyncio.Event()
         wait_for_room_ready = session.wait_for_room_ready
@@ -1000,15 +1011,20 @@ def _sliding_homeserver(
     user_id: str,
     joined: list[str],
     *,
+    listed_once: Iterable[str] = (),
+    delivered_with: list[set[str]] | None = None,
     subscribed: asyncio.Event | None = None,
     release: asyncio.Event | None = None,
 ) -> Callable[..., Awaitable[bytes]]:
     """Answer Sliding Sync as a server whose room list reaches no room: only subscriptions deliver a room's state.
 
-    A fresh connection answers with each subscribed room in `joined`; once `subscribed` is given, it is set when a
-    request subscribes such a room, and that answer waits for `release`.
+    A fresh connection answers with each subscribed room in `joined`, and `delivered_with` records the whole
+    subscription set of each such answer. The first answer also reports the `listed_once` rooms joined in a window
+    that is not initial, which leaves their state unestablished, as for a room leaving the list. Once `subscribed`
+    is given, it is set when a request subscribes a joined room, and that answer waits for `release`.
     """
     positions = 0
+    unlisted = list(listed_once)
 
     async def request(_method: str, path: str, body: str | None = None, *_args: object, **_kwargs: object) -> bytes:
         nonlocal positions
@@ -1021,7 +1037,10 @@ def _sliding_homeserver(
         assert "/sync" in path
         if "pos" in parse_qs(urlparse(path).query):
             await asyncio.Event().wait()
-        room_ids = [room_id for room_id in json.loads(body or "{}").get("room_subscriptions", {}) if room_id in joined]
+        subscriptions = set(json.loads(body or "{}").get("room_subscriptions", {}))
+        room_ids = [room_id for room_id in subscriptions if room_id in joined]
+        if room_ids and delivered_with is not None:
+            delivered_with.append(subscriptions)
         if room_ids and subscribed is not None:
             subscribed.set()
             if release is not None:
@@ -1045,6 +1064,11 @@ def _sliding_homeserver(
             }
             for room_id in room_ids
         }
+        rooms.update(
+            (room_id, {"initial": False, "membership": "join", "timeline": [], "required_state": [own_join]})
+            for room_id in unlisted
+        )
+        unlisted.clear()
         return json.dumps({"pos": f"p{positions}", "rooms": rooms}).encode()
 
     return request
@@ -1084,28 +1108,10 @@ async def test_sliding_startup_welcome_reaches_a_joined_room_outside_discovery(
     The router's room list never reaches the room it created, and its subscriptions were set before the room
     existed, so the room's state arrives only once the join subscribes it.
     """
-    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
-    bot.rooms = [ROOM]
-    welcomed: list[bool] = []
-
-    async def welcome(room_id: str) -> None:
-        welcomed.append(await bot._room_lifecycle.send_welcome_message_if_empty(room_id))
-
-    bot._room_lifecycle.deps = replace(
-        bot._room_lifecycle.deps,
-        change_membership=AgentBot.change_local_membership.__get__(bot),
-        on_configured_room_joined=welcome,
-    )
+    bot, welcomed = _welcoming_router(tmp_path)
     joined: list[str] = []
     async with _sliding_bot_syncing(bot, monkeypatch, _sliding_homeserver(bot.agent_user.user_id, joined)) as client:
-        monkeypatch.setattr(client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
-        monkeypatch.setattr(
-            client,
-            "room_messages",
-            AsyncMock(return_value=nio.RoomMessagesResponse(room_id=ROOM, chunk=[], start="", end=None)),
-        )
-        http_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$welcome", room_id=ROOM))
-        monkeypatch.setattr(client, "_send", http_send)
+        http_send = _empty_listed_room(client, monkeypatch)
         await asyncio.wait_for(bot._room_lifecycle.join_configured_rooms(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert joined == [ROOM]
@@ -1120,13 +1126,21 @@ async def test_sliding_join_of_an_unconfigured_room_keeps_it_subscribed_until_ni
 ) -> None:
     """An invited or personal room is not configured, and room setup's own subscription refresh must not drop it first."""
     bot = _agent_bot(tmp_path)
-    bot.rooms = []
+    configured = "!configured:localhost"
+    bot.rooms = [configured]
     monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
     monkeypatch.setattr(bot, "leave_unconfigured_rooms", AsyncMock())
     joined: list[str] = []
+    delivered_with: list[set[str]] = []
     subscribed = asyncio.Event()
     release = asyncio.Event()
-    request = _sliding_homeserver(bot.agent_user.user_id, joined, subscribed=subscribed, release=release)
+    request = _sliding_homeserver(
+        bot.agent_user.user_id,
+        joined,
+        delivered_with=delivered_with,
+        subscribed=subscribed,
+        release=release,
+    )
     async with _sliding_bot_syncing(bot, monkeypatch, request):
         join = asyncio.create_task(AgentBot.change_local_membership(bot, ROOM, "join"))
         try:
@@ -1144,5 +1158,28 @@ async def test_sliding_join_of_an_unconfigured_room_keeps_it_subscribed_until_ni
         finally:
             join.cancel()
             await asyncio.gather(join, return_exceptions=True)
+
+    assert joined == [ROOM]
+    # The configured room stays subscribed while the joined room's state is on its way.
+    assert delivered_with == [{configured, ROOM}]
+
+
+@pytest.mark.asyncio
+async def test_sliding_reported_join_outside_the_list_subscribes_the_room_nio_cannot_send_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room nio reports joined but without its state, outside the room list, gets its state through a subscription.
+
+    That is a saved invited or personal room after a restart: no join is sent, and without the subscription its
+    room setup would wait on every start.
+    """
+    bot = _agent_bot(tmp_path)
+    bot.rooms = []
+    joined = [ROOM]
+    request = _sliding_homeserver(bot.agent_user.user_id, joined, listed_once=[ROOM])
+    async with _sliding_bot_syncing(bot, monkeypatch, request):
+        joining = AgentBot.change_local_membership(bot, ROOM, "join")
+        assert await asyncio.wait_for(joining, timeout=SETTLE_TIMEOUT_SECONDS) is True
 
     assert joined == [ROOM]
