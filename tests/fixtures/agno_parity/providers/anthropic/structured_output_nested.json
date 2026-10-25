@@ -17,8 +17,7 @@
       "id": "claude-sonnet-5-5",
       "provider": "anthropic"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "$defs": {
           "CronSchedule": {
@@ -194,9 +193,9 @@
         "title": "ScheduledWorkflow",
         "type": "object"
       },
-      "model": "mindroom.scheduling.tasks:ScheduledWorkflow",
-      "type": "pydantic"
+      "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
+    "portable_replay": null,
     "stream": false,
     "tool_choice": null,
     "tools": []
@@ -204,7 +203,6 @@
   "parsed": {
     "message": {
       "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -219,8 +217,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "end_turn"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -234,7 +231,7 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": "end_turn"
+    "stop_reason": "end"
   },
   "request": {
     "body": {

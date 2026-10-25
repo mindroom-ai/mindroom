@@ -54,20 +54,16 @@
       "messages": [
         {
           "content": "<your_role>\nExtract durable memory statements for long-term memory storage.\n</your_role>",
-          "from_history": false,
-          "stop_after_tool_call": false,
           "role": "system"
         },
         {
           "content": "Extract only durable memories from this conversation excerpt.\nKeep only stable facts, explicit preferences, decisions, commitments, and action items.\nSkip chit-chat, temporary statements, and one-off tool output.\nIf nothing should be stored, output exactly: NO_REPLY\nOutput plain lines only, one memory per line, no commentary.\nExisting memory snippets (avoid duplicates):\n- The user lives in Berlin.\n\nConversation excerpt:\nuser: I prefer aisle seats on flights.\nassistant: Noted, aisle seats from now on.\n",
-          "from_history": false,
-          "stop_after_tool_call": false,
           "role": "user"
         }
       ],
       "tools": [],
       "tool_choice": null,
-      "response_format": null,
+      "output_schema": null,
       "deferred_tool_names": []
     }
   ],

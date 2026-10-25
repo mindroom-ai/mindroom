@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from ollama import AsyncClient, Client
 
 from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, EmbedderRequestError, embedder_request_error
-from mindroom.providers.ollama_errors import provider_error
+from mindroom.providers.ollama.errors import provider_error
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

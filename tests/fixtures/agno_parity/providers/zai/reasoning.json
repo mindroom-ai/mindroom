@@ -17,8 +17,8 @@
       "id": "glm-5.3",
       "provider": "zai"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": []
@@ -26,7 +26,6 @@
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -36,8 +35,7 @@
         "system_fingerprint": "fp_parity"
       },
       "reasoning_content": "Rain is likely, so pack for wet weather.",
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -45,7 +43,7 @@
       "reasoning_tokens": 7,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {

@@ -501,6 +501,7 @@ class AgentBot:
                 ),
             )
 
+        self._personal_agents_provisioning: set[tuple[str, str]] = set()
         self.personal_rooms = PersonalRoomService(
             self.agent_name,
             self._runtime_view,
@@ -2794,16 +2795,27 @@ class AgentBot:
         """Create one user's agent from a template and reload the config so the runtime starts it."""
         client = self.client
         assert client is not None
-        profile = await client.get_displayname(user_id)
-        _, changed = await provision_personal_agent(
-            self.config,
-            self.runtime_paths,
-            template=template,
-            user_id=user_id,
-            user_display_name=profile.displayname if isinstance(profile, nio.ProfileGetDisplayNameResponse) else None,
-            source_user_id=source_user_id,
-            source_room_id=source_room_id,
-        )
+        # A live join and a reconciliation pass can both reach one user; only one may register the account.
+        # A second call returns at once, so the caller treats the user as pending and retries without waiting.
+        key = (template, user_id)
+        if key in self._personal_agents_provisioning:
+            return
+        self._personal_agents_provisioning.add(key)
+        try:
+            profile = await client.get_displayname(user_id)
+            _, changed = await provision_personal_agent(
+                self.config,
+                self.runtime_paths,
+                template=template,
+                user_id=user_id,
+                user_display_name=profile.displayname
+                if isinstance(profile, nio.ProfileGetDisplayNameResponse)
+                else None,
+                source_user_id=source_user_id,
+                source_room_id=source_room_id,
+            )
+        finally:
+            self._personal_agents_provisioning.discard(key)
         # This runs only while the live config lacks the agent, so an existing entry still needs a reload,
         # but re-requesting a queued one would restart its debounce and response drain on every retry.
         orchestrator = self.orchestrator

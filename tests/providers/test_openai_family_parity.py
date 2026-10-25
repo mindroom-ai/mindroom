@@ -7,13 +7,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.llm.provider import TextDelta, ToolCallReady, TurnCompleted
+from tests.agno_parity.golden_files import render
 from tests.providers.golden_support import (
-    expected_body,
-    expected_stop_reason,
     golden_id,
     golden_paths,
     load_golden,
-    ordered_json,
+    regenerated_golden,
 )
 from tests.providers.openai_family_support import OPENAI_FAMILIES, replay_golden
 
@@ -32,13 +31,12 @@ def test_every_openai_family_golden_is_replayed() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", GOLDENS, ids=golden_id)
 async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> None:
-    """Request method, URL, kept headers, and body match, and the parsed reply matches field for field."""
+    """Replaying a golden regenerates it byte for byte: request method, URL, kept headers, body, and parsed reply."""
     golden = load_golden(path)
     replay = await replay_golden(golden, tmp_path)
-    assert replay.request == golden["request"]
-    assert ordered_json(replay.request["body"]) == ordered_json(expected_body(golden, replay.request["body"]))
-    assert replay.parsed == golden["parsed"]
-    assert replay.stop_reason == expected_stop_reason(golden)
+    regenerated = regenerated_golden(golden, replay)
+    assert regenerated == golden
+    assert render(regenerated) == path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

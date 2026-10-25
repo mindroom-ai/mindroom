@@ -2320,8 +2320,7 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
 Each provider accepts only the keys in the table below.
-A model with any other key fails to load with an `Unsupported extra_kwargs` error that names the unknown keys and lists the accepted ones.
-Retired Agno model settings that older configs still set, such as `retries`, load with a warning and are ignored.
+A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
 
 - `base_url` sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
@@ -2973,7 +2972,7 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
-The retired `compress_tool_results` field is ignored with a warning, and tool results replay unchanged.
+Tool results replay unchanged; the retired `compress_tool_results` field fails validation with `Unknown key`, so remove it.
 
 ## Context Window
 
@@ -3157,6 +3156,7 @@ A `file` member of a team that uses Mem0 does not see that team's memory in its 
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory.
+The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder
 
@@ -3462,7 +3462,7 @@ Save from the Memory page to write the changes to `config.yaml`.
 
 ## Agno Learning
 
-Agno Learning is retired: configs that still set `learning` or `learning_mode` load with a warning and the values are ignored.
+Agno Learning is retired: a config that sets `learning` or `learning_mode` on an agent or in `defaults` fails validation with `Unknown key`, so remove them.
 Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.
 
 # Knowledge Bases
@@ -3567,7 +3567,7 @@ A refresh reuses the stored vectors of unchanged files and only embeds files tha
 Changing `chunk_size`, `chunk_overlap`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, HTTP 408, 429, and 5xx) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, 500, 502, 503, 504, and 529) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
 
 Knowledge base configuration hot-reloads.
 After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
@@ -3919,8 +3919,9 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 ## Storage
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
+They use Chroma, whose `chromadb` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[chromadb]`.
 For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
-Files-mode bases need no vector database.
+Files-mode bases build no vector index, but refreshing them still loads the `chromadb` extra.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 ## Search Limits
@@ -10213,6 +10214,7 @@ WebRTC cannot send UDP from these browsers.
 
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
 Pages larger than 2 MiB fail, as do pages a server sends compressed.
+An entry that sets the retired `website.knowledge` option fails config load until you remove it.
 
 ```yaml
 agents:
@@ -18472,6 +18474,7 @@ See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-pr
 
 With `workers.backend: kubernetes`, the primary runtime creates a worker Deployment and Service per worker on demand and routes tool calls to it.
 Idle workers scale to zero, keeping agent data and worker caches.
+The default image includes the `kubernetes` package this needs; a custom image built without all extras must install `mindroom[kubernetes]` in the primary runtime.
 Each worker keeps its own caches and virtualenvs under `workers.kubernetes.storageSubpathPrefix`.
 [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) describes which workspaces each worker mounts, and [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) describes how tool settings reach workers.
 `google_vertex_adc` tools must run in the primary runtime, because workers receive no Google application default credentials.
@@ -20901,6 +20904,9 @@ Smaller changes that need operator action:
   In a sandbox runner, set every proxy variable, or only `all_proxy`, to the same HTTP(S) proxy, or the browser does not start.
   See [Egress Proxy for Browsers](https://docs.mindroom.chat/tools/web-scraping-and-browser/#egress-proxy-for-browsers) for the full rules.
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
+- **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode` (see [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning)), `compress_tool_results` (see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings)), and the `website` tool's `knowledge` option (see [`website`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#website)) from `config.yaml`.
+  Configs created by older `mindroom config init` runs set `learning: false` on the `mind` agent.
+  Also delete every `extra_kwargs` key a model's provider does not accept, such as the retired Agno setting `retries` or a misspelled key, on every model, including models no agent uses; [Extra Kwargs](https://docs.mindroom.chat/configuration/models/#extra-kwargs) lists the accepted keys.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
 - **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.

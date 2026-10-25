@@ -27,6 +27,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
+from tests.agno_parity.golden_files import render
 from tests.providers.gemini_ollama_support import (
     FAMILIES,
     Golden,
@@ -36,10 +37,8 @@ from tests.providers.gemini_ollama_support import (
 )
 from tests.providers.golden_support import (
     comparable_metrics,
-    expected_parsed,
-    expected_stop_reason,
     hide_provider_environment,
-    ordered_json,
+    regenerated_golden,
 )
 
 if TYPE_CHECKING:
@@ -58,15 +57,14 @@ def test_every_route_has_goldens() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("golden", GOLDENS, ids=[golden.id for golden in GOLDENS])
 async def test_adapter_reproduces_golden(golden: Golden, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The adapter sends the golden request and parses the golden reply."""
+    """The adapter sends the golden request and parses the golden reply, so the replay regenerates it byte for byte."""
     hide_provider_environment(monkeypatch)
 
     result = await replay(golden, tmp_path)
 
-    assert result.request == golden.data["request"]
-    assert ordered_json(result.request["body"]) == ordered_json(golden.data["request"]["body"])
-    assert result.parsed == expected_parsed(golden.data)
-    assert result.stop_reason == expected_stop_reason(golden.data)
+    regenerated = regenerated_golden(golden.data, result)
+    assert regenerated == golden.data
+    assert render(regenerated) == golden.path.read_text(encoding="utf-8")
 
 
 def _chunks_reporting_usage(golden: Golden) -> int:

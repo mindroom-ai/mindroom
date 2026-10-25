@@ -1,7 +1,8 @@
 """Parse a model's ``extra_kwargs`` into the settings dataclass of its provider adapter, and report its parameters.
 
 Settings fields keep the Agno model field names that authored configs already use.
-Keys an adapter does not accept fail with the accepted list instead of being passed through.
+Keys an adapter does not accept fail with the accepted list instead of being passed through, at config load and
+again when the model is built.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.redaction import redact_sensitive_data
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Collection, Iterable, Mapping
 
     from _typeshed import DataclassInstance
 
@@ -36,6 +37,27 @@ def _copied(value: Any) -> Any:  # noqa: ANN401 - arbitrary authored value
     return value
 
 
+def settings_keys(settings_type: type[DataclassInstance], accepted: Iterable[str] | None = None) -> frozenset[str]:
+    """Return the keys ``settings_type`` declares, narrowed to ``accepted`` for a type that several routes share."""
+    declared = frozenset(field.name for field in fields(settings_type))
+    return declared if accepted is None else declared & frozenset(accepted)
+
+
+def reject_unsupported_extra_kwargs(
+    extra_kwargs: Mapping[str, Any] | None,
+    allowed: Collection[str],
+    *,
+    provider: str,
+) -> None:
+    """Raise ``ValueError`` naming the ``extra_kwargs`` keys outside ``allowed`` and listing the accepted ones."""
+    if unknown := sorted((extra_kwargs or {}).keys() - set(allowed)):
+        msg = (
+            f"Unsupported extra_kwargs for provider {provider!r}: {', '.join(unknown)}; remove or correct them. "
+            f"Accepted keys: {', '.join(sorted(allowed))}"
+        )
+        raise ValueError(msg)
+
+
 def settings_from_extra_kwargs[T: DataclassInstance](
     settings_type: type[T],
     extra_kwargs: Mapping[str, Any] | None,
@@ -49,14 +71,7 @@ def settings_from_extra_kwargs[T: DataclassInstance](
     routes share.
     """
     values = dict(extra_kwargs or {})
-    declared = {field.name for field in fields(settings_type)}
-    allowed = declared if accepted is None else declared & set(accepted)
-    if unknown := sorted(values.keys() - allowed):
-        msg = (
-            f"Unsupported extra_kwargs for provider {provider!r}: {', '.join(unknown)}. "
-            f"Accepted keys: {', '.join(sorted(allowed))}"
-        )
-        raise ValueError(msg)
+    reject_unsupported_extra_kwargs(values, settings_keys(settings_type, accepted), provider=provider)
     return settings_type(**{key: _copied(value) for key, value in values.items()})
 
 
@@ -82,4 +97,10 @@ def settings_params(settings: DataclassInstance) -> dict[str, Any]:
     return cast("dict[str, Any]", redact_sensitive_data(params))
 
 
-__all__ = ["SECRET", "settings_from_extra_kwargs", "settings_params"]
+__all__ = [
+    "SECRET",
+    "reject_unsupported_extra_kwargs",
+    "settings_from_extra_kwargs",
+    "settings_keys",
+    "settings_params",
+]
