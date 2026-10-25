@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
+
+import httpx
 
 from mindroom.llm.provider import StreamProgress, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
@@ -26,6 +28,24 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.settings import ChatSettings
 
 __all__ = ["ChatAdapter"]
+
+
+@dataclass
+class _WatchedBody(httpx.AsyncByteStream):
+    """A response body that records whether it was read to its end."""
+
+    body: httpx.AsyncByteStream
+    read_to_end: bool = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Pass the body through, then record that it ended."""
+        async for chunk in self.body:
+            yield chunk
+        self.read_to_end = True
+
+    async def aclose(self) -> None:
+        """Close the body."""
+        await self.body.aclose()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -77,6 +97,10 @@ class ChatAdapter:
         try:
             client = await self.clients.client(request.overrides)
             sdk_stream = await client.chat.completions.create(**kwargs)
+            # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK stops
+            # reading at the sentinel, so a body read to its end never sent one.
+            body = _WatchedBody(cast("httpx.AsyncByteStream", sdk_stream.response.stream))
+            sdk_stream.response.stream = body
             try:
                 async for chunk in sdk_stream:
                     # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
@@ -87,6 +111,9 @@ class ChatAdapter:
                 await sdk_stream.close()
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
+        if body.read_to_end and accumulator.parts.finish_reason is None:
+            # Servers may omit the finish reason or ``[DONE]``, but a stream with neither was cut off: no turn ends.
+            return
         for event in accumulator.finish():
             first_token = output_started(first_token, event)
             yield event

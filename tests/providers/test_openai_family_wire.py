@@ -49,7 +49,13 @@ from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.tool_policy import without_provider_tools
-from tests.providers.openai_family_support import golden_provider, provider_runtime, unsigned_jwt
+from tests.providers.golden_support import PacedBytes, encoded_response
+from tests.providers.openai_family_support import (
+    golden_provider,
+    openai_family_adapter,
+    provider_runtime,
+    unsigned_jwt,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -351,14 +357,77 @@ def _tool_call_reply(server_id: str | None) -> dict[str, Any]:
     return _chat_reply(_chunk({"tool_calls": [call]}, finish_reason="tool_calls"))
 
 
+_COAT = _chunk({"content": "Pack a coat."})
+_STOP = _chunk({}, finish_reason="stop")
+_DONE = {"data": "[DONE]"}
+
+
+def _chat_events(*chunks: dict[str, Any]) -> dict[str, Any]:
+    return {"status": 200, "headers": {"content-type": "text/event-stream"}, "sse": list(chunks)}
+
+
+def _streamed_chat(*chunks: dict[str, Any]) -> dict[str, Any]:
+    """Return a Chat stream whose body streams as a server's does, so the adapter can tell where it ends."""
+    return {**_chat_events(*chunks), "pause_seconds": 0.0}
+
+
 @pytest.mark.asyncio
-async def test_a_chat_stream_without_a_finish_reason_reports_no_stop_reason(tmp_path: Path) -> None:
-    """OpenAI-compatible servers may end a stream without ``finish_reason``; the text still arrives whole."""
-    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _chat_reply(_chunk({"content": "Pack a coat."})))
+@pytest.mark.parametrize(
+    ("ending", "stop_reason"),
+    [([_STOP, _DONE], "end"), ([_STOP], "end"), ([_DONE], None)],
+    ids=["finish-reason-and-done", "finish-reason-without-done", "done-without-finish-reason"],
+)
+async def test_a_chat_stream_ends_its_turn_at_a_finish_reason_or_done(
+    tmp_path: Path,
+    ending: list[dict[str, Any]],
+    stop_reason: str | None,
+) -> None:
+    """OpenAI-compatible servers may omit ``finish_reason`` or ``[DONE]``; either one ends the turn."""
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _streamed_chat(_COAT, *ending))
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
+    turn = await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert (turn.content, turn.stop_reason) == ("Pack a coat.", None)
+    assert (turn.content, turn.stop_reason) == ("Pack a coat.", stop_reason)
+
+
+class _RecordedBody(PacedBytes):
+    """A streamed response body that records whether it was closed."""
+
+    closed = False
+
+    async def aclose(self) -> None:
+        """Record the close."""
+        self.closed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", [[_STOP, _DONE], []], ids=["ended-at-done", "cut-off"])
+async def test_a_chat_stream_closes_its_response_body(tmp_path: Path, ending: list[dict[str, Any]]) -> None:
+    """The response body is closed once the stream stops, at ``[DONE]`` or cut off, which releases its connection."""
+    whole = encoded_response(_chat_events(_COAT, *ending))
+    body = _RecordedBody([whole.content])
+    adapter = openai_family_adapter(
+        {"provider": "llama_cpp", "id": "qwen"},
+        tmp_path,
+        lambda _request: httpx.Response(200, headers=whole.headers, stream=body),
+    )
+
+    [event async for event in adapter.stream(ModelRequest(messages=[_user()]))]
+
+    assert body.closed
+
+
+@pytest.mark.asyncio
+async def test_a_chat_stream_cut_off_without_a_finish_reason_or_done_ends_no_turn(tmp_path: Path) -> None:
+    """A body that ends after text without either was cut off: its text arrives, but the turn does not end.
+
+    The request pipeline turns the missing turn into its retryable early-end error.
+    """
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _streamed_chat(_COAT))
+
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
+
+    assert events == [TextDelta("Pack a coat.")]
 
 
 @pytest.mark.asyncio

@@ -38,6 +38,7 @@ from mindroom.providers.pipeline.retry import STREAM_STALLED
 from tests.providers.anthropic_family_support import ROUTE_CONFIGS, provider_for
 from tests.providers.gemini_ollama_support import build_adapter
 from tests.providers.golden_support import (
+    PacedBytes,
     hide_provider_environment,
     ndjson_response,
     pipeline_provider,
@@ -181,6 +182,20 @@ _CHAT_START = _chat_chunk({"role": "assistant", "content": ""})
 
 def _chat_stream(*events: dict[str, Any] | str, pause: float = 0.0, drop: bool = False) -> Reply:
     return lambda: sse_response([_CHAT_START, *events], pause_seconds=pause, drop=drop)
+
+
+def _chat_cut_off(*events: dict[str, Any]) -> Reply:
+    """Return a Chat stream whose body ends after ``events``, without a finish reason or ``[DONE]``.
+
+    The body streams as a server's does: the adapter tells a body that just ended from one that stopped at
+    ``[DONE]`` by whether it was read to its end, which a body that arrives whole never shows.
+    """
+
+    def reply() -> httpx.Response:
+        whole = sse_response([_CHAT_START, *events])
+        return httpx.Response(whole.status_code, headers=whole.headers, stream=PacedBytes([whole.content]))
+
+    return reply
 
 
 def _chat_error(**error: object) -> Reply:
@@ -392,9 +407,9 @@ _STALLED = 2
 
 # An early end, a stream that ends before the provider finished the turn, is retried like a dropped connection on
 # every route until the attempt committed. Only on Responses did the Agno-backed runtime do the same; on Claude,
-# Gemini, and Ollama it accepted what had arrived as the finished reply after one request, an empty one when nothing
-# had. A Chat stream has no early end: its end finishes the turn, since OpenAI-compatible servers may omit the finish
-# reason, as on the Agno-backed runtime.
+# Gemini, Ollama, and Chat it accepted what had arrived as the finished reply after one request, an empty one when
+# nothing had. OpenAI-compatible servers may omit the finish reason or ``[DONE]``, so a Chat stream ends early only
+# when it has neither.
 def _early_ends(before_output: Reply, after_output: Reply) -> list[_Case]:
     """Return the early end before any output and the early end after visible output of one route's wire."""
     return [
@@ -860,6 +875,7 @@ _CHAT_CASES = [
         UNAVAILABLE,
         1,
     ),
+    *_early_ends(_chat_cut_off(), _chat_cut_off(_chat_chunk({"content": _PARTIAL}))),
 ]
 _CHAT_SHARED = [
     case
@@ -1356,6 +1372,33 @@ async def test_a_compaction_summary_attempt_sends_one_request_on_every_route(rou
         return answer
 
     provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+
+    with pytest.raises(ProviderUnavailable):
+        await generate_compaction_summary(
+            model=provider,
+            summary_input="Conversation",
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+        )
+
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_summary_cut_off_after_its_text_is_not_returned(tmp_path: Path) -> None:
+    """A Chat summary stream whose body ends after a text delta, without a finish reason or ``[DONE]``, is no summary.
+
+    Compaction would otherwise store the partial text as the summary of everything it replaces.
+    """
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        answer = _chat_cut_off(_chat_chunk({"content": _PARTIAL}))()
+        assert isinstance(answer, httpx.Response)
+        return answer
+
+    provider = pipeline_provider(_adapter("openai_chat", tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
 
     with pytest.raises(ProviderUnavailable):
         await generate_compaction_summary(
