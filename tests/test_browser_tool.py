@@ -73,8 +73,9 @@ if TYPE_CHECKING:
     from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
-# Bounds a wait for the fake Playwright adapter to reach a lifecycle phase, which startup reaches on its own. No
-# production timer races it, so it sits far above startup on a loaded host and below pytest's 60-second timeout.
+# Bounds a wait for the fake Playwright adapter to reach a startup or teardown phase, which the browser call under
+# test reaches on its own. No production timer races it, so it sits far above that call on a loaded host and below
+# pytest's 60-second timeout.
 _PHASE_WAIT_SECONDS = 10.0
 # A load the relay or egress proxy refuses keeps Chromium's error and says the destination may not be allowed.
 _PROXY_FAILURE_HINTED = r"ERR_SOCKS_CONNECTION_FAILED[\s\S]*outbound access to its host or port may not be allowed"
