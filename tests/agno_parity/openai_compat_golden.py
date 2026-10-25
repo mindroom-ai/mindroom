@@ -110,24 +110,17 @@ _REQUESTS: dict[str, dict[str, list[list[ScriptStep]]]] = {
 }
 
 
-def _numbered(cases: dict[str, Any]) -> dict[str, Any]:
-    """Number the completion ids by first appearance, one of the two values that vary between runs."""
+def _normalized(cases: dict[str, Any]) -> dict[str, Any]:
+    """Number the completion ids by first appearance and blank the clock, the only values that vary between runs."""
     text = json.dumps(cases)
     ids: dict[str, str] = {}
-    return json.loads(
-        _COMPLETION_ID.sub(lambda match: ids.setdefault(match.group(), f"chatcmpl-{len(ids) + 1:012x}"), text),
-    )
-
-
-def _as_captured(cases: dict[str, Any]) -> dict[str, Any]:
-    """Keep the capture's clock readings, the other value that varies between runs, which no comparison reads."""
-    captured = iter([match.group() for match in _CREATED.finditer(GOLDEN.read_text(encoding="utf-8"))])
-    return json.loads(_CREATED.sub(lambda _match: next(captured), json.dumps(cases)))
+    text = _COMPLETION_ID.sub(lambda match: ids.setdefault(match.group(), f"chatcmpl-{len(ids) + 1:012x}"), text)
+    return json.loads(_CREATED.sub(r"\g<1>0", text))
 
 
 def regenerated_golden(root: Path) -> dict[str, Any]:
     """Return the golden the owned API path regenerates for the golden's requests, with its run state under ``root``."""
-    return _as_captured(_numbered(_post_all(root)))
+    return _normalized(_post_all(root))
 
 
 def _post_all(tmp_path: Path) -> dict[str, Any]:
