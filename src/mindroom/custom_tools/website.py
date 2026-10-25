@@ -186,7 +186,7 @@ def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
 
 
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-# The crawl budget, the fetch timeout, the breadth-first queue, the 1-3 second pause before each fetch, and the
+# The crawl budget, the fetch timeout, the breadth-first queue, the 1-3 second pause between fetches, and the
 # 5000-character page documents follow Agno's WebsiteReader, so the tool returns what it always has.
 _MAX_DEPTH = 3
 _MAX_LINKS = 10
@@ -202,7 +202,7 @@ class _MindRoomWebsiteReader:
     _urls_to_crawl: list[tuple[str, int]] = field(default_factory=list, init=False, repr=False)
 
     def delay(self) -> None:
-        """Pause a random 1-3 seconds before each fetch so a crawl does not hammer one host."""
+        """Pause a random 1-3 seconds between a crawl's fetches so it does not hammer one host."""
         time.sleep(random.uniform(1, 3))  # noqa: S311 - pacing, not security.
 
     def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, crawl_host: str) -> None:
@@ -355,10 +355,9 @@ class _MindRoomWebsiteReader:
                 crawl_host=crawl_host,
             ):
                 continue
+            if self._visited:
+                self.delay()
             self._visited.add(current_url)
-            # TODO(simplify): The pause also precedes the first fetch, so reading one page always waits 1-3 seconds.
-            # Pause only between fetches of one crawl. Users would get single-page reads seconds sooner.
-            self.delay()
             num_links += self._record_current_url(
                 current_url=current_url,
                 current_depth=current_depth,
