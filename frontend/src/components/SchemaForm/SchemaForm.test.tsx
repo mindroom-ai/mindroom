@@ -171,6 +171,7 @@ const ROOT: JsonSchema = {
         aliases: {
           type: "object",
           additionalProperties: { type: "array", items: { type: "string" } },
+          "x-mindroom": { key_placeholder: "@alice:example.org" },
         },
         participation: {
           anyOf: [{ $ref: "#/$defs/ParticipationConfig" }, { type: "null" }],
@@ -431,6 +432,16 @@ describe("SchemaFields", () => {
       target: { value: "sonnet" },
     });
     expect(lastValue()).toEqual({ room_models: { lobby: "sonnet" } });
+  });
+
+  it("shows a map's example key in its new-key input", () => {
+    renderFixture();
+    expect(
+      screen.getByRole("textbox", { name: "New aliases key" }),
+    ).toHaveAttribute("placeholder", "Key, such as @alice:example.org");
+    expect(
+      screen.getByRole("combobox", { name: "New room models key" }),
+    ).toHaveAttribute("placeholder", "Key");
   });
 
   it("enables optional objects with their defaults and disables them by removing the key", () => {

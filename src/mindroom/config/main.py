@@ -483,7 +483,11 @@ class Config(BaseModel):
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     personal_agents: dict[str, PersonalAgentTemplateConfig] = Field(
         default_factory=dict,
-        description="Templates that give every onboarded user their own agent",
+        description=(
+            "Templates that give every onboarded user their own agent; "
+            "select a template's key as the Personal rooms agent to use it"
+        ),
+        json_schema_extra=dashboard_hint(key_placeholder="mind"),
     )
     personal_rooms: PersonalRoomsConfig | None = Field(default=None, description="Optional native personal agent rooms")
     budgets: BudgetsConfig | None = Field(default=None, description="Optional per-user monthly spending budgets")
