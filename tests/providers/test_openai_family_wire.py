@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +59,8 @@ _RESPONSE_USAGE = {"input_tokens": 42, "output_tokens": 12, "total_tokens": 54}
 _OPENAI_CHAT = {"provider": "openai", "api": "chat_completions", "id": "gpt-6-astra", "api_key": "test-key"}
 _OPENAI_RESPONSES = {"provider": "openai", "api": "responses", "id": "gpt-6-astra", "api_key": "test-key"}
 _CALL = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
+# The id a Chat turn stores a call under when the server's id would not reach the model unchanged.
+_NEW_CHAT_ID = r"call_[0-9a-f]{32}"
 
 
 def _chunk(delta: dict[str, Any] | None = None, *, finish_reason: str | None = None, **extra: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -273,17 +276,49 @@ async def test_chat_completion_splits_think_tags_as_agno_did(
 
 
 @pytest.mark.asyncio
-async def test_chat_tool_calls_without_ids_get_generated_ids(tmp_path: Path) -> None:
-    delta = {"tool_calls": [{"index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]}
-    built = _Built(
-        tmp_path,
-        {"provider": "llama_cpp", "id": "qwen"},
-        _chat_reply(_chunk(delta, finish_reason="tool_calls")),
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "blocking"])
+@pytest.mark.parametrize(
+    ("server_id", "stored"),
+    [
+        (None, _NEW_CHAT_ID),
+        ("functions.get_weather:0", _NEW_CHAT_ID),
+        (f"call_{'a' * 35}", f"call_{'a' * 35}"),
+        (f"call_{'a' * 36}", _NEW_CHAT_ID),
+    ],
+    ids=["omitted", "unprefixed", "at-40-characters", "past-40-characters"],
+)
+async def test_a_chat_call_keeps_only_a_server_id_that_chat_requests_send_unchanged(
+    tmp_path: Path,
+    server_id: str | None,
+    stored: str,
+    stream: bool,
+) -> None:
+    """A missing id, or one outside the Chat rule (``call_``, at most 40 characters), becomes a new id that fits it."""
+    call: dict[str, Any] = {"index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+    if server_id is not None:
+        call["id"] = server_id
+    completion = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "m",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "content": None, "tool_calls": [call]},
+            },
+        ],
+        "usage": _USAGE,
+    }
+    reply = (
+        _chat_reply(_chunk({"tool_calls": [call]}, finish_reason="tool_calls")) if stream else _json_reply(completion)
     )
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, reply)
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
+    turn = await _turn(built, ModelRequest(messages=[_user()], stream=stream))
 
-    assert len(turn.tool_calls[0]["id"]) == 36
+    assert re.fullmatch(stored, turn.tool_calls[0]["id"])
 
 
 @pytest.mark.asyncio

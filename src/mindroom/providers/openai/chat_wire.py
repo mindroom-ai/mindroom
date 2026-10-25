@@ -15,7 +15,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
-from uuid import uuid4
 
 from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
@@ -23,7 +22,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
-from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
+from mindroom.providers.openai.tool_ids import chat_call_id, reformat_tool_call_ids
 from mindroom.providers.tool_policy import disable_tool_selection, provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -486,10 +485,12 @@ def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> N
 
 
 def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Give id-less calls (local servers) a generated id, so their results can reference them."""
+    """Store each call under an id later requests send unchanged, so its result and approval receipt name that id.
+
+    A server may omit the id or send one outside the Chat rule; either call gets a new id that fits it.
+    """
     for call in calls:
-        if not call.get("id"):
-            call["id"] = str(uuid4())
+        call["id"] = chat_call_id(call.get("id"))
     return calls
 
 

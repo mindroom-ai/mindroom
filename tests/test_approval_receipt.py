@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, SendRequest
-from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.run import resume_agent, run_agent
+from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.ai import stream_agent_response
 from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt, messages_with_approval_receipt
@@ -16,7 +18,8 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader, appro
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.event_journal import ApprovalCall, ApprovalDecision
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
+from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -24,7 +27,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.agent_loop.helpers import collect, context, echo, spec, toolkit
+from tests.agent_loop.helpers import collect, context, echo, gated, spec, toolkit
 from tests.approval_continuation_helpers import carries_approval_receipt
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import (
@@ -39,6 +42,7 @@ from tests.delegation_helpers import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
+from tests.providers.openai_family_support import golden_provider
 from tests.scripted_agent_helpers import streamed_text
 from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
 
@@ -319,6 +323,97 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
     assert all(
         "trusted approval receipt" not in str(message.content) for message in [*first.messages, *second.messages]
     )
+
+
+def _chat_echo_call_reply(server_id: str | None) -> dict[str, Any]:
+    """Return a Chat stream answering with one ``echo`` call, under ``server_id`` or, when it is None, no id."""
+    call: dict[str, Any] = {"index": 0, "type": "function", "function": {"name": "echo", "arguments": '{"text": "x"}'}}
+    if server_id is not None:
+        call["id"] = server_id
+    chunk = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "qwen",
+        "choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}],
+    }
+    return {
+        "status": 200,
+        "headers": {"content-type": "text/event-stream"},
+        "sse": [{"data": chunk}, {"data": "[DONE]"}],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server_id",
+    [None, "Xq7Lm2Rt9Vb4Nc8Kd1Fs6Hj3Pw5Yz0Ae", "functions.echo:0", f"chatcmpl-tool-{'a' * 32}"],
+    ids=["omitted", "unprefixed", "dotted", "past-40-characters"],
+)
+async def test_a_chat_resume_sends_the_call_under_the_id_its_receipt_names(
+    tmp_path: Path,
+    server_id: str | None,
+) -> None:
+    """A Chat server's call reaches the model under the receipt's id, though the server omitted it or broke Chat's rule.
+
+    Chat requests send only ``call_`` ids of at most 40 characters, so the server's own id cannot be the one named.
+    """
+    built = golden_provider(
+        {
+            "input": {"model_config": {"provider": "llama_cpp", "id": "qwen"}},
+            "response_raw": _chat_echo_call_reply(server_id),
+        },
+        tmp_path,
+    )
+    agent = AgentSpec(
+        id="code",
+        name="Code",
+        model=built.provider,
+        system_message=Message(role="system", content="You are Code."),
+        toolkits=(gated(echo),),
+    )
+    _, paused = await collect(
+        run_agent(
+            agent,
+            [Message(role="user", content="Go")],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+    call_id = paused.requirements[0].tool_execution.tool_call_id if paused.requirements else None
+    assert call_id is not None
+    approval = ApprovalCall(
+        tool_call_id=call_id,
+        tool_name="echo",
+        invoking_agent="code",
+        expires_at_ns=1,
+        decision=ApprovalDecision.APPROVED,
+        human_approval_required=True,
+        toolkit_name="gated",
+        arguments_digest=approval_arguments_digest({"text": "x"}),
+    )
+
+    with approval_receipt_context(build_approval_receipt((approval,)), run_id=paused.run_id):
+        await collect(
+            resume_agent(
+                agent,
+                paused,
+                build_resume_request(paused=paused.messages, summary=None, history=[]),
+                approved=[approval],
+                denied={},
+                external_results={},
+                context=lambda run_id: context(run_id=run_id),
+                hooks=LoopHooks(before_request=(approval_receipt_hook(built.provider.capabilities),)),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
+        )
+
+    resumed = json.loads(built.requests[1].content)["messages"]
+    assert [message["role"] for message in resumed] == ["system", "user", "assistant", "tool"]
+    assert f"`echo` (tool call id `{call_id}`): human approval was required" in resumed[0]["content"]
+    assert [resumed[2]["tool_calls"][0]["id"], resumed[3]["tool_call_id"]] == [call_id, call_id]
 
 
 def _leader_delegating_to_code(
