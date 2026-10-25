@@ -12,7 +12,13 @@ from agno.tools.function import Function
 from structlog.testing import capture_logs
 
 import mindroom.agents as agents_module
-from mindroom.agent_loop.build import AgentBuild, AgentSurface, appended_context, prompt_for_turn
+from mindroom.agent_loop.build import (
+    AgentBuild,
+    AgentSurface,
+    appended_context,
+    prompt_for_turn,
+    tool_owners_by_agent,
+)
 from mindroom.agent_loop.prompt import CLAUDE_TOOLS_NOTE, render_system_message
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent
@@ -102,6 +108,11 @@ def _build(config: Config, runtime_paths: RuntimePaths, **kwargs: Any) -> AgentB
     return create_agent("assistant", config, runtime_paths, identity, **kwargs)
 
 
+def _owners(build: AgentBuild) -> dict[str, str]:
+    """Return the authored toolkit approvals name each function the build offers by, by function name."""
+    return {name: toolkit for (_agent, name), toolkit in tool_owners_by_agent(build).items()}
+
+
 def _offered(build: AgentBuild) -> dict[str, ToolFunction]:
     return dict(prepare_run_tools(build.spec).functions)
 
@@ -122,7 +133,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert [toolkit.name for toolkit in build.spec.toolkits] == ["calculator", "search_knowledge_base", "skills"]
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"search_knowledge_base"} | SKILL_FUNCTION_NAMES
     assert build.spec.max_tool_calls_per_turn == config.resolve_entity("assistant").max_tool_calls_per_turn
-    assert build.tool_owners == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
+    assert _owners(build) == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "assistant")
     assert f"### {workspace / 'SOUL.md'}\nYou are calm and precise." in build.prompt.role
     assert build.prompt.role.endswith("Answer questions about the team handbook.")
@@ -290,10 +301,29 @@ def test_the_toolkit_whose_function_a_run_offers_owns_its_name_for_approvals_and
     assert (calculator.name, wikipedia.name) == ("calculator", "wikipedia")
     [offered] = calculator.functions
     assert _offered(build)["ping"] is offered
-    assert build.tool_owners == {"ping": "calculator"}
+    assert _owners(build) == {"ping": "calculator"}
     assert build.tool_jobs is not None
     job_tool = build.tool_jobs.tools["ping"]
     assert (job_tool.function, job_tool.toolkit_name, job_tool.toolkit) == (offered, "calculator", built["calculator"])
+
+
+def test_a_shadowed_function_is_reported_once_per_build_however_often_its_runs_read_the_tools(tmp_path: Path) -> None:
+    """The build resolves the names its toolkits share once; the runs, resumes, and history budget only read the result."""
+    config, runtime_paths = _config(tmp_path, tools=["calculator", "wikipedia"])
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name=tool_name, tools=[ping])
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+        build = _build(config, runtime_paths, persist_runtime_state=False)
+        for _run in range(3):
+            prepare_run_tools(build.spec).specs()
+
+    calculator, wikipedia = build.spec.toolkits[:2]
+    assert ([f.name for f in calculator.functions], wikipedia.functions) == (["ping"], ())
+    assert [(log["toolkit"], log["tool_name"]) for log in logs if log["event"] == "duplicate_tool_name"] == [
+        ("wikipedia", "ping"),
+    ]
 
 
 def test_a_configured_toolkit_the_run_offers_nothing_of_is_reported(tmp_path: Path) -> None:
@@ -311,8 +341,8 @@ def test_a_configured_toolkit_the_run_offers_nothing_of_is_reported(tmp_path: Pa
     assert [(log["toolkit"], log["function_names"]) for log in shadowed] == [("wikipedia", ["ping"])]
 
 
-def test_a_deferred_function_an_earlier_one_shadows_is_offered_nowhere_and_never_reported(tmp_path: Path) -> None:
-    """The run's deferred toolkits hold only the functions it offers, so no run or build warns about a shadowed one."""
+def test_a_deferred_function_an_earlier_one_shadows_is_offered_nowhere_and_reported_once(tmp_path: Path) -> None:
+    """The run's deferred toolkits hold only the functions it offers; the build reports each shadowed one once."""
     config, runtime_paths = _config(
         tmp_path,
         tools=["calculator", {"wikipedia": {"defer": True}}, {"arxiv": {"defer": True}}],
@@ -332,8 +362,12 @@ def test_a_deferred_function_an_earlier_one_shadows_is_offered_nowhere_and_never
     assert [function.name for function in wikipedia.functions] == ["search_knowledge_base"]
     assert arxiv.functions == ()
     assert build.request_template.deferred_tools.names == frozenset({"search_knowledge_base"})
-    assert not [log for log in logs if log["event"] == "duplicate_tool_name"]
-    assert not [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
+    assert [(log["toolkit"], log["tool_name"]) for log in logs if log["event"] == "duplicate_tool_name"] == [
+        ("wikipedia", "ping"),
+        ("arxiv", "ping"),
+    ]
+    shadowed = [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
+    assert [(log["toolkit"], log["function_names"]) for log in shadowed] == [("arxiv", ["ping"])]
 
 
 def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_path: Path) -> None:
@@ -353,7 +387,7 @@ def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_pat
     server, calculator = build.spec.toolkits[:2]
     assert (server.name, server.functions) == ("demo", ())
     assert _offered(build)["ping"] is calculator.functions[0]
-    assert build.tool_owners == {"ping": "calculator"}
+    assert _owners(build) == {"ping": "calculator"}
 
 
 def test_a_configured_function_named_like_a_generated_one_is_what_the_run_offers_owns_and_runs_as_a_job(
@@ -375,7 +409,7 @@ def test_a_configured_function_named_like_a_generated_one_is_what_the_run_offers
     assert (configured.name, generated.name) == ("calculator", "search_knowledge_base")
     [offered] = configured.functions
     assert _offered(build)["search_knowledge_base"] is offered
-    assert build.tool_owners == {"search_knowledge_base": "calculator"}
+    assert _owners(build) == {"search_knowledge_base": "calculator"}
     assert build.tool_jobs is not None
     job_tool = build.tool_jobs.tools["search_knowledge_base"]
     assert (job_tool.function, job_tool.toolkit_name, job_tool.toolkit) == (offered, "calculator", built["calculator"])
@@ -418,7 +452,7 @@ def test_a_persona_build_offers_only_its_tools_and_speaks_with_its_prompt(tmp_pa
     build = _build(config, runtime_paths, knowledge=_knowledge(), persona=persona)
 
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS
-    assert build.tool_owners == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
+    assert _owners(build) == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
     assert build.prompt.persona == "You are the reviewer."
     assert "Answer questions about the team handbook." not in (build.prompt.role or "")
     assert (build.prompt.knowledge_block, build.prompt.skills_block) == (None, None)

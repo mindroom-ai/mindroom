@@ -19,7 +19,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import offered_toolkits, prepare_run_tools
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -162,13 +162,12 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
             name="Helper",
             model=ScriptedModel([]),
             system_message=None,
-            toolkits=tuple(adapt_toolkit(toolkit) for toolkit in toolkits),
+            toolkits=offered_toolkits([adapt_toolkit(toolkit, key=toolkit.name) for toolkit in toolkits], agent=AGENT),
         ),
         prompt=PromptSpec(role=role, instructions=()),
         request_template=ModelRequest(messages=()),
         history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         store=None,
-        tool_owners={},
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,

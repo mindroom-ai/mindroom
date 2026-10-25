@@ -126,24 +126,6 @@ class AdaptedToolkit:
     connect: ToolkitConnect | None = None
 
 
-def first_of_each_name[T](
-    pairs: Iterable[tuple[T, ToolFunction]],
-    on_dropped: Callable[[T, ToolFunction], None] | None = None,
-) -> Iterator[tuple[T, ToolFunction]]:
-    """Yield the pairs whose function is the first of its name, in order, the selection a run offers.
-
-    Each later pair of a taken name is dropped, kept as main behaves, and passed to ``on_dropped``.
-    """
-    names: set[str] = set()
-    for source, function in pairs:
-        if function.name in names:
-            if on_dropped is not None:
-                on_dropped(source, function)
-            continue
-        names.add(function.name)
-        yield source, function
-
-
 async def connect_toolkits(toolkits: Iterable[AdaptedToolkit], closes: list[ToolkitClose]) -> None:
     """Connect each of ``toolkits`` that holds a connection for one run, adding how to close it to ``closes``.
 

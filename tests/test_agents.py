@@ -2459,12 +2459,19 @@ def _run_directory_with_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     return run_directory
 
 
-def _tool_entrypoints(build: AgentBuild) -> dict[str, dict[str, Callable[..., str]]]:
-    """Return what each of the build's toolkits runs for a call, by toolkit and function name."""
-    return {
-        toolkit.name: {function.name: function.entrypoint for function in toolkit.functions}
-        for toolkit in build.spec.toolkits
-    }
+def _agent_offered(tool_name: str, runtime_paths: RuntimePaths, *, file_memory: bool = False) -> AgentBuild:
+    """Build the ``general`` agent offered only the tool ``tool_name``."""
+    config = _test_config()
+    config.agents["general"].tools = [tool_name]
+    config.agents["general"].include_default_tools = False
+    if file_memory:
+        config.agents["general"].memory_backend = "file"
+    return _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+
+
+def _tool_entrypoints(build: AgentBuild) -> dict[str, Callable[..., str]]:
+    """Return what the build runs for each call, by function name."""
+    return {name: function.entrypoint for name, function in build.spec.functions.items()}
 
 
 def test_agent_without_a_workspace_cannot_read_the_run_directory(
@@ -2473,13 +2480,11 @@ def test_agent_without_a_workspace_cannot_read_the_run_directory(
 ) -> None:
     """A shared agent without file memory has no workspace, so its file tools refuse the process working directory."""
     run_directory = _run_directory_with_secret(tmp_path, monkeypatch)
-    config = _test_config()
-    config.agents["general"].tools = ["file", "coding"]
-    config.agents["general"].include_default_tools = False
+    runtime_paths = _runtime_paths(tmp_path / "storage")
 
-    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path / "storage")))
-
-    file_tools, coding = (_tool_entrypoints(agent)[name] for name in ("file_tools", "coding"))
+    # Both toolkits offer `read_file`, so each is checked in an agent offered it alone.
+    agent = _agent_offered("file", runtime_paths)
+    file_tools, coding = _tool_entrypoints(agent), _tool_entrypoints(_agent_offered("coding", runtime_paths))
     results = [
         *(file_tools["read_file"](path) for path in (".env", str(run_directory / ".env"))),
         *(coding["read_file"](path) for path in (".env", str(run_directory / ".env"))),
@@ -2513,14 +2518,10 @@ def test_agent_workspace_file_tools_stay_inside_the_workspace(
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "general")
     workspace.mkdir(parents=True)
     (workspace / "notes.md").write_text("workspace notes\n", encoding="utf-8")
-    config = _test_config()
-    config.agents["general"].memory_backend = "file"
-    config.agents["general"].tools = ["file", "coding"]
-    config.agents["general"].include_default_tools = False
 
-    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
-
-    file_tools, coding = (_tool_entrypoints(agent)[name] for name in ("file_tools", "coding"))
+    agent = _agent_offered("file", runtime_paths, file_memory=True)
+    file_tools = _tool_entrypoints(agent)
+    coding = _tool_entrypoints(_agent_offered("coding", runtime_paths, file_memory=True))
     assert file_tools["read_file"]("notes.md") == "workspace notes\n"
     assert "workspace notes" in coding["read_file"]("notes.md")
     assert coding["write_file"]("draft.md", "draft\n").startswith("Wrote")

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import Message
@@ -20,10 +20,9 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
-from mindroom.tool_system.tool_function import first_of_each_name
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.provider import ToolSpec
@@ -40,43 +39,52 @@ MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PreparedTools:
-    """The tools one run offers: its functions by name in offer order, and the toolkit instructions for its prompt."""
+    """The tools one run offers: its functions by name in offer order."""
 
     functions: Mapping[str, ToolFunction]
-    instructions: tuple[str, ...]
 
     def specs(self) -> tuple[ToolSpec, ...]:
         """Return the model-facing definitions sorted by name, a stable order for prompt caches."""
         return tuple(sorted((function.definition() for function in self.functions.values()), key=lambda s: s.name))
 
 
-def offered_functions(spec: AgentSpec) -> Iterator[tuple[AdaptedToolkit, ToolFunction]]:
-    """Yield each function a run of ``spec`` offers, in offer order, with the toolkit it belongs to.
+def offered_toolkits(toolkits: Sequence[AdaptedToolkit], *, agent: str) -> tuple[AdaptedToolkit, ...]:
+    """Return ``toolkits``, each offering only the functions a run of ``agent`` offers of it, in the same order.
 
-    The functions are those ``first_of_each_name`` selects over the toolkits; each one it drops is logged.
+    A run offers the first function of each name, so a build resolves its toolkits once: each later function of a
+    taken name is dropped and logged here, and a toolkit whose every function is taken stays, offering none.
     """
+    taken: set[str] = set()
+    offered: list[AdaptedToolkit] = []
+    for toolkit in toolkits:
+        functions: list[ToolFunction] = []
+        for function in toolkit.functions:
+            if function.name in taken:
+                logger.warning("duplicate_tool_name", agent=agent, tool_name=function.name, toolkit=toolkit.name)
+                continue
+            taken.add(function.name)
+            functions.append(function)
+        offered.append(replace(toolkit, functions=tuple(functions)))
+    return tuple(offered)
 
-    def log_dropped(toolkit: AdaptedToolkit, function: ToolFunction) -> None:
-        logger.warning("duplicate_tool_name", agent=spec.id, tool_name=function.name, toolkit=toolkit.name)
 
-    return first_of_each_name(
-        ((toolkit, function) for toolkit in spec.toolkits for function in toolkit.functions),
-        log_dropped,
-    )
+def toolkit_instructions(toolkits: Iterable[AdaptedToolkit]) -> tuple[str, ...]:
+    """Return the instructions of ``toolkits`` the prompt shows, in offer order.
 
-
-def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
-    """Flatten the agent's toolkits into the functions a run offers, as ``offered_functions`` selects them.
-
-    Each toolkit's instructions are kept once per toolkit identity: its name, instructions, and function names.
+    Each toolkit's instructions are kept once per toolkit identity: its name, its instructions, and the functions it
+    was built with, whichever of them a run offers.
     """
-    functions = {function.name: function for _toolkit, function in offered_functions(spec)}
     instructions: dict[tuple[str, str, frozenset[str]], str] = {}
-    for toolkit in spec.toolkits:
+    for toolkit in toolkits:
         if toolkit.instructions is not None:
             key = (toolkit.name, toolkit.instructions, frozenset(function.name for function in toolkit.functions))
             instructions.setdefault(key, toolkit.instructions)
-    return PreparedTools(functions=functions, instructions=tuple(instructions.values()))
+    return tuple(instructions.values())
+
+
+def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
+    """Return the tools a run of ``spec`` offers: the functions its build resolved."""
+    return PreparedTools(functions=spec.functions)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -249,8 +257,9 @@ __all__ = [
     "ToolBatch",
     "dispatch_tool_calls",
     "media_follow_up",
-    "offered_functions",
+    "offered_toolkits",
     "plan_tool_batch",
     "prepare_run_tools",
     "tool_result_message",
+    "toolkit_instructions",
 ]

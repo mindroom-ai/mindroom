@@ -687,8 +687,9 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     memory = adapt_toolkit(MemoryTools("helper", paths.storage_root, config, paths))
     catalog = await _catalog(tmp_path, [memory])
     identity = build_execution_identity_from_runtime_context(catalog.runtime_context)
-    compact = adapt_toolkit(CompactContextTools("helper", config, paths, identity))
-    await catalog.prepare([compact], {"compact_context": "compact_context"})
+    await catalog.prepare(
+        [adapt_toolkit(CompactContextTools("helper", config, paths, identity), key="compact_context")],
+    )
     binding = await catalog.bind(ToolKey("memory", "add_memory"))
     events = [
         event

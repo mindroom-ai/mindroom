@@ -11,7 +11,7 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom import agents
 from mindroom.agent_cli.minimal_agent import MinimalTurn, minimal_turn
-from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
@@ -277,8 +277,9 @@ def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> No
     assert build.surface.mode == "minimal"
     assert build.surface.deferred == ()
     # The catalog behind Bash holds every function the build owns, whichever ones its spec offers the model.
-    assert "run_shell_command" in build.tool_owners
-    assert "read_file" not in build.tool_owners
+    owned = {name for _agent, name in tool_owners_by_agent(build)}
+    assert "run_shell_command" in owned
+    assert "read_file" not in owned
 
 
 def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:

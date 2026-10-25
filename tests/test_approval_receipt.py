@@ -554,7 +554,7 @@ def _state_stub() -> object:
 
     return LoopState(
         messages=[Message(role="system", content="rules")],
-        offered=PreparedTools(functions={}, instructions=()),
+        offered=PreparedTools(functions={}),
         tools=(),
         run=context(),
         record=RunRecord(run_id="run-1"),

@@ -17,8 +17,10 @@ from mindroom.agent_loop.tools import (
     MEDIA_FOLLOW_UP_TEXT,
     dispatch_tool_calls,
     media_follow_up,
+    offered_toolkits,
     plan_tool_batch,
     prepare_run_tools,
+    toolkit_instructions,
 )
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
@@ -28,18 +30,15 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.llm.messages import Message
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
-# --- prepare_run_tools -----------------------------------------------------------------------------------------------
+# --- offered_toolkits and prepare_run_tools --------------------------------------------------------------------------
 
 
-def test_prepared_tools_keep_offer_order_and_only_prompt_instructions() -> None:
-    first = replace(toolkit(add, name="math"), instructions="Use math.")
-    second = toolkit(echo, name="text")  # Agno adds no instructions unless the toolkit asks.
-
-    prepared = prepare_run_tools(spec(ScriptedModel([]), first, second))
+def test_prepared_tools_keep_offer_order() -> None:
+    prepared = prepare_run_tools(spec(ScriptedModel([]), toolkit(add, name="math"), toolkit(echo, name="text")))
 
     assert list(prepared.functions) == ["add", "echo"]
-    assert prepared.instructions == ("Use math.",)
     assert [tool.name for tool in prepared.specs()] == ["add", "echo"]
 
 
@@ -50,7 +49,7 @@ def test_prepared_tools_sort_definitions_by_name_for_prompt_cache_stability() ->
     assert [tool.name for tool in prepared.specs()] == ["add", "echo"]
 
 
-def test_prepared_tools_keep_the_first_of_a_repeated_name() -> None:
+def _loud_echo() -> AdaptedToolkit:
     def echo_v2(text: str) -> str:
         """Return the text, loudly.
 
@@ -60,18 +59,40 @@ def test_prepared_tools_keep_the_first_of_a_repeated_name() -> None:
         """
         return text.upper()
 
-    second = replace(
+    return replace(
         toolkit(echo_v2, name="loud"),
         functions=tuple(replace(f, name="echo") for f in toolkit(echo_v2).functions),
     )
-    agent = spec(ScriptedModel([]), toolkit(add, echo, name="first"), second)
+
+
+def test_offered_toolkits_keep_the_first_of_a_repeated_name_and_log_each_drop_once() -> None:
+    first = toolkit(add, echo, name="first")
+    loud = _loud_echo()
+    shadowed = toolkit(echo, name="shadowed")
 
     with capture_logs() as logs:
-        prepared = prepare_run_tools(agent)
+        offered = offered_toolkits((first, loud, shadowed), agent="code")
 
-    assert list(prepared.functions) == ["add", "echo"]
-    assert prepared.functions["echo"].description == "Return the text."
-    assert [entry["tool_name"] for entry in logs if entry["event"] == "duplicate_tool_name"] == ["echo"]
+    assert [toolkit.name for toolkit in offered] == ["first", "loud", "shadowed"]
+    assert offered[0] == first
+    assert (offered[1].functions, offered[2].functions) == ((), ())
+    assert prepare_run_tools(spec(ScriptedModel([]), *offered)).functions["echo"].description == "Return the text."
+    assert [(entry["toolkit"], entry["tool_name"]) for entry in logs if entry["event"] == "duplicate_tool_name"] == [
+        ("loud", "echo"),
+        ("shadowed", "echo"),
+    ]
+
+
+def test_a_spec_refuses_two_functions_of_one_name() -> None:
+    with pytest.raises(ValueError, match="two functions named 'echo'"):
+        spec(ScriptedModel([]), toolkit(add, echo, name="first"), _loud_echo())
+
+
+def test_toolkit_instructions_keep_only_prompt_instructions_once_per_toolkit() -> None:
+    math = replace(toolkit(add, name="math"), instructions="Use math.")
+    text = toolkit(echo, name="text")  # Agno adds no instructions unless the toolkit asks.
+
+    assert toolkit_instructions((math, text, math, replace(math, name="algebra"))) == ("Use math.", "Use math.")
 
 
 # --- plan_tool_batch -------------------------------------------------------------------------------------------------

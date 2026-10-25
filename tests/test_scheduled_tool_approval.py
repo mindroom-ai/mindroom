@@ -16,7 +16,7 @@ import pytest
 from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import offered_toolkits, prepare_run_tools
 from mindroom.agents import create_agent
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalManager
@@ -82,7 +82,6 @@ if TYPE_CHECKING:
     from mindroom.approval.manager import ApprovalActionResult
     from mindroom.event_journal import ScheduledCallRefusal
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
-    from mindroom.tool_system.tool_function import ToolFunction
 
 _ROOM = "!room:test"
 _THREAD = "$thread"
@@ -1070,23 +1069,25 @@ class _SlackTools(Toolkit):
 
 @dataclass(frozen=True)
 class _LiveRun:
-    """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy."""
+    """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy.
 
-    toolkits: tuple[Toolkit, ...]
+    ``toolkits`` pairs each toolkit with the authored toolkit the run offers its functions from.
+    """
+
+    toolkits: tuple[tuple[Toolkit, str], ...]
     middleware: tuple[ToolMiddleware, ...] = ()
 
     async def call(self, function_name: str, /, **arguments: object) -> object:
         """Run one of the run's functions as the loop does, with the live tools bound as an agent build binds them."""
-        functions: dict[str, ToolFunction] = {}
-        for toolkit in (*self.toolkits, SchedulerTools()):
-            for function in adapt_toolkit(toolkit).functions:
-                functions.setdefault(function.name, function)
-        owners = {"schedule_tool_call": "scheduler", "run_scheduled_call": "scheduler"}
-        for toolkit in self.toolkits:
-            for name, function in toolkit.get_async_functions().items():
-                if function.owning_toolkit is not None:
-                    owners.setdefault(name, function.owning_toolkit)
-        policy = bind_live_tools(functions, owners, self.middleware)
+        adapted = [
+            adapt_toolkit(toolkit, key=name) for toolkit, name in (*self.toolkits, (SchedulerTools(), "scheduler"))
+        ]
+        functions = {
+            function.name: function
+            for toolkit in offered_toolkits(adapted, agent="helper")
+            for function in toolkit.functions
+        }
+        policy = bind_live_tools(functions, self.middleware)
         context = ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
         return await run_tool_call(functions[function_name], arguments, context, middleware=policy)
 
@@ -1116,14 +1117,13 @@ def _live_agent(
         assert runs is None, "runs records only the default toolkit's calls"
         assert outcome is _DEFAULT_OUTCOME, "outcome configures only the default toolkit"
     for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = toolkit_name
         if authored_confirmation:
             function.requires_confirmation = True
         if external_execution:
             function.external_execution = True
         if stop_after_tool_call:
             function.stop_after_tool_call = True
-    return _LiveRun((toolkit,), middleware)
+    return _LiveRun(((toolkit, toolkit_name),), middleware)
 
 
 async def _schedule_from_tool(

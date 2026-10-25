@@ -105,11 +105,11 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
 
 def _with_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
     """Return ``build`` also offering ``toolkit``, each of its functions authored under its name."""
-    return replace(
-        build,
-        spec=replace(build.spec, toolkits=(*build.spec.toolkits, toolkit)),
-        tool_owners={**build.tool_owners, **{function.name: toolkit.name for function in toolkit.functions}},
+    authored = replace(
+        toolkit,
+        functions=tuple(replace(function, toolkit=toolkit.name) for function in toolkit.functions),
     )
+    return replace(build, spec=replace(build.spec, toolkits=(*build.spec.toolkits, authored)))
 
 
 def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tuple[RunRecord, ConversationSession]:
@@ -835,7 +835,7 @@ async def _checkpointed_batch(
     ]
     state = LoopState(
         messages=[assistant],
-        offered=PreparedTools(functions={}, instructions=()),
+        offered=PreparedTools(functions={}),
         tools=(),
         run=catalog.run,
         record=record,

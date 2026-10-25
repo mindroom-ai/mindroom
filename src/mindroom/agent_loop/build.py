@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from mindroom.agent_loop.prompt import render_system_message
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.agent_loop.prompt import PromptSpec
@@ -65,9 +64,9 @@ class AgentBuild:
 
     ``spec`` carries no system message: ``prompt_for_turn`` renders one per turn from ``prompt``, whose
     ``turn_context`` is the build's own context, the date and session context. ``request_template`` holds the
-    settings of every request of a run, such as the deferred tool names; ``tool_owners``, which approvals check, maps
-    each function a run offers from a configured toolkit to that toolkit's authored name, and leaves out the functions
-    generated for the agent, such as the knowledge search. ``tool_policy`` is the agent's tool-call policy, outermost
+    settings of every request of a run, such as the deferred tool names. Each function a run offers names the
+    authored toolkit it comes from, which approvals check (``tool_owners_by_agent``); a function generated for the
+    agent, such as the knowledge search, names none. ``tool_policy`` is the agent's tool-call policy, outermost
     first: the binding through which a scheduled call runs one of the build's functions (for a build that offers the
     scheduler), plugin before and after hooks, call recording, and the computer announcement. ``tool_jobs`` is the agent
     as tool jobs see it while the instance runs them, which the loop's hooks offer the wait budget of its managed calls
@@ -81,15 +80,22 @@ class AgentBuild:
     request_template: ModelRequest
     history_settings: ResolvedHistorySettings
     store: ConversationStore | None
-    tool_owners: Mapping[str, str]
     surface: AgentSurface
     tool_policy: tuple[ToolMiddleware, ...]
     tool_jobs: JobActor | None
 
 
 def tool_owners_by_agent(*builds: AgentBuild) -> dict[tuple[str, str], str]:
-    """Return the authored toolkit of each function the builds offer, keyed ``(agent id, function)`` as approvals look it up."""
-    return {(build.spec.id, name): toolkit for build in builds for name, toolkit in build.tool_owners.items()}
+    """Return the authored toolkit of each function the builds offer, keyed ``(agent id, function)`` as approvals look it up.
+
+    A function generated for the agent names no toolkit and is left out.
+    """
+    return {
+        (build.spec.id, name): function.toolkit
+        for build in builds
+        for name, function in build.spec.functions.items()
+        if function.toolkit is not None
+    }
 
 
 def prompt_for_turn(build: AgentBuild, *context: str) -> Message:

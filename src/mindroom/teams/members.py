@@ -11,8 +11,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.build import appended_context, prompt_for_turn
 from mindroom.agent_loop.prompt import model_note_for
-from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.session_context import resolve_bound_team_scope
@@ -431,9 +430,6 @@ def build_team_spec(
         )
         for build in members.builds
     )
-    prepared = prepare_run_tools(
-        AgentSpec(id=team_id, name=team_display_name, model=model, system_message=None, toolkits=leader_toolkits),
-    )
     additional_context = appended_context(
         render_date_context(config.timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
         system_enrichment,
@@ -441,7 +437,7 @@ def build_team_spec(
     system_message = render_leader_system_message(
         team_members,
         mode,
-        tool_instructions=prepared.instructions,
+        tool_instructions=toolkit_instructions(leader_toolkits),
         # The delegation tool is always offered, so every leader request offers tools.
         model_note=model_note_for(model.capabilities, offers_tools=True),
         additional_context=additional_context,

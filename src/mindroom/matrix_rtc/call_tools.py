@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.tools import offered_functions
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
@@ -624,23 +623,24 @@ async def build_call_tools(
     connections = _CallConnections()
     middleware = agent_tool_middleware(build)
     tools: list[RawFunctionTool] = []
-    for toolkit, function in offered_functions(build.spec):
-        # The build applied the call's function filter to the functions it built, not to ones added beside them.
-        if _function_requires_text_chat(function, config):
-            logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
-            continue
-        tools.append(
-            _wrap_tool_function(
-                function,
-                middleware=middleware,
-                call_context=call_context,
-                context=context,
-                agent_name=agent_name,
-                authorize_operation=authorize_operation,
-                usage_owner=usage_owner,
-                connect=functools.partial(connections.connect, toolkit),
-            ),
-        )
+    for toolkit in build.spec.toolkits:
+        for function in toolkit.functions:
+            # The build applied the call's function filter to the functions it built, not to ones added beside them.
+            if _function_requires_text_chat(function, config):
+                logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
+                continue
+            tools.append(
+                _wrap_tool_function(
+                    function,
+                    middleware=middleware,
+                    call_context=call_context,
+                    context=context,
+                    agent_name=agent_name,
+                    authorize_operation=authorize_operation,
+                    usage_owner=usage_owner,
+                    connect=functools.partial(connections.connect, toolkit),
+                ),
+            )
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
     return CallAgentTooling(
         tools=tuple(tools),

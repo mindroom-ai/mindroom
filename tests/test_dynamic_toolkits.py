@@ -11,8 +11,7 @@ from agno.tools.function import Function
 
 from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import prepare_run_tools, toolkit_instructions
 from mindroom.agents import (
     _context_hidden_toolkits,
     create_agent,
@@ -40,7 +39,6 @@ from mindroom.tool_system.dynamic_toolkits import (
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit
-from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -1047,14 +1045,7 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
     )
     _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit))
 
-    spec = AgentSpec(
-        id="code",
-        name="code",
-        model=ScriptedModel([]),
-        system_message=None,
-        toolkits=(adapt_toolkit(active_toolkit), deferred),
-    )
-    assert prepare_run_tools(spec).instructions == (active_toolkit_marker,)
+    assert toolkit_instructions((adapt_toolkit(active_toolkit), deferred)) == (active_toolkit_marker,)
 
 
 def test_native_tool_search_keeps_initial_toolkit_instructions(

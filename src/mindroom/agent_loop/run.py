@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
-from mindroom.agent_loop.tools import offered_functions, prepare_run_tools
+from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import is_own_model_message
@@ -207,9 +207,8 @@ def resume_request_template(template: ModelRequest) -> ModelRequest:
 
 def check_approved_tools_offered(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> None:
     """Refuse a resume with an approved call whose tool the spec no longer offers."""
-    offered = {function.name for _toolkit, function in offered_functions(spec)}
     for call in approved:
-        if call.tool_name not in offered:
+        if call.tool_name not in spec.functions:
             msg = f"Approved tool {call.tool_name!r} is no longer offered to agent {spec.id!r}"
             raise ValueError(msg)
 
