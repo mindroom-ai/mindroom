@@ -7,6 +7,7 @@ rows are the Chroma rows Agno wrote, which owned refreshes must still write and 
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
 import chromadb
@@ -25,11 +26,14 @@ from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import tool_definition
 from tests.agno_parity.golden_files import render, sorted_keys
 from tests.agno_parity.knowledge_goldens import (
+    DISTANCE_KEYS,
+    DISTANCE_RELATIVE_TOLERANCE,
     EMBEDDERS_PATH,
     GOLDEN_DIR,
     ROWS_PATH,
     SEARCH_PATH,
     ParityEmbedder,
+    distances_as_recorded,
     embedder_case,
     golden_config,
     install_parity_embedder,
@@ -66,12 +70,12 @@ def test_embedders_send_the_request_bodies_agno_sent(
 
 
 def _with_approximate_distances(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Compare distances to float32 precision; Chroma's own arithmetic decides their last digits."""
+    """Compare distances only as closely as Chroma's float32 arithmetic agrees across machines."""
     approximate: list[dict[str, Any]] = []
     for document in documents:
         meta_data = dict(document["meta_data"])
-        for key in ("distances", "similarity_score"):
-            meta_data[key] = pytest.approx(meta_data[key], rel=1e-6)
+        for key in DISTANCE_KEYS:
+            meta_data[key] = pytest.approx(meta_data[key], rel=DISTANCE_RELATIVE_TOLERANCE, abs=0)
         approximate.append({**document, "meta_data": meta_data})
     return approximate
 
@@ -122,13 +126,29 @@ async def test_search_tool_results_match_agnos(tmp_path: Path, parity_embedder: 
     Documents keep their values and layout, merged bases interleave, an empty base reports no documents, and a
     failed query embedding reports the error type.
     """
-    regenerated = await regenerated_search(tmp_path, parity_embedder)
+    assert await regenerated_search(tmp_path, parity_embedder) == SEARCH_GOLDENS
 
-    expected = [
-        {**search, "documents": _with_approximate_distances(search["documents"])} if "documents" in search else search
-        for search in SEARCH_GOLDENS["searches"]
+
+def test_a_distance_differing_only_in_chromas_last_bits_regenerates_as_recorded() -> None:
+    """An x86_64 machine's distance one float32 ulp from the recorded one keeps the recorded value; a real change does not.
+
+    ``0.604523241519928`` is what an x86_64 run returns for the distance an aarch64 run recorded as
+    ``0.6045231819152832``.
+    """
+    recorded = next(search["documents"] for search in SEARCH_GOLDENS["searches"] if "documents" in search)
+    [index] = [
+        index for index, document in enumerate(recorded) if document["meta_data"]["distances"] == 0.6045231819152832
     ]
-    assert regenerated == {**SEARCH_GOLDENS, "searches": expected}
+    on_x86 = deepcopy(recorded)
+    on_x86[index]["meta_data"] |= {"distances": 0.604523241519928, "similarity_score": 0.604523241519928}
+    moved = deepcopy(recorded)
+    moved[index]["meta_data"]["distances"] = 0.6046
+    replaced = deepcopy(on_x86)
+    replaced[index]["content"] = "Another chunk."
+
+    assert distances_as_recorded(on_x86, recorded) == recorded
+    assert distances_as_recorded(moved, recorded)[index]["meta_data"]["distances"] == 0.6046
+    assert distances_as_recorded(replaced, recorded)[index]["meta_data"]["distances"] == 0.604523241519928
 
 
 @pytest.mark.parametrize("memory_search_available", [False, True])

@@ -310,6 +310,7 @@ Each search sends one query through the `search_knowledge_base` tool for an agen
 A search records `documents`, the tool's JSON result parsed, or `text` for `No documents found` and the error text.
 The tool lays its result out with `indent=2` and `ensure_ascii=False`, each document's keys as `name`, `meta_data`, `content`.
 `content_hash` in each document's `meta_data` becomes `<sha256>`.
+Chroma sums each cosine distance in float32 in an order the CPU's vector width decides, so a distance's last bits differ between machines; a regeneration keeps a recorded `distances` or `similarity_score` that the new value matches within a relative `1e-6` (`DISTANCE_RELATIVE_TOLERANCE` in `tests/agno_parity/knowledge_goldens.py`), so every machine writes the same file, and a larger difference is written and fails the parity test.
 
 ## Codec goldens (`codecs.json`)
 

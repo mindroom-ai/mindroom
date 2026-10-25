@@ -60,6 +60,12 @@ SEARCH_PATH = GOLDEN_DIR / "search.json"
 _HEX32 = re.compile(r"[0-9a-f]{32}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _QUERY_EMBEDDING_ERROR = "embedder request failed (HTTP 503)"
+# Chroma computes each cosine distance in float32 and sums it in an order the CPU's vector width decides, so its last
+# bits differ between machines: an x86_64 run returns 0.604523241519928 where an aarch64 run returns
+# 0.6045231819152832, one float32 ulp apart. Comparisons accept up to this relative difference in a search document's
+# distances.
+DISTANCE_KEYS = ("distances", "similarity_score")
+DISTANCE_RELATIVE_TOLERANCE = 1e-6
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -254,7 +260,7 @@ async def refresh_golden_bases(config: Config, runtime_paths: RuntimePaths) -> d
     return published
 
 
-def normalized_search_documents(output: str) -> list[dict[str, Any]]:
+def _normalized_search_documents(output: str) -> list[dict[str, Any]]:
     """Parse a search result, checking its layout and normalizing the per-version content hash."""
     documents = json.loads(output)
     assert output == json.dumps(documents, indent=2, ensure_ascii=False)
@@ -263,6 +269,38 @@ def normalized_search_documents(output: str) -> list[dict[str, Any]]:
         assert _HEX64.fullmatch(document["meta_data"]["content_hash"]), document
         document["meta_data"]["content_hash"] = "<sha256>"
     return documents
+
+
+def _within_distance_tolerance(found: float, recorded: float) -> bool:
+    """Return whether two distances differ by no more than Chroma's float32 arithmetic makes them differ."""
+    return abs(found - recorded) <= DISTANCE_RELATIVE_TOLERANCE * abs(recorded)
+
+
+def distances_as_recorded(found: list[dict[str, Any]], recorded: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the ``found`` documents with each distance ``recorded`` holds kept where only Chroma's arithmetic differs.
+
+    A document keeps a recorded distance when it is the recorded document in the same place, apart from its
+    distances, and the distance is within ``DISTANCE_RELATIVE_TOLERANCE`` of the recorded one; any other difference,
+    a changed document, order, or distance, stays as found, so the comparison and a regeneration show it.
+    """
+    kept: list[dict[str, Any]] = []
+    for index, document in enumerate(found):
+        before = recorded[index] if index < len(recorded) else None
+        meta_data = document["meta_data"]
+        if before is not None and _without_distances(document) == _without_distances(before):
+            meta_data = {
+                key: before["meta_data"][key]
+                if key in DISTANCE_KEYS and _within_distance_tolerance(value, before["meta_data"][key])
+                else value
+                for key, value in meta_data.items()
+            }
+        kept.append({**document, "meta_data": meta_data})
+    return kept
+
+
+def _without_distances(document: dict[str, Any]) -> dict[str, Any]:
+    meta_data = {key: value for key, value in document["meta_data"].items() if key not in DISTANCE_KEYS}
+    return {**document, "meta_data": meta_data}
 
 
 async def _search_tool_output(knowledge: AgentKnowledge, query: str) -> str:
@@ -278,7 +316,8 @@ async def regenerated_search(root: Path, embedder: ParityEmbedder) -> dict[str, 
     """Return the search golden the owned search tool regenerates over the golden bases refreshed under ``root``.
 
     Each search is the tool call of its agent: the documents it found, or the text it answered with, as its golden
-    records. A search whose golden answer is an error runs with its query embedding failing.
+    records. A search whose golden answer is an error runs with its query embedding failing. Distances that differ
+    from the golden's only by Chroma's arithmetic keep the golden's value, so every machine regenerates the same file.
     """
     golden = load(SEARCH_PATH)
     config, runtime_paths = golden_config(root)
@@ -289,7 +328,11 @@ async def regenerated_search(root: Path, embedder: ParityEmbedder) -> dict[str, 
         handle = resolve_agent_knowledge_access(search["agent"], config, runtime_paths).knowledge
         assert handle is not None
         output = await _search_tool_output(handle, search["query"])
-        found = {"documents": normalized_search_documents(output)} if "documents" in search else {"text": output}
+        found = (
+            {"documents": distances_as_recorded(_normalized_search_documents(output), search["documents"])}
+            if "documents" in search
+            else {"text": output}
+        )
         searches.append({"agent": search["agent"], "query": search["query"], **found})
     embedder.failing = False
     return sorted_keys({**golden, "searches": searches})
