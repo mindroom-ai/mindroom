@@ -65,7 +65,7 @@ from mindroom.scheduling.tasks import (
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call, run_tool_call
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -2041,46 +2041,6 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
         assert await _binding_column(journal, "outcome") == "failed"
     finally:
         await manager.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("output_path", [None, "result.txt"])
-async def test_a_scheduled_call_that_did_not_run_fails_its_call_with_or_without_an_output_path(
-    tmp_path: Path,
-    output_path: str | None,
-) -> None:
-    """The model reads the refusal as a failed call and no output file is written, as for a call that raised.
-
-    The after-call hooks around ``run_scheduled_call`` receive the refusal's text either way.
-    """
-    observed: list[object] = []
-
-    @hook(EVENT_TOOL_AFTER_CALL)
-    async def observe(ctx: ToolAfterCallContext) -> None:
-        observed.append(ctx.result)
-
-    scheduler = wrap_toolkit_for_output_files(SchedulerTools(), ToolOutputFilePolicy(workspace_root=tmp_path))
-    [runner] = [function for function in adapt_toolkit(scheduler).functions if function.name == "run_scheduled_call"]
-    policy = build_tool_hook_middleware(HookRegistry.from_plugins([_plugin("audit", [observe])]), _AGENT)
-    arguments: dict[str, object] = {"task_id": _TASK}
-    if output_path is not None:
-        arguments["mindroom_output_path"] = output_path
-
-    # No run binds its live functions here, so the stored call cannot run.
-    with tool_runtime_context(_turn_context(_code_config())):
-        answer = await execute_tool_call(
-            runner,
-            arguments,
-            ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
-            middleware=(policy,),
-        )
-
-    refusal = (
-        f"❌ Scheduled call `{_TASK}` did not run: scheduled calls run only in their agent's own conversation turn."
-    )
-    assert (answer.content, answer.is_error) == (refusal, True)
-    assert observed == [refusal]
-    assert list(tmp_path.iterdir()) == []
 
 
 class _ConfiguredSlackTools(Toolkit):

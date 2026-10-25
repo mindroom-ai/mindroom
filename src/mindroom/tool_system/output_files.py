@@ -23,7 +23,7 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
 from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, Function, Toolkit, ToolResult
 from mindroom.tool_system.declarations import declare_tool_schema_finisher, declare_tool_schema_source
-from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if sys.version_info >= (3, 14):
@@ -610,41 +610,24 @@ def _docstring_with_output_path(original_doc: str | None) -> str:
     return f"{base}\n\n{output_arg_doc}"
 
 
-def _output_request(
-    policy: ToolOutputFilePolicy,
-    *,
-    tool_name: str,
-    output_path: object,
-) -> ToolOutputFileRequest | str:
-    """Validate before tool execution, without creating files or directories; return why a path is refused."""
-    normalized = normalize_output_path_argument(output_path)
-    validated = _validate_output_path(policy, normalized) if normalized is not None else None
-    if isinstance(validated, str):
-        return validated
-    return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
-
-
 def prepare_tool_output_file(
     policy: ToolOutputFilePolicy,
     *,
     tool_name: str,
     output_path: object = None,
 ) -> ToolOutputFileRequest | dict[str, object]:
-    """Validate before tool execution, without creating files or directories; a refused path is an error receipt."""
-    request = _output_request(policy, tool_name=tool_name, output_path=output_path)
-    return _error_receipt(request) if isinstance(request, str) else request
+    """Validate before tool execution, without creating files or directories."""
+    normalized = normalize_output_path_argument(output_path)
+    validated = _validate_output_path(policy, normalized) if normalized is not None else None
+    if isinstance(validated, str):
+        return _error_receipt(validated)
+    return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
 
 
 def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
-    """Apply the shared explicit redirect or large-result policy after execution.
-
-    A failed answer goes to no file, requested or automatic: the call answers with why it failed, as a call that
-    raised does.
-    """
+    """Apply the shared explicit redirect or large-result policy after execution."""
     if isinstance(result, ToolOutputFileHandled):
         return result.result
-    if isinstance(result, ToolOutcome) and result.is_error:
-        return result
     if request.path is None:
         return _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
     return _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
@@ -660,10 +643,9 @@ def _wrap_entrypoint(
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
 
         async def async_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            request = _output_request(policy, tool_name=tool_name, output_path=mindroom_output_path)
-            if isinstance(request, str):
-                # The tool never runs; the call fails with why, as a call that raised does.
-                return ToolOutcome(content=request, is_error=True)
+            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
+            if isinstance(request, dict):
+                return request
             token = _active_output_request.set(request)
             try:
                 result = await async_entrypoint(*args, **kwargs)
@@ -675,10 +657,9 @@ def _wrap_entrypoint(
     else:
 
         def sync_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            request = _output_request(policy, tool_name=tool_name, output_path=mindroom_output_path)
-            if isinstance(request, str):
-                # The tool never runs; the call fails with why, as a call that raised does.
-                return ToolOutcome(content=request, is_error=True)
+            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
+            if isinstance(request, dict):
+                return request
             token = _active_output_request.set(request)
             try:
                 result = entrypoint(*args, **kwargs)
