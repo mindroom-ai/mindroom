@@ -642,7 +642,7 @@ async def test_a_reattached_call_reads_a_job_saved_failed_without_error_text_as_
         await runtime.shutdown()
     assert first == ToolOutcome(content="TimeoutError", is_error=True)
     [job] = (await saved_jobs(tmp_path)).values()
-    # Releases through v2026.10.501 saved the empty text of such an exception; the runtime saved it as the result alone.
+    # Releases through v2026.10.512 saved the empty text of such an exception; the runtime saved it as the result alone.
     await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(replace(job, result="", has_result_payload=False))))
     restored = await tool_job_runtime(tmp_path)
     register_background_runtime(context.runtime_paths, restored)

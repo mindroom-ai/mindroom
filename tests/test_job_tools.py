@@ -342,7 +342,7 @@ async def test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed(
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
-    # Releases through v2026.10.501 saved the empty text of an exception such as TimeoutError: the runtime as the job's
+    # Releases through v2026.10.512 saved the empty text of an exception such as TimeoutError: the runtime as the job's
     # result alone, and the job executor in its payload's error too.
     encoded = None if payload is None else encode_result_payload(payload)
 
@@ -659,7 +659,7 @@ async def test_collect_returns_every_ended_job_once(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_collect_reads_a_job_saved_failed_without_error_text_as_failed(tmp_path: Path) -> None:
     """Collect reports a failed job that older releases saved without error text as a failure that says so."""
-    # Both shapes releases through v2026.10.501 saved: the runtime's empty result alone, and the executor's payload.
+    # Both shapes releases through v2026.10.512 saved: the runtime's empty result alone, and the executor's payload.
     call_failure = encode_result_payload(ToolResultPayload(value=None, error=""))
     response, runtime, _tools, _owner, _rest = await _collect_in_a_run(
         tmp_path,

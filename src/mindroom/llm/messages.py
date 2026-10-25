@@ -245,7 +245,7 @@ class ToolResultView:
 # Legacy format: a stored ``tool`` message with ``tool_call_error`` true and null or empty ``content``. The Agno
 # runtime stored a failed call's error text as content that could be missing, and the owned executor stored
 # ``str(error)``, which is empty for exceptions such as ``TimeoutError`` or ``httpx.ReadTimeout``.
-# Last legacy release: v2026.10.501; replacement: unreleased, whose executor stores the exception's type name when
+# Last legacy release: v2026.10.512; replacement: unreleased, whose executor stores the exception's type name when
 # its text is empty.
 # Handling: the view gives such a result ``_NO_ERROR_TEXT``, so Claude, which rejects a failed result with empty
 # content, can still answer a thread that replays it, and every other wire says the call failed.
