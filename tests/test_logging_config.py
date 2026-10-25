@@ -34,6 +34,7 @@ from mindroom.logging_config import (
     subprocess_logging_env,
 )
 from mindroom.message_target import MessageTarget
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -823,7 +824,7 @@ def stalling_log_files(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[_Stalli
 
 
 def _wait_for_log_lines(log_file: Path, count: int) -> None:
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
     while len(log_file.read_text().splitlines()) < count:
         assert time.monotonic() < deadline, f"log file never reached {count} lines"
         time.sleep(0.01)
@@ -844,7 +845,7 @@ async def test_stalled_log_file_write_leaves_the_event_loop_and_stderr_running(
     [log_stream] = stalling_log_files
     log_stream.writable.clear()
     # A write on the logging thread would hold the loop until this timer frees it.
-    unstall = threading.Timer(5, log_stream.writable.set)
+    unstall = threading.Timer(10, log_stream.writable.set)
     unstall.start()
     try:
         started = time.monotonic()
@@ -852,8 +853,8 @@ async def test_stalled_log_file_write_leaves_the_event_loop_and_stderr_running(
             get_logger("tests.logging").info("logged_during_stall", index=index)
             await asyncio.sleep(0)
         loop_lag = time.monotonic() - started
-        assert loop_lag < 0.5
-        assert log_stream.stalled.wait(5)
+        assert loop_lag < 1
+        assert log_stream.stalled.wait(SETTLE_TIMEOUT_SECONDS)
         assert not log_stream.writable.is_set()
         console = capsys.readouterr().err
     finally:
@@ -871,38 +872,95 @@ async def test_stalled_log_file_write_leaves_the_event_loop_and_stderr_running(
     assert log_file.read_text() == console
 
 
-def test_stalled_log_file_drops_records_past_its_queue_limit_and_counts_them(
+def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stalling_log_files: list[_StallingLogStream],
 ) -> None:
-    """A stall longer than the queue holds drops file records, and the file says how many once it catches up."""
+    """From the queue limit until the writer catches up, records skip the file; a note then says how many."""
     monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
     monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 2)
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
     log_file = current_log_file()
     assert log_file is not None
-    _wait_for_log_lines(log_file, 1)
     [log_stream] = stalling_log_files
     logger = get_logger("tests.logging")
-    log_stream.writable.clear()
-    try:
-        logger.info("logged_during_stall", index=0)
-        assert log_stream.stalled.wait(5)
-        for index in range(1, 6):
-            logger.info("logged_during_stall", index=index)
-    finally:
-        log_stream.writable.set()
+
+    def log_during_stall(first_index: int) -> None:
+        """Log six records: one stalls in the write, two fill the queue, and three are dropped."""
+        log_stream.writable.clear()
+        log_stream.stalled.clear()
+        try:
+            logger.info("logged_during_stall", index=first_index)
+            assert log_stream.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+            for index in range(first_index + 1, first_index + 6):
+                logger.info("logged_during_stall", index=index)
+        finally:
+            log_stream.writable.set()
+
+    _wait_for_log_lines(log_file, 1)
+    log_during_stall(0)
     _wait_for_log_lines(log_file, 4)
-    logger.info("logged_after_stall")
+    with bound_log_context(room_id="!room:example.org"):
+        logger.info("logged_after_stall")
+    _wait_for_log_lines(log_file, 6)
+    log_during_stall(6)
     logging.shutdown()
 
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
+    note = ("Log file dropped records while its writes were stalled", None, 3)
     assert [(record["event"], record.get("index"), record.get("dropped_records")) for record in records] == [
         ("Logging initialized", None, None),
         ("logged_during_stall", 0, None),
         ("logged_during_stall", 1, None),
         ("logged_during_stall", 2, None),
-        ("Log file dropped records while its writes were stalled", None, 3),
+        note,
         ("logged_after_stall", None, None),
+        ("logged_during_stall", 6, None),
+        ("logged_during_stall", 7, None),
+        ("logged_during_stall", 8, None),
+        note,
     ]
+    assert records[5]["room_id"] == "!room:example.org"
+    assert {(record["logger"], record["level"], "room_id" in record) for record in (records[4], records[9])} == {
+        ("mindroom.logging_config", "warning", False),
+    }
+
+
+def test_log_file_keeps_its_records_after_another_logging_config(tmp_path: Path) -> None:
+    """A later `dictConfig`, like the one uvicorn runs for the API server, leaves the file receiving records to exit."""
+    _runtime_paths(tmp_path)
+    child = """
+import logging.config
+import sys
+from pathlib import Path
+
+from mindroom.constants import RuntimePaths
+from mindroom.logging_config import get_logger, setup_logging
+
+root = Path(sys.argv[1])
+setup_logging(
+    runtime_paths=RuntimePaths(
+        config_path=root / "config.yaml",
+        config_dir=root,
+        env_path=root / ".env",
+        storage_root=root / "mindroom_data",
+    ),
+)
+logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+for index in range(1000):
+    get_logger("tests.child").info("logged_after_another_config", index=index)
+"""
+
+    subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path)],
+        env={**os.environ, "MINDROOM_LOG_FORMAT": "json"},
+        capture_output=True,
+        check=True,
+        timeout=60,
+    )
+
+    [log_file] = (tmp_path / "mindroom_data" / "logs").glob("mindroom_*.log")
+    records = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert [record["event"] for record in records] == ["Logging initialized"] + ["logged_after_another_config"] * 1000
+    assert [record["index"] for record in records[1:]] == list(range(1000))

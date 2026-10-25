@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import atexit
+import contextvars
 import logging
 import logging.config
 import logging.handlers
@@ -213,38 +215,59 @@ class _QueuedFileHandler(logging.handlers.QueueHandler):
 
     A log directory on a network file system can stall writes for minutes, and a write on the event loop would stall
     every agent with it. Formatting stays on the logging thread, so records keep their bound context and timestamps.
-    The queue is capped so a long stall cannot grow memory without limit: records past the cap skip the file only,
-    stderr still gets them, and the file records how many it skipped once it catches up.
+    The queue is capped so a long stall cannot grow memory without limit: from the cap until the writer has caught up,
+    records skip the file only, stderr still gets them, and a note in the file says how many it skipped.
     """
 
     def __init__(self, filename: str, mode: str, encoding: str) -> None:
-        # Created first, so `logging.shutdown`, which closes the newest handlers first, drains the queue before the file.
-        file_handler = logging.FileHandler(filename, mode=mode, encoding=encoding)
         super().__init__(queue.Queue())
-        self.dropped_records = 0
-        self.listener = logging.handlers.QueueListener(self.queue, file_handler)
-        self.listener.start()
+        self._file = logging.FileHandler(filename, mode=mode, encoding=encoding)
+        self._dropped_records = 0
+        # A later `dictConfig`, such as uvicorn's, drops this handler from the list `logging.shutdown` closes at exit.
+        atexit.register(self.close)
 
     def enqueue(self, record: logging.LogRecord) -> None:
-        """Queue the formatted record, or count it as dropped while the queue is at its cap."""
-        if cast("queue.Queue[logging.LogRecord]", self.queue).qsize() >= _MAX_QUEUED_LOG_FILE_RECORDS:
-            self.dropped_records += 1
+        """Queue the formatted record, or count it as dropped from the cap until the writer has caught up."""
+        queued_records = cast("queue.Queue[logging.LogRecord]", self.queue).qsize()
+        if queued_records >= _MAX_QUEUED_LOG_FILE_RECORDS or (self._dropped_records and queued_records):
+            self._dropped_records += 1
             return
-        if self.dropped_records:
-            dropped_records, self.dropped_records = self.dropped_records, 0
-            get_logger(__name__).warning(
-                "Log file dropped records while its writes were stalled",
-                dropped_records=dropped_records,
-            )
+        if self.listener is None:
+            # Any `dictConfig` closes every handler, even one it leaves on the root logger, and a closed `FileHandler`
+            # reopens on its next record; this writer starts again the same way.
+            self.listener = logging.handlers.QueueListener(self.queue, self._file)
+            self.listener.start()
+        self._queue_dropped_records_note()
         self.queue.put_nowait(record)
+
+    def _queue_dropped_records_note(self) -> None:
+        """Queue a note where the file skipped records, if it skipped any since the last note."""
+        if not self._dropped_records:
+            return
+        note = logging.makeLogRecord(
+            {
+                "name": __name__,
+                "levelno": logging.WARNING,
+                "levelname": "WARNING",
+                "msg": "Log file dropped records while its writes were stalled",
+                "dropped_records": self._dropped_records,
+            },
+        )
+        self._dropped_records = 0
+        # An empty context keeps the bound fields of whichever task logged next off the note.
+        self.queue.put_nowait(contextvars.Context().run(self.prepare, note))
 
     def close(self) -> None:
         """Write every queued record, then close the file."""
-        if self.listener is not None:
-            self.listener.stop()
-            for handler in self.listener.handlers:
-                handler.close()
-            self.listener = None
+        self.acquire()
+        try:
+            if self.listener is not None:
+                self._queue_dropped_records_note()
+                self.listener.stop()
+                self.listener = None
+            self._file.close()
+        finally:
+            self.release()
         super().close()
 
 
