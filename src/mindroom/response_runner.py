@@ -5682,22 +5682,25 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-        early_placeholder_state: _EarlyPlaceholderState | None = None,
+        early_placeholder_state: _EarlyPlaceholderState,
     ) -> str | None:
         """Own participation before any fallible locked request preparation."""
         participation = _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths)
-        placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         try:
             return await self._generate_response_with_participation_locked(
                 request,
                 resolved_target=resolved_target,
-                early_placeholder_state=placeholder_state,
+                early_placeholder_state=early_placeholder_state,
                 participation=participation,
             )
         except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
             raise
         except Exception as error:
-            if participation is None or participation.decision is not None or placeholder_state.settlement_started:
+            if (
+                participation is None
+                or participation.decision is not None
+                or early_placeholder_state.settlement_started
+            ):
                 raise
             participation.decline("preparation_failed")
             self.deps.logger.exception("Response preparation skipped before participation", error=str(error))
