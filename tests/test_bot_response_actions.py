@@ -114,12 +114,17 @@ class TestAgentBot(AgentBotTestBase):
             bot.orchestrator = MagicMock()
             bot.orchestrator.agent_bots = {"calculator": MagicMock()}
 
+            availability = bot._turn_policy.responder_availability()
             await bot._turn_policy._decide_team_for_sender(
                 agents_in_thread=[],
                 context=context,
                 room=room,
-                requester_user_id="@alice:localhost",
-                availability=bot._turn_policy.responder_availability(),
+                availability=availability,
+                available_responders_in_room=await bot._turn_policy.responder_candidates_for_room(
+                    room,
+                    "@alice:localhost",
+                    availability,
+                ),
             )
 
         assert mock_decide.call_count == 1
