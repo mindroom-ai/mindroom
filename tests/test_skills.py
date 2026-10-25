@@ -89,7 +89,7 @@ def _build_skills(
     """Build the toolkit with ``roots`` as the default skill roots, only ``env`` in the environment, and stored keys.
 
     ``credentials`` names the keys a stored credential carries; without ``roots`` the default roots stay as they are.
-    The agent has no workspace unless ``kwargs`` names its ``workspace_root``.
+    Without a ``workspace_root`` in ``kwargs``, the toolkit reads the agent's canonical workspace under the storage root.
     """
     runtime_paths = replace(runtime_paths, process_env=dict(env or {}), env_file_values={})
     if credentials:

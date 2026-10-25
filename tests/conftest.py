@@ -531,7 +531,7 @@ async def prepare_agent_and_prompt_for_test(
 ) -> Any:  # noqa: ANN401
     """Prepare one agent turn through ``ai._prepare_agent_and_prompt`` with a plain top-level turn's options.
 
-    ``options`` names the turn options a test sets; every other one takes the value a fresh Matrix reply passes.
+    ``options`` names the turn options a test sets; every other one is unset (None, empty, or off).
     """
     turn_options: dict[str, Any] = {
         "scope_context": None,
