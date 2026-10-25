@@ -146,8 +146,8 @@ class ShellOutputCapture:
                 tool_name="run_shell_command",
                 output_path=self.destination.path,
             )
-            if isinstance(request, str):
-                return {"mindroom_tool_output": {"status": "error", "error": request}}
+            if isinstance(request, dict):
+                return cast("dict[str, dict[str, object]]", request)
             output = (
                 selected.read()
                 if selected is not None

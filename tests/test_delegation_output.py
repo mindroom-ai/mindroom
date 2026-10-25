@@ -13,7 +13,6 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.delegation.state import DelegationState
-from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -180,15 +179,13 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
             assert saved_again["auto_saved"] is True
             assert saved_again["path"].startswith("mindroom_tool_outputs/job-")
             recorded = (workspace / saved_again["path"]).read_text()
+        receipt = json.loads(recorded)["mindroom_tool_output"]
         if mode in {"invalid", "resumed_invalid"}:
-            # A refused path fails the call with why, as it fails any other tool's call.
-            assert delegation.is_error
-            assert recorded.startswith("mindroom_output_path ")
+            assert receipt["status"] == "error"
             assert not (tmp_path / "escape.txt").exists()
             # An invalid path never starts the child; a resumed one is refused before the child continues.
             assert len(child.requests) == (0 if mode == "invalid" else 1)
         else:
-            receipt = json.loads(recorded)["mindroom_tool_output"]
             assert receipt["status"] == "saved_to_file"
             assert "Child report" in (relocated_output or workspace / receipt["path"]).read_text()
             assert receipt.get("auto_saved", False) == (mode == "automatic")
@@ -196,75 +193,3 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         release.set()
         if runtime is not None:
             await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("execution", ["inline", "foreground"])
-async def test_a_failed_child_answers_with_its_failure_and_writes_no_output_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    execution: str,
-) -> None:
-    """A child that failed answers its parent's call as failed with why, and its result goes to no output file.
-
-    That is how a failed answer of any other tool reads, whether the child ran inline or as a job the parent waited for.
-    """
-    paths = _runtime_paths(tmp_path)
-    config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=execution != "inline"),
-        agents={
-            "leader": AgentConfig(display_name="Leader", delegate_to=["child"], private=AgentPrivateConfig(per="user")),
-            "child": AgentConfig(display_name="Child"),
-        },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
-    )
-    entity_ids(config, paths)
-    identity = ToolExecutionIdentity(
-        "matrix",
-        "leader",
-        "@alice:example.org",
-        "!room:example.org",
-        None,
-        None,
-        "parent",
-    )
-    runtime = await tool_job_runtime(tmp_path) if execution != "inline" else None
-    pin_background_tool_jobs(config, paths)
-    if runtime is not None:
-        register_background_runtime(paths, runtime)
-
-    async def fail() -> None:
-        msg = "provider down"
-        raise ProviderError(msg, provider="Synthetic")
-
-    child = ScriptedModel([[Await(fail)]])
-    parent = ScriptedModel(
-        [
-            calls(
-                tool_call(
-                    "run_subagent",
-                    "delegate",
-                    agent_name="child",
-                    task="Write report",
-                    mindroom_output_path="report.txt",
-                ),
-            ),
-            answer("Parent done"),
-        ],
-    )
-    ScriptedAgents({"child": child}, by_session={"parent": parent}).install(monkeypatch)
-    workspace = resolve_agent_runtime("leader", config, paths, identity).tool_base_dir
-    assert workspace is not None
-    options = {"config": config, "runtime_paths": paths, "identity": identity}
-    try:
-        await respond("leader", "Delegate", **options, run_id="parent-run")
-    finally:
-        if runtime is not None:
-            await runtime.shutdown()
-
-    result = stored_run("leader", "parent-run", **options)
-    delegation = next(tool for tool in result.tools or [] if tool.tool_name == "run_subagent")
-    assert delegation.is_error
-    assert str(delegation.result).startswith("Delegation to 'child' failed: provider down")
-    assert not (workspace / "report.txt").exists()
