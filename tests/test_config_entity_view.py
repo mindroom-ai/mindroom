@@ -207,6 +207,34 @@ def test_unauthored_compaction_reports_not_authored() -> None:
     assert config.resolve_entity(None).has_authored_compaction_config is False
 
 
+def test_history_settings_carry_the_scopes_compaction_config() -> None:
+    """A build's history settings hold its scope's compaction config, which the scope's history preparation follows."""
+    config = _representative_config()
+    for scope in ("overriding_agent", "overriding_team", "inheriting_agent", "inheriting_team", None):
+        view = config.resolve_entity(scope)
+        settings = view.history_settings
+        assert (settings.compaction_config, settings.has_authored_compaction_config) == (
+            view.compaction_config,
+            view.has_authored_compaction_config,
+        )
+
+    unauthored_defaults = Config(
+        agents={
+            "plain_agent": AgentConfig(display_name="Plain Agent"),
+            "compacting_agent": AgentConfig(
+                display_name="Compacting Agent",
+                compaction=CompactionOverrideConfig(enabled=True),
+            ),
+        },
+        defaults=DefaultsConfig(tools=[], compaction=None),
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+    assert [
+        unauthored_defaults.resolve_entity(scope).history_settings.has_authored_compaction_config
+        for scope in ("plain_agent", "compacting_agent", None)
+    ] == [False, True, False]
+
+
 def test_resolve_entity_returns_a_fresh_view_per_call() -> None:
     config = _representative_config()
 

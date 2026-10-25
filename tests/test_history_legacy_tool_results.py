@@ -11,13 +11,14 @@ import pytest
 
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.summary_input import messages_for_runs
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, complete
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.codec import run_from_row
+from tests.history_helpers import replay_settings
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
 from tests.providers.golden_support import Wire, hide_provider_environment
 
@@ -114,7 +115,7 @@ def test_a_team_runs_member_responses_decode_each_combined_result() -> None:
 
 
 def test_compaction_reads_each_combined_result_as_its_own_tool_result() -> None:
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=1)
+    settings = replay_settings(max_tool_calls_from_history=1)
 
     messages = messages_for_runs([_stored_run()], settings)
 

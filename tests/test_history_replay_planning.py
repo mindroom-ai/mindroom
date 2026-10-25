@@ -35,7 +35,6 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
     ResolvedHistoryExecutionPlan,
-    ResolvedHistorySettings,
     ResolvedReplayPlan,
     ScopeSummary,
 )
@@ -52,6 +51,7 @@ from tests.history_helpers import (
     _runtime_paths,
     _session,
     folded_run_ids,
+    replay_settings,
 )
 
 
@@ -89,10 +89,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
     estimate_prompt_visible_history_tokens(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-        ),
+        history_settings=replay_settings(),
         replay_estimator=replay_estimator,
         native_route=native_route,
     )
@@ -106,7 +103,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
 @pytest.mark.parametrize("native_route", [None, "native-route"])
 def test_history_estimate_charges_conservative_visual_cost_without_provider_estimator(native_route: str | None) -> None:
     """Fallback planning charges visual tokens without treating image bytes as prompt text."""
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     without_image = _session(
         "without-image",
@@ -148,10 +145,7 @@ def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavail
     tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-        ),
+        history_settings=replay_settings(),
         replay_estimator=ReplayEstimate(None, uses_visual_tokens=True),
         native_route=native_route,
     )
@@ -164,7 +158,7 @@ def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_esti
     native_route: str | None,
 ) -> None:
     """A larger provider text estimate cannot hide the fallback image charge."""
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     without_image = _session(
         "without-image",
@@ -1318,10 +1312,7 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
     )
 
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="runs", limit=2),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = replay_settings(HistoryPolicy(mode="runs", limit=2))
     replay_plan = plan_replay_that_fits(
         session=session,
         scope=scope,
@@ -1412,10 +1403,7 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
         estimated_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="runs", limit=2),
-                max_tool_calls_from_history=None,
-            ),
+            history_settings=replay_settings(HistoryPolicy(mode="runs", limit=2)),
             replay_estimator=None,
         ),
         add_history_to_context=True,
@@ -1546,7 +1534,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
     session = _session("summary-only", runs=[])
     session.summary = summary
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
     size = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
@@ -1588,7 +1576,7 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
     )
     session.summary = ScopeSummary(text="Project facts", updated_at=datetime.now(UTC))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
     plan = plan_replay_that_fits(
         session=session,
         scope=scope,
@@ -1623,10 +1611,7 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
     )
 
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = replay_settings()
     replay_plan = plan_replay_that_fits(
         session=session,
         scope=scope,

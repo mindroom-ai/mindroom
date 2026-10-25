@@ -33,10 +33,8 @@ from mindroom.history.summary_call import (
 )
 from mindroom.history.summary_input import _compaction_replay_messages, build_summary_input
 from mindroom.history.types import (
-    HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
-    ResolvedHistorySettings,
 )
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
@@ -53,6 +51,7 @@ from tests.history_helpers import (
     _completed_run,
     _make_config,
     _session,
+    replay_settings,
 )
 
 
@@ -629,7 +628,7 @@ def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> N
 
     replay_messages = _compaction_replay_messages(
         run,
-        ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        replay_settings(),
     )
 
     assert [(message.role, message.content) for message in replay_messages] == [
@@ -655,7 +654,7 @@ def test_build_summary_input_skips_replayed_history_copies() -> None:
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        history_settings=replay_settings(),
         max_input_tokens=1_000,
         token_estimator=estimate_compaction_input_tokens,
     )
@@ -680,7 +679,7 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        history_settings=replay_settings(),
         max_input_tokens=1_000,
         token_estimator=estimate_compaction_input_tokens,
     )
@@ -715,10 +714,7 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=1,
-        ),
+        history_settings=replay_settings(max_tool_calls_from_history=1),
         max_input_tokens=1_000,
         token_estimator=estimate_compaction_input_tokens,
     )

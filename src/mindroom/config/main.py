@@ -1359,6 +1359,8 @@ class Config(BaseModel):
                 num_history_messages=self.defaults.num_history_messages,
             ),
             max_tool_calls_from_history=self.defaults.max_tool_calls_from_history,
+            compaction_config=self._default_compaction_config(),
+            has_authored_compaction_config=self._has_authored_default_compaction_config(),
         )
 
     def _configured_entity(self, entity_name: str) -> AgentConfig | TeamConfig:
@@ -1395,6 +1397,8 @@ class Config(BaseModel):
                 num_history_messages=num_history_messages,
             ),
             max_tool_calls_from_history=max_tool_calls_from_history,
+            compaction_config=self._entity_compaction_config(entity_name),
+            has_authored_compaction_config=self._has_authored_entity_compaction_config(entity_name),
         )
 
     def _entity_max_tool_calls_per_turn(self, entity_name: str) -> int:

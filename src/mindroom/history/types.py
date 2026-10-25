@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from mindroom.config.models import CompactionConfig
     from mindroom.llm.provider import NativeCompactionReplay
 
 COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
@@ -95,10 +96,16 @@ class HistoryPolicy:
 
 @dataclass(frozen=True)
 class ResolvedHistorySettings:
-    """Resolved history selection policy and tool-call limits for one run."""
+    """Resolved history selection policy, tool-call limits, and text compaction config for one run.
+
+    ``has_authored_compaction_config`` tells whether the operator configured text compaction for the entity or its
+    defaults, rather than only inheriting the built-in config.
+    """
 
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
+    compaction_config: CompactionConfig
+    has_authored_compaction_config: bool
 
     @property
     def replays_whole_history(self) -> bool:
