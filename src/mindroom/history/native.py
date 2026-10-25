@@ -27,7 +27,7 @@ def configure_native_history(
     history_settings: ResolvedHistorySettings,
     session: ConversationSession | None,
     allowed: bool,
-    runs: Sequence[AnyRunRecord] = (),
+    runs: Sequence[AnyRunRecord],
 ) -> NativeHistory | None:
     """Return the native settings of a run's requests, with compaction only when it keeps the scope's authored semantics.
 

@@ -19,6 +19,7 @@ from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.types import HistoryScope
@@ -39,6 +40,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
+    _EarlyPlaceholderState,
     _NonStreamingGeneration,
 )
 from mindroom.response_sources import ResponseSources
@@ -75,6 +77,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     install_model_providers,
     message_origin,
+    process_and_respond_for_test,
     request_envelope,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -205,7 +208,7 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
         )
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
             async with response_span(coordinator, request, placeholder_event_id="$thinking"):
-                await coordinator._process_and_respond(request, run_id="run-1")
+                await process_and_respond_for_test(coordinator, request, run_id="run-1")
 
     coordinator._persist_interrupted_recorder.assert_called()
 
@@ -268,6 +271,7 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
                     existing_event_id="$thinking",
                 ),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                early_placeholder_state=_EarlyPlaceholderState(),
             )
 
     assert response_event_id == "$thinking"
@@ -373,10 +377,12 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
             ),
         )
 
-        await coordinator._process_and_respond(
+        await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
-        await coordinator._process_and_respond(
+        await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello again", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -447,7 +453,8 @@ async def test_process_and_respond_applies_session_started_agent_and_room_scopes
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator._process_and_respond(
+        await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -498,7 +505,8 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator._process_and_respond(
+        await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -636,7 +644,8 @@ async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> N
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator._process_and_respond(
+        await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -703,7 +712,8 @@ async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator._process_and_respond(
+        await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -778,8 +788,10 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        generation = await coordinator._process_and_respond_streaming(
+        generation = await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            streaming=True,
         )
 
     assert generation.delivery.event_id == "$terminal"
@@ -839,8 +851,10 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        generation = await coordinator._process_and_respond_streaming(
+        generation = await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            streaming=True,
         )
 
     assert generation.delivery.event_id == "$terminal"
@@ -898,7 +912,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
             coordinator,
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         ) as request:
-            generation = await coordinator._process_and_respond_streaming(request, run_id="run-1")
+            generation = await process_and_respond_for_test(coordinator, request, streaming=True, run_id="run-1")
 
     assert generation.delivery.event_id == "$streamed"
     persisted_run = _persisted_run(storage)
@@ -984,8 +998,10 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        generation = await coordinator._process_and_respond_streaming(
+        generation = await process_and_respond_for_test(
+            coordinator,
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            streaming=True,
         )
 
     assert generation.delivery.event_id == "$terminal"
@@ -1061,7 +1077,7 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
             existing_event_id="$thinking",
         )
         async with response_span(coordinator, request, placeholder_event_id="$thinking"):
-            generation = await coordinator._process_and_respond(request)
+            generation = await process_and_respond_for_test(coordinator, request)
 
     assert generation.delivery.terminal_status == "cancelled"
     assert sequence == [
@@ -1131,11 +1147,13 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
         mock_stream.side_effect = fake_stream_agent_response
 
         with pytest.raises(asyncio.CancelledError, match="cancel"):
-            await coordinator._process_and_respond_streaming(
+            await process_and_respond_for_test(
+                coordinator,
                 replace(
                     _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
                     existing_event_id="$thinking",
                 ),
+                streaming=True,
             )
 
     assert sequence == [
@@ -1199,6 +1217,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                early_placeholder_state=_EarlyPlaceholderState(),
             )
 
     # An interruption whose note did not land leaves its turn to replay.
@@ -1284,6 +1303,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
                 response_event_id = await coordinator._generate_response_locked(
                     _response_request(prompt="Campground opened", user_id="@owner:localhost"),
                     resolved_target=target,
+                    early_placeholder_state=_EarlyPlaceholderState(),
                 )
 
     assert response_event_id == "$thinking"
@@ -1362,6 +1382,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                early_placeholder_state=_EarlyPlaceholderState(),
             )
 
     # An interruption whose note did not land leaves its turn to replay.
@@ -1416,6 +1437,7 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                early_placeholder_state=_EarlyPlaceholderState(),
             )
 
     # The interruption note replaces the placeholder, which stays the turn's visible reply.
@@ -1488,6 +1510,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
                 resolution = await coordinator._generate_response_locked(
                     _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                     resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                    early_placeholder_state=_EarlyPlaceholderState(),
                 )
 
     assert resolution is None
@@ -1541,6 +1564,7 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                early_placeholder_state=_EarlyPlaceholderState(),
             )
 
     assert resolution is None
@@ -1629,6 +1653,7 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
                 resolution = await coordinator._generate_response_locked(
                     request,
                     resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                    early_placeholder_state=_EarlyPlaceholderState(),
                 )
 
     # An interruption whose note did not land leaves its turn to replay.
@@ -1720,6 +1745,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
                 resolution = await coordinator._generate_response_locked(
                     request,
                     resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                    early_placeholder_state=_EarlyPlaceholderState(),
                 )
 
     assert resolution == "$thinking"
@@ -1758,7 +1784,7 @@ async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_contex
             base_request,
             response_envelope=replace(base_request.response_envelope, target=target),
         )
-        await coordinator._process_and_respond(request)
+        await process_and_respond_for_test(coordinator, request)
 
 
 @pytest.mark.asyncio
@@ -1795,7 +1821,7 @@ async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logg
             base_request,
             response_envelope=replace(base_request.response_envelope, target=target),
         )
-        await coordinator._process_and_respond_streaming(request)
+        await process_and_respond_for_test(coordinator, request, streaming=True)
 
 
 @pytest.mark.asyncio
@@ -1826,7 +1852,8 @@ async def test_process_and_respond_passes_current_and_model_prompt_to_ai(
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator._process_and_respond(
+        await process_and_respond_for_test(
+            coordinator,
             _response_request(
                 prompt="Hello",
                 model_prompt="Hello with context",
@@ -1865,13 +1892,15 @@ async def test_process_and_respond_streaming_passes_current_and_model_prompt_to_
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        await coordinator._process_and_respond_streaming(
+        await process_and_respond_for_test(
+            coordinator,
             _response_request(
                 prompt="Hello",
                 model_prompt="Hello with context",
                 user_id="@alice:localhost",
                 thread_id="$thread-root",
             ),
+            streaming=True,
         )
 
 
@@ -1903,6 +1932,7 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+                early_placeholder_state=_EarlyPlaceholderState(),
             )
 
     # The error note replaces the placeholder, which stays the reply's visible message.
@@ -2053,3 +2083,43 @@ async def test_generate_response_passes_resolved_correlation_id_to_ai_response(
     assert ctx.reply_to_event_id == "$original"
     assert ctx.correlation_id == "$edit"
     assert ctx.history_boundary_event_id == history_boundary_event_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settlement_began", [False, True])
+async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_begins(
+    tmp_path: Path,
+    *,
+    settlement_began: bool,
+) -> None:
+    """A judged turn that fails before its settlement began is declined quietly; once settlement began, it raises."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+
+    async def fail(*_args: object, early_placeholder_state: _EarlyPlaceholderState, **_kwargs: object) -> None:
+        early_placeholder_state.settlement_started = settlement_began
+        msg = "delivery failed"
+        raise RuntimeError(msg)
+
+    with (
+        patch.object(coordinator, "_generate_response_with_participation_locked", new=fail),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        turn = coordinator._generate_response_locked(
+            replace(_response_request(prompt="Hello", user_id="@alice:localhost"), participation=ParticipationConfig()),
+            resolved_target=MessageTarget.resolve("!test:localhost", None, "$user_msg"),
+            early_placeholder_state=_EarlyPlaceholderState(),
+        )
+        if settlement_began:
+            with pytest.raises(RuntimeError, match=r"^delivery failed$"):
+                await turn
+        else:
+            assert await turn is None

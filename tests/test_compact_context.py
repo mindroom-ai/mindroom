@@ -252,6 +252,9 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_pa
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
+        active_model_name=None,
+        room_id=None,
+        session_state=None,
     )
 
     persisted = storage.load_session("session-1", "agent")
@@ -278,10 +281,14 @@ async def test_a_manual_compaction_request_is_recorded_in_the_session_state_it_i
         config=config,
         execution_identity=identity,
         session_state=session_state,
+        active_model_name=None,
+        room_id=None,
     )
 
     assert result == COMPACT_CONTEXT_SUCCESS
-    assert session_state == add_pending_force_compaction_scope(None, _AGENT_SCOPE)
+    expected_state: dict[str, object] = {}
+    add_pending_force_compaction_scope(expected_state, _AGENT_SCOPE)
+    assert session_state == expected_state
 
 
 @pytest.mark.asyncio
@@ -819,7 +826,8 @@ async def test_a_consumed_compaction_request_keeps_metadata_another_writer_store
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     seeded = _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")])
-    seeded.session_state = add_pending_force_compaction_scope(None, scope)
+    seeded.session_state = {}
+    add_pending_force_compaction_scope(seeded.session_state, scope)
     seed_session(storage, seeded)
     session = storage.load_session("session-1", "agent")
     assert session is not None
@@ -868,6 +876,9 @@ async def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_af
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
+        active_model_name=None,
+        room_id=None,
+        session_state=None,
     )
     assert result == COMPACT_CONTEXT_SUCCESS
     team_scope = HistoryScope(kind="team", scope_id="squad")

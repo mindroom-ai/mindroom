@@ -64,8 +64,12 @@ import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
 import mindroom.scheduling.tasks as scheduling_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
+import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
+from mindroom import ai as mindroom_ai
+from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import ResponseTurnContext
+from mindroom.approval.manager import ApprovalActionResult, ApprovalManager, initialize_approval_store
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing.batch import PendingEvent
@@ -107,6 +111,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
+from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.prompt_tokens import build_static_token_estimator
@@ -153,7 +158,12 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.response_runner import (
+    PostLockRequestPreparationError,
+    ResponseRequest,
+    ResponseRunner,
+    _ResponseGenerationOutcome,
+)
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.store import persist_to
 from mindroom.thread_utils import decide_agent_response
@@ -167,21 +177,26 @@ from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
+from tests.fakes.scripted_model import estimate_only_model
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
     from xdist.workermanage import WorkerController
 
+    from mindroom.agent_cli.session import CliTurnOwner
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
+    from mindroom.history.request_messages import TurnMessages
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
+    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
+    from mindroom.tool_system.tool_access import ToolKey
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from tests.team_turn_helpers import ProbeToolkit
 
@@ -460,6 +475,8 @@ __all__ = [
     "dispatch_context_result",
     "drain_coalescing",
     "enforce_turn_authorization",
+    "handle_card_response_for_test",
+    "initialize_approval_store_for_test",
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
@@ -478,6 +495,7 @@ __all__ = [
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
     "prepared_dispatch_result",
+    "process_and_respond_for_test",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -504,6 +522,159 @@ RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
 
 
+async def prepare_agent_and_prompt_for_test(
+    ctx: ResponseTurnContext,
+    *,
+    prompt: str,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    **options: Any,  # noqa: ANN401
+) -> Any:  # noqa: ANN401
+    """Prepare one agent turn through ``ai._prepare_agent_and_prompt`` with a plain top-level turn's options.
+
+    ``options`` names the turn options a test sets; every other one is unset (None, empty, or off).
+    """
+    turn_options: dict[str, Any] = {
+        "scope_context": None,
+        "thread_history": None,
+        "knowledge": None,
+        "include_interactive_questions": True,
+        "tool_function_filter": None,
+        "execution_identity": None,
+        "compaction_lifecycle": None,
+        "delegation_depth": 0,
+        "refresh_scheduler": None,
+        "include_openai_compat_guidance": False,
+        "model_prompt": None,
+        "current_timestamp_ms": None,
+        "current_event_id": None,
+        "current_prompt_is_structured": False,
+        "pipeline_timing": None,
+        "eager_deferred_tools": False,
+        "supports_native_tool_approval": False,
+        "reusable_build": None,
+    }
+    return await mindroom_ai._prepare_agent_and_prompt(
+        ctx,
+        prompt=prompt,
+        runtime_paths=runtime_paths,
+        config=config,
+        **(turn_options | options),
+    )
+
+
+async def process_and_respond_for_test(
+    runner: ResponseRunner,
+    request: ResponseRequest,
+    *,
+    streaming: bool = False,
+    **options: Any,  # noqa: ANN401
+) -> _ResponseGenerationOutcome:
+    """Deliver ``request`` through the runner's streaming or non-streaming driver with a plain turn's options.
+
+    ``options`` names the driver options a test sets; otherwise the turn runs under a fresh run id, ignores its
+    delivery start, collects its attempt run ids into a list nothing reads, and prepares its runtime from ``request``.
+    """
+    driver = runner._process_and_respond_streaming if streaming else runner._process_and_respond
+    driver_options: dict[str, Any] = {
+        "run_id": str(uuid.uuid4()),
+        "on_delivery_started": lambda _event_id: None,
+        "attempt_run_id_collector": [],
+    }
+    if "runtime" not in options:
+        driver_options["runtime"] = await runner.prepare_response_runtime(request)
+    return await driver(request, **(driver_options | options))
+
+
+def build_unseen_context_messages_for_test(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    **options: Any,  # noqa: ANN401
+) -> "tuple[TurnMessages, list[str]]":
+    """Build one turn's unseen thread context through ``_build_unseen_context_messages`` with a plain reply's options.
+
+    ``options`` names the options a test sets; the others take the values a thread reply without a sender, display
+    names, timestamp, transient context, or attachments passes.
+    """
+    turn_options: dict[str, Any] = {
+        "transient_context_messages": (),
+        "current_sender_id": None,
+        "member_display_names": {},
+        "current_timestamp_ms": None,
+        "prompt_event_id": None,
+        "current_prompt_is_structured": False,
+        "attachment_context": None,
+    }
+    return _build_unseen_context_messages(prompt, thread_history, **(turn_options | options))
+
+
+def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
+    """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the options a test names.
+
+    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no shared storage,
+    overrides, execution env, extra passthrough, or resolved worker target.
+    """
+    plain: dict[str, Any] = {
+        "function_entrypoint": lambda *_args, **_kwargs: None,
+        "shared_storage_root_path": None,
+        "tool_config_overrides": None,
+        "tool_init_overrides": None,
+        "execution_env": None,
+        "extra_env_passthrough": None,
+        "worker_target": None,
+    }
+    return sandbox_proxy_module._call_proxy_sync(**(plain | call))
+
+
+def live_turn_tools_for_test(
+    owner: "CliTurnOwner",
+    *,
+    catalog: "PreparedAgentToolCatalog",
+    authorize: "Callable[[ToolKey, dict[str, object]], Awaitable[None]]",
+    **options: Any,  # noqa: ANN401
+) -> LiveTurnTools:
+    """Build one CLI turn's live tools with the options a test names.
+
+    The others take a top-level turn's values: no context documents, output-file policy, or knowledge refresh.
+    """
+    turn_options: dict[str, Any] = {
+        "context": {},
+        "output_file_policy": None,
+        "delegation_depth": 0,
+        "refresh_scheduler": None,
+    }
+    return LiveTurnTools(owner, catalog=catalog, authorize=authorize, **(turn_options | options))
+
+
+def initialize_approval_store_for_test(runtime_paths: RuntimePaths, **collaborators: Any) -> ApprovalManager:  # noqa: ANN401
+    """Initialize the approval store with the collaborators a test names, and none of the others."""
+    unset = dict.fromkeys(
+        (
+            "prepare_event",
+            "send_delivery",
+            "resolve_delivery",
+            "resolve_action_delivery",
+            "cards",
+            "transport_sender",
+            "sending_device",
+            "continuation_ready",
+            "recovery",
+            "responder_principal",
+        ),
+    )
+    return initialize_approval_store(runtime_paths, **(unset | collaborators))
+
+
+async def handle_card_response_for_test(manager: ApprovalManager, **response: Any) -> ApprovalActionResult:  # noqa: ANN401
+    """Answer one approval card through ``manager.handle_card_response`` as a plain card response does.
+
+    ``response`` names the card, its responder, the decision, and whatever else a test sets; the reason, consume
+    callback, timed approval, and binding and schedule scopes otherwise stay unset.
+    """
+    unset = dict.fromkeys(("reason", "before_consume", "auto_approve_seconds", "current_binding", "scheduled_scope"))
+    return await manager.handle_card_response(**(unset | response))
+
+
 async def prepare_history_for_run_for_test(
     *,
     agent_name: str,
@@ -526,7 +697,7 @@ async def prepare_history_for_run_for_test(
 ) -> PreparedHistoryState:
     """Compose the production history-preparation seams for one test run of an agent without instructions or tools.
 
-    ``model`` is the provider the run's requests go to; None sizes history by estimate alone, as a test double does.
+    ``model`` is the provider the run's requests go to; without one, history is sized by estimate alone.
     """
     resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
     static_token_estimator = build_static_token_estimator(Message(role="system", content=""), (), frozenset())
@@ -554,12 +725,14 @@ async def prepare_history_for_run_for_test(
             ),
         )
     scope_history_kwargs = {
-        "model": model,
+        "model": model or estimate_only_model(),
         "resolved_inputs": resolved_inputs,
         "non_prompt_tokens": static_token_estimator.non_prompt_tokens(),
         "runtime_paths": runtime_paths,
         "config": config,
         "compaction_lifecycle": compaction_lifecycle,
+        "pipeline_timing": None,
+        "allow_native_compaction": True,
     }
     if storage is not None and session_id is not None:
         persisted_session = session
@@ -585,6 +758,7 @@ async def prepare_history_for_run_for_test(
         prepared_scope_history=prepared_scope_history,
         config=config,
         static_prompt_tokens=static_prompt_tokens,
+        pipeline_timing=None,
     )
 
 

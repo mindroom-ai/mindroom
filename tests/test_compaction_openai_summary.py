@@ -131,6 +131,7 @@ async def test_summary_rejects_explicit_output_limit_below_usage_cap(route: _Rou
             summary_input="Conversation",
             summary_prompt="Summarize",
             timeout_seconds=10,
+            on_usage=None,
         )
     assert len(requests) == 1
     assert requests[0]["max_completion_tokens" if route == "chat" else "max_output_tokens"] == 4
@@ -146,6 +147,7 @@ async def test_summary_rejects_partial_text_stopped_by_content_filter(route: _Ro
             summary_input="Conversation",
             summary_prompt="Summarize",
             timeout_seconds=10,
+            on_usage=None,
         )
 
 
@@ -157,6 +159,7 @@ async def test_summary_accepts_explicit_completion_at_usage_cap(route: _Route, t
         summary_input="Conversation",
         summary_prompt="Summarize",
         timeout_seconds=10,
+        on_usage=None,
     )
     assert summary == "Project facts"
 
@@ -186,6 +189,7 @@ async def test_summary_makes_one_http_attempt_whatever_retries_the_model_authors
             summary_input="Conversation",
             summary_prompt="Summarize",
             timeout_seconds=10,
+            on_usage=None,
         )
     assert len(requests) == 1
 
@@ -204,6 +208,7 @@ async def test_a_summary_whose_transport_times_out_fails_as_a_timeout(route: _Ro
             summary_input="Conversation",
             summary_prompt="Summarize",
             timeout_seconds=10,
+            on_usage=None,
         )
     assert raised.value.code == TRANSPORT_TIMEOUT
     assert is_summary_timeout(raised.value)
@@ -236,6 +241,7 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
         summary_input="Conversation",
         summary_prompt="Summarize",
         timeout_seconds=10,
+        on_usage=None,
     )
 
     assert summary == "Project facts"

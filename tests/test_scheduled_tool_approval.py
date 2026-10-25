@@ -72,9 +72,16 @@ from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import install_model_providers, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    handle_card_response_for_test,
+    install_model_providers,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
@@ -174,12 +181,12 @@ async def _decide(
     scheduled_scope: str | None = None,
     sender: str = _REQUESTER,
 ) -> ApprovalActionResult:
-    return await manager.handle_card_response(
+    return await handle_card_response_for_test(
+        manager,
         room_id=_ROOM,
         sender_id=sender,
         card_event_id=_SCHEDULED_CARD,
         status=status,
-        reason=None,
         authorize_responder=lambda _agent: True,
         scheduled_scope=scheduled_scope,
     )
@@ -261,6 +268,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         expires_at_ns=9_000_000_000_000_000_000,
         agent_name=_AGENT,
         thread_id=_THREAD,
+        grant_operation=None,
     )
     assert card is not None
     assert await manager.reserve_and_publish(
@@ -792,12 +800,12 @@ async def test_scope_is_ignored_on_an_ordinary_approval_card(
     try:
         await _ordinary_card(journal, manager, "plain")
 
-        result = await manager.handle_card_response(
+        result = await handle_card_response_for_test(
+            manager,
             room_id=_ROOM,
             sender_id=_REQUESTER,
             card_event_id="$card-plain",
             status="approved",
-            reason=None,
             authorize_responder=lambda _agent: True,
             scheduled_scope="any_arguments",
         )
@@ -1956,6 +1964,13 @@ async def _run(
         return await agent.call("run_scheduled_call", task_id=_TASK, arguments_json=arguments_json)
 
 
+def _failed_answer(result: object) -> str:
+    """Return the text of a runner's answer that fails its call, which Claude and Gemini read as a failure."""
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    return result.content
+
+
 @pytest.mark.asyncio
 async def test_live_function_runs_once_under_the_runs_tool_call_policy(
     journal_database: Callable[[], EventJournalStore],
@@ -1985,8 +2000,7 @@ async def test_live_function_runs_once_under_the_runs_tool_call_policy(
 
         repeat = await _run(manager, agent)
 
-        assert isinstance(repeat, str)
-        assert "already used" in repeat
+        assert "already used" in _failed_answer(repeat)
         assert len(runs) == 1
     finally:
         await manager.shutdown()
@@ -1997,7 +2011,10 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """The runner's own caller and its after-call hooks receive the decline's text, never the policy's failed outcome."""
+    """The runner answers with the policy's failed outcome, while its after-call hooks receive the decline's text.
+
+    The call never ran, so it is journaled failed, as a call that raised is.
+    """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
@@ -2012,7 +2029,13 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
     async def observe(ctx: ToolAfterCallContext) -> None:
         observed.append((ctx.tool_name, ctx.result, ctx.blocked))
 
-    policy = build_tool_hook_middleware(HookRegistry.from_plugins([_plugin("policy", [decline, observe])]), _AGENT)
+    policy = build_tool_hook_middleware(
+        HookRegistry.from_plugins([_plugin("policy", [decline, observe])]),
+        _AGENT,
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
     agent = _live_agent(runs, middleware=(policy,))
     try:
         await _armed(manager)
@@ -2025,9 +2048,10 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
             "Reason: Slack is paused\n\n"
             "Adjust your approach — try a different tool or different arguments."
         )
-        assert result == declined
+        assert _failed_answer(result) == declined
         assert runs == []
         assert observed == [("post_slack_message", declined, True), ("run_scheduled_call", declined, False)]
+        assert await _binding_column(journal, "outcome") == "failed"
     finally:
         await manager.shutdown()
 
@@ -2080,7 +2104,15 @@ def configured_slack_pair(configured_slack: list[dict[str, object]]) -> Iterator
 def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: str = _AGENT) -> AgentBuild:
     """Build the configured agent as a turn does, on a model that is never called."""
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    return create_agent(agent_name, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+    return create_agent(
+        agent_name,
+        config,
+        runtime_paths_for(config),
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
 
 
 async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Config) -> object:
@@ -2116,7 +2148,15 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
 
-    build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+    build = create_agent(
+        _AGENT,
+        config,
+        runtime_paths_for(config),
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     functions = build.spec.functions
     assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
@@ -2202,8 +2242,11 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
         ((_TOOLKIT, _MIRRORED_TOOLKIT), "sent", [_ARGUMENTS], "completed"),
         (
             (_MIRRORED_TOOLKIT, _TOOLKIT),
-            f"❌ Scheduled call `{_TASK}` did not run: "
-            "`post_slack_message` now comes from another toolkit than the one the call was stored for.",
+            ToolOutcome(
+                content=f"❌ Scheduled call `{_TASK}` did not run: "
+                "`post_slack_message` now comes from another toolkit than the one the call was stored for.",
+                is_error=True,
+            ),
             [],
             None,
         ),
@@ -2216,7 +2259,7 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
     monkeypatch: pytest.MonkeyPatch,
     configured_slack_pair: dict[str, list[dict[str, object]]],
     configured: tuple[str, str],
-    expected: str,
+    expected: object,
     stored_toolkit_runs: list[dict[str, object]],
     outcome: str | None,
 ) -> None:
@@ -2281,8 +2324,7 @@ async def test_replacement_arguments_run_only_under_an_any_arguments_approval(
             assert result == "sent"
             assert [{key: run[key] for key in ("channel", "text")} for run in runs] == [_OTHER_ARGUMENTS]
         else:
-            assert isinstance(result, str)
-            assert "only the stored arguments" in result
+            assert "only the stored arguments" in _failed_answer(result)
             assert runs == []
             assert await _binding_column(journal, "consumed_at_ns") is None
     finally:
@@ -2304,9 +2346,8 @@ async def test_unapproved_call_offers_the_ordinary_way_only_once_its_time_has_co
     try:
         assert await _schedule(manager, execute_at=datetime.now(UTC) + offset)
 
-        result = await _run(manager, _live_agent(runs))
+        result = _failed_answer(await _run(manager, _live_agent(runs)))
 
-        assert isinstance(result, str)
         assert "has not approved it" in result
         assert ("call `post_slack_message` with these arguments" in result) is fired
         assert (canonical_arguments(_ARGUMENTS) in result) is fired
@@ -2348,8 +2389,7 @@ async def test_call_that_cannot_run_here_spends_nothing(
 
         result = await _run(manager, agent, context=_turn_context(_code_config(), thread_id=thread_id))
 
-        assert isinstance(result, str)
-        assert reason in result
+        assert reason in _failed_answer(result)
         assert await _binding_column(journal, "consumed_at_ns") is None
     finally:
         await manager.shutdown()
@@ -2401,8 +2441,7 @@ async def test_call_that_needs_live_input_is_refused_before_spending_its_approva
 
         result = await _run(manager, agent)
 
-        assert isinstance(result, str)
-        assert "needs live input or conversation control" in result
+        assert "needs live input or conversation control" in _failed_answer(result)
         assert runs == []
         assert await _binding_column(journal, "consumed_at_ns") is None
     finally:
@@ -2429,8 +2468,7 @@ async def test_failed_call_spends_its_approval_and_records_the_failure(
 
         result = await _run(manager, _live_agent(outcome=error))
 
-        assert isinstance(result, str)
-        assert result.endswith(f"failed: {text}")
+        assert _failed_answer(result).endswith(f"failed: {text}")
         assert await _binding_column(journal, "outcome") == "failed"
         assert await _claim(manager) == "used"
     finally:
@@ -2478,9 +2516,8 @@ async def test_cancelled_task_runs_nothing_and_offers_no_other_way(
         await _armed(manager)
         await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
 
-        result = await _run(manager, _live_agent(runs))
+        result = _failed_answer(await _run(manager, _live_agent(runs)))
 
-        assert isinstance(result, str)
         assert "withdrawn when the task was cancelled" in result
         assert "with these arguments" not in result
         assert runs == []

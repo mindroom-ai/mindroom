@@ -184,7 +184,16 @@ def test_materialized_agents_keep_distinct_cache_identity(
     team_identity = replace(identity, agent_name="team")
     persist_entity_accounts(config, runtime_paths)
     requests = [
-        _sent(create_agent(name, config, runtime_paths, execution_identity=team_identity).spec.model)
+        _sent(
+            create_agent(
+                name,
+                config,
+                runtime_paths,
+                execution_identity=team_identity,
+                knowledge=None,
+                active_model_name=None,
+            ).spec.model,
+        )
         for name in config.agents
     ]
 

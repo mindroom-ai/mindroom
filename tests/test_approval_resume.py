@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.delegation.lifecycle import child_execution_identity
-from mindroom.delegation.state import DelegationState
+from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.event_journal import approval_arguments_digest
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun

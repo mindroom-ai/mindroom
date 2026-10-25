@@ -139,10 +139,14 @@ Smaller changes that need operator action:
   In a sandbox runner, set every proxy variable, or only `all_proxy`, to the same HTTP(S) proxy, or the browser does not start.
   See [Egress Proxy for Browsers](../tools/web-scraping-and-browser.md#egress-proxy-for-browsers) for the full rules.
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
+- **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode` (see [Agno Learning](../memory.md#agno-learning)), `compress_tool_results` (see [History Settings](../configuration/history.md#history-settings)), and the `website` tool's `knowledge` option (see [`website`](../tools/web-scraping-and-browser.md#website)) from `config.yaml`.
+  Configs created by older `mindroom config init` runs set `learning: false` on the `mind` agent.
+  Also delete every `extra_kwargs` key a model's provider does not accept, such as the retired Agno setting `retries` or a misspelled key, on every model, including models no agent uses; [Extra Kwargs](../configuration/models.md#extra-kwargs) lists the accepted keys.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
 - **MCP gateway and shared agents**: the [MCP gateway](mcp-gateway.md#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
+- **Retired prompt overrides**: a [`prompts`](../configuration/index.md#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
 
 ### Compaction History
 

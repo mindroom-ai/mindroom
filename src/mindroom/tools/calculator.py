@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     icon_color="text-blue-500",  # Tailwind color class
     config_fields=[],
     dependencies=["agno"],  # From agno requirements
-    docs_url="https://docs.agno.com/tools/toolkits/local/calculator",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#calculator",
     function_names=("add", "divide", "exponentiate", "factorial", "is_prime", "multiply", "square_root", "subtract"),
 )
 def calculator_tools() -> type[CalculatorTools]:

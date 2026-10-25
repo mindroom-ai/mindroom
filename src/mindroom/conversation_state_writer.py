@@ -50,7 +50,7 @@ class ConversationStateWriter:
         self,
         team_agents: list[MatrixID],
         *,
-        requester_user_id: str | None = None,
+        requester_user_id: str | None,
     ) -> HistoryScope:
         """Return the persisted team-history scope for one team response."""
         config = self.deps.runtime.config
@@ -63,7 +63,6 @@ class ConversationStateWriter:
                 member_names,
                 config.agents,
                 requester_user_id=requester_user_id,
-                missing_requester_message="Private ad hoc team history scope requires requester_user_id",
             )
             or "team_"
         )

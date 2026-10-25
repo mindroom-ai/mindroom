@@ -64,7 +64,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.embeddings.ollama_embedder"
-depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama_errors"]
+depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors"]
 visibility = ["mindroom.embeddings.factory"]
 
 [[modules]]
@@ -522,6 +522,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
     "mindroom.reply_lifecycle",
+    "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
 ]
 visibility = [
@@ -760,6 +761,7 @@ depends_on = [
     "mindroom.approval.resume",
     "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
+    "mindroom.delegation.state",
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
@@ -3321,7 +3323,6 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.identity",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.tool_system.events",
@@ -3462,6 +3463,7 @@ depends_on = [
     "mindroom.config.schema_hints",
     "mindroom.config.knowledge_graph",
     "mindroom.config.egress_broker",
+    "mindroom.providers.registry",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -3653,6 +3655,7 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.embeddings.errors",
     "mindroom.knowledge.file_memory_knowledge",
+    "mindroom.knowledge.read_protocol",
     "mindroom.logging_config",
     "mindroom.memory._shared",
     "mindroom.timing",
@@ -6115,6 +6118,7 @@ depends_on = [
     "mindroom.knowledge.collection_lifetime",
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.read_protocol",
     "mindroom.logging_config",
 ]
 visibility = ["mindroom.knowledge.manager"]
@@ -6166,6 +6170,7 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.dependencies",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -6204,6 +6209,7 @@ depends_on = [
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_outcome",
+    "mindroom.knowledge.read_protocol",
     "mindroom.knowledge.readers",
 ]
 
@@ -6266,6 +6272,7 @@ depends_on = [
     "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.registry",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.dependencies",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -6470,7 +6477,6 @@ expose = [
     "reconcile_knowledge_mode_transition_states",
     "resolve_agent_knowledge_access",
     "resolve_agent_knowledge_access_async",
-    "resolve_knowledge_base_access",
     "resolve_knowledge_base_access_async",
     "semantic_agent_knowledge_base_ids",
     "StandaloneKnowledgeRefreshScheduler",
@@ -7354,6 +7360,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.worker_routing",
@@ -7765,7 +7772,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delegation.state"
-depends_on = []
+depends_on = ["mindroom.tool_system.worker_routing"]
 
 [[modules]]
 path = "mindroom.delegation.hooks"
@@ -7778,11 +7785,18 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 
+# Delegation records that predate primary-owned state, left as they were.
+[[modules]]
+path = "mindroom.delegation.legacy_records"
+depends_on = ["mindroom.path_confinement"]
+visibility = ["mindroom.delegation.records"]
+
 [[modules]]
 path = "mindroom.delegation.records"
 depends_on = [
     "mindroom.atomic_file",
     "mindroom.constants",
+    "mindroom.delegation.legacy_records",
     "mindroom.delegation.state",
     "mindroom.path_confinement",
     "mindroom.runtime_resolution",
@@ -7794,7 +7808,6 @@ path = "mindroom.delegation.audit"
 depends_on = [
     "mindroom.delegation.records",
     "mindroom.delegation.state",
-    "mindroom.tool_system.worker_routing",
     "mindroom.llm",
 ]
 
@@ -7938,7 +7951,7 @@ visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.par
 [[modules]]
 path = "mindroom.providers.tool_policy"
 depends_on = []
-visibility = ["mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.providers.gemini", "mindroom.providers.ollama_adapter", "mindroom.providers.openai"]
+visibility = ["mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.providers.gemini", "mindroom.providers.ollama.adapter", "mindroom.providers.openai"]
 
 # Owned provider adapters (stream-only, over mindroom.llm); the provider registry wires them in.
 [[modules]]
@@ -7948,9 +7961,11 @@ depends_on = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.credentials",
+    "mindroom.providers.extra_kwargs",
     "mindroom.providers.gemini",
     "mindroom.providers.names",
-    "mindroom.providers.ollama_adapter",
+    "mindroom.providers.ollama.adapter",
+    "mindroom.providers.ollama.settings",
     "mindroom.providers.openai",
     "mindroom.providers.pipeline",
     "mindroom.providers.synthetic_adapter",
@@ -7988,7 +8003,11 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.providers.ollama_adapter"
+path = "mindroom.providers.ollama"
+depends_on = []
+
+[[modules]]
+path = "mindroom.providers.ollama.adapter"
 depends_on = [
     "mindroom.credentials.sync",
     "mindroom.llm",
@@ -7996,16 +8015,21 @@ depends_on = [
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
-    "mindroom.providers.ollama_errors",
+    "mindroom.providers.ollama.errors",
+    "mindroom.providers.ollama.settings",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
 
 # Importing this module loads the Ollama SDK, so only the two Ollama modules, each imported on first use, may import it.
 [[modules]]
-path = "mindroom.providers.ollama_errors"
+path = "mindroom.providers.ollama.errors"
 depends_on = ["mindroom.providers.errors"]
-visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.providers.ollama_adapter"]
+visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.providers.ollama.adapter"]
+
+[[modules]]
+path = "mindroom.providers.ollama.settings"
+depends_on = ["mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"
@@ -8082,7 +8106,6 @@ depends_on = [
     "mindroom.delegation.storage",
     "mindroom.history.session_context",
     "mindroom.history.types",
-    "mindroom.tool_system.worker_routing",
     "mindroom.llm",
     "mindroom.history.storage",
 ]
@@ -9510,7 +9533,6 @@ visibility = [
 path = "mindroom.history.legacy_summary_system_prompt"
 depends_on = []
 visibility = [
-    "mindroom.approval.receipt",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]

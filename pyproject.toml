@@ -23,11 +23,10 @@ dependencies = [
   "anyio>=4.10",
   "authlib>=1.6",
   "certifi>=2026.4.22",
-  "chromadb>=1.5.8",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "cryptography>=47",
-  "fastapi[standard]>=0.136.3",
+  "fastapi>=0.136.3",
   "google-auth>=2.40.3",
   "google-genai>=2",
   "h11>=0.16",
@@ -42,7 +41,6 @@ dependencies = [
   "markdown-it-py>=4",
   "mcp[cli]>=2.3,<3",
   "mdit-py-plugins>=0.5",
-  "mem0ai>=0.1.115",
   # Owned to-device transport requires the durable NIO API.
   "mindroom-nio[e2e]==1.1.6",
   "ollama>=0.6.1",
@@ -55,6 +53,7 @@ dependencies = [
   "pygments>=2.20",
   "pyjwt>=2.13",
   "python-dotenv>=1",
+  "python-multipart>=0.0.27",
   "pyyaml>=6",
   "questionary>=2.1.1",
   "referencing>=0.37",
@@ -130,6 +129,9 @@ cartesia = [
   "cartesia",
 ]
 chat_ui = []
+chromadb = [
+  "chromadb>=1.5.8",
+]
 claude_agent = [
   "claude-agent-sdk>=0.2.140",
 ]
@@ -286,6 +288,9 @@ knowledge_graph = [
   # C parser for FalkorDB replies; redis-py parses large ones in pure Python on the event loop otherwise.
   "hiredis",
   "psutil",
+]
+kubernetes = [
+  "kubernetes>=28.1",
 ]
 linear = [
   "requests",

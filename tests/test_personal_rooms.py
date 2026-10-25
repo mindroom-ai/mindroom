@@ -1096,6 +1096,41 @@ async def test_router_reprovisioning_never_supersedes_a_queued_reload(
 
 
 @pytest.mark.asyncio
+async def test_router_provisions_one_users_agent_one_call_at_a_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second call for a user being provisioned returns at once instead of registering again; other users proceed."""
+    router, _, _, _ = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"))
+    release = asyncio.Event()
+    users: list[str] = []
+
+    async def provision(*_args: object, user_id: str, **_kwargs: object) -> tuple[str, bool]:
+        users.append(user_id)
+        await release.wait()
+        return "mind_x", True
+
+    monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
+
+    first = asyncio.create_task(
+        router._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost"),
+    )
+    await asyncio.sleep(0)
+    await asyncio.wait_for(
+        router._provision_personal_agent("mind", "@alice:localhost", "@bridge_alice:localhost", "!other:localhost"),
+        timeout=1,
+    )
+    other = asyncio.create_task(
+        router._provision_personal_agent("mind", "@bob:localhost", "@bob:localhost", "!lobby:localhost"),
+    )
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, other)
+
+    assert users == ["@alice:localhost", "@bob:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_router_join_creates_room_without_hooks_or_target_lobby_membership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -189,7 +189,8 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
         HistoryScopeState(force_compact_before_next_run=True),
     )
     pending = _session("pending", runs=[_completed_run("run-2")])
-    pending.session_state = add_pending_force_compaction_scope(None, agent_scope)
+    pending.session_state = {}
+    add_pending_force_compaction_scope(pending.session_state, agent_scope)
     for session in (flagged, pending, _session("idle", runs=[_completed_run("run-3")])):
         seed_session(storage, session)
     statements: list[str] = []

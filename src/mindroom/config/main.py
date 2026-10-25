@@ -212,7 +212,17 @@ def iter_config_validation_messages(
 ) -> list[tuple[str, str]]:
     """Return user-facing validation messages from one config validation exception."""
     if isinstance(exc, ValidationError):
-        return [(" → ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
+        return [
+            (
+                " → ".join(str(x) for x in error["loc"]),
+                (
+                    f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
+                    if error["type"] == "extra_forbidden"
+                    else error["msg"]
+                ),
+            )
+            for error in exc.errors(include_context=False)
+        ]
     if isinstance(exc, ConfigRuntimeValidationError):
         return [("config", str(exc))]
     if isinstance(exc, ConfigIncludeError):
@@ -1228,6 +1238,7 @@ class Config(BaseModel):
         from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
 
         validate_call_agent_room_ownership(config, runtime_paths)
+        config._validate_model_extra_kwargs(runtime_paths)
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
         config._runtime_approved_egress_inherited_default_tools = approved_egress_overlay.inherited_default_tools
         config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
@@ -1335,6 +1346,10 @@ class Config(BaseModel):
             msg = f"Unknown agent: {agent_name}. Available agents: {available}"
             raise ValueError(msg)
         return self.agents[agent_name]
+
+    def configured_team_name(self, team_name: str) -> str | None:
+        """Return ``team_name`` when it names a configured team, else None: an ad hoc team is no configured entity."""
+        return team_name if team_name in self.teams else None
 
     def _default_history_settings(self) -> ResolvedHistorySettings:
         """Return defaults-only replay settings for ad hoc shared team scope."""
@@ -1615,6 +1630,18 @@ class Config(BaseModel):
             chunk_overlap=private_knowledge.chunk_overlap,
             git=private_knowledge.git,
         )
+
+    def _validate_model_extra_kwargs(self, runtime_paths: RuntimePaths) -> None:
+        """Reject an ``extra_kwargs`` key the route serving its model does not accept, naming the model."""
+        # why-lazy: the provider registry imports every provider family's route tables, which config import must not load.
+        from mindroom.providers.registry import check_extra_kwargs  # noqa: PLC0415
+
+        for model_name, model_config in self.models.items():
+            try:
+                check_extra_kwargs(model_config, runtime_paths)
+            except ValueError as exc:
+                msg = f"models.{model_name}: {exc}"
+                raise ConfigRuntimeValidationError(msg) from exc
 
     def _validate_authored_tool_entry(
         self,
