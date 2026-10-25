@@ -209,7 +209,8 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
     assert has_queued_force_compaction(storage, "idle", agent_scope) is False
     assert has_queued_force_compaction(storage, "missing", agent_scope) is False
     assert statements
-    assert not any(storage.names.runs in statement for statement in statements)
+    run_tables = (storage.names.log_runs, storage.names.log_messages)
+    assert not any(table in statement for table in run_tables for statement in statements)
 
 
 def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
