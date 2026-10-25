@@ -7,6 +7,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from mindroom import agent_modes
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
@@ -91,9 +93,12 @@ def test_corrupt_mode_records_fail_to_standard(tmp_path: Path) -> None:
     assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "session") == "standard"
 
 
-def test_mode_records_are_bounded(tmp_path: Path) -> None:
+def test_mode_records_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, state_root = _paths(tmp_path)
-    for number in range(1001):
+    monkeypatch.setattr(agent_modes, "_MAX_TRACKED_CHOICES", 3)
+    for number in range(4):
         agent_modes.set_agent_mode(paths, state_root, "agent", str(number), "minimal")
     assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "0") == "standard"
-    assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "1000") == "minimal"
+    assert all(
+        agent_modes.resolve_agent_mode(paths, state_root, "agent", str(number)) == "minimal" for number in (1, 2, 3)
+    )
