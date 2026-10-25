@@ -165,7 +165,7 @@ async def add_links(ctx):
 
 Used by `tool:before_call`.
 Hooks run one after another, and the first hook that calls `ctx.decline(reason)` stops the chain.
-The tool does not run, and the model receives the reason in the tool result.
+The tool does not run, and the model receives the reason as a failed tool result.
 A gate hook that fails or times out does not block the tool call.
 
 ```python

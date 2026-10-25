@@ -75,9 +75,9 @@ if TYPE_CHECKING:
     from mindroom.participation import ParticipationGate
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution_authority import JobTool
-    from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
+    from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
     from tests.fakes.scripted_model import ScriptStep
 
 

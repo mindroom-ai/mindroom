@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.hooks import HookRegistry
-    from mindroom.tool_system.invocation import ToolOutcome
+    from mindroom.tool_system.tool_function import ToolOutcome
 
 
 def offered_function(build: AgentBuild, name: str) -> ToolFunction:

@@ -43,6 +43,7 @@ from mindroom.tool_system.output_files import (
     wrap_toolkit_for_output_files,
     write_bytes_to_output_path,
 )
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
@@ -1122,5 +1123,7 @@ async def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_p
     result = await _run_through_hooks(toolkit, registry, {"text": "hi", OUTPUT_PATH_ARGUMENT: "blocked.txt"})
 
     assert not (tmp_path / "blocked.txt").exists()
-    assert seen == [("after", True, result)]
-    assert "[TOOL CALL DECLINED]" in str(result)
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert "[TOOL CALL DECLINED]" in result.content
+    assert seen == [("after", True, result.content)]

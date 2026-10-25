@@ -41,6 +41,7 @@ from mindroom.tool_system.runtime_context import (
     resolve_tool_runtime_hook_bindings,
 )
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -69,6 +70,15 @@ _DECLINED_RESULT_TEMPLATE = (
     "Adjust your approach — try a different tool or different arguments."
 )
 _ToolHookResult = Any
+
+
+def _declined(tool_name: str, reason: str) -> ToolOutcome:
+    """Return the failed outcome that answers a call that was declined before it ran.
+
+    Its text is the result the after-call hooks receive for a call a plugin hook declined and for a background
+    script call whose approval was denied; only the first answers the model with it.
+    """
+    return ToolOutcome(content=_DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason), is_error=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,8 +415,8 @@ async def _run_before_hooks(
     resolved_context: _ResolvedToolContext,
     arguments: dict[str, Any],
     tool_name: str,
-) -> str | None:
-    """Run the before-call hooks; return the declined result when one of them declines the call."""
+) -> ToolOutcome | None:
+    """Run the before-call hooks; return the declined outcome when one of them declines the call."""
     before_context = ToolBeforeCallContext(
         **resolved_context.hook_context_kwargs(arguments),
         tool_name=tool_name,
@@ -429,7 +439,7 @@ async def _run_before_hooks(
     )
     if not before_context.declined:
         return None
-    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=before_context.decline_reason)
+    return _declined(tool_name, before_context.decline_reason)
 
 
 @dataclass(slots=True)
@@ -593,25 +603,29 @@ async def _execute_bridge(  # noqa: C901
 
     if has_before_hooks:
         before_hooks_started_at = time.perf_counter()
-        declined_result = await _run_before_hooks(
+        declined = await _run_before_hooks(
             hook_registry=hook_registry,
             resolved_context=resolved_context,
             arguments=hook_arguments,
             tool_name=tool_name,
         )
         timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
-        if declined_result is not None:
+        if declined is not None:
             duration_ms = timing.mark_result_ready()
-            await finish("blocked_before_hooks", duration_ms=duration_ms, result=declined_result, blocked=True)
-            return declined_result
+            await finish("blocked_before_hooks", duration_ms=duration_ms, result=declined.content, blocked=True)
+            return declined
 
     if origin is not None and approval_gate is not None:
         decision = await approval_gate(origin, tool_name, deepcopy(args))
         if not decision.approved:
             reason = denial_note_for(decision.reason)
-            declined_result = _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
             duration_ms = timing.mark_result_ready()
-            await finish("blocked_approval", duration_ms=duration_ms, result=declined_result, blocked=True)
+            await finish(
+                "blocked_approval",
+                duration_ms=duration_ms,
+                result=_declined(tool_name, reason).content,
+                blocked=True,
+            )
             return BackgroundToolApprovalDenied(reason=reason)
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
@@ -652,7 +666,11 @@ async def dispatch_external_tool_hooks(
     blocked: bool = False,
     duration_ms: float = 0,
 ) -> str | None:
-    """Dispatch one phase of a durable external tool through the ordinary hook policy."""
+    """Dispatch one phase of a durable external tool through the ordinary hook policy.
+
+    The before phase returns the declined result's text when a plugin hook declines the call, which the caller then
+    answers as a failed call.
+    """
     dispatch = ToolDispatchContext(execution_identity=execution_identity)
     runtime_context = get_tool_runtime_context()
     if runtime_context is not None and execution_identity_matches_tool_runtime_context(
@@ -671,12 +689,13 @@ async def dispatch_external_tool_hooks(
     if before:
         if not hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
             return None
-        return await _run_before_hooks(
+        declined = await _run_before_hooks(
             hook_registry=hook_registry,
             resolved_context=resolved,
             arguments=deepcopy(arguments),
             tool_name=tool_name,
         )
+        return None if declined is None else declined.content
     if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
         await _emit_after_call(
             hook_registry=hook_registry,
@@ -703,9 +722,10 @@ def build_tool_hook_middleware(
     """Return the tool-call policy as the middleware around every tool call, in the loop and outside it.
 
     The call reaches its entrypoint only through ``call_next``, so a plugin before-hook that declines it, a
-    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running. A background
-    script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a declined call then
-    returns ``BackgroundToolApprovalDenied`` without running.
+    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a declined call
+    returns a failed ``ToolOutcome`` with the decline's text. A background script's call passes its ``origin`` and the
+    ``approval_gate`` that asks its requester; a call its requester denied returns ``BackgroundToolApprovalDenied``
+    without running.
     """
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)

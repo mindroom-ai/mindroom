@@ -30,7 +30,7 @@ from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
-from mindroom.tool_system.tool_function import InjectedValue
+from mindroom.tool_system.tool_function import InjectedValue, ToolOutcome
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -218,7 +218,9 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
         await record_scheduled_call_outcome(task_id, "failed")
         return f"❌ Scheduled call `{task_id}` failed: {failure_text(error)}"
     await record_scheduled_call_outcome(task_id, "completed")
-    return result
+    # The policy answers a call a plugin hook declined with a failed outcome; this runner's caller, and the after-call
+    # hooks around it, receive its text as the runner's own result.
+    return result.content if isinstance(result, ToolOutcome) and result.is_error else result
 
 
 def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition

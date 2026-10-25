@@ -28,8 +28,8 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.provider import ToolSpec
     from mindroom.llm.runs import ToolExecution
-    from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
+    from mindroom.tool_system.invocation import ToolMiddleware
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome, ToolValue
 
 logger = get_logger(__name__)
 

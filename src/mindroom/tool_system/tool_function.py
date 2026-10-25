@@ -178,6 +178,18 @@ class ToolValue:
                 yield kind, item
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolOutcome(ToolValue):
+    """What one tool call produced: the text the model reads (the error text on failure) and the tool's media.
+
+    A tool or middleware may answer a call with one: ``stop_after_call`` stops the run after it, and ``is_error``
+    fails it, as the tool-call policy answers a call a plugin hook declined.
+    """
+
+    stop_after_call: bool = False
+    is_error: bool = False
+
+
 def media_reference(kind: MediaKind, medium: Image | Audio | Video | File) -> dict[str, object]:
     """Return a client's reference to one medium without its bytes: its kind, its MIME type, and its URL if any."""
     reference: dict[str, object] = {"kind": kind, "mime_type": medium.mime_type}

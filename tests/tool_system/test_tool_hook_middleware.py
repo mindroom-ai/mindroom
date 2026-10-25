@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.tools import Toolkit
 
+from mindroom.agent_loop.tools import PlannedCall, dispatch_tool_calls
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
@@ -17,13 +18,19 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, ToolSpec, complete
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, current_tool_call, execute_tool_call
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.agent_loop.helpers import context
+from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
+from tests.providers.golden_support import Wire, hide_provider_environment
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 
 def _context() -> ToolCallContext:
@@ -90,6 +97,75 @@ async def test_before_hooks_block_a_call_and_after_hooks_see_results_and_blocks(
     assert "no secrets" in str(blocked.content)
     assert [(name, blocked_flag) for name, _, blocked_flag in seen] == [("echo", False), ("echo", True)]
     assert seen[0][1] == "HI"
+
+
+_DECLINED = (
+    "[TOOL CALL DECLINED]\n"
+    "Tool: echo\n"
+    "Reason: no secrets\n\n"
+    "Adjust your approach — try a different tool or different arguments."
+)
+
+
+def _sent_result(family: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Return the one tool result a request sends, as the wire encodes it."""
+    if family == "anthropic":
+        [block] = [
+            block
+            for message in body["messages"]
+            for block in message["content"]
+            if isinstance(block, dict) and block["type"] == "tool_result"
+        ]
+        # The prompt-cache marker the request adds to the newest result is not part of the result.
+        return {key: value for key, value in block.items() if key != "cache_control"}
+    [part] = [part for content in body["contents"] for part in content["parts"] if "functionResponse" in part]
+    return part["functionResponse"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(CLAUDE_DEPRECATION_FILTER)
+@pytest.mark.parametrize(
+    ("family", "expected"),
+    [
+        ("anthropic", {"type": "tool_result", "tool_use_id": "call-1", "content": _DECLINED, "is_error": True}),
+        ("gemini", {"id": "call-1", "name": "echo", "response": {"error": _DECLINED}}),
+    ],
+)
+async def test_a_declined_call_reaches_claude_and_gemini_as_a_failed_call(
+    family: str,
+    expected: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop answers a call a before-call hook declined as failed, so Claude and Gemini read the decline as one."""
+    hide_provider_environment(monkeypatch)
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def block_secret(ctx: ToolBeforeCallContext) -> None:
+        ctx.decline("no secrets")
+
+    probes = _Probes()
+    echo = next(function for function in adapt_toolkit(probes).functions if function.name == "echo")
+    middleware = [build_tool_hook_middleware(HookRegistry.from_plugins([_plugin("policy", [block_secret])]), "code")]
+    planned = PlannedCall(function=echo, execution=echo.planned_execution("call-1", {"text": "secret"}))
+
+    [answer] = await dispatch_tool_calls([planned], run=context(), middleware=middleware)
+    wire = Wire(FAMILIES[family].reply())
+    call = {"id": "call-1", "type": "function", "function": {"name": "echo", "arguments": '{"text": "secret"}'}}
+    turn = [Message(role="user", content="Echo the secret."), Message(role="assistant", tool_calls=[call]), answer]
+    definition = ToolSpec(
+        name="echo",
+        description="Echo.",
+        parameters=echo.parameters,
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
+    await complete(FAMILIES[family].adapter(tmp_path, wire), ModelRequest(messages=turn, tools=[definition]))
+
+    assert probes.calls == []
+    assert _sent_result(family, wire.body()) == expected
 
 
 @pytest.mark.asyncio
