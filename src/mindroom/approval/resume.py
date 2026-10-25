@@ -84,14 +84,13 @@ def resume_from_session(
     hooks: LoopHooks,
     persist: Persist[RunRecord],
     request_template: ModelRequest,
-    model_name: str | None = None,
+    model_name: str,
 ) -> AsyncIterator[RunEvent]:
     """Resume ``paused`` where ``storage`` stores it with ``decisions``: the history ``plan`` replays, then the request.
 
     The resume reuses the paused run's stored system message and shares the session's state with its tools; the
-    stream ends with ``RunFinished`` as ``resume_agent``'s does. ``model_name`` is the model a live turn's attempt
-    runs on, which its tool calls carry; ``ResumeRunner`` passes none, so its calls keep the model of the tool context
-    it runs in.
+    stream ends with ``RunFinished`` as ``resume_agent``'s does. ``model_name`` is the configured model the run uses,
+    which its tool calls carry.
     """
     session = storage.session
     history, summary = replayed_history(session, storage.scope, settings, plan)
@@ -205,9 +204,6 @@ class ResumeRunner:
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.storage.session)
         if decisions.approved or decisions.denied:
             add_approval_receipt_reader(paused.run_id)
-        # TODO(simplify): this resume, like a saved team approval's TeamResume, names no model, so its tools see the
-        # tool context's, none for an approval saved without one, while the run uses its agent's. Pass model_name.
-        # Tools that follow the reply's model, such as claude_agent, would notice.
         events = resume_from_session(
             build.spec,
             paused,
@@ -222,6 +218,7 @@ class ResumeRunner:
             # stored data would notice: a failed approval stays answerable (#3075).
             persist=persist_into(None, self.storage),
             request_template=with_native_history(build.request_template, native),
+            model_name=self.model_name,
         )
         return with_resumed_turn_log_context(events)
 
