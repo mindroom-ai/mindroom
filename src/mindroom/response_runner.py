@@ -5373,9 +5373,9 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        run_id: str | None,
-        on_delivery_started: Callable[[str | None], None] | None,
-        attempt_run_id_collector: list[str] | None,
+        run_id: str,
+        on_delivery_started: Callable[[str | None], None],
+        attempt_run_id_collector: list[str],
         runtime: _PreparedResponseRuntime,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a response without streaming."""
@@ -5394,9 +5394,6 @@ class ResponseRunner:
             scope=session_scope,
             resolved_target=runtime.resolved_target,
         )
-        # The caller's list survives raising exit paths (cancellation, stream
-        # re-raises), unlike the returned outcome.
-        attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = await self._active_response_event_ids(request.room_id)
         turn_recorder = self._build_turn_recorder(
             user_message=runtime.model_prompt,
@@ -5419,7 +5416,7 @@ class ResponseRunner:
                     runtime=runtime,
                     active_event_ids=active_event_ids,
                     turn_recorder=turn_recorder,
-                    attempt_run_id_collector=attempt_run_ids,
+                    attempt_run_id_collector=attempt_run_id_collector,
                     pipeline_timing=request.pipeline_timing,
                 )
             except Exception:
@@ -5465,8 +5462,7 @@ class ResponseRunner:
             generation.run_metadata_content,
             request.attachment_ids,
         )
-        if on_delivery_started is not None:
-            on_delivery_started(_existing_event_id(request))
+        on_delivery_started(_existing_event_id(request))
         try:
             delivery = await self.deps.delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
@@ -5494,13 +5490,13 @@ class ResponseRunner:
         self._note_final_delivery_timing(request, delivery)
         return build_outcome(delivery)
 
-    async def _process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
+    async def _process_and_respond_streaming(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
-        run_id: str | None,
-        on_delivery_started: Callable[[str | None], None] | None,
-        attempt_run_id_collector: list[str] | None,
+        run_id: str,
+        on_delivery_started: Callable[[str | None], None],
+        attempt_run_id_collector: list[str],
         runtime: _PreparedResponseRuntime,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a streamed response."""
@@ -5524,9 +5520,6 @@ class ResponseRunner:
         # live while the delivery gateway snapshots extra_content, and both
         # must survive the raising StreamingDeliveryError exit below.
         run_metadata_content: dict[str, Any] = {}
-        # The caller's list survives raising exit paths (cancellation, stream
-        # re-raises), unlike the returned outcome.
-        attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = await self._active_response_event_ids(request.room_id)
         tool_trace: list[Any] = []
         transport_outcome: StreamTransportOutcome | None = None
@@ -5558,7 +5551,7 @@ class ResponseRunner:
                         turn_recorder=turn_recorder,
                         tool_trace=tool_trace,
                         run_metadata_content=run_metadata_content,
-                        attempt_run_id_collector=attempt_run_ids,
+                        attempt_run_id_collector=attempt_run_id_collector,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=on_delivery_started,
                     )
@@ -5661,8 +5654,7 @@ class ResponseRunner:
             run_metadata_content,
             request.attachment_ids,
         )
-        if on_delivery_started is not None:
-            on_delivery_started(transport_outcome.last_physical_stream_event_id)
+        on_delivery_started(transport_outcome.last_physical_stream_event_id)
         delivery = await self._finalize_streamed_turn(
             request=request,
             delivery_target=runtime.resolved_target,

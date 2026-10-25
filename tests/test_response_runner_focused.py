@@ -5594,6 +5594,69 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_reply_reports_its_delivery_start_before_delivering_it(tmp_path: Path) -> None:
+    """A blocking reply reports that delivery began, naming the event it edits, before it delivers the answer."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    steps: list[str] = []
+
+    async def deliver_final(*_args: object, **_kwargs: object) -> FinalDeliveryOutcome:
+        steps.append("deliver")
+        return _completed_outcome("$existing", body="final text")
+
+    with (
+        patch.object(DeliveryGateway, "deliver_final", new=deliver_final),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="final text"),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await process_and_respond_for_test(
+            coordinator,
+            replace(_plain_request(_target()), existing_event_id="$existing"),
+            on_delivery_started=lambda event_id: steps.append(f"started {event_id}"),
+        )
+
+    assert steps == ["started $existing", "deliver"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_reply_reports_its_delivery_start_before_finalizing_it(tmp_path: Path) -> None:
+    """A streamed reply reports that delivery began, naming its last stream event, before it finalizes the answer."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    steps: list[str] = []
+    transport = StreamTransportOutcome(
+        last_physical_stream_event_id="$stream",
+        terminal_status="completed",
+        rendered_body="streamed body",
+        visible_body_state="visible_body",
+    )
+
+    async def finalize(*_args: object, **_kwargs: object) -> FinalDeliveryOutcome:
+        steps.append("finalize")
+        return _completed_outcome("$stream", body="streamed body")
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "chunk"
+
+    with (
+        patch.object(DeliveryGateway, "deliver_stream", new=AsyncMock(return_value=transport)),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
+        patch_response_runner_module(
+            stream_agent_response=fake_stream,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await process_and_respond_for_test(
+            coordinator,
+            _plain_request(_target()),
+            streaming=True,
+            on_delivery_started=lambda event_id: steps.append(f"started {event_id}"),
+        )
+
+    assert steps == ["started $stream", "finalize"]
+
+
+@pytest.mark.asyncio
 async def test_process_shutdown_unwraps_streaming_cancellation_without_persistence(
     tmp_path: Path,
 ) -> None:

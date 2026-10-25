@@ -563,11 +563,15 @@ async def process_and_respond_for_test(
 ) -> _ResponseGenerationOutcome:
     """Deliver ``request`` through the runner's streaming or non-streaming driver with a plain turn's options.
 
-    ``options`` names the driver options a test sets; the run id, delivery callback, and run-id collector otherwise
-    stay unset, and the runtime is prepared from ``request`` itself.
+    ``options`` names the driver options a test sets; otherwise the turn runs under a fresh run id, ignores its
+    delivery start, collects its attempt run ids into a list nothing reads, and prepares its runtime from ``request``.
     """
     driver = runner._process_and_respond_streaming if streaming else runner._process_and_respond
-    driver_options: dict[str, Any] = {"run_id": None, "on_delivery_started": None, "attempt_run_id_collector": None}
+    driver_options: dict[str, Any] = {
+        "run_id": str(uuid.uuid4()),
+        "on_delivery_started": lambda _event_id: None,
+        "attempt_run_id_collector": [],
+    }
     if "runtime" not in options:
         driver_options["runtime"] = await runner.prepare_response_runtime(request)
     return await driver(request, **(driver_options | options))
