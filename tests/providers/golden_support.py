@@ -83,7 +83,6 @@ _UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 GENERATED_ID = "<uuid4>"
 _VOLATILE_MESSAGE_KEYS = ("id", "created_at")
 _TIMING_METRIC_KEYS = ("duration", "time_to_first_token")
-_STOP_KEYS = ("stop_reason", "finish_reason", "response_status")
 # The classes the JSON-schema structured-output goldens name, which record no module.
 _GOLDEN_SCHEMAS: dict[str, type[BaseModel]] = {
     schema.__name__: schema for schema in (_RoutingSuggestion, ScheduledWorkflow)
@@ -408,7 +407,7 @@ def normalized_parsed(message: Message) -> dict[str, Any]:
     parsed = {
         "message": message_dict,
         "metrics": metrics,
-        "stop_reason": next((provider_data[key] for key in _STOP_KEYS if provider_data.get(key) is not None), None),
+        "stop_reason": provider_data.get("stop_reason"),
     }
     return scrub_generated_ids(_json_roundtrip(parsed))
 
