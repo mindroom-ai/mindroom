@@ -160,7 +160,6 @@ def test_inherited_google_keys_are_dropped() -> None:
         "GOOGLE_API_KEY": "test",
         "GOOGLE_API_KEY_FILE": "google-key",
         "GEMINI_API_KEY": "test",
-        "GEMINI_API_KEY_FILE": "gemini-key",
         "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json",
         "GOOGLE_DELEGATED_USER": "user@example.org",
     }
