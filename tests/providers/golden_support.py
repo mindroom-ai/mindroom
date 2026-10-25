@@ -316,34 +316,6 @@ def normalized_parsed(message: Message) -> dict[str, Any]:
     return scrub_generated_ids(_json_roundtrip(parsed))
 
 
-def expected_body(golden: dict[str, Any], sent: dict[str, Any]) -> dict[str, Any]:
-    """Return a golden's request body in the key order to compare ``sent`` with.
-
-    A golden whose input is a dict response format sent that dict in the capture input's sorted key order (the
-    fixture README), which no caller builds: the adapter renders the format from the schema, ``type`` first and the
-    properties in field order, as Agno's agent did. Its order is taken from ``sent`` when the value is equal.
-    """
-    body = deepcopy(golden["request"]["body"])
-    encoded = golden["input"]["response_format"]
-    dict_format = encoded is not None and encoded["type"] == "dict" and "response_format" in body
-    if dict_format and body["response_format"] == sent.get("response_format"):
-        body["response_format"] = sent["response_format"]
-    return body
-
-
-def _as_captured(golden: dict[str, Any], regenerated: dict[str, Any]) -> dict[str, Any]:
-    """Keep what the capture recorded where the owned replay produces no counterpart, which no comparison reads.
-
-    That is a dict response format's key order (``expected_body``).
-    """
-    body = regenerated["request"]["body"]
-    if body is not None and "response_format" in body:
-        captured = golden["request"]["body"]["response_format"]
-        if captured == body["response_format"]:
-            body["response_format"] = captured
-    return regenerated
-
-
 def regenerated_golden(golden: dict[str, Any], replay: Replay) -> dict[str, Any]:
     """Return the golden that ``replay`` of ``golden`` regenerates.
 
@@ -353,7 +325,7 @@ def regenerated_golden(golden: dict[str, Any], replay: Replay) -> dict[str, Any]
     """
     request = sorted_keys({key: value for key, value in replay.request.items() if key != "body"})
     request["body"] = replay.request["body"]
-    regenerated = {
+    return {
         "family": golden["family"],
         "input": golden["input"],
         "parsed": replay.parsed,
@@ -361,7 +333,6 @@ def regenerated_golden(golden: dict[str, Any], replay: Replay) -> dict[str, Any]
         "response_raw": golden["response_raw"],
         "scenario": golden["scenario"],
     }
-    return _as_captured(golden, regenerated)
 
 
 def comparable_metrics(metrics: Any) -> dict[str, Any]:  # noqa: ANN401 - MessageMetrics
