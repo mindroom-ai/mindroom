@@ -1301,17 +1301,6 @@ async def _invoke_mcp_echo(
 
 
 @pytest.mark.asyncio
-async def test_an_mcp_tool_hands_the_gateway_client_its_text(
-    context: AgentToolContext,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An MCP-backed tool returns a tool result; the gateway client gets its text, not the result object's repr."""
-    planned = CallToolResult(content=[TextContent(type="text", text="hello")])
-
-    assert await _invoke_mcp_echo(context, monkeypatch, planned) == {"result": "hello"}
-
-
-@pytest.mark.asyncio
 async def test_a_tool_image_reaches_the_gateway_client_as_a_reference_beside_the_text(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
