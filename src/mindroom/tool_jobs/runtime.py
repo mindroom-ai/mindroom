@@ -55,7 +55,7 @@ _ADMITTED_OPERATION = attrgetter("tool_name", "toolkit_name", "kind", "source_ev
 # Ended jobs, read or not, are deleted this long after their last change, once their originating turn has finished.
 _ENDED_JOB_RETENTION = timedelta(days=30)
 # A job whose own call returned its result inline is never listed or reported once it ended, so after its turn only a
-# reread by its exact ID reads it, and it is kept only this long.
+# reread by its exact ID reads it; it is deleted after this shorter margin instead.
 _INLINE_JOB_RETENTION = timedelta(days=1)
 logger = get_logger(__name__)
 # A ToolResultPayload encoded by `tool_jobs.results`; the runtime stores it without reading it.

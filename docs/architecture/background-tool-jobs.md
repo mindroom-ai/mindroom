@@ -27,7 +27,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - The response's `mindroom-agent` owner closes through the response's execution resources, so a shell job that outlives its reply keeps the CLI until the last job settles; cancelling one shell window stops only that window's calls.
 - A saved job result decodes only to text, media, session-state changes, and an error under fixed wire tags, so saved data never chooses the code that runs; a streamed call's job saves the joined text the model read, not its events.
 - Recovery fails on a saved job it cannot read and names that job, instead of dropping it silently.
-- A job whose own call returned its result inline is kept one day instead of 30, because once it ended no listing, notice, or follow-up names it, so after its turn only a reread by its exact ID reads it; the day keeps such a reread working across the next turns of a conversation.
+- A job whose own call returned its result inline is kept one day instead of 30, because once it ended no listing, notice, or follow-up names it, so after its turn only a reread by its exact ID reads it; the day is a margin for such a reread, as by an ID a person saw in the jobs bar while the call ran.
   On a busy deployment about 99% of the stored result bytes belonged to such jobs, mostly images and shell output.
   Clearing the payload when the result is acknowledged was rejected: the job would stay in memory and in the table, and a reread by ID would find no result.
 
