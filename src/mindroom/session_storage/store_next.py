@@ -297,13 +297,11 @@ class ConversationStore:
     ) -> bool:
         """Set ``changes``' top-level keys in stored run ``run_id``'s metadata and keep the rest, a final run's too.
 
-        A visible top-level run's event ids join the event sets of the summary row that covers it, the scope's first
-        whose ``through`` reaches its ``seq``, so redacting a reply linked after the summary still cuts it; a run
-        behind the latest barrier is retired, and ``through`` never decreases in ``id`` order, so it joins none.
+        A visible top-level run's event ids also join the summary row that covers it (``_join_covering_row``).
         Returns whether the run is stored. ``session``, when given, then holds a changed copy of the run in a new
         list; loaded runs are shared, so none changes in place.
         """
-        runs, summaries = quote_identifier(self.names.log_runs), quote_identifier(self.names.log_summaries)
+        runs = quote_identifier(self.names.log_runs)
         with self.transaction(write=True) as connection:
             row = connection.execute(
                 f"SELECT parent_run_id, scope_key, status, seq, metadata FROM {runs} "  # noqa: S608
@@ -314,27 +312,9 @@ class ConversationStore:
                 return False
             parent_run_id, scope_key, status, seq, stored = row
             metadata = {**(decoded_mapping(stored) or {}), **changes}
-            update = f"UPDATE {runs} SET metadata = ?, updated_at = ? WHERE run_id = ?"  # noqa: S608
-            connection.execute(update, (json.dumps(metadata), int(time()), run_id))
-            visible = parent_run_id is None and status not in _NON_VISIBLE
-            covering = (
-                visible
-                and connection.execute(
-                    f"SELECT id, event_ids, seen_event_ids FROM {summaries} WHERE session_id = ?1 AND scope_key = ?2 "  # noqa: S608
-                    f"AND through >= ?3 AND ?3 > COALESCE((SELECT through FROM {summaries} WHERE session_id = ?1 "
-                    "AND scope_key = ?2 AND summary IS NULL ORDER BY id DESC LIMIT 1), 0) ORDER BY id LIMIT 1",
-                    (session_id, scope_key, seq),
-                ).fetchone()
-            )
-            if covering:
-                summary_id, event_ids, seen = covering
-                seen_ids = seen_event_ids(metadata)
-                joined = (
-                    sorted({*json.loads(event_ids), *seen_ids, *source_event_ids(metadata)}),
-                    sorted({*json.loads(seen), *seen_ids}),
-                )
-                update = f"UPDATE {summaries} SET event_ids = ?, seen_event_ids = ? WHERE id = ?"  # noqa: S608
-                connection.execute(update, (*map(json.dumps, joined), summary_id))
+            connection.execute(f"UPDATE {runs} SET metadata = ? WHERE run_id = ?", (json.dumps(metadata), run_id))  # noqa: S608
+            if parent_run_id is None and status not in _NON_VISIBLE:
+                _join_covering_row(connection, self.names, session_id, scope_key, seq, metadata)
         if session is not None:
             session.runs = [
                 replace(run, metadata=copy.deepcopy(metadata)) if run.run_id == run_id else run for run in session.runs
@@ -771,6 +751,39 @@ def _upsert_run(
     )
 
 
+def _join_covering_row(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    scope_key: str,
+    seq: int,
+    metadata: Mapping[str, Any],
+) -> None:
+    """Add a visible run's event ids to the summary row that covers it, so redacting a reply linked later still cuts it.
+
+    The covering row is the scope's first whose ``through`` reaches the run's ``seq``. A run behind the latest barrier
+    is retired, and ``through`` never decreases in ``id`` order, so it joins none.
+    """
+    summaries = quote_identifier(names.log_summaries)
+    covering = connection.execute(
+        f"SELECT id, event_ids, seen_event_ids FROM {summaries} WHERE session_id = ?1 AND scope_key = ?2 "  # noqa: S608
+        f"AND through >= ?3 AND ?3 > COALESCE((SELECT through FROM {summaries} WHERE session_id = ?1 "
+        "AND scope_key = ?2 AND summary IS NULL ORDER BY id DESC LIMIT 1), 0) ORDER BY id LIMIT 1",
+        (session_id, scope_key, seq),
+    ).fetchone()
+    if covering is not None:
+        summary_id, stored_event_ids, stored_seen = covering
+        event_ids, seen = summary_event_sets([metadata])
+        connection.execute(
+            f"UPDATE {summaries} SET event_ids = ?, seen_event_ids = ? WHERE id = ?",  # noqa: S608
+            (
+                json.dumps(sorted({*json.loads(stored_event_ids), *event_ids})),
+                json.dumps(sorted({*json.loads(stored_seen), *seen})),
+                summary_id,
+            ),
+        )
+
+
 def _set_visible_messages(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -925,6 +938,16 @@ def seen_event_ids(metadata: object) -> set[str]:
     return event_ids
 
 
+def summary_event_sets(run_metadata: Sequence[object]) -> tuple[set[str], set[str]]:
+    """Return the ``event_ids`` and ``seen_event_ids`` a summary row keeps of the runs whose metadata it is given.
+
+    ``event_ids``, which redactions match, hold what the runs answered and represent; ``seen_event_ids`` only what they
+    represent.
+    """
+    seen = set().union(*map(seen_event_ids, run_metadata))
+    return seen.union(*map(source_event_ids, run_metadata)), seen
+
+
 @dataclass(frozen=True, slots=True)
 class FoldWrite:
     """What a mid-turn fold stores: its conversation, live running record, folded messages, and ended member runs."""
@@ -1071,5 +1094,6 @@ __all__ = [
     "seen_event_ids",
     "source_event_ids",
     "store_fold",
+    "summary_event_sets",
     "write_with_session_state",
 ]

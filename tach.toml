@@ -1133,6 +1133,7 @@ expose = [
     "seen_event_ids",
     "source_event_ids",
     "store_fold",
+    "summary_event_sets",
     "write_with_session_state",
 ]
 

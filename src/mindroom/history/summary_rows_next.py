@@ -30,6 +30,7 @@ from mindroom.session_storage.store_next import (
     seen_event_ids,
     source_event_ids,
     store_fold,
+    summary_event_sets,
 )
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import quote_identifier
@@ -163,18 +164,18 @@ def append_summary(
         }
         if any(stored.get(run.run_id, (None, None, None))[:2] != (run.seq, run.status) for run in covered):
             return None
-        metadata_sets = [metadata for _seq, _status, metadata in stored.values()]
+        run_metadata = [metadata for _seq, _status, metadata in stored.values()]
         provenance: tuple[str | None, ...] = (None, None, None)
         write = None
         if fold is not None:
             live = fold.run.metadata
             # The running run's events count even when it later ends paused, cancelled, or failed.
-            metadata_sets.append(live)
+            run_metadata.append(live)
             provenance = (fold.run.run_id, _encoded(source_event_ids(live)), _encoded(seen_event_ids(live)))
             write = FoldWrite(_scope_session(session_id, scope_key), fold.run, fold.messages, fold.member_run_ids)
             # The summary row references the session row, which a first turn's fold may be the first to need.
             ensure_session_row(connection, tables.names, write.session)
-        seen = set().union(*map(seen_event_ids, metadata_sets))
+        event_ids, seen = summary_event_sets(run_metadata)
         (row_id,) = connection.execute(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, through, summary, event_ids, seen_event_ids, "  # noqa: S608
             "created_at, fold_run_id, fold_event_ids, fold_seen_event_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
@@ -185,7 +186,7 @@ def append_summary(
                 # With nothing covered, the row sorts where the latest one does.
                 max((run.seq for run in covered), default=through),
                 summary,
-                _encoded(seen.union(*map(source_event_ids, metadata_sets))),
+                _encoded(event_ids),
                 _encoded(seen),
                 int(time()),
                 *provenance,
