@@ -101,13 +101,16 @@ def without_approval_receipt() -> Generator[None, None, None]:
         _context.reset(token)
 
 
-def take_unsent_receipt(run_id: str) -> tuple[ApprovalCall, ...] | None:
-    """Return the bound receipt's calls under run ``run_id``'s ids when it reads it and has not yet, marking it read."""
+def take_unsent_receipt(run_id: str, call_id: Callable[[str], str]) -> tuple[ApprovalCall, ...] | None:
+    """Return the bound receipt's calls when run ``run_id`` reads it and has not yet, marking it read.
+
+    Each call goes under the id ``call_id`` gives the run's own id for it, such as the id the run's request sends.
+    """
     receipt = _context.get()
     if receipt is None or run_id not in receipt.readers or run_id in receipt.sent:
         return None
     receipt.sent.add(run_id)
-    return receipt.readers[run_id]
+    return _renamed(receipt.readers[run_id], call_id)
 
 
 __all__ = [

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import SendRequest
@@ -83,13 +84,31 @@ def messages_with_approval_receipt(messages: Sequence[Message], receipt_text: st
     return outbound
 
 
+def _sent_call_id(messages: Sequence[Message], call_id: str) -> str:
+    """Return the id a request for ``messages`` sends for their call ``call_id``.
+
+    That is a Responses call's ``call_id``, which its result references and a replay keeps when it drops the call's
+    ``fc_`` item id, and any other call's own id.
+    """
+    return next(
+        (
+            tool_call["call_id"]
+            for message in messages
+            for tool_call in message.tool_calls or ()
+            if tool_call.get("id") == call_id and tool_call.get("call_id")
+        ),
+        call_id,
+    )
+
+
 async def approval_receipt_hook(state: LoopState) -> RequestDecision:
     """Send the bound receipt with a reader run's first request, once per run.
 
     The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt, and under which
-    ids it names their calls. It is projected into the request only, so no run's history holds it.
+    ids it names their calls, each as the request sends it. It is projected into the request only, so no run's
+    history holds it.
     """
-    calls = take_unsent_receipt(state.run.run_id)
+    calls = take_unsent_receipt(state.run.run_id, partial(_sent_call_id, state.messages))
     if calls is None:
         return SendRequest()
     return SendRequest(messages=messages_with_approval_receipt(state.messages, build_approval_receipt(calls)))

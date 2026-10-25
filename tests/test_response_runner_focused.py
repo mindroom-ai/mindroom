@@ -4909,7 +4909,7 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
     receipts: list[str] = []
 
     async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
-        receipt_calls = take_unsent_receipt(second.run_id)
+        receipt_calls = take_unsent_receipt(second.run_id, lambda call_id: call_id)
         assert receipt_calls is not None
         receipts.append(build_approval_receipt(receipt_calls))
         return CompletedApprovalRun(response_text="done", metadata_content={})

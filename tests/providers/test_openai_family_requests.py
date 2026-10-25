@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -14,11 +15,16 @@ from openai.types.responses import Response, ResponseUsage
 from openai.types.responses.response_input_item_param import ResponseInputItemParam
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
-from mindroom.approval.receipt import messages_with_approval_receipt
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.approval.receipt import approval_receipt_hook, messages_with_approval_receipt
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.attachments.media import attachment_records_to_media
 from mindroom.attachments.storage import AttachmentRecord
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
@@ -39,6 +45,7 @@ from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
+from tests.agent_loop.helpers import collect, context
 from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
@@ -584,6 +591,71 @@ async def test_an_approval_resume_on_a_stored_chain_replays_its_tool_loop(tmp_pa
         {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
         {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
     ]
+
+
+def _lookup(order: str) -> dict[str, Any]:
+    return {
+        "id": f"fc_{order}",
+        "call_id": f"call_{order}",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": json.dumps({"order": order})},
+    }
+
+
+def _decided(call_id: str, decision: ApprovalDecision) -> ApprovalCall:
+    return ApprovalCall(
+        tool_call_id=call_id,
+        tool_name="lookup",
+        invoking_agent="code",
+        expires_at_ns=1,
+        decision=decision,
+        human_approval_required=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_its_request_sends_it(
+    tmp_path: Path,
+) -> None:
+    """The receipt names each call by the ``call_id`` the replayed call and its result keep, not its item id.
+
+    Two calls of one tool are told apart only by their ids, and the replay drops each call's ``fc_`` item id.
+    """
+    adapter, sent = _stored_reply_route(tmp_path)
+    prompt = Message(role="system", content="You are Code.")
+    calls = Message(
+        role="assistant",
+        tool_calls=[_lookup("first"), _lookup("second")],
+        provider_data=_stored_response("resp_1", [prompt]),
+    )
+    history = [
+        Message(role="user", content="Look up both orders."),
+        calls,
+        Message(role="tool", tool_call_id="fc_first", content="Found the first"),
+        Message(role="tool", tool_call_id="fc_second", content="Declined"),
+    ]
+    decided = (_decided("fc_first", ApprovalDecision.APPROVED), _decided("fc_second", ApprovalDecision.DENIED))
+    spec = AgentSpec(id="code", name="Code", model=adapter, system_message=prompt, toolkits=())
+
+    with approval_receipt_context(decided, run_id="run-1"):
+        await collect(
+            run_agent(
+                spec,
+                history,
+                ctx=context(run_id="run-1"),
+                persist=None,
+                request_template=ModelRequest(messages=(), stream=False),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
+            ),
+        )
+
+    [request] = sent
+    assert "previous_response_id" not in request
+    receipt_ids = re.findall(r"tool call id `([^`]+)`", request["input"][0]["content"])
+    assert receipt_ids == ["call_first", "call_second"]
+    for item_type in ("function_call", "function_call_output"):
+        assert [item["call_id"] for item in request["input"] if item.get("type") == item_type] == receipt_ids
+    assert "fc_" not in json.dumps(request["input"])
 
 
 @pytest.mark.asyncio
