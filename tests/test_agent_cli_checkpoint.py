@@ -111,7 +111,7 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
         msg = "injected database failure"
         raise OSError(msg)
 
-    monkeypatch.setattr(ConversationStore, "save_runs", fail)
+    monkeypatch.setattr(ConversationStore, "save_run", fail)
     await _capture(checkpoint, record, messages)
     with pytest.raises(OSError, match="injected"):
         await checkpoint.persist("bash-1")
@@ -161,7 +161,7 @@ async def test_a_checkpoint_and_the_state_its_calls_ran_with_are_stored_together
     assert store is not None
     with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute(
-            f"CREATE TRIGGER refuse_run BEFORE UPDATE ON {store.names.runs} BEGIN SELECT RAISE(ABORT, 'run refused'); END",
+            f"CREATE TRIGGER refuse_run BEFORE UPDATE ON {store.names.log_runs} BEGIN SELECT RAISE(ABORT, 'run refused'); END",
         )
     catalog.run.session_state["before_approval"] = "kept"
 
@@ -292,7 +292,7 @@ async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(
             await write_with_session_state(
                 store,
                 session,
-                lambda opened, state: opened.save_runs(session, [record], state=state),
+                lambda opened, state: opened.save_run(session, record, record_usage=False, state=state),
             )
             fields = store.read_session_fields("session")
             assert fields is not None

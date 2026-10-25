@@ -980,7 +980,7 @@ async def test_write_failure_prevents_shell_and_inner_effects(
         msg = "database unavailable"
         raise OSError(msg)
 
-    monkeypatch.setattr(ConversationStore, "save_runs", fail)
+    monkeypatch.setattr(ConversationStore, "save_run", fail)
     async with response_cli_lifetime():
         await capture_bash_batch(owner, ("bash-1", {"command": "touch"}))
         with pytest.raises(OSError, match="database unavailable"):
