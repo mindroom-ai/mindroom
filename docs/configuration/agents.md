@@ -136,6 +136,7 @@ agents:
 
 Here every user gets their own `mind_data/` root, seeded from `./mind_template/` (for example `SOUL.md`, `USER.md`, `MEMORY.md`, and a `memory/` folder), while `company_docs` stays shared by everyone.
 Private roots live at `<storage>/private_instances/<requester scope>/<agent>/<private.root>/`, not next to `config.yaml`, and dedicated workers mount only that root.
+A private agent is still one Matrix account, so use [personal agents](../personal-agents.md) when each person needs an agent of their own that others can mention or add to a team.
 
 How a private agent behaves:
 

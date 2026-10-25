@@ -77,6 +77,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](../deployment/egress-broker.md) |
 | `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
+| `personal_agents` | Templates that give each onboarded user their own agent | [Personal Agents](../personal-agents.md#personal-agents) |
 | `budgets` | Default monthly spending cap per user and the fallback model | [Budgets](../budgets.md) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](../matrix.md#matrix-sync) |
