@@ -7224,7 +7224,6 @@ expose = [
     "renumbered_tool_trace",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
-    "stable_call_id",
     "strip_visible_tool_markers",
     "tool_marker_text",
     "tool_markers_match_trace",

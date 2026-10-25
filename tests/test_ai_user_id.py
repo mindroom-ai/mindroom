@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     from mindroom.final_delivery import StreamTransportOutcome
     from mindroom.llm.provider import ModelProvider
     from mindroom.response_turn import ResponseTurnContext
+    from mindroom.tool_system.events import ToolTraceEntry
 
 
 @pytest.fixture
@@ -1785,7 +1786,32 @@ class TestUserIdPassthrough:
         )
 
         assert response == "Done."
-        assert len(tool_trace) == 1
+        assert [entry.tool_name for entry in tool_trace] == ["read_file"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
+    async def test_a_blocking_reply_that_shows_its_tool_calls_names_each_tool(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The blocking path writes each tool the run called into the reply's text and its tool trace."""
+        config, runtime_paths = _bound(tmp_path)
+        _install(monkeypatch, calls(tool_call("read_file", "call-1", path="README.md")), answer("Done."))
+        tool_trace: list[ToolTraceEntry] = []
+
+        response = await _respond(
+            make_turn_context("general", session_id="session1"),
+            config,
+            runtime_paths,
+            streaming=False,
+            show_tool_calls=True,
+            tool_trace_collector=tool_trace,
+        )
+
+        assert response.startswith("Done.\n")
+        assert "`read_file`" in response
+        assert [entry.tool_name for entry in tool_trace] == ["read_file"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])

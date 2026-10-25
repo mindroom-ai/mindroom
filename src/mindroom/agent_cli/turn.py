@@ -603,7 +603,7 @@ class LiveTurnTools(TurnToolBridge):
 
         def on_child_event(event: object) -> None:
             if isinstance(event, ToolStarted | ToolCompleted):
-                child_call_id = str(event.call.tool_call_id)
+                child_call_id = event.call.tool_call_id
                 if child_call_id in child_toolkits:
                     emit_cli_run_event(event, parent=parent, toolkit_name=child_toolkits[child_call_id])
 
@@ -612,7 +612,7 @@ class LiveTurnTools(TurnToolBridge):
                 if not started:
                     started = True
                     tool = requirement.tool_execution
-                    yield AgentToolCallEvent("started", str(tool.tool_call_id), binding.key, call=tool.call)
+                    yield AgentToolCallEvent("started", tool.tool_call_id, binding.key, call=tool.call)
                 result = await advance_cli_delegation(
                     binding,
                     requirement,
@@ -625,7 +625,7 @@ class LiveTurnTools(TurnToolBridge):
                     on_event=on_child_event,
                 )
             if not isinstance(result, PausedAttempt):
-                yield AgentToolCallEvent("completed", str(result.tool_call_id), binding.key, call=result.call)
+                yield AgentToolCallEvent("completed", result.tool_call_id, binding.key, call=result.call)
                 return
             handler = self.catalog.runtime_context.cli_approval_handler
             if handler is None:
@@ -635,16 +635,16 @@ class LiveTurnTools(TurnToolBridge):
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
             for tool in result.tools:
                 child_toolkit = result.toolkit_owners.get(
-                    (result.approval_agent_name or self.catalog.runtime_context.agent_name, str(tool.tool_name)),
+                    (result.approval_agent_name or self.catalog.runtime_context.agent_name, tool.tool_name),
                 )
-                child_toolkits[str(tool.tool_call_id)] = child_toolkit
+                child_toolkits[tool.tool_call_id] = child_toolkit
                 emit_cli_run_event(ToolStarted(tool.call), parent=parent, toolkit_name=child_toolkit)
                 presentation.start_tool(tool.call, origin=ToolCallOrigin(parent, child_toolkit))
             paused = replace(result, response_text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace))
             resolved = await handler(paused)
             approval_calls = approval_calls_for_cli_pause(paused, self.catalog.runtime_context.agent_name)
-            decisions = {str(item.tool_execution.tool_call_id): bool(item.confirmation) for item in resolved}
-            denial_reasons = {str(item.tool_execution.tool_call_id): item.confirmation_note for item in resolved}
+            decisions = {item.tool_execution.tool_call_id: bool(item.confirmation) for item in resolved}
+            denial_reasons = {item.tool_execution.tool_call_id: item.confirmation_note for item in resolved}
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
         if event.kind == "continuation_required" and event.call is not None:

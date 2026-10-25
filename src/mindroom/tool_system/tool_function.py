@@ -81,7 +81,7 @@ class ToolFunction:
             approval_type=self.approval_type,
         )
 
-    def planned_execution(self, call_id: str | None, arguments: dict[str, Any] | None) -> ToolExecution:
+    def planned_execution(self, call_id: str, arguments: dict[str, Any] | None) -> ToolExecution:
         """Return the execution a call of this function starts as, before it runs.
 
         The call is paused when the function requires confirmation or external execution, and a paused call carries

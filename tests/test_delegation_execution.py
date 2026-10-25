@@ -330,6 +330,100 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
 
 
 @pytest.mark.asyncio
+async def test_a_blocking_pause_shows_the_delegation_answered_before_it_as_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that pauses on its second child's approval shows its first delegation done, and the rest waiting."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    leader = ScriptedModel(
+        [
+            calls(
+                tool_call("run_subagent", "delegate-0", agent_name="code", task="Summarize"),
+                tool_call("run_subagent", "delegate-1", agent_name="code", task="Write report"),
+            ),
+        ],
+    )
+    code = ScriptedModel([answer("summary"), calls(tool_call("write_report", "same-call"))])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+
+    assert isinstance(paused, PausedAttempt)
+    assert report.written == []
+    [card] = paused.tools
+    assert [(entry.tool_call_id, entry.type) for entry in paused.tool_trace] == [
+        ("delegate-0", "tool_call_completed"),
+        ("delegate-1", "tool_call_started"),
+        (card.tool_call_id, "tool_call_started"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_call_gated_two_delegations_down_keeps_the_toolkit_of_the_agent_that_made_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader's card for a grandchild's gated call names the grandchild's toolkit, so the approved call runs."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    config.agents["code"].delegate_to = ["writer"]
+    config.agents["writer"] = AgentConfig(display_name="Writer", tools=["report"])
+    with_responder_access(config, "writer", users=[REQUESTER])
+    entity_ids(config, paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-1", agent_name="writer", task="Write it")), answer("code result")],
+    )
+    writer = ScriptedModel([calls(tool_call("write_report", "write-call")), answer("writer result")])
+    ScriptedAgents({"leader": leader, "code": code, "writer": writer}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        assert paused.toolkit_owners == {("writer", "write_report"): "report"}
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        call_id = str(state.pending_tools[0]["tool_call_id"])
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            _saved_approval_calls(state),
+            agent_name="leader",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={call_id: True},
+            denial_reasons={call_id: None},
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text.endswith("parent result")
+    assert report.written == ["written"]
+
+
+@pytest.mark.asyncio
 async def test_a_completed_sibling_keeps_its_result_when_the_policy_changes_before_the_next_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

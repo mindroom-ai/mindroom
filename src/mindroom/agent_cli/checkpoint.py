@@ -54,7 +54,7 @@ class BatchCheckpoint:
         self.catalog.record = record
         self._batch = _Batch(
             messages=deepcopy(state.messages),
-            calls={call.execution.tool_call_id: call for call in planned if call.execution.tool_call_id},
+            calls={call.execution.tool_call_id: call for call in planned},
         )
 
     def resume_saved_parent(self, parent_call_id: str) -> None:

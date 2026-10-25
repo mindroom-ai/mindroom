@@ -75,7 +75,7 @@ class RunContext:
         """Return the state the run's tool calls share, its session's."""
         return self.session.session_state
 
-    def call_context(self, call_id: str | None) -> ToolCallContext:
+    def call_context(self, call_id: str) -> ToolCallContext:
         """Return the context of the call ``call_id`` this run makes, sharing the run's state and scope."""
         return ToolCallContext(
             run_id=self.run_id,

@@ -123,7 +123,7 @@ def _route_decisions(
     alone, and a call id two members share is refused rather than guessed at; a delegation's result names its member
     and call, which the resume checks against the calls the team waits for.
     """
-    waiting: dict[str | None, list[RunRequirement]] = {}
+    waiting: dict[str, list[RunRequirement]] = {}
     for requirement in persisted.requirements or ():
         if not requirement.is_resolved():
             waiting.setdefault(requirement.tool_execution.tool_call_id, []).append(requirement)
@@ -278,7 +278,7 @@ def drive_team_delegations(
     return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
-def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str | None]:
+def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str]:
     """Return the slot that shows the call ``requirement`` waits on and the call's id there, by ``pending_call_slot``."""
     member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
     if member_id is None:

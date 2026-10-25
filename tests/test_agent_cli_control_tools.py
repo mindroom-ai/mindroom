@@ -341,13 +341,15 @@ async def _allow(key, arguments) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("saved_gate", [True, False])
 @pytest.mark.parametrize("approved", [True, False])
 async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_id(
     tmp_path,
     monkeypatch,
     approved,
+    saved_gate,
 ) -> None:
-    """The CLI caller chooses call IDs, so an approval saved under one in the run never admits a new call."""
+    """The CLI caller chooses call IDs, so a decision saved under one in the run never decides a new call."""
     config = _delegation_config()
     config.tool_approval.default = "require_approval"
     paths = _runtime_paths(tmp_path)
@@ -372,9 +374,9 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         approval_handler=decide,
     )
     call_id = uuid4()
-    # A recovered follow-up turn inherits the run metadata that approved an earlier call under this ID.
+    # A recovered follow-up turn inherits the run metadata that decided an earlier call under this ID.
     assert catalog.record is not None
-    catalog.record.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): True}).to_dict()}
+    catalog.record.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): saved_gate}).to_dict()}
     children = []
 
     async def child_response(child, **kwargs):
