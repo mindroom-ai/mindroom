@@ -228,7 +228,7 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts(
     events, record = await _run(spec(model, toolkit(add)), messages)
 
     tool_messages = [message for message in messages if message.role == "tool"]
-    assert [(m.tool_call_id, m.tool_call_error) for m in tool_messages] == [("c1", None), ("c2", True), ("c3", False)]
+    assert [(m.tool_call_id, m.tool_call_error) for m in tool_messages] == [("c1", True), ("c2", True), ("c3", False)]
     assert tool_messages[0].content == MISSING_TOOL_ERROR_TEXT
     assert "validation error" in str(tool_messages[1].content)
     assert tool_messages[2].content == '{"sum": 7}'
