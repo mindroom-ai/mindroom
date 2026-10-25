@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     worker_inert_agent_functions=("text_to_speech",),
     display_name="Cartesia",
     description="Voice AI services including text-to-speech and voice localization",
-    category=ToolCategory.DEVELOPMENT,  # others/ → DEVELOPMENT according to mapping
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # requires API key
     setup_type=SetupType.API_KEY,  # API key authentication
     icon="VolumeX",  # Voice/sound related icon

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.AGENT,
     display_name="MoviePy Video Tools",
     description="Process videos, extract audio, generate SRT caption files, and embed rich word-highlighted captions",
-    category=ToolCategory.DEVELOPMENT,  # Derived from docs URL (/others/)
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,  # No authentication required
     setup_type=SetupType.NONE,  # No authentication needed
     icon="FaVideo",  # React icon name for video

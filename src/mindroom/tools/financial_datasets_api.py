@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Financial Datasets API",
     description="Comprehensive financial data API for stocks, financial statements, SEC filings, and cryptocurrency",
-    category=ToolCategory.DEVELOPMENT,  # From /tools/toolkits/others/ path
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses API key authentication
     icon="TrendingUp",  # Financial/trending icon

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     display_name="Mem0 Memory",
     description="Persistent memory system that stores, retrieves, searches, and manages user memories and context",
-    category=ToolCategory.PRODUCTIVITY,  # Database tools → Productivity
+    category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key for cloud usage
     setup_type=SetupType.API_KEY,  # Optional API key for cloud usage
     icon="Brain",

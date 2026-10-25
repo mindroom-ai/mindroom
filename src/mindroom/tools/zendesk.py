@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Zendesk",
     description="Customer support platform for searching help center articles",
-    category=ToolCategory.DEVELOPMENT,  # From others/ category
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires username, password, company_name
     setup_type=SetupType.API_KEY,  # Uses username/password authentication
     icon="SiZendesk",  # React icon for help/support

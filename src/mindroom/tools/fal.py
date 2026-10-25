@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     worker_inert_agent_functions=("generate_media", "image_to_image"),
     display_name="Fal",
     description="AI model serving platform for media generation (images and videos)",
-    category=ToolCategory.DEVELOPMENT,  # others category maps to DEVELOPMENT
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # requires FAL_KEY API key
     setup_type=SetupType.API_KEY,  # uses API key authentication
     icon="FaRobot",  # AI/robot icon for AI model serving

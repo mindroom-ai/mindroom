@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     display_name="Daytona",
     description="Execute code in secure, remote sandbox environments",
-    category=ToolCategory.DEVELOPMENT,  # others/ maps to DEVELOPMENT
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses API key authentication
     icon="FaTerminal",  # Terminal icon for code execution

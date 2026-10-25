@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="OpenWeather",
     description="Weather data services from OpenWeatherMap API",
-    category=ToolCategory.DEVELOPMENT,  # Based on agno docs structure: /tools/toolkits/others/
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses api_key parameter
     icon="WiDaySunny",  # Weather icon

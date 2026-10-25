@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Spider",
     description="Web scraper and crawler that returns LLM-ready data",
-    category=ToolCategory.RESEARCH,  # Based on web_scrape category in docs
+    category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     icon="FaSpider",

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Apify",
     description="Web scraping, crawling, data extraction, and web automation platform with ready-to-use Actors",
-    category=ToolCategory.DEVELOPMENT,  # Based on agno docs URL path 'others/'
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API token
     setup_type=SetupType.API_KEY,  # Uses API token authentication
     icon="FaCode",  # Web scraping/automation icon

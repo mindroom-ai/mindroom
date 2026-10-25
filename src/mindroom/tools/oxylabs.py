@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Oxylabs",
     description="Powerful web scraping capabilities including SERP, Amazon product data, and universal web scraping",
-    category=ToolCategory.RESEARCH,  # web_scrape maps to RESEARCH
+    category=ToolCategory.RESEARCH,
     status=ToolStatus.REQUIRES_CONFIG,  # requires username and password
     setup_type=SetupType.API_KEY,  # uses username/password credentials
     icon="FaGlobe",
