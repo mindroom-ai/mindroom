@@ -10,6 +10,8 @@ export type ReferenceOptions = Record<ReferenceKind, string[]>;
 export interface SchemaHint {
   reference?: ReferenceKind;
   key_reference?: ReferenceKind;
+  /** Example key shown in a mapping's empty new-key input. */
+  key_placeholder?: string;
   secret?: boolean;
   multiline?: boolean;
   /** Error-path tag of a union variant whose discriminator has no fixed value. */

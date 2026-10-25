@@ -45,7 +45,7 @@ describe("resolveSettingsSections", () => {
     expect(byId.diagnostics).toBeUndefined();
   });
 
-  it("groups personal agent templates with personal rooms", () => {
+  it("puts personal agent templates before the personal rooms that select them", () => {
     const personal: JsonSchema = {
       type: "object",
       properties: {
@@ -57,8 +57,8 @@ describe("resolveSettingsSections", () => {
       ({ id }) => id === "personal-rooms",
     );
     expect(section?.entries).toEqual([
-      { root: "personal_rooms" },
       { root: "personal_agents" },
+      { root: "personal_rooms" },
     ]);
   });
 
