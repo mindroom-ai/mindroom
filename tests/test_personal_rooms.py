@@ -21,7 +21,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.config.personal_agents import append_personal_agent_roster_entry
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind
@@ -47,6 +47,7 @@ from mindroom.matrix.personal_rooms import (
 from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -464,7 +465,7 @@ async def test_generated_agent_service_serves_only_its_owner(tmp_path: Path, mon
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
     state.save(paths)
     entry = personal_agent_entry("@alice:localhost", source_room_id="!lobby:localhost")
-    append_personal_agent_roster_entry(paths, entry)
+    _append_personal_agent_roster_entry(paths, entry)
     data = deepcopy(PERSONAL_AGENTS_BASE)
     # Bob may use alice's agent, so only ownership keeps him from a personal room through it.
     data["personal_agents"]["mind"]["agent"]["access"] = {"users": ["@bob:localhost"]}
@@ -492,7 +493,7 @@ async def test_generated_agent_service_serves_its_owners_bridge_alias(
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
     state.save(paths)
-    append_personal_agent_roster_entry(
+    _append_personal_agent_roster_entry(
         paths,
         personal_agent_entry("@alice:localhost", source_room_id="!lobby:localhost"),
     )
@@ -1007,6 +1008,38 @@ def bots(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatch, 
     return router, target
 
 
+def _template_router(tmp_path: Path, profile: object, status: str = "applied") -> tuple[Any, Config, Any, Mock]:
+    """A router whose personal_rooms.agent names a template, with a stub reload lifecycle in the given status."""
+    paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(paths)
+    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
+    state.save(paths)
+    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id="@mindroom_router:localhost",
+        display_name="Router",
+        password=TEST_PASSWORD,
+    )
+    router = make_test_agent_bot(user, tmp_path / "router", config=config, runtime_paths=paths)
+    router.client = SimpleNamespace(user_id=user.user_id, get_displayname=AsyncMock(return_value=profile))
+    config_reload = SimpleNamespace(request_reload=Mock(), status=ConfigReloadStatus(status=status))
+    router.orchestrator = SimpleNamespace(agent_bots={ROUTER_AGENT_NAME: router}, config_reload=config_reload)
+    return router, config, paths, config_reload.request_reload
+
+
+_ALICE_JOIN = RoomMemberJoin(
+    "!lobby:localhost",
+    "$join",
+    "@alice:localhost",
+    "@alice:localhost",
+    None,
+    None,
+    "join",
+    None,
+)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("profile", "display_name"),
@@ -1022,26 +1055,11 @@ async def test_router_provisions_a_joining_users_agent_and_reloads(
     display_name: str | None,
 ) -> None:
     """A lobby join with a template target creates that user's agent under their display name, then reloads."""
-    paths = test_runtime_paths(tmp_path)
-    state = MatrixState.load(paths)
-    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
-    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    user = AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id="@mindroom_router:localhost",
-        display_name="Router",
-        password=TEST_PASSWORD,
-    )
-    router = make_test_agent_bot(user, tmp_path / "router", config=config, runtime_paths=paths)
-    router.client = SimpleNamespace(user_id=user.user_id, get_displayname=AsyncMock(return_value=profile))
-    config_reload = SimpleNamespace(request_reload=Mock())
-    router.orchestrator = SimpleNamespace(agent_bots={ROUTER_AGENT_NAME: router}, config_reload=config_reload)
-    provision = AsyncMock(return_value="mind_alice")
+    router, config, paths, request_reload = _template_router(tmp_path, profile)
+    provision = AsyncMock(return_value=("mind_alice", True))
     monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
 
-    join = RoomMemberJoin("!lobby:localhost", "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
-    await router._personal_room_lifecycle.baseline_join(join)
+    await router._personal_room_lifecycle.baseline_join(_ALICE_JOIN)
 
     router.client.get_displayname.assert_awaited_once_with("@alice:localhost")
     provision.assert_awaited_once_with(
@@ -1050,9 +1068,31 @@ async def test_router_provisions_a_joining_users_agent_and_reloads(
         template="mind",
         user_id="@alice:localhost",
         user_display_name=display_name,
+        source_user_id="@alice:localhost",
         source_room_id="!lobby:localhost",
     )
-    config_reload.request_reload.assert_called_once_with()
+    request_reload.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed", "status", "reloads"),
+    [(True, "pending", True), (False, "pending", False), (False, "applied", True), (False, "failed", True)],
+)
+async def test_router_reprovisioning_never_supersedes_a_queued_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: bool,
+    status: str,
+    reloads: bool,
+) -> None:
+    """An agent whose roster entry already existed asks for a reload only when none is queued, so retries cannot restart its wait."""
+    router, _, _, request_reload = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"), status)
+    monkeypatch.setattr("mindroom.bot.provision_personal_agent", AsyncMock(return_value=("mind_alice", changed)))
+
+    await router._personal_room_lifecycle.baseline_join(_ALICE_JOIN)
+
+    assert request_reload.called is reloads
 
 
 @pytest.mark.asyncio

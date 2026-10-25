@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
 from mindroom.constants import AGENT_NAME_PATTERN, tracking_dir
-from mindroom.durable_write import write_json_file_durable
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -139,6 +138,10 @@ class PersonalAgentRosterEntry(BaseModel):
     matrix_username: str | None
     user_display_name: str
     source_room_id: str
+    # The account whose trigger onboarded the owner, such as a bridge alias; None means user_id.
+    source_user_id: str | None = None
+    # Recorded before the account is registered, so an interrupted registration resumes under these names.
+    pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -298,6 +301,8 @@ def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEnt
                     f"personal_agents.{entry.template} for {entry.user_id}"
                 )
                 raise ValueError(msg)
+        if entry.pending:
+            continue
         agents[entry.agent_name] = personal_agent_data(template, entry)
         instances[entry.agent_name] = PersonalAgentInstance(entry.template, entry.user_id, entry.matrix_username)
         owners.setdefault(entry.template, set()).add(entry.user_id)
@@ -310,19 +315,14 @@ def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEnt
     )
 
 
-def _personal_agent_roster_path(runtime_paths: RuntimePaths) -> Path:
+def personal_agent_roster_path(runtime_paths: RuntimePaths) -> Path:
     """Return the primary-only roster file of generated agents."""
     return tracking_dir(runtime_paths) / "personal_agents.json"
 
 
-def personal_agent_roster_lock_path(runtime_paths: RuntimePaths) -> Path:
-    """Return the lock file that serializes roster updates."""
-    return tracking_dir(runtime_paths) / "personal_agents.lock"
-
-
 def read_personal_agent_roster(runtime_paths: RuntimePaths) -> list[PersonalAgentRosterEntry]:
     """Read every roster entry, or an empty list before the first onboarding."""
-    path = _personal_agent_roster_path(runtime_paths)
+    path = personal_agent_roster_path(runtime_paths)
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -332,10 +332,3 @@ def read_personal_agent_roster(runtime_paths: RuntimePaths) -> list[PersonalAgen
     except ValueError as exc:  # JSON and pydantic errors are both ValueErrors.
         msg = f"Personal agent roster {path} is invalid: {exc}"
         raise ValueError(msg) from exc
-
-
-def append_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: PersonalAgentRosterEntry) -> None:
-    """Append one entry durably; the caller holds the roster lock."""
-    roster = [*read_personal_agent_roster(runtime_paths), entry]
-    payload = _PersonalAgentRosterFile(entries=roster).model_dump(mode="json")
-    write_json_file_durable(_personal_agent_roster_path(runtime_paths), payload, strict_atomic_replace=True)

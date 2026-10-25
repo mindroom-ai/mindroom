@@ -26,7 +26,6 @@ from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProf
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
-from mindroom.config.personal_agents import append_personal_agent_roster_entry
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import SendTextRequest
@@ -49,6 +48,7 @@ from mindroom.orchestration.plugin_watch import (
 )
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.response_admission import ResponseAdmissionGate, ResponseAdmissionRefusedError
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
@@ -1174,7 +1174,7 @@ async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tm
     """A roster entry changes no authored byte, but its generated agent still needs the reload."""
     paths = test_runtime_paths(tmp_path)
     current_config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    _append_personal_agent_roster_entry(paths, personal_agent_entry())
     new_config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     assert current_config.authored_model_dump() == new_config.authored_model_dump()
     orchestrator = _MultiAgentOrchestrator(paths)
@@ -1357,7 +1357,7 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
 async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path) -> None:
     """A generated agent's first sync lets the router onboard its owner at once instead of after a retry delay."""
     paths = test_runtime_paths(tmp_path)
-    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    _append_personal_agent_roster_entry(paths, personal_agent_entry())
     data = deepcopy(PERSONAL_AGENTS_BASE) | {"agents": {"general": {"display_name": "General"}}}
     orchestrator = _MultiAgentOrchestrator(paths)
     orchestrator.config = Config.validate_with_runtime(data, paths)
@@ -1374,7 +1374,7 @@ async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path)
 async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path: Path) -> None:
     """A generated agent's stored Matrix username is requested, so a wiped matrix_state recreates the same ID."""
     paths = test_runtime_paths(tmp_path)
-    append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
+    _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     orchestrator = _MultiAgentOrchestrator(paths)
     requested: dict[str, str | None] = {}
@@ -1409,7 +1409,7 @@ async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path
 def test_preflight_account_provisioning_checks_personal_agent_username(tmp_path: Path) -> None:
     """The localpart collision check uses a generated agent's stored Matrix username."""
     paths = test_runtime_paths(tmp_path)
-    append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
+    _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     state = MatrixState.load(runtime_paths=paths)
     state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")

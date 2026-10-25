@@ -1195,6 +1195,15 @@ class Config(BaseModel):
             except (ValidationError, ConfigRuntimeValidationError) as exc:
                 msg = f"personal_agents would generate an invalid agent for a new user: {exc}"
                 raise ConfigRuntimeValidationError(msg) from exc
+        settings = config.personal_rooms
+        instance = expansion.instances.get(settings.agent) if settings is not None else None
+        if settings is not None and instance is not None:
+            # A generated agent serves personal rooms only through its template.
+            msg = (
+                f"personal_rooms.agent names {settings.agent}, which personal_agents.{instance.template} generates; "
+                f"name the template {instance.template} instead"
+            )
+            raise ConfigRuntimeValidationError(msg)
         config._personal_agent_instances = expansion.instances
         # An edited generated agent stays in the authored dump, so saving the edit fails as a collision.
         config._personal_agent_dumps = {

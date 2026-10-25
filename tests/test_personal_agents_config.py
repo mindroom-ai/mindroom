@@ -15,16 +15,15 @@ from mindroom.config.personal_agents import (
     PersonalAgentInstance,
     PersonalAgentRosterEntry,
     PersonalAgentTemplateConfig,
-    _personal_agent_roster_path,
-    append_personal_agent_roster_entry,
     expand_personal_agents,
     personal_agent_data,
     personal_agent_display_name,
-    personal_agent_roster_lock_path,
+    personal_agent_roster_path,
     personal_agent_username,
     read_personal_agent_roster,
 )
 from mindroom.constants import tracking_dir
+from mindroom.personal_agents import _append_personal_agent_roster_entry, _personal_agent_roster_lock_path
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from tests.conftest import test_runtime_paths
 
@@ -197,18 +196,18 @@ def test_roster_round_trip(tmp_path: Path) -> None:
     """The roster is empty before the first entry and reads back what was appended."""
     paths = test_runtime_paths(tmp_path)
     assert read_personal_agent_roster(paths) == []
-    append_personal_agent_roster_entry(paths, _entry())
+    _append_personal_agent_roster_entry(paths, _entry())
     assert read_personal_agent_roster(paths) == [_entry()]
-    assert _personal_agent_roster_path(paths) == tracking_dir(paths) / "personal_agents.json"
-    assert personal_agent_roster_lock_path(paths) == tracking_dir(paths) / "personal_agents.lock"
+    assert personal_agent_roster_path(paths) == tracking_dir(paths) / "personal_agents.json"
+    assert _personal_agent_roster_lock_path(paths) == tracking_dir(paths) / "personal_agents.lock"
 
 
 def test_roster_append_keeps_earlier_entries(tmp_path: Path) -> None:
     """Appending rewrites the roster with earlier entries intact."""
     paths = test_runtime_paths(tmp_path)
     first, second = _entry(), _entry("@bob:example.org")
-    append_personal_agent_roster_entry(paths, first)
-    append_personal_agent_roster_entry(paths, second)
+    _append_personal_agent_roster_entry(paths, first)
+    _append_personal_agent_roster_entry(paths, second)
     assert read_personal_agent_roster(paths) == [first, second]
 
 
@@ -227,7 +226,7 @@ def _runtime_config(
 ) -> Config:
     paths = test_runtime_paths(tmp_path)
     for entry in roster:
-        append_personal_agent_roster_entry(paths, entry)
+        _append_personal_agent_roster_entry(paths, entry)
     return Config.validate_with_runtime(deepcopy(BASE) if data is None else data, paths)
 
 
@@ -311,6 +310,25 @@ def test_personal_rooms_may_name_a_template() -> None:
     assert Config.model_validate(deepcopy(BASE)).personal_rooms.agent == "mind"
 
 
+def test_pending_entry_generates_no_agent_but_keeps_its_name(tmp_path: Path) -> None:
+    """A registration still in flight starts no agent, yet a save that takes its name is rejected."""
+    pending = _entry(pending=True)
+    config = _runtime_config(tmp_path, roster=(pending,))
+    assert "mind_alice_smith" not in config.agents
+    assert config.personal_agent_name("mind", pending.user_id) is None
+    data = deepcopy(BASE) | {"agents": {"mind_alice_smith": {"display_name": "Mine"}}}
+    with pytest.raises(ConfigRuntimeValidationError, match=r"agents\.mind_alice_smith collides"):
+        Config.validate_with_runtime(data, test_runtime_paths(tmp_path))
+
+
+def test_personal_rooms_must_not_name_a_generated_agent(tmp_path: Path) -> None:
+    """A generated agent serves personal rooms only through its template, so naming it directly is a config error."""
+    data = deepcopy(BASE)
+    data["personal_rooms"]["agent"] = "mind_alice_smith"
+    with pytest.raises(ConfigRuntimeValidationError, match=r"personal_rooms\.agent .*name the template mind"):
+        _runtime_config(tmp_path, data, roster=(_entry(),))
+
+
 def test_authored_dump_round_trips_template(tmp_path: Path) -> None:
     """Revalidating the authored dump regenerates the same agents from the template."""
     config = _runtime_config(tmp_path, roster=(_entry(),))
@@ -343,7 +361,7 @@ def test_override_on_every_owner_does_not_hide_a_broken_template(tmp_path: Path)
 def test_invalid_roster_error_names_the_file(tmp_path: Path, content: str) -> None:
     """A corrupt or hand-edited roster fails with an error that names the roster file."""
     paths = test_runtime_paths(tmp_path)
-    path = _personal_agent_roster_path(paths)
+    path = personal_agent_roster_path(paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     with pytest.raises(ValueError, match=f"Personal agent roster {re.escape(str(path))} is invalid: "):

@@ -21,7 +21,6 @@ import yaml
 from structlog.testing import capture_logs
 
 from mindroom.config.main import load_config
-from mindroom.config.personal_agents import append_personal_agent_roster_entry
 from mindroom.constants import (
     RuntimePaths,
     deserialize_runtime_paths,
@@ -30,6 +29,7 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
 )
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
@@ -680,7 +680,7 @@ def test_docker_worker_projection_includes_personal_agents(
 ) -> None:
     """The worker projection reads the config file, so it expands personal agent templates itself."""
     paths = test_runtime_paths(tmp_path)
-    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    _append_personal_agent_roster_entry(paths, personal_agent_entry())
     config_text = yaml.safe_dump(PERSONAL_AGENTS_BASE)
 
     backend, _fake_client, _credential_sync_calls = _backend(
@@ -719,7 +719,7 @@ def test_docker_worker_projection_sees_roster_change_while_config_is_cached(
     assert "agents" not in manager._load_host_config_data(host_config_path)
     assert manager._config_data_cache is not None
 
-    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    _append_personal_agent_roster_entry(paths, personal_agent_entry())
 
     assert "mind_alice_smith" in manager._load_host_config_data(host_config_path)["agents"]
     assert "agents" not in manager._config_data_cache[2]
@@ -731,7 +731,7 @@ def test_docker_worker_projection_rejects_generated_agent_name_collision(
 ) -> None:
     """A generated agent that clashes with an authored one is a worker backend error."""
     paths = test_runtime_paths(tmp_path)
-    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    _append_personal_agent_roster_entry(paths, personal_agent_entry())
     authored = PERSONAL_AGENTS_BASE | {"agents": {"mind_alice_smith": {"display_name": "Taken"}}}
     backend, _fake_client, _credential_sync_calls = _backend(
         monkeypatch,

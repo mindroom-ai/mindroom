@@ -1,4 +1,4 @@
-"""Give one user their personal agent: register its Matrix account, then record it in the roster."""
+"""Give one user their personal agent: reserve it in the roster, register its Matrix account, then activate it."""
 
 from __future__ import annotations
 
@@ -11,14 +11,15 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.agent import AgentConfig
 from mindroom.config.personal_agents import (
     PersonalAgentRosterEntry,
-    append_personal_agent_roster_entry,
     personal_agent_data,
     personal_agent_display_name,
-    personal_agent_roster_lock_path,
+    personal_agent_roster_path,
     personal_agent_username,
     read_personal_agent_roster,
 )
-from mindroom.constants import RESERVED_ENTITY_NAMES, runtime_matrix_homeserver
+from mindroom.config.yaml_includes import load_yaml_config_source
+from mindroom.constants import RESERVED_ENTITY_NAMES, runtime_matrix_homeserver, tracking_dir
+from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.state import matrix_state_for_runtime
@@ -32,8 +33,35 @@ from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+
+def _personal_agent_roster_lock_path(runtime_paths: RuntimePaths) -> Path:
+    """Return the lock file that serializes roster updates."""
+    return tracking_dir(runtime_paths) / "personal_agents.lock"
+
+
+def _write_personal_agent_roster(runtime_paths: RuntimePaths, roster: list[PersonalAgentRosterEntry]) -> None:
+    payload = {"entries": [entry.model_dump(mode="json") for entry in roster]}
+    write_json_file_durable(personal_agent_roster_path(runtime_paths), payload, strict_atomic_replace=True)
+
+
+def _append_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: PersonalAgentRosterEntry) -> None:
+    """Append one entry durably; the caller holds the roster lock."""
+    _write_personal_agent_roster(runtime_paths, [*read_personal_agent_roster(runtime_paths), entry])
+
+
+def _activate_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: PersonalAgentRosterEntry) -> None:
+    """Rewrite one pending entry durably as active; the caller holds the roster lock."""
+    key = (entry.template, entry.user_id)
+    roster = [
+        other.model_copy(update={"pending": False}) if (other.template, other.user_id) == key else other
+        for other in read_personal_agent_roster(runtime_paths)
+    ]
+    _write_personal_agent_roster(runtime_paths, roster)
 
 
 def is_mindroom_account_id(user_id: str, runtime_paths: RuntimePaths) -> bool:
@@ -74,22 +102,29 @@ def _new_roster_entry(
     template: str,
     user_id: str,
     user_display_name: str | None,
+    source_user_id: str,
     source_room_id: str,
 ) -> PersonalAgentRosterEntry:
-    """Pick the first free name, the plain slug and then the hashed one, for a user's new agent."""
+    """Pick the first free name, the plain slug and then the hashed one, for a user's new pending agent."""
     template_config = config.personal_agents[template]
+    # An agent or team saved but not reloaded yet would collide with this name at the next load.
+    saved, _ = load_yaml_config_source(runtime_paths.config_path)
+    saved_sections = [section for section in (saved.get("agents"), saved.get("teams")) if isinstance(section, dict)]
     taken_names = {
         *config.agents,
         *config.teams,
         *config.personal_agents,
         *RESERVED_ENTITY_NAMES,
+        *(name for section in saved_sections for name in section),
         *(entry.agent_name for entry in roster),
     }
     slug = personal_agent_username(user_id)
     hashed = f"{slug}_{sha256(user_id.encode()).hexdigest()[:6]}"
-    # Someone on another server must not claim a local person's plain name first.
-    local = user_id.partition(":")[2] == runtime_matrix_domain(runtime_paths)
-    for username in (slug, hashed) if local else (hashed,):
+    # A slug that changed the localpart is shared with others, and someone on another server
+    # must not claim a local person's plain name first.
+    localpart, _, domain = user_id.removeprefix("@").partition(":")
+    plain = slug == localpart.lower() and domain == runtime_matrix_domain(runtime_paths)
+    for username in (slug, hashed) if plain else (hashed,):
         agent_name = template_config.agent_name(template, username)
         rendered = template_config.rendered_matrix_username(username)
         matrix_username = None if rendered is None else namespaced_username_localpart(rendered, runtime_paths)
@@ -103,6 +138,8 @@ def _new_roster_entry(
             matrix_username=matrix_username,
             user_display_name=personal_agent_display_name(user_id, user_display_name),
             source_room_id=source_room_id,
+            source_user_id=None if source_user_id == user_id else source_user_id,
+            pending=True,
         )
     msg = f"No free personal agent name for {user_id}"
     raise ValueError(msg)
@@ -115,36 +152,41 @@ async def provision_personal_agent(
     template: str,
     user_id: str,
     user_display_name: str | None,
+    source_user_id: str,
     source_room_id: str,
-) -> str:
-    """Return the name of a user's agent from one template, creating its account and roster entry when missing.
+) -> tuple[str, bool]:
+    """Return the name of a user's agent from one template and whether this call created or activated its entry.
 
-    The Matrix account is created before the roster entry is written, so a failed
-    registration leaves no entry for a reload to load. Calling again for the same
-    user returns the existing agent's name.
+    The roster entry is written as pending before the Matrix account is created
+    and becomes active after it, so a reload never loads an agent without an
+    account, and an interrupted registration resumes under the same names.
+    Calling again for a user whose entry is active returns that agent's name.
     """
     if "[" in user_id or "]" in user_id:
         # access.users entries are globs, so brackets would keep the owner out of their own agent.
         msg = f"{user_id} cannot own a personal agent: brackets in a Matrix ID are not supported"
         raise ValueError(msg)
-    async with async_exclusive_file_lock(personal_agent_roster_lock_path(runtime_paths)):
+    async with async_exclusive_file_lock(_personal_agent_roster_lock_path(runtime_paths)):
         roster = read_personal_agent_roster(runtime_paths)
-        for entry in roster:
-            if entry.template == template and entry.user_id == user_id:
-                return entry.agent_name
-        # A new agent's account can join an onboarding room before the reload that makes it known.
-        if is_mindroom_account_id(user_id, runtime_paths):
-            msg = f"{user_id} is a MindRoom account and cannot own a personal agent"
-            raise ValueError(msg)
-        entry = _new_roster_entry(
-            config,
-            runtime_paths,
-            roster,
-            template=template,
-            user_id=user_id,
-            user_display_name=user_display_name,
-            source_room_id=source_room_id,
-        )
+        existing = next((entry for entry in roster if entry.template == template and entry.user_id == user_id), None)
+        if existing is not None and not existing.pending:
+            return existing.agent_name, False
+        entry = existing
+        if entry is None:
+            # A new agent's account can join an onboarding room before the reload that makes it known.
+            if is_mindroom_account_id(user_id, runtime_paths):
+                msg = f"{user_id} is a MindRoom account and cannot own a personal agent"
+                raise ValueError(msg)
+            entry = _new_roster_entry(
+                config,
+                runtime_paths,
+                roster,
+                template=template,
+                user_id=user_id,
+                user_display_name=user_display_name,
+                source_user_id=source_user_id,
+                source_room_id=source_room_id,
+            )
         agent_data = personal_agent_data(config.personal_agents[template].model_dump(exclude_unset=True), entry)
         try:
             # An owner ID such as one with a space or a wildcard would make every later config load invalid.
@@ -152,6 +194,9 @@ async def provision_personal_agent(
         except ValidationError as exc:
             msg = f"{user_id} cannot own a personal agent: {exc}"
             raise ValueError(msg) from exc
+        if existing is None:
+            await run_blocking_until_complete(_append_personal_agent_roster_entry, runtime_paths, entry)
+        # A resumed entry's own account loads its stored credentials instead of counting as taken.
         await create_agent_user(
             runtime_matrix_homeserver(runtime_paths),
             entry.agent_name,
@@ -159,5 +204,5 @@ async def provision_personal_agent(
             runtime_paths,
             username=entry.matrix_username,
         )
-        await run_blocking_until_complete(append_personal_agent_roster_entry, runtime_paths, entry)
-        return entry.agent_name
+        await run_blocking_until_complete(_activate_personal_agent_roster_entry, runtime_paths, entry)
+        return entry.agent_name, True

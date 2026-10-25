@@ -86,8 +86,8 @@ class PersonalRoomLifecycle:
     service: PersonalRoomService
     lookup_target: Callable[[str], PersonalRoomTarget | None]
     requester_user_id: Callable[[nio.RoomMessageFormatted], str]
-    # Creates one user's agent from a template (template, user_id, source_room_id) and requests a reload.
-    provision_personal_agent: Callable[[str, str, str], Awaitable[None]] | None = None
+    # Creates one user's agent from a template (template, owner, joining account, source_room_id) and requests a reload.
+    provision_personal_agent: Callable[[str, str, str, str], Awaitable[None]] | None = None
     _reconciled: bool = field(default=False, init=False)
     _config_revision: int = field(default=0, init=False)
     _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
@@ -218,7 +218,7 @@ class PersonalRoomLifecycle:
             if self.provision_personal_agent is None:
                 msg = "Personal agents need a provisioning callback"
                 raise RuntimeError(msg)
-            await self.provision_personal_agent(settings.agent, owner_id, source_room_id)
+            await self.provision_personal_agent(settings.agent, owner_id, user_id, source_room_id)
             msg = "Personal agent is not in the live config yet"
             raise _TargetPendingError(msg)
         target = self.lookup_target(target_name)
@@ -393,7 +393,8 @@ class PersonalRoomLifecycle:
         for entry in roster:
             if entry.template != settings.agent:
                 continue
-            candidates.add((entry.user_id, entry.source_room_id))
+            # A bridge alias's join is retried for the alias, whose membership is the one that onboarded.
+            candidates.add((entry.source_user_id or entry.user_id, entry.source_room_id))
             recorded, recorded_failed = self._recorded_candidates(entry.agent_name)
             candidates.update(recorded)
             failed |= recorded_failed

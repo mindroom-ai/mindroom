@@ -2779,22 +2779,30 @@ class AgentBot:
             return None
         return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)
 
-    async def _provision_personal_agent(self, template: str, user_id: str, source_room_id: str) -> None:
+    async def _provision_personal_agent(
+        self,
+        template: str,
+        user_id: str,
+        source_user_id: str,
+        source_room_id: str,
+    ) -> None:
         """Create one user's agent from a template and reload the config so the runtime starts it."""
         client = self.client
         assert client is not None
         profile = await client.get_displayname(user_id)
-        await provision_personal_agent(
+        _, changed = await provision_personal_agent(
             self.config,
             self.runtime_paths,
             template=template,
             user_id=user_id,
             user_display_name=profile.displayname if isinstance(profile, nio.ProfileGetDisplayNameResponse) else None,
+            source_user_id=source_user_id,
             source_room_id=source_room_id,
         )
-        # Also when the roster already had the entry: this runs only while the live config lacks the agent.
+        # This runs only while the live config lacks the agent, so an existing entry still needs a reload,
+        # but re-requesting a queued one would restart its debounce and response drain on every retry.
         orchestrator = self.orchestrator
-        if orchestrator is not None:
+        if orchestrator is not None and (changed or orchestrator.config_reload.status.status != "pending"):
             orchestrator.config_reload.request_reload()
 
     def personal_room_target_ready(self) -> None:
