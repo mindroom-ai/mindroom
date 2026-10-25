@@ -154,13 +154,15 @@ def _with_deferred_tool_search(body: dict[str, Any], deferred_tool_names: frozen
 def _with_tool_choice(body: dict[str, Any], tool_choice: ToolChoice | None) -> dict[str, Any]:
     """Turn tool selection off for a ``"none"`` request that offers tools; the API rejects a choice without them.
 
-    The SDK merges ``extra_body`` over the named fields, so an authored ``extra_body.tool_choice`` is replaced too.
+    Tools come from ``tools`` or ``mcp_servers``. The SDK merges ``extra_body`` over the named fields, so those
+    authored there count too, and an authored ``extra_body.tool_choice`` is replaced.
     """
-    if tool_choice is None or not body.get("tools"):
+    extra_body = body.get("extra_body")
+    effective = {**body, **extra_body} if isinstance(extra_body, dict) else body
+    if tool_choice is None or not (effective.get("tools") or effective.get("mcp_servers")):
         return body
     choice = {"type": "none"}
     prepared = {**body, "tool_choice": choice}
-    extra_body = body.get("extra_body")
     if isinstance(extra_body, dict) and "tool_choice" in extra_body:
         prepared["extra_body"] = {**extra_body, "tool_choice": choice}
     return prepared

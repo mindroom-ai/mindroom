@@ -8049,6 +8049,7 @@ The SDK retries transient failures automatically without repeating the side effe
 
 Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
 A denied approval raises a non-retryable error with kind `approval_denied`.
+A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
 
 ## Complete Watcher Example
@@ -18042,6 +18043,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `approval_required` | The tool needs confirmation or a configured approval and cannot run through the gateway |
 | `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
+| `tool_declined` | A MindRoom plugin declined the call, so it did not run; `message` gives the plugin's reason |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
 | `duplicate_request` | A call with the same request ID is already running |

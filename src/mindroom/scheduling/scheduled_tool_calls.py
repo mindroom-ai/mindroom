@@ -188,7 +188,10 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
     task_id: str,
     arguments_json: str | None,
 ) -> object:
-    """Spend a scheduled task's approval once and run its stored call in this turn."""
+    """Spend a scheduled task's approval once and run its stored call in this turn.
+
+    Returns the stored call's own result, or a failed outcome saying why it did not run or how it failed.
+    """
     live = _LIVE_TOOLS.get()
     if live is None or context.agent_name not in context.config.agents:
         return _refused(task_id, "scheduled calls run only in their agent's own conversation turn")
@@ -205,9 +208,11 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
     if isinstance(claimed, str):
         if claimed in _ASK_INSTEAD and time.time_ns() >= call.execute_at_ns:
             # Once its time has come, the call can still go ahead the ordinary way, with an approval card now.
-            return (
-                f"{_refused(task_id, _REFUSALS[claimed])} To ask the requester to approve it now, call "
-                f"`{call.tool_name}` with these arguments: {call.arguments_json}"
+            return _refused(
+                task_id,
+                _REFUSALS[claimed],
+                advice=f" To ask the requester to approve it now, call `{call.tool_name}` with these arguments: "
+                f"{call.arguments_json}",
             )
         if claimed in _ASK_INSTEAD:
             return _refused(task_id, f"{_REFUSALS[claimed]}; it runs when its task fires")
@@ -217,11 +222,12 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
         result = await _execute(live, function, json.loads(arguments_text), call_id=f"scheduled-{task_id}")
     except Exception as error:
         await record_scheduled_call_outcome(task_id, "failed")
-        return f"❌ Scheduled call `{task_id}` failed: {failure_text(error)}"
-    await record_scheduled_call_outcome(task_id, "completed")
-    # The policy answers a call a plugin hook declined with a failed outcome; this runner's caller, and the after-call
-    # hooks around it, receive its text as the runner's own result.
-    return result.content if isinstance(result, ToolOutcome) and result.is_error else result
+        return ToolOutcome(content=f"❌ Scheduled call `{task_id}` failed: {failure_text(error)}", is_error=True)
+    # The policy answers a call a plugin hook declined with a failed outcome: the call never ran, and this runner's own
+    # call fails with the decline.
+    declined = isinstance(result, ToolOutcome) and result.is_error
+    await record_scheduled_call_outcome(task_id, "failed" if declined else "completed")
+    return result
 
 
 def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition
@@ -295,8 +301,9 @@ async def _execute(live: _LiveTools, function: ToolFunction, arguments: dict[str
         await wait_for_future_until_complete(asyncio.create_task(settle(), name="scheduled-tool-call-cleanup"))
 
 
-def _refused(task_id: str, reason: str) -> str:
-    return f"❌ Scheduled call `{task_id}` did not run: {reason}."
+def _refused(task_id: str, reason: str, *, advice: str = "") -> ToolOutcome:
+    """Answer a scheduled call that did not run as a failed call, which Claude and Gemini read as a failure."""
+    return ToolOutcome(content=f"❌ Scheduled call `{task_id}` did not run: {reason}.{advice}", is_error=True)
 
 
 def _sentence(reason: str) -> str:

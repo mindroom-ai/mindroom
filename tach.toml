@@ -7360,6 +7360,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.worker_routing",

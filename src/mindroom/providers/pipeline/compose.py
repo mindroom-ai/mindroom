@@ -1,9 +1,9 @@
 """Compose the request pipeline around one provider adapter.
 
-Outermost first: the malformed tool-call guidance retry, portable deferred tool search, media fallback, stream
+Outermost first: portable deferred tool search, media fallback, the malformed tool-call guidance retry, stream
 retry with the idle limit, the safeguard refusal, and request logging. Each attempt is therefore logged, a refused
-one included; retries never resend media a route rejected; and the guidance message passes through the same
-projections as the conversation it follows.
+one included; and retries never resend media a route rejected, since the guidance retry resends the request the media
+fallback sent.
 """
 
 from __future__ import annotations
@@ -36,6 +36,6 @@ def wrap_provider(
     provider = WrappedProvider(adapter, partial(logged_stream, log=request_log))
     provider = WrappedProvider(provider, refusal_stream)
     provider = WrappedProvider(provider, partial(retrying_stream, idle_timeout_seconds=idle_timeout_seconds))
+    provider = WrappedProvider(provider, guidance_retry_stream)
     provider = WrappedProvider(provider, partial(media_fallback_stream, fallback_prompt=media_fallback_prompt))
-    provider = WrappedProvider(provider, portable_tool_search_stream)
-    return WrappedProvider(provider, guidance_retry_stream)
+    return WrappedProvider(provider, portable_tool_search_stream)
