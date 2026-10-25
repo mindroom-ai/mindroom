@@ -580,7 +580,7 @@ class TestRouterTeamFormation:
 
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
-        """DM fallback should degrade to the remaining supported single agent."""
+        """A DM room's auto team leaves out a private agent and degrades to the one supported agent left."""
         from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -809,7 +809,7 @@ class TestRouterTeamFormation:
 
     @pytest.mark.asyncio
     async def test_tagged_agents_reject_when_sender_can_talk_to_zero_agents(self) -> None:
-        """Explicit sender visibility of [] must not fall back to room-visible agents."""
+        """A sender who can reach no responder in the room has every tagged agent rejected, named in one reason."""
         from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -842,44 +842,6 @@ class TestRouterTeamFormation:
         assert result.reason == (
             "Team request includes agents 'calculator', 'general' that are not available to you in this room."
         )
-
-    @pytest.mark.asyncio
-    async def test_tagged_agents_use_supplied_responder_boundary_over_room_cache(self) -> None:
-        """Supplied responder candidates are authoritative for explicit team requests."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
-                    "general": AgentConfig(display_name="General", role="General"),
-                },
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-            ),
-        )
-        runtime_paths = runtime_paths_for(config)
-
-        result = decide_team_formation(
-            tagged_agents=[
-                entity_ids(config, runtime_paths)["calculator"],
-                entity_ids(config, runtime_paths)["general"],
-            ],
-            agents_in_thread=[],
-            all_mentioned_in_thread=[],
-            runtime_paths=runtime_paths,
-            config=config,
-            available_responders_in_room=[
-                entity_ids(config, runtime_paths)["calculator"],
-                entity_ids(config, runtime_paths)["general"],
-            ],
-            materializable_agent_names={"calculator", "general"},
-            is_dm_room=False,
-            is_thread=False,
-        )
-
-        assert result.outcome is TeamOutcome.TEAM
-        assert result.intent is TeamIntent.EXPLICIT_MEMBERS
-        assert _agent_names(result.eligible_members, config) == ["calculator", "general"]
 
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:

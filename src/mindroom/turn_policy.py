@@ -434,11 +434,9 @@ class TurnPolicy:
         self,
         room: nio.MatrixRoom,
         requester_user_id: str,
-        availability: _ResponderAvailability | None = None,
     ) -> list[MatrixID]:
         """Return candidates from the boundary-prepared room membership snapshot."""
-        if availability is None:
-            availability = self.responder_availability()
+        availability = self.responder_availability()
         candidates = classify_responder_candidates_from_cached_room(
             room,
             requester_user_id,
