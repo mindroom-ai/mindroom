@@ -1517,7 +1517,11 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
     )
     lifecycle._activated_once = True
     monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
+    loop = asyncio.get_running_loop()
+    shutdown_budget_seconds = 0.05
     drain_started = asyncio.Event()
+    # For each drain shutdown runs: its timeout, a lower bound on the shutdown budget left then, and its result.
+    shutdown_drains: list[tuple[float, float, bool]] = []
     original_drain = broker_module.drain_script_tool_cleanup
 
     async def observing_drain(
@@ -1526,25 +1530,33 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         timeout_seconds: float,
     ) -> bool:
         drain_started.set()
-        return await original_drain(observed_broker, timeout_seconds=timeout_seconds)
+        budget_left_seconds = shutdown_started_at + shutdown_budget_seconds - loop.time()
+        drained = await original_drain(observed_broker, timeout_seconds=timeout_seconds)
+        shutdown_drains.append((timeout_seconds, budget_left_seconds, drained))
+        return drained
 
     monkeypatch.setattr("mindroom.orchestration.script_runtime.drain_script_tool_cleanup", observing_drain)
-    shutdown = asyncio.create_task(lifecycle.shutdown(timeout_seconds=0.05))
-    await asyncio.wait_for(drain_started.wait(), timeout=_WAIT_SECONDS)
+    shutdown_started_at = loop.time()
+    shutdown = asyncio.create_task(lifecycle.shutdown(timeout_seconds=shutdown_budget_seconds))
+    try:
+        await asyncio.wait_for(drain_started.wait(), timeout=_WAIT_SECONDS)
+        await _cancel_cleanup_owner(broker, original_cleanup)
+        close_started_before_body_returned = close_started.is_set()
+        # The body stays blocked until the finally below, so shutdown returns only if its drain is bounded.
+        await asyncio.wait_for(shutdown, timeout=_WAIT_SECONDS)
+        cleanup_owned_after_shutdown = bool(broker._cleanup_tasks)
+    finally:
+        release_body.set()
 
-    shutdown_waited_for_cleanup = shutdown.done() is False
-    await _cancel_cleanup_owner(broker, original_cleanup)
-    close_started_before_body_returned = close_started.is_set()
-    await asyncio.wait_for(shutdown, timeout=0.2)
-    cleanup_owned_after_timeout = bool(broker._cleanup_tasks)
-
-    release_body.set()
     assert await asyncio.to_thread(close_started.wait, _WAIT_SECONDS)
     cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=_WAIT_SECONDS)
 
-    assert shutdown_waited_for_cleanup is True
+    [(drain_timeout_seconds, budget_left_seconds, drained_before_shutdown_returned)] = shutdown_drains
+    # Shutdown gives its cleanup drain what is left of its own budget, and the drain gives up at that deadline.
+    assert budget_left_seconds <= drain_timeout_seconds <= shutdown_budget_seconds
+    assert drained_before_shutdown_returned is False
     assert close_started_before_body_returned is False
-    assert cleanup_owned_after_timeout is True
+    assert cleanup_owned_after_shutdown is True
     assert cleanup_drained is True
     await _assert_cleanup_forgotten(broker)
 
