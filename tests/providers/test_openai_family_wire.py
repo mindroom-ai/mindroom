@@ -254,7 +254,7 @@ async def test_chat_completion_splits_think_tags_and_records_finish_reason(tmp_p
     ],
     ids=["empty-reasoning-kept", "no-opening-tag-split"],
 )
-async def test_chat_completion_splits_at_a_lone_closing_think_tag_and_keeps_empty_reasoning(
+async def test_chat_completion_splits_at_a_lone_closing_think_tag_and_leaves_an_empty_think_block_in_the_content(
     tmp_path: Path,
     content: str,
     expected: tuple[str, str | None],

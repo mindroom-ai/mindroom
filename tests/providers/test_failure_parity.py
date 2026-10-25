@@ -3,7 +3,9 @@
 Each row scripts the wire's answer to every request of one route and stream mode, sends one request through the
 route's real adapter inside the production pipeline, and pins how many HTTP requests it makes before it fails
 (the SDK's own retries included), the normalized error it ends with, and how the error reply the user reads begins.
-A comment gives the reason for each case whose number of requests its error type alone does not decide.
+A failure that is not transient is final at once. A transient one is retried until the attempt commits, by producing
+output the caller could have shown or by starting a hosted tool that acts or costs, and is final after that; a
+stall is retried only once. A comment explains each other case.
 Error replies follow the typed error: a rate limit reads as one, any other transient failure as temporary
 unavailability, and a request that no longer fits the context window says so.
 """
@@ -1283,7 +1285,7 @@ ROWS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("row", ROWS, ids=[row.id for row in ROWS])
-async def test_a_failed_request_is_retried_and_reported_as_the_parity_table_says(row: Row, tmp_path: Path) -> None:
+async def test_a_failed_request_is_retried_and_reported_as_its_row_says(row: Row, tmp_path: Path) -> None:
     """The route retries the failure as often as the row says, ends with its error, and reports it as the row says."""
     sent: list[httpx.Request] = []
 

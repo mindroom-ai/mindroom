@@ -650,7 +650,7 @@ async def test_a_blocking_collaborate_pause_adds_the_notice_after_the_labeled_re
         pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "null", id="blocking-tool-only"),
     ],
 )
-async def test_a_coordinate_member_without_text_reaches_the_leader_streamed_and_blocking(
+async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_member_result_rule_of_its_stream_mode(
     stream: bool,
     writer_turns: list[list[Any]],
     expected: str,

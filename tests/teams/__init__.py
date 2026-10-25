@@ -1,1 +1,1 @@
-"""Tests of ``mindroom.teams``: the leader prompt, the delegation tools, team runs, and team resumes."""
+"""Tests of ``mindroom.teams``: the leader prompt, delegation tools, runs and resumes, reply document, and usage."""
