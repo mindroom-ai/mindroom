@@ -181,6 +181,12 @@ PARSE_CASES: dict[str, tuple[type[BaseModel], str, BaseModel | None]] = {
     "bare_fence": (_RoutingSuggestion, f"```\n{_ROUTING_JSON}\n```", _ROUTED),
     "thinking": (_RoutingSuggestion, f"<think>The handbook agent fits.</think>\n{_ROUTING_JSON}", _ROUTED),
     "empty_thinking": (_RoutingSuggestion, f"<think></think>{_ROUTING_JSON}", _ROUTED),
+    # A chat template that opens the block in the prompt leaves only its end; the draft before it is not merged in.
+    "template_opened_thinking": (
+        _Palette,
+        'A draft: {"swatches": [{"name": "pale", "color": "red"}]}, too pale.</think>' + _PALETTE.model_dump_json(),
+        _PALETTE,
+    ),
     "markdown_keys": (
         _RoutingSuggestion,
         '{*"entity_name"*: "assistant", `"reasoning"`: "Handbook questions."}',
