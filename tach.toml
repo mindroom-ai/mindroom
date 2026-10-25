@@ -1080,6 +1080,7 @@ path = "mindroom.session_storage.legacy_agno2_runs"
 depends_on = ["mindroom.usage.storage"]
 visibility = [
     "mindroom.session_storage.store",
+    "mindroom.session_storage.store_next",
     "mindroom.history.legacy_compaction_state",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.stats_storage",
@@ -1097,6 +1098,42 @@ depends_on = [
     "mindroom.usage.storage",
     "mindroom.session_storage.lanes",
     "mindroom.history.types",
+]
+
+[[modules]]
+path = "mindroom.session_storage.store_next"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.history.summary_rows_schema",
+    "mindroom.history.types",
+    "mindroom.llm",
+    "mindroom.session_storage.codec",
+    "mindroom.session_storage.lanes",
+    "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.schema",
+    "mindroom.session_storage.types",
+    "mindroom.usage.storage",
+]
+
+[[interfaces]]
+from = ["mindroom.session_storage.store_next"]
+expose = [
+    "BUSY_TIMEOUT_SECONDS",
+    "ConversationStore",
+    "FoldWrite",
+    "SaveOutcome",
+    "connect_conversation_database",
+    "decoded_mapping",
+    "delete_runs_in_transaction",
+    "ensure_session_row",
+    "migrate_database",
+    "next_seq",
+    "persist_to",
+    "runs_without",
+    "seen_event_ids",
+    "source_event_ids",
+    "store_fold",
+    "write_with_session_state",
 ]
 
 [[modules]]
@@ -2817,6 +2854,7 @@ visibility = [
     "mindroom.history.summary_rows",
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
+    "mindroom.session_storage.store_next",
 ]
 
 [[modules]]
@@ -8950,7 +8988,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = ["mindroom.llm"]
-visibility = ["mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
+visibility = ["mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.session_storage.store_next", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
