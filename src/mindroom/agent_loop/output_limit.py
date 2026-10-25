@@ -1,9 +1,8 @@
 """Answer the tool calls of a response the output limit cut off, and stop the run when it keeps happening.
 
-A response stopped at the model's output limit ends with an incomplete tool call: its arguments hold only what the model
-wrote before the cut, and they may still parse, so none of its calls may run. Each call is answered with a result
-telling the model why, so the next request can split the work; the loop's third cut-off response ends the run with an
-error.
+A response stopped at the model's output limit is incomplete, so a tool call in it may be partial or missing, and
+partial arguments may still parse; none of its calls may run. Each call is answered with a result telling the model why,
+so the next request can split the work; the loop's third cut-off response ends the run with an error.
 """
 
 from __future__ import annotations

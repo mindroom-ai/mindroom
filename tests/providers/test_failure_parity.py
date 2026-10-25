@@ -1411,7 +1411,7 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
         turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
 
     assert (turn.content, turn.stop_reason, turn.usage.tokens.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
-    assert [entry.get("stop_reason") for entry in logs if entry["event"] == "LLM usage"][-1] == stop_reason
+    assert [entry.get("stop_reason") for entry in logs if entry["event"] == "LLM usage"] == [stop_reason]
 
 
 def get_weather(city: str) -> str:

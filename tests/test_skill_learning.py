@@ -1031,7 +1031,7 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(
 
 
 @pytest.mark.asyncio
-async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(
+async def test_a_review_never_runs_a_call_the_output_limit_cut_off(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

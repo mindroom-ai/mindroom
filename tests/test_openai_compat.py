@@ -4465,7 +4465,7 @@ class TestTeamCompletion:
             "member-model": 44,
         }
 
-    def test_a_claude_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
+    def test_a_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
         self,
         team_app_client: TestClient,
     ) -> None:
