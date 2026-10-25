@@ -828,9 +828,7 @@ async def _checkpointed_batch(
     [bash] = minimal_bash_toolkit().functions
     planned = [
         PlannedCall(
-            call_id=call_id,
             function=bash,
-            arguments={"command": command},
             execution=ToolExecution(tool_call_id=call_id, tool_name="bash", tool_args={"command": command}),
         )
         for call_id, command in batch

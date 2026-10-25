@@ -54,7 +54,7 @@ class BatchCheckpoint:
         self.catalog.record = record
         self._batch = _Batch(
             messages=deepcopy(state.messages),
-            calls={call.call_id: call for call in planned if call.call_id},
+            calls={call.execution.tool_call_id: call for call in planned if call.execution.tool_call_id},
         )
 
     def resume_saved_parent(self, parent_call_id: str) -> None:
@@ -85,7 +85,7 @@ class BatchCheckpoint:
         execution = ToolExecution(
             tool_call_id=call_id,
             tool_name=call.function.name,
-            tool_args=deepcopy(call.arguments),
+            tool_args=deepcopy(call.execution.tool_args),
             is_error=False,
             result=result if isinstance(result, str) else result.content,
         )
@@ -119,7 +119,7 @@ class BatchCheckpoint:
                 observed[observed_id] = ToolExecution(
                     tool_call_id=observed_id,
                     tool_name=call.function.name,
-                    tool_args=deepcopy(call.arguments),
+                    tool_args=deepcopy(call.execution.tool_args),
                     result=result.get_content_string() if result is not None else None,
                     is_error=result.tool_call_error if result is not None else None,
                 )

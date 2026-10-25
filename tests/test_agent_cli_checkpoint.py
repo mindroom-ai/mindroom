@@ -49,9 +49,7 @@ async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: lis
     bash = minimal_bash_toolkit().functions[0]
     planned = [
         PlannedCall(
-            call_id=call["id"],
             function=bash,
-            arguments={"command": "work"},
             execution=ToolExecution(tool_call_id=call["id"], tool_name="bash", tool_args={"command": "work"}),
         )
         for call in messages[-1].tool_calls or ()
@@ -99,7 +97,10 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
     saved = catalog.store.get_run("run")
     assert isinstance(saved, RunRecord)
     assert [item.to_dict() for item in saved.messages] == [item.to_dict() for item in original]
-    assert [tool.tool_call_id for tool in saved.tools or ()] == ["bash-1", "bash-2"]
+    assert [(tool.tool_call_id, tool.tool_args) for tool in saved.tools or ()] == [
+        ("bash-1", {"command": "work"}),
+        ("bash-2", {"command": "work"}),
+    ]
     # A crash before the run's own terminal save must not replay the unanswered Bash call.
     assert not is_model_history_visible_run(saved)
     assert record.status is RunStatus.running

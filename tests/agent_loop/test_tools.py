@@ -107,7 +107,7 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
     assert str(messages[1].content).startswith("Error while decoding function arguments: ")
     assert messages[2].content == "Function arguments are not a valid JSON object.\n\n Please fix and retry."
     # The three errors never counted, so the fourth call is the first within the limit.
-    assert [call.call_id for call in batch.planned] == ["c4"]
+    assert [call.execution.tool_call_id for call in batch.planned] == ["c4"]
     assert batch.refused == ()
 
 
@@ -122,7 +122,7 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
         max_tool_calls_per_turn=2,
     )
 
-    assert [call.call_id for call in batch.planned] == ["c1"]
+    assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
     assert [(m.tool_call_id, m.content, m.tool_call_error, m.tool_args) for m in batch.refused] == [
         (
             "c2",
@@ -150,7 +150,7 @@ def test_empty_list_arguments_plan_as_no_arguments() -> None:
         max_tool_calls_per_turn=None,
     )
 
-    assert batch.planned[0].arguments is None
+    assert batch.planned[0].execution.tool_args is None
     assert batch.planned[0].execution.tool_args is None
 
 

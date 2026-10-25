@@ -332,12 +332,7 @@ async def _answer_resumed(
             function = state.offered.functions[execution.tool_name]
             # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
             execution.requires_confirmation = False
-            planned = PlannedCall(
-                call_id=execution.tool_call_id,
-                function=function,
-                arguments=execution.tool_args,
-                execution=execution,
-            )
+            planned = PlannedCall(function=function, execution=execution)
             yield ToolStarted(execution.call)
             results.extend(await dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware))
             yield ToolCompleted(execution.call)

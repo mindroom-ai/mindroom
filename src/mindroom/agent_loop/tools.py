@@ -83,13 +83,11 @@ def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
 class PlannedCall:
     """One tool call the loop admitted: it runs now unless its ``execution`` is paused for a decision.
 
-    ``arguments`` is None when the model sent ``[]``; ``execution`` is the run record's entry for the call, which
-    the dispatcher fills in place.
+    ``execution`` is the run record's entry for the call, holding its id and arguments (None when the model sent
+    ``[]``), which the dispatcher fills in place.
     """
 
-    call_id: str | None
     function: ToolFunction
-    arguments: dict[str, Any] | None
     execution: ToolExecution
 
 
@@ -155,7 +153,7 @@ def plan_tool_batch(
                 )
                 continue
         execution = function.planned_execution(call_id, arguments)
-        planned.append(PlannedCall(call_id=call_id, function=function, arguments=arguments, execution=execution))
+        planned.append(PlannedCall(function=function, execution=execution))
     return ToolBatch(planned=tuple(planned), refused=tuple(refused))
 
 
@@ -182,8 +180,8 @@ async def _timed(call: PlannedCall, run: RunContext, middleware: Sequence[ToolMi
     started = time.perf_counter()
     outcome = await execute_tool_call(
         call.function,
-        call.arguments,
-        run.call_context(call.call_id),
+        call.execution.tool_args,
+        run.call_context(call.execution.tool_call_id),
         middleware=middleware,
     )
     return outcome, time.perf_counter() - started

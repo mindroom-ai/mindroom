@@ -141,9 +141,7 @@ async def capture_bash_batch(
     )
     planned = [
         PlannedCall(
-            call_id=call_id,
             function=bash,
-            arguments=arguments,
             execution=ToolExecution(tool_call_id=call_id, tool_name="bash", tool_args=arguments),
         )
         for call_id, arguments in bash_calls
