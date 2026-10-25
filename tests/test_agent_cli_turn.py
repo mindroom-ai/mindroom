@@ -22,6 +22,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom.agent_cli import turn
 from mindroom.agent_cli.json_io import canonical_json
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
+from mindroom.agent_cli.main import main as cli_main
 from mindroom.agent_cli.protocol import (
     ContextReadOperation,
     ToolCallOperation,
@@ -41,6 +42,7 @@ from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cl
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
@@ -51,9 +53,11 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, run_bash_batch, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit
+from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -244,8 +248,8 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
     await owner.close()
 
 
-async def _native_owner(tmp_path: Path, tools: list, authorize) -> LiveTurnTools:
-    catalog = await _catalog(tmp_path, [_toolkit("calls", *tools)])
+async def _native_owner(tmp_path: Path, tools: list, authorize, middleware: tuple = ()) -> LiveTurnTools:
+    catalog = await _catalog(tmp_path, [_toolkit("calls", *tools)], middleware=middleware)
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
     catalog.store = create_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir(exist_ok=True)
@@ -399,6 +403,55 @@ async def test_a_cli_approval_pause_records_its_run_and_that_run_s_model(tmp_pat
             await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "work"}, "outer")
     assert pauses == [("session", "run", "run-model")]
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_call_a_plugin_hook_declines_settles_failed_and_the_cli_exits_1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A call a before-call hook declines never runs; its receipt fails with the decline, so ``tools call`` exits 1."""
+    ran: list[str] = []
+
+    async def write_note() -> str:
+        ran.append("note")
+        return "noted"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        ctx.decline("notes are paused")
+
+    policy = build_tool_hook_middleware(HookRegistry.from_plugins([_plugin("policy", [decline])]), "helper")
+    owner = await _native_owner(tmp_path, [write_note], _allow, middleware=(policy,))
+    receipts: list[dict] = []
+
+    async def command() -> str:
+        receipts.append(await _call_receipt(owner, "write_note"))
+        return "done"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        assert await owner.run_native_shell(command) == "done"
+    await owner.close()
+    [receipt] = receipts
+
+    assert ran == []
+    assert receipt["status"] == "failed"
+    assert "[TOOL CALL DECLINED]" in json.dumps(receipt["outcome"])
+    assert "Reason: notes are paused" in json.dumps(receipt["outcome"])
+
+    class Client:
+        """The agent CLI's transport, answering with the receipt the turn settled."""
+
+        def operation(self, _payload: dict[str, object]) -> dict[str, object]:
+            return receipt
+
+        def receipt(self, _call_id: str) -> dict[str, object]:
+            return receipt
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    assert cli_main(["tools", "call", "calls.write_note"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
 
 
 @pytest.mark.asyncio

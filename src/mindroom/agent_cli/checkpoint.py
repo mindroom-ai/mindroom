@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.tools import PlannedCall
     from mindroom.llm.messages import Message
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
-    from mindroom.tool_system.invocation import ToolOutcome
+    from mindroom.tool_system.tool_function import ToolOutcome
 
 __all__ = ["BatchCheckpoint"]
 
