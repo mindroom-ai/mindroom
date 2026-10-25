@@ -2011,8 +2011,9 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
-Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, so a private CA installed there is trusted.
-To trust a private CA without installing it, set `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment.
+Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
+An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
@@ -20781,8 +20782,9 @@ Always back up configuration and persistent storage before replacing the running
 
 ## Upgrading to OpenAI SDK 3
 
-OpenAI-compatible and Claude model requests now verify certificates against the operating system's trust store instead of certifi's bundle, as described in [Model Configuration](https://docs.mindroom.chat/configuration/models/#configuration-examples).
-On a host without system CA certificates, install them (for example the `ca-certificates` package) or set `SSL_CERT_FILE` before upgrading; the published images already include them.
+OpenAI-compatible and Claude model requests, and the other OpenAI SDK requests [Model Configuration](https://docs.mindroom.chat/configuration/models/#configuration-examples) lists, now verify certificates against the operating system's trust store instead of certifi's bundle.
+The published images include system CA certificates.
+On a host without them, install them (for example the `ca-certificates` package) before upgrading, or point `SSL_CERT_FILE` at a complete CA bundle, such as certifi's `cacert.pem` with any private CA appended.
 
 ## Upgrading to durable reply records
 
