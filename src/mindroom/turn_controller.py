@@ -2244,7 +2244,9 @@ class TurnController:
         is_nonterminal_stream = (
             isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in UNFINISHED_REPLY_STATUSES
         )
-        if not isinstance(event.body, str) or (is_nonterminal_stream and event_info.is_edit):
+        # A placeholder still streaming names no requester, so refusing it here would mark the turn its finished
+        # reply needs as handled.
+        if not isinstance(event.body, str) or is_nonterminal_stream:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         # Another entity's finished reply arrives as an edit of its placeholder; its mentions dispatch like a message.
         final_reply = self._mentioned_entity_final_reply(room, event) if event_info.is_edit else None
@@ -2253,8 +2255,6 @@ class TurnController:
         is_edit = event_info.is_edit and final_reply is None
         prechecked_event = await self._precheck_dispatch_event(room, event, is_edit=is_edit)
         if prechecked_event is None:
-            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        if is_nonterminal_stream:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         await ensure_room_membership_synced(
             self._client(),
