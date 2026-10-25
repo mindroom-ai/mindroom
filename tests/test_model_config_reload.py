@@ -108,12 +108,21 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
     """Build the next standalone agent, team member, team, and router model."""
     config = runtime.config
     assert config is not None
-    agent = create_agent("general", config, runtime.runtime_paths, execution_identity=None)
+    agent = create_agent(
+        "general",
+        config,
+        runtime.runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     members = materialize_exact_team_members(
         ["general"],
         config=config,
         runtime_paths=runtime.runtime_paths,
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     team = build_team_spec(
         members=members,

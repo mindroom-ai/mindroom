@@ -2607,7 +2607,7 @@ MindRoom forms a team without any `teams:` entry when:
 Tagging exactly one agent gets a reply from that agent alone.
 Threads where two or more people have posted never form a team from earlier thread context; tag the agents again in the current message (see [Multi-Human Thread Protection](https://docs.mindroom.chat/configuration/threads/#multi-human-thread-protection)).
 
-If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available in this room.`
+If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available to you in this room.`
 For teams formed from thread context or a DM room, unavailable agents are left out, and if only one remains it answers alone.
 
 The `default` model picks the mode for each ad hoc team from the request: `coordinate` when the agents have different subtasks, `collaborate` for opinions or brainstorming, and `collaborate` when the choice fails.
@@ -16856,7 +16856,7 @@ async def block_secret_reads(ctx):
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None | 5000 |
 | `session:started` | Observer | `SessionHookContext` | Once when a response creates a new persisted session | None | 5000 |
 | `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved | None | 15000 |
-| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary | None | 5000 |
+| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary; the counts size the conversation history before and after a compaction that runs before a reply, and the whole model request before and after one that runs during a reply | None | 5000 |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
 | `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router, after a human joins a room | None | 3000 |
@@ -20905,6 +20905,7 @@ Smaller changes that need operator action:
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
 - **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
+- **Retired prompt overrides**: a [`prompts`](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
 
 ### Compaction History
 

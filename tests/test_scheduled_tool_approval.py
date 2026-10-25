@@ -74,7 +74,13 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import install_model_providers, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    handle_card_response_for_test,
+    install_model_providers,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
@@ -174,12 +180,12 @@ async def _decide(
     scheduled_scope: str | None = None,
     sender: str = _REQUESTER,
 ) -> ApprovalActionResult:
-    return await manager.handle_card_response(
+    return await handle_card_response_for_test(
+        manager,
         room_id=_ROOM,
         sender_id=sender,
         card_event_id=_SCHEDULED_CARD,
         status=status,
-        reason=None,
         authorize_responder=lambda _agent: True,
         scheduled_scope=scheduled_scope,
     )
@@ -261,6 +267,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         expires_at_ns=9_000_000_000_000_000_000,
         agent_name=_AGENT,
         thread_id=_THREAD,
+        grant_operation=None,
     )
     assert card is not None
     assert await manager.reserve_and_publish(
@@ -792,12 +799,12 @@ async def test_scope_is_ignored_on_an_ordinary_approval_card(
     try:
         await _ordinary_card(journal, manager, "plain")
 
-        result = await manager.handle_card_response(
+        result = await handle_card_response_for_test(
+            manager,
             room_id=_ROOM,
             sender_id=_REQUESTER,
             card_event_id="$card-plain",
             status="approved",
-            reason=None,
             authorize_responder=lambda _agent: True,
             scheduled_scope="any_arguments",
         )
@@ -2012,7 +2019,13 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
     async def observe(ctx: ToolAfterCallContext) -> None:
         observed.append((ctx.tool_name, ctx.result, ctx.blocked))
 
-    policy = build_tool_hook_middleware(HookRegistry.from_plugins([_plugin("policy", [decline, observe])]), _AGENT)
+    policy = build_tool_hook_middleware(
+        HookRegistry.from_plugins([_plugin("policy", [decline, observe])]),
+        _AGENT,
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
     agent = _live_agent(runs, middleware=(policy,))
     try:
         await _armed(manager)
@@ -2080,7 +2093,15 @@ def configured_slack_pair(configured_slack: list[dict[str, object]]) -> Iterator
 def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: str = _AGENT) -> AgentBuild:
     """Build the configured agent as a turn does, on a model that is never called."""
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    return create_agent(agent_name, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+    return create_agent(
+        agent_name,
+        config,
+        runtime_paths_for(config),
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
 
 
 async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Config) -> object:
@@ -2116,7 +2137,15 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
 
-    build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+    build = create_agent(
+        _AGENT,
+        config,
+        runtime_paths_for(config),
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     functions = build.spec.functions
     assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())

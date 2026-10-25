@@ -2066,7 +2066,7 @@
       ],
       "description": "Mathematical calculator with basic and advanced operations",
       "display_name": "Calculator",
-      "docs_url": "https://docs.agno.com/tools/toolkits/local/calculator",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#calculator",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -3109,7 +3109,7 @@
       ],
       "description": "Code execution sandbox environment with Python, file operations, and web server capabilities",
       "display_name": "E2B Code Execution",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/e2b",
+      "docs_url": "https://docs.mindroom.chat/tools/automation-and-platforms/#e2b",
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
@@ -3564,7 +3564,7 @@
       ],
       "description": "Read, write, list, and search files in the agent workspace",
       "display_name": "File Tools",
-      "docs_url": "https://docs.agno.com/tools/toolkits/local/file",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#file",
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
@@ -4056,7 +4056,7 @@
       ],
       "description": "Browse code and manage GitHub repositories, issues, and pull requests",
       "display_name": "GitHub",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/github",
+      "docs_url": "https://docs.mindroom.chat/tools/project-management/#github",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -4466,7 +4466,7 @@
       ],
       "description": "Read, create, update, and format Google Sheets spreadsheets",
       "display_name": "Google Sheets",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
+      "docs_url": "https://docs.mindroom.chat/tools/data-and-databases/#google_sheets",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -5802,7 +5802,7 @@
       ],
       "description": "Execute Python code, manage files, and install packages",
       "display_name": "Python Tools",
-      "docs_url": "https://docs.agno.com/tools/toolkits/local/python",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#python",
       "executes_code": true,
       "file_access": "unconfined",
       "function_names": [
@@ -6433,7 +6433,7 @@
       "dependencies": [],
       "description": "Run terminal commands and scripts in the agent workspace",
       "display_name": "Shell Commands",
-      "docs_url": "https://docs.agno.com/tools/toolkits/local/shell",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#shell",
       "executes_code": true,
       "file_access": "unconfined",
       "function_names": [
@@ -6485,7 +6485,7 @@
       ],
       "description": "Sleep utility for introducing delays and pauses in execution",
       "display_name": "Sleep",
-      "docs_url": "https://docs.agno.com/tools/toolkits/local/sleep",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#sleep",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -7134,7 +7134,7 @@
       ],
       "description": "Search, read, send, and organize email in Gmail",
       "display_name": "Gmail",
-      "docs_url": "https://docs.agno.com/tools/toolkits/social/gmail",
+      "docs_url": "https://docs.mindroom.chat/tools/messaging-and-social/#gmail",
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
@@ -7348,7 +7348,7 @@
       ],
       "description": "Search tracks, manage playlists, get recommendations, and control playback on Spotify",
       "display_name": "Spotify",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/spotify",
+      "docs_url": "https://docs.mindroom.chat/tools/media-and-content/#spotify",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8716,7 +8716,7 @@
       ],
       "description": "View calendars and create or update events in Google Calendar",
       "display_name": "Google Calendar",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/googlecalendar",
+      "docs_url": "https://docs.mindroom.chat/tools/calendar-and-scheduling/#google_calendar",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8916,7 +8916,7 @@
       ],
       "description": "Search, read, upload, and organize files in Google Drive",
       "display_name": "Google Drive",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_drive",
+      "docs_url": "https://docs.mindroom.chat/tools/data-and-databases/#google_drive",
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
@@ -14166,7 +14166,7 @@
       ],
       "description": "Web scraping and content extraction from websites",
       "display_name": "Website Tools",
-      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/website",
+      "docs_url": "https://docs.mindroom.chat/tools/web-scraping-and-browser/#website",
       "executes_code": false,
       "file_access": "none",
       "function_names": [

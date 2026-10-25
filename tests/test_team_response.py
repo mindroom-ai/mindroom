@@ -907,7 +907,14 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     """A caller that prepares the turn itself, as the OpenAI-compatible API does, recovers the live notice too."""
     team = _team(tmp_path, monkeypatch)
     _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
-    members = materialize_team_members(list(team.member_names), team.orchestrator, team.identity)
+    members = materialize_team_members(
+        list(team.member_names),
+        team.orchestrator,
+        team.identity,
+        configured_team_name=None,
+        reason_prefix="Team request",
+        active_model_names=dict.fromkeys(team.member_names, "default"),
+    )
 
     scope_context = load_bound_scope_session(
         member_names=team.member_names,
@@ -950,7 +957,14 @@ def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one
 ) -> None:
     """Every agent build renders a role, so a build without one is a broken invariant, not a member with no role."""
     team = _team(tmp_path, monkeypatch)
-    members = materialize_team_members(list(team.member_names), team.orchestrator, team.identity)
+    members = materialize_team_members(
+        list(team.member_names),
+        team.orchestrator,
+        team.identity,
+        configured_team_name=None,
+        reason_prefix="Team request",
+        active_model_names=dict.fromkeys(team.member_names, "default"),
+    )
     [build] = members.builds
     roleless = replace(members, builds=[replace(build, prompt=replace(build.prompt, role=None))])
 
@@ -1334,6 +1348,31 @@ async def test_a_resume_shows_the_saved_document_first_then_each_change_and_coll
         ("call-touch", "agent:general", "tool_call_completed"),
         ("call-team", "team", "tool_call_completed"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_whose_reply_hides_tool_calls_collects_no_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """A resumed team run whose reply hides tool calls hands its caller no tool trace."""
+    team, paused = await _pause_on_general(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("Done.")])
+    team.models["general-model"] = ScriptedModel([answer("After approval.")])
+    trace: list[Any] = []
+
+    result = await team.resume(
+        paused,
+        approved=True,
+        approvals=(_approval("call-touch", "dangerous"),),
+        show_tool_calls=False,
+        tool_trace_collector=trace,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert probe.calls == ["dangerous"]
+    assert trace == []
 
 
 @pytest.mark.asyncio

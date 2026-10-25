@@ -75,11 +75,6 @@ logger = get_logger(__name__)
 _NO_MEMBER_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType({})
 
 _IN_PROGRESS_REPLY_LABEL = "You (reply still streaming)"
-# TODO(simplify): no MindRoom code writes the interrupted-draft and partial-reply labels; only a trusted relay claim
-# could carry them. Match only the in-progress label. Models would notice only for such a relayed claim.
-_PARTIAL_REPLY_GUIDANCE_LABELS = frozenset(
-    {"You (interrupted reply draft)", _IN_PROGRESS_REPLY_LABEL, "You (partial reply)"},
-)
 _HOOK_OUTPUT_LABEL = "[posted automatically by hook {hook_source}, not written by you or any agent]"
 # Claims about who wrote a message; only MindRoom's own accounts may make them.
 _AUTHORSHIP_CLAIM_KEYS = (ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY)
@@ -203,6 +198,9 @@ def _context_body_from_visible_message(
     response_sender_id: str | None,
 ) -> str:
     """Return the model-facing body for one visible Matrix message, without marker lines known to be display chrome."""
+    # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
+    # Those markers are display chrome, not conversation content; if we replay
+    # them to the model it can continue the pattern as plain text with no trace.
     if has_tool_trace(message.content) or _is_own_reply(message, response_sender_id):
         return strip_visible_tool_markers(message.body)
     return message.body
@@ -221,16 +219,12 @@ def _context_message_from_visible_message(
     message: ResolvedVisibleMessage,
     *,
     response_sender_id: str | None,
-    missing_sender_label: str | None = None,
-    body: str | None = None,
-    attachment_records: Sequence[AttachmentRecord] = (),
-    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
+    missing_sender_label: str | None,
+    body: str,
+    attachment_records: Sequence[AttachmentRecord],
+    member_display_names: Mapping[str, str],
 ) -> Message:
-    """Convert one visible Matrix message into a structured prompt message."""
-    # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
-    # Those markers are display chrome, not conversation content; if we replay
-    # them to the model it can continue the pattern as plain text with no trace.
-    body = _context_body_from_visible_message(message, response_sender_id=response_sender_id) if body is None else body
+    """Convert one visible Matrix message, whose prompt text is ``body``, into a structured prompt message."""
     annotation = format_attachment_annotation(list(attachment_records))
     if _is_own_reply(message, response_sender_id):
         if message.content.get("msgtype") == "m.audio":
@@ -248,7 +242,7 @@ def _context_message_from_visible_message(
         body = f"{_HOOK_OUTPUT_LABEL.format(hook_source=hook_source)}\n{body}"
     event_id = message.event_id or None
     speaker_label = _relayed_sender(message) or message.sender or missing_sender_label
-    if speaker_label in _PARTIAL_REPLY_GUIDANCE_LABELS and response_sender_id is not None:
+    if speaker_label == _IN_PROGRESS_REPLY_LABEL and response_sender_id is not None:
         content = render_msg_tag(
             sender=response_sender_id,
             body=f"{speaker_label}: {body}",
@@ -381,18 +375,18 @@ def _build_unseen_context_messages(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
-    transient_context_messages: Sequence[Message] = (),
+    transient_context_messages: Sequence[Message],
     seen_event_ids: set[str],
     current_event_id: str,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
-    current_sender_id: str | None = None,
-    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
-    current_timestamp_ms: float | None = None,
-    prompt_event_id: str | None = None,
-    current_prompt_is_structured: bool = False,
+    current_sender_id: str | None,
+    member_display_names: Mapping[str, str],
+    current_timestamp_ms: float | None,
+    prompt_event_id: str | None,
+    current_prompt_is_structured: bool,
     config: Config,
-    attachment_context: _ThreadAttachmentContext | None = None,
+    attachment_context: _ThreadAttachmentContext | None,
 ) -> tuple[TurnMessages, list[str]]:
     """Return the canonical turn for unseen thread context plus the current prompt, and the unseen event ids."""
     history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
@@ -410,9 +404,6 @@ def _build_unseen_context_messages(
         member_display_names=member_display_names,
     )
     # Unseen context keeps only in-progress drafts of this sender, so only their header can apply.
-    # TODO(simplify): Nothing renders DEFAULT_UNSEEN_MESSAGES_HEADER, INTERRUPTED_PARTIAL_REPLY_HEADER,
-    # MIXED_PARTIAL_REPLY_HEADER, or PREVIOUS_CONVERSATION_THREAD_HEADER, yet each can be overridden. Retire the four
-    # from the prompt registry. Operators who override them would notice their overrides rejected.
     if partial_reply_kinds:
         context_messages = (
             Message(role="user", content=config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")),
@@ -441,21 +432,21 @@ def _build_thread_history_messages(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     *,
-    transient_context_messages: Sequence[Message] = (),
+    transient_context_messages: Sequence[Message],
     response_sender_id: str | None,
-    current_sender_id: str | None = None,
-    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
-    current_timestamp_ms: float | None = None,
-    current_event_id: str | None = None,
-    current_prompt_is_structured: bool = False,
+    current_sender_id: str | None,
+    member_display_names: Mapping[str, str],
+    current_timestamp_ms: float | None,
+    current_event_id: str | None,
+    current_prompt_is_structured: bool,
     config: Config,
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-    static_token_budget: int | None = None,
-    estimate_static_tokens_fn: Callable[[str], int] | None = None,
-    render_messages_text_fn: Callable[[Sequence[Message]], str] | None = None,
-    attachment_context: _ThreadAttachmentContext | None = None,
+    max_messages: int | None,
+    max_message_length: int | None,
+    missing_sender_label: str | None,
+    static_token_budget: int | None,
+    estimate_static_tokens_fn: Callable[[str], int],
+    render_messages_text_fn: Callable[[Sequence[Message]], str],
+    attachment_context: _ThreadAttachmentContext | None,
 ) -> TurnMessages:
     """Return the canonical turn for fallback full-thread replay."""
 
@@ -483,11 +474,7 @@ def _build_thread_history_messages(
         attachment_context=attachment_context,
         member_display_names=member_display_names,
     )
-    if (
-        static_token_budget is not None
-        and estimate_static_tokens_fn is not None
-        and render_messages_text_fn is not None
-    ):
+    if static_token_budget is not None:
         return _messages_with_capped_context(
             with_context,
             context_messages,
@@ -843,34 +830,29 @@ async def prepare_agent_execution_context(
     build: AgentBuild,
     system_message: Message,
     prompt: str,
-    transient_context_messages: Sequence[Message] = (),
+    transient_context_messages: Sequence[Message],
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
-    resolved_runtime_model: ResolvedRuntimeModel | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    current_sender_id: str | None = None,
-    current_timestamp_ms: float | None = None,
-    current_event_id: str | None = None,
-    current_prompt_is_structured: bool = False,
-    include_openai_compat_guidance: bool = False,
-    pipeline_timing: DispatchPipelineTiming | None = None,
+    resolved_runtime_model: ResolvedRuntimeModel,
+    compaction_lifecycle: CompactionLifecycle | None,
+    current_sender_id: str | None,
+    current_timestamp_ms: float | None,
+    current_event_id: str | None,
+    current_prompt_is_structured: bool,
+    include_openai_compat_guidance: bool,
+    pipeline_timing: DispatchPipelineTiming | None,
 ) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call.
 
-    ``system_message`` is the turn's rendered system message, which sizes the static part of every request.
+    ``system_message`` is the turn's rendered system message, which sizes the static part of every request, and
+    ``resolved_runtime_model`` the model the turn runs on, whose window bounds its history.
     """
     agent_name = ctx.entity_label
     response_sender = None
     if not include_openai_compat_guidance:
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
-    runtime_model = resolved_runtime_model or config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        runtime_paths=runtime_paths,
-    )
     static_token_estimator = build_static_token_estimator(
         system_message,
         PreparedTools(functions=build.spec.functions).specs(),
@@ -885,8 +867,8 @@ async def prepare_agent_execution_context(
             config=config,
             entity_name=agent_name,
             history_settings=build.history_settings,
-            active_model_name=runtime_model.model_name,
-            active_context_window=runtime_model.context_window,
+            active_model_name=resolved_runtime_model.model_name,
+            active_context_window=resolved_runtime_model.context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
         )
         return await prepare_scope_history(
@@ -918,7 +900,7 @@ async def prepare_agent_execution_context(
         estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=_fallback_static_token_budget(
-            context_window=runtime_model.context_window,
+            context_window=resolved_runtime_model.context_window,
             replay_window_tokens=compaction_config.replay_window_tokens,
             reserve_tokens=compaction_config.reserve_tokens,
         ),

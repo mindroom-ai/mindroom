@@ -19,7 +19,6 @@ __all__ = [
     "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
     "CURRENT_MESSAGE_PROMPT_INTRO",
     "DATETIME_CONTEXT_TEMPLATE",
-    "DEFAULT_UNSEEN_MESSAGES_HEADER",
     "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS",
     "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
     "DREAMING_PROMPT_TEMPLATE",
@@ -32,19 +31,16 @@ __all__ = [
     "HIDDEN_TOOL_CALLS_PROMPT",
     "INLINE_MEDIA_FALLBACK_PROMPT",
     "INTERACTIVE_QUESTION_PROMPT",
-    "INTERRUPTED_PARTIAL_REPLY_HEADER",
     "IN_PROGRESS_PARTIAL_REPLY_HEADER",
     "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE",
     "MEMORY_CONTEXT_PROMPT_TEMPLATE",
     "MEMORY_EXISTING_SNIPPETS_TEMPLATE",
     "MEMORY_NO_EXISTING_SNIPPETS",
-    "MIXED_PARTIAL_REPLY_HEADER",
     "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
     "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "OPENAI_COMPAT_HISTORY_GUIDANCE",
     "OUTPUT_REDIRECT_PROMPT",
     "PERSONALITY_CONTEXT_SECTION_HEADING",
-    "PREVIOUS_CONVERSATION_THREAD_HEADER",
     "PROMPT_CURATION_PROMPT_TEMPLATE",
     "PROMPT_CURATION_RECHECK_TEMPLATE",
     "PROMPT_DEFAULTS",
@@ -196,27 +192,14 @@ NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery
 Deferred capability domains available through native tool search: {tool_domains}.
 When a request may need one of these domains, search the deferred tool catalog before concluding that the capability is unavailable."""
 
-PREVIOUS_CONVERSATION_THREAD_HEADER = "Previous conversation in this thread:"
 THREAD_HISTORY_OMITTED_MARKER_TEMPLATE = (
     "[{omitted_count} earlier message(s) in this thread were omitted to fit the context window.]"
 )
 CURRENT_MESSAGE_PROMPT_INTRO = "Current message:\n"
-DEFAULT_UNSEEN_MESSAGES_HEADER = "Messages since your last response:"
-INTERRUPTED_PARTIAL_REPLY_HEADER = (
-    "Messages since your last response:\n"
-    "Your previous response was interrupted before completion. "
-    "The partial content below may be incomplete. Continue from where you left off if appropriate."
-)
 IN_PROGRESS_PARTIAL_REPLY_HEADER = (
     "Messages since your last response:\n"
     "Your previous response is still being delivered. Do NOT repeat or redo that work. "
     "The partial content is shown below for context only."
-)
-MIXED_PARTIAL_REPLY_HEADER = (
-    "Messages since your last response:\n"
-    "Some partial content from your previous response is still being delivered, so do NOT repeat or redo that work. "
-    "Other partial content was interrupted before completion and may be incomplete. "
-    "Continue from where you left off if appropriate."
 )
 QUEUED_MESSAGE_NOTICE_TEXT = (
     "[SYSTEM NOTICE — PAUSE FOR A NEWER USER MESSAGE] A newer user message arrived in this thread "

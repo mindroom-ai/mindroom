@@ -1810,15 +1810,14 @@ def create_agent(
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    knowledge: AgentKnowledge | None,
+    active_model_name: str | None,
     hook_registry: HookRegistry | None = None,
-    knowledge: AgentKnowledge | None = None,
     history_storage: ConversationStore | None = None,
-    active_model_name: str | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
     persist_runtime_state: bool = True,
     disable_runtime_capabilities: bool = False,
-    disabled_tool_names: frozenset[str] = frozenset(),
     tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1837,12 +1836,12 @@ def create_agent(
         runtime_paths: Explicit runtime context for paths, env, and credentials.
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
+        knowledge: The shared knowledge of a RAG-enabled agent, or None; for a persona, callers resolve
+            it narrowed to the persona's kept knowledge bases.
+        active_model_name: The runtime-selected model name overriding the configured model, or None.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
-        knowledge: Optional shared knowledge for RAG-enabled agents; for a persona, callers resolve
-            it narrowed to the persona's kept knowledge bases.
         history_storage: Optional already-open conversation store to reuse for this agent.
-        active_model_name: Optional runtime-selected model name overriding the configured model.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -1851,7 +1850,6 @@ def create_agent(
         persist_runtime_state: Whether this agent's runs should write durable history.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
-        disabled_tool_names: Resolved tool names to omit from this instance.
         tool_function_filter: Optional policy applied to each fully resolved
             function after normal toolkit construction.
         delegation_depth: Current delegation nesting depth. Used to prevent
@@ -1917,7 +1915,6 @@ def create_agent(
         persona_tools,
         lambda: caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth),
         tool_function_filter,
-        disabled_tool_names,
     )
     # Loaded before the skills, which include the skills of the plugins this config loads.
     plugins = _load_agent_plugins(config, runtime_paths)

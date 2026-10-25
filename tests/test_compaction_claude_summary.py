@@ -83,6 +83,7 @@ async def _summarize(model: ModelProvider, *, timeout_seconds: float = 10) -> st
         summary_input="Conversation",
         summary_prompt="Summarize",
         timeout_seconds=timeout_seconds,
+        on_usage=None,
     )
 
 

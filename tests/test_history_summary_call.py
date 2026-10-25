@@ -44,6 +44,7 @@ from mindroom.llm.provider import RequestOverrides
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import Await
 from tests.fakes.summary_model import summary_model, summary_steps
@@ -66,6 +67,7 @@ async def test_compaction_call_timeout_raises_owned_timeout() -> None:
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=0.01,
+            on_usage=None,
         )
 
 
@@ -79,6 +81,7 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
         summary_input="Current prompt",
         summary_prompt="Custom compaction instructions.",
         timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        on_usage=None,
     )
 
     [request] = model.requests
@@ -98,6 +101,7 @@ async def test_the_summary_request_is_one_call_without_provider_retries_thinking
         summary_input="Current prompt",
         summary_prompt=COMPACTION_SUMMARY_PROMPT,
         timeout_seconds=42.0,
+        on_usage=None,
     )
 
     [request] = model.requests
@@ -186,6 +190,7 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=0.01,
+            on_usage=None,
         )
 
     assert asyncio.get_running_loop().time() - start < 0.04
@@ -204,6 +209,7 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=0.01,
+            on_usage=None,
         )
 
     await asyncio.wait_for(call.started.wait(), timeout=0.1)
@@ -221,6 +227,7 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            on_usage=None,
         )
 
 
@@ -233,6 +240,7 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            on_usage=None,
         ),
     )
 
@@ -257,6 +265,7 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            on_usage=None,
         ),
     )
 
@@ -281,6 +290,7 @@ async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            on_usage=None,
         ),
     )
 
@@ -310,6 +320,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=0.01,
+            on_usage=None,
         )
 
     await asyncio.wait_for(call.started.wait(), timeout=0.1)
@@ -391,6 +402,7 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
         compacted_runs=[big_run, small_run],
         max_input_tokens=220,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert [run.run_id for run in included_runs] == ["run-big"]
@@ -418,6 +430,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
         compacted_runs=[run],
         max_input_tokens=280,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
@@ -443,6 +456,7 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
         compacted_runs=[run],
         max_input_tokens=220,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert included_runs == [run]
@@ -462,6 +476,7 @@ def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:
         compacted_runs=[run],
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert included_runs == [run]
@@ -511,6 +526,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
         compacted_runs=[run],
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert included_runs == [run]
@@ -541,6 +557,7 @@ def test_build_summary_input_preserves_complete_near_cap_summary_without_claimin
         compacted_runs=[run],
         max_input_tokens=1_001,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert included_runs == []
@@ -556,6 +573,7 @@ def test_build_summary_input_returns_no_progress_when_run_envelope_cannot_fit() 
         compacted_runs=[_completed_run("run-1")],
         max_input_tokens=1,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert summary_input == ""
@@ -570,6 +588,7 @@ def test_build_summary_input_preserves_previous_summary_text() -> None:
         compacted_runs=[run],
         max_input_tokens=1_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert included_runs == [run]
@@ -622,6 +641,7 @@ def test_build_summary_input_skips_replayed_history_copies() -> None:
         compacted_runs=[run],
         history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         max_input_tokens=1_000,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert included_runs == [run]
@@ -646,6 +666,7 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
         compacted_runs=[run],
         history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         max_input_tokens=1_000,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert included_runs == [run]
@@ -683,6 +704,7 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
             max_tool_calls_from_history=1,
         ),
         max_input_tokens=1_000,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert included_runs == [run]
@@ -736,6 +758,7 @@ def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -
         compacted_runs=[run],
         max_input_tokens=300,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-result"]
@@ -754,6 +777,7 @@ def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -
         compacted_runs=[result_only],
         max_input_tokens=300,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert "Run truncated to fit compaction budget." in summary_input
@@ -788,6 +812,7 @@ def test_each_tool_result_names_its_own_call_in_the_summary_input() -> None:
         compacted_runs=[run],
         max_input_tokens=100_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert '<message role="tool" tool_name="missing_tool">\nError: The requested tool does not exist.' in summary_input

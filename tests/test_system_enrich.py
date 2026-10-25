@@ -49,6 +49,7 @@ from tests.conftest import (
     make_turn_context,
     message_origin,
     patch_response_runner_module,
+    process_and_respond_for_test,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -354,6 +355,8 @@ def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedEx
         config=config,
         runtime_paths=runtime_paths_for(config),
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     assert members.failed_agent_names == []
     return members
@@ -480,7 +483,8 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ),
     ):
-        generation = await bot._response_runner._process_and_respond(
+        generation = await process_and_respond_for_test(
+            bot._response_runner,
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$event",),
@@ -554,7 +558,7 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         ),
     ):
         async with response_span(runner, request):
-            generation = await runner._process_and_respond_streaming(request)
+            generation = await process_and_respond_for_test(runner, request, streaming=True)
 
     assert generation.delivery.event_id == "$response"
     assert generation.delivery.response_text == "stream chunk"

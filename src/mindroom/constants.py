@@ -622,17 +622,10 @@ def _trusted_tool_runtime_env_layers(
 def _isolated_runtime_env_layers(
     runtime_paths: RuntimePaths,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    env_file_values = {
-        key: value
-        for key, value in runtime_paths.env_file_values.items()
-        if runtime_env_policy.is_isolated_worker_runtime_env_name(key)
-    }
-    process_env = {
-        key: value
-        for key, value in runtime_paths.process_env.items()
-        if runtime_env_policy.is_isolated_worker_runtime_env_name(key)
-    }
-    return process_env, env_file_values
+    return (
+        runtime_env_policy.isolated_worker_runtime_env(runtime_paths.process_env),
+        runtime_env_policy.isolated_worker_runtime_env(runtime_paths.env_file_values),
+    )
 
 
 def _shell_extra_env_patterns(extra_env_passthrough: str | None) -> tuple[str, ...]:

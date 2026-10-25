@@ -85,6 +85,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     message_origin,
     patch_response_runner_module,
+    process_and_respond_for_test,
     push_stream_chunk,
     replace_response_runner_deps,
     request_envelope,
@@ -2330,7 +2331,7 @@ class TestStreamingBehavior:
             ),
         ):
             async with response_span(runner, request):
-                generation = await runner._process_and_respond_streaming(request)
+                generation = await process_and_respond_for_test(runner, request, streaming=True)
 
         assert generation.delivery.event_id == "$stream_1"
         assert sent_contents
@@ -2499,7 +2500,8 @@ class TestStreamingBehavior:
                 typing_indicator=_noop_typing_indicator,
             ),
         ):
-            generation = await bot._response_runner._process_and_respond(
+            generation = await process_and_respond_for_test(
+                bot._response_runner,
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),

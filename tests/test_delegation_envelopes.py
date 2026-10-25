@@ -14,9 +14,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import _drive_delegations
-from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.records import DelegationRecordOwner
-from mindroom.delegation.state import DelegationState
+from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus

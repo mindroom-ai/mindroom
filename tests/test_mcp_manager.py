@@ -4776,6 +4776,8 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
             runtime_paths,
             execution_identity=worker_target.execution_identity,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         await manager.shutdown()
@@ -5195,6 +5197,8 @@ async def test_oauth_mcp_catalog_projection_hides_function_colliding_with_deferr
             runtime_paths,
             execution_identity=worker_target.execution_identity,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         await manager.shutdown()
@@ -5255,6 +5259,8 @@ async def test_failed_deferred_non_oauth_mcp_server_is_left_out_of_agent_constru
         runtime_paths,
         execution_identity=None,
         include_interactive_questions=False,
+        knowledge=None,
+        active_model_name=None,
     )
     tool_names = [toolkit.name for toolkit in agent.spec.toolkits]
     assert "mcp_demo" not in tool_names
@@ -5313,6 +5319,8 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
             runtime_paths,
             execution_identity=None,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         await manager.shutdown()

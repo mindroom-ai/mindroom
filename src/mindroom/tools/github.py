@@ -58,7 +58,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.RUNTIME_CONFIG,
     ),
-    docs_url="https://docs.agno.com/tools/toolkits/others/github",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#github",
     function_names=(
         "assign_issue",
         "close_issue",

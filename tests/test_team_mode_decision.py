@@ -14,10 +14,12 @@ from unittest.mock import patch
 import nio
 import pytest
 
+from mindroom.authorization import get_available_responders_in_room
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.llm.errors import ProviderError
+from mindroom.matrix.identity import MatrixID
 from mindroom.teams.formation import (
     TeamOutcome,
     TeamResolution,
@@ -62,7 +64,10 @@ async def _select_team_mode_for_test(message: str, agent_names: list[str], confi
 
 
 def decide_team_formation_for_test(*, config: Config, room: nio.MatrixRoom, **kwargs: object) -> TeamResolution:
-    """Run team-formation logic with the test config's bound runtime context."""
+    """Run team-formation logic for a main-timeline message in a group room, with the options a test names.
+
+    The sender sees every responder in ``room`` unless a test names ``available_responders_in_room``.
+    """
     runtime_paths = runtime_paths_for(config)
     if not room.users:
         # Team-formation tests should default to all configured agents being visible in the room.
@@ -70,7 +75,13 @@ def decide_team_formation_for_test(*, config: Config, room: nio.MatrixRoom, **kw
             room,
             [agent_id.full_id for agent_id in entity_ids(config, runtime_paths).values() if agent_id is not None],
         )
-    return decide_team_formation(config=config, room=room, runtime_paths=runtime_paths, **kwargs)
+    turn_context: dict[str, object] = {
+        "is_dm_room": False,
+        "is_thread": False,
+        "available_responders_in_room": get_available_responders_in_room(room, config, runtime_paths),
+        "materializable_agent_names": None,
+    }
+    return decide_team_formation(config=config, runtime_paths=runtime_paths, **(turn_context | kwargs))
 
 
 def _agent_names(ids: list[object], config: Config) -> list[str]:
@@ -304,6 +315,21 @@ class TestShouldFormTeam:
 
         assert result.outcome is TeamOutcome.TEAM
         assert _agent_names(result.eligible_members, mock_config) == ["email", "phone", "research"]
+        assert result.mode == TeamMode.COLLABORATE
+
+    def test_a_thread_team_collaborates_when_its_message_tags_only_entities_that_cannot_join(self, mock_config):
+        """Tags that name no teamable agent leave the thread's team, which collaborates as any thread team does."""
+        ids = entity_ids(mock_config, runtime_paths_for(mock_config))
+        result = decide_team_formation_for_test(
+            tagged_agents=[MatrixID.parse("@mindroom_unknown:localhost"), MatrixID.parse("@alice:localhost")],
+            agents_in_thread=[ids["research"], ids["analyst"]],
+            all_mentioned_in_thread=[],
+            room=_matrix_room(mock_config),
+            config=mock_config,
+        )
+
+        assert result.outcome is TeamOutcome.TEAM
+        assert _agent_names(result.eligible_members, mock_config) == ["research", "analyst"]
         assert result.mode == TeamMode.COLLABORATE
 
 

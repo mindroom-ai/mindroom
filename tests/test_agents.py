@@ -201,7 +201,7 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
         config,
         runtime_paths_for(config),
         execution_identity=execution_identity,
-        **kwargs,
+        **({"knowledge": None, "active_model_name": None} | kwargs),
     )
 
 
@@ -832,6 +832,8 @@ def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
         runtime_paths=runtime_paths,
         execution_identity=identity,
         supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     toolkits = {tool.name: tool for tool in agent.spec.toolkits}
@@ -3847,6 +3849,8 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=alice_identity,
+        knowledge=None,
+        active_model_name=None,
     )
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
@@ -3859,6 +3863,8 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=alice_identity,
+        knowledge=None,
+        active_model_name=None,
     )
 
     bob_agent = create_agent(
@@ -3866,6 +3872,8 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=bob_identity,
+        knowledge=None,
+        active_model_name=None,
     )
     bob_worker_key = resolve_worker_key("user", bob_identity)
     assert bob_worker_key is not None
@@ -3918,6 +3926,8 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert "Template user." not in _role(agent)
@@ -3960,6 +3970,8 @@ def test_create_agent_loads_private_workspace_skills(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert agent.prompt.skills_block is not None
@@ -3979,35 +3991,16 @@ def test_create_agent_private_root_requires_execution_identity(
     )
 
     with pytest.raises(ValueError, match="requires an active execution identity"):
-        create_agent("general", config=config, runtime_paths=_runtime_paths(tmp_path), execution_identity=None)
-
-    assert not (tmp_path / "mind_data").exists()
-
-
-def test_create_agent_disabled_tool_names_omit_resolved_tools(
-    tmp_path: Path,
-) -> None:
-    """Call-scoped agent construction can omit mutating tools from borrowed agents."""
-    config = _test_config()
-    config.agents["general"].tools = ["memory", "calculator"]
-    runtime_paths = _runtime_paths(tmp_path)
-    config = _bind_runtime_paths(config, runtime_paths)
-    built_tools: list[str] = []
-
-    def fake_build_agent_toolkit(tool_name: str, **_kwargs: object) -> None:
-        built_tools.append(tool_name)
-
-    with patch("mindroom.agents.build_agent_toolkit", side_effect=fake_build_agent_toolkit):
         create_agent(
             "general",
             config=config,
-            runtime_paths=runtime_paths,
+            runtime_paths=_runtime_paths(tmp_path),
             execution_identity=None,
-            disabled_tool_names=frozenset({"memory"}),
+            knowledge=None,
+            active_model_name=None,
         )
 
-    assert "calculator" in built_tools
-    assert "memory" not in built_tools
+    assert not (tmp_path / "mind_data").exists()
 
 
 def test_tool_function_filter_prunes_resolved_functions(tmp_path: Path) -> None:
@@ -4318,6 +4311,8 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
             runtime_paths=runtime_paths,
             execution_identity=None,
             disable_runtime_capabilities=True,
+            knowledge=None,
+            active_model_name=None,
         )
 
     assert built_tools == []
@@ -4370,6 +4365,8 @@ def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_
         execution_identity=identity,
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert agent.spec.toolkits == ()
@@ -5509,12 +5506,21 @@ def test_team_member_matches_solo_agent_construction() -> None:
     config = _test_config()
     runtime_paths = runtime_paths_for(config)
 
-    solo = create_agent("calculator", config, runtime_paths, execution_identity=None)
+    solo = create_agent(
+        "calculator",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     [member] = materialize_exact_team_members(
         ["calculator"],
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     ).builds
     assert member.prompt.role == solo.prompt.role
     assert (member.spec.id, member.spec.name) == (solo.spec.id, solo.spec.name)

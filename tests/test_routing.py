@@ -37,6 +37,8 @@ from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.bot import AgentBot
     from mindroom.matrix.client import ResolvedVisibleMessage
 
@@ -53,15 +55,17 @@ async def suggest_responder_for_message(
     message: str,
     agents: list[MatrixID],
     config: Config,
-    thread_history: list[ResolvedVisibleMessage] | None = None,
+    thread_history: Sequence[ResolvedVisibleMessage] = (),
 ) -> str | None:
-    """Run routing with the test config's bound runtime context."""
+    """Run routing for a message in a room's main timeline with the test config's bound runtime context."""
     return await mindroom.routing.suggest_responder_for_message(
         message,
         agents,
         config,
         runtime_paths_for(config),
         thread_history,
+        room_id="!room:localhost",
+        thread_id=None,
     )
 
 

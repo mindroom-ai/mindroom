@@ -33,9 +33,9 @@ async def request_compaction_before_next_reply(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-    active_model_name: str | None = None,
-    room_id: str | None = None,
-    session_state: dict[str, object] | None = None,
+    active_model_name: str | None,
+    room_id: str | None,
+    session_state: dict[str, object] | None,
 ) -> str:
     """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to.
 
@@ -44,7 +44,7 @@ async def request_compaction_before_next_reply(
     request is also recorded in it, in place.
     """
     # An agent scope's id is its agent; an ad-hoc team has no authored settings of its own.
-    entity_name = scope.scope_id if scope.kind == "agent" or scope.scope_id in config.teams else None
+    entity_name = scope.scope_id if scope.kind == "agent" else config.configured_team_name(scope.scope_id)
     runtime_model = config.resolve_runtime_model(
         entity_name=entity_name,
         active_model_name=active_model_name,

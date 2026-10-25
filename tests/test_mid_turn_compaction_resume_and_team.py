@@ -193,6 +193,8 @@ def _resumable(
         execution_identity=None,
         history_storage=store,
         supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
     )
     session = store.load_session("session-1", "agent") or new_scope_session(
         session_id="session-1",
