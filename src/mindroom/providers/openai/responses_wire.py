@@ -130,15 +130,15 @@ def system_text_digest(messages: Sequence[Message]) -> str:
 
 
 def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> bool:
-    """Return whether a request for ``messages`` can continue the stored response that recorded ``provider_data``.
+    """Return whether a request for ``messages`` can continue the response that recorded ``provider_data``.
 
-    The provider keeps that response's context, including the system text its request sent or continued, and a
-    continuing request never resends it, so the response continues only when that system text is the request's.
+    The provider keeps a stored response's context, including the system text its request sent or continued, and a
+    continuing request never resends it, so the response continues only when that system text is the request's. Only
+    a stored response records its digest, so an unstored one never continues.
     Sending the system text as ``instructions``, which a chain does not carry over, would keep the chain, but
     ``instructions`` cannot hold the explicit prompt-cache breakpoint of the shared system prefix, so a changed system
     text replays the history instead.
     """
-    request_digest = system_text_digest(messages)
     # LEGACY_COMPAT: Stored Responses replies without the digest of their system text.
     # Legacy format: an assistant message whose ``provider_data`` records a ``response_id`` but no
     # ``mindroom_system_sha256``.
@@ -146,7 +146,7 @@ def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> 
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once, with the current system text, and continues the response it stores from then on.
     # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_system_digest_replays_once
-    return provider_data.get(_STORED_KEY) is not False and provider_data.get(_SYSTEM_DIGEST_KEY) == request_digest
+    return provider_data.get(_SYSTEM_DIGEST_KEY) == system_text_digest(messages)
 
 
 def responses_replay(
