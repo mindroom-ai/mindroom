@@ -27,7 +27,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
-from tests.agno_parity.prompt_scenarios import message_dict
+from tests.agno_parity.golden_files import turn_message
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -92,9 +92,9 @@ async def test_a_prompt_is_sent_under_its_rendered_system_message(structured_out
         instructions=("Answer briefly.", "Use the evidence."),
         output_format_prompt=output_format_prompt(capabilities, _Verdict),
     )
-    assert [message_dict(message) for message in request.messages] == [
-        message_dict(render_system_message(spec)),
-        message_dict(Message(role="user", content="Is it raining?")),
+    assert [turn_message(message) for message in request.messages] == [
+        turn_message(render_system_message(spec)),
+        turn_message(Message(role="user", content="Is it raining?")),
     ]
     assert request.output_schema is _Verdict
     assert ("Provide your output as a JSON" in str(request.messages[0].content)) is json_prompt

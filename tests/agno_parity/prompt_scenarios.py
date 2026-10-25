@@ -299,11 +299,6 @@ class Scenario:
     turn: Callable[[Path], AgentTurn] | None = None
 
 
-def message_dict(message: OwnedMessage) -> dict[str, Any]:
-    """Return a request message as the prompt goldens record it: a turn without its usage, whose timings vary."""
-    return {key: value for key, value in turn_message(message).items() if key != "metrics"}
-
-
 def output_schema_dict(schema: type[BaseModel] | None) -> dict[str, Any] | None:
     """Return a request's output schema as the goldens record it: its class and its JSON schema."""
     if schema is None:
@@ -316,7 +311,7 @@ def call_dict(call: ModelCall) -> dict[str, Any]:
     return {
         "model": {"id": call.model_id, "provider": call.model_provider},
         "stream": call.stream,
-        "messages": [message_dict(message) for message in call.messages],
+        "messages": [turn_message(message) for message in call.messages],
         "tools": [tool_definition(tool) for tool in call.tools],
         "tool_choice": call.tool_choice,
         "output_schema": output_schema_dict(call.output_schema),

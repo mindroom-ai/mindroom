@@ -88,15 +88,13 @@ def test_regenerating_writes_every_family_and_lists_the_files_it_changed(
     unchanged.write_text(render({"same": True}), encoding="utf-8")
     families = ("provider_goldens", "prompt_goldens", "tool_goldens", "knowledge_goldens", "event_goldens")
     for name in families:
-        monkeypatch.setattr(regenerate_goldens, name, lambda name=name: {tmp_path / f"{name}.json": {"family": name}})
-    monkeypatch.setattr(regenerate_goldens, "event_goldens", lambda: {unchanged: {"same": True}})
+        goldens = {tmp_path / f"{name}.json": {"family": name}, unchanged: {"same": True}}
+        monkeypatch.setattr(regenerate_goldens, name, lambda goldens=goldens: goldens)
 
     changed = regenerate_goldens.regenerate()
 
-    assert changed == [tmp_path / f"{name}.json" for name in families[:-1]]
-    assert [(tmp_path / f"{name}.json").read_text(encoding="utf-8") for name in families[:-1]] == [
-        render({"family": name}) for name in families[:-1]
-    ]
+    assert changed == [tmp_path / f"{name}.json" for name in families]
+    assert [path.read_text(encoding="utf-8") for path in changed] == [render({"family": name}) for name in families]
 
 
 def test_nothing_connects_while_the_goldens_regenerate() -> None:
