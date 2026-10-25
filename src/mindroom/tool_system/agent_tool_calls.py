@@ -258,7 +258,8 @@ class PreparedAgentToolCatalog:
                 with self.execution_context():
                     toolkit = await deferred.materialize()
                 await connect_toolkits((toolkit,), self._closes)
-                # Every function a deferred toolkit materializes is reached under its name.
+                # Every function a deferred toolkit materializes is reached under the deferred toolkit's registered
+                # name, not the function's authored ``toolkit``, which differs for an implied tool.
                 self._prepare(toolkit, toolkit.functions, deferred.name)
                 del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
