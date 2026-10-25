@@ -24,6 +24,7 @@ from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.execution_preparation import render_prepared_messages_text
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
@@ -1403,6 +1404,30 @@ async def test_a_denied_resume_shows_the_saved_document_before_the_member_answer
     assert published[0] == (0, paused.response_text)
     assert published[-1][1] == result.response_text
     assert "I did not touch it." in result.response_text
+
+
+@pytest.mark.asyncio
+async def test_a_team_request_logs_the_messages_its_leader_was_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team request's logged full prompt is the text of the leader's messages as sent, as an agent request's is."""
+    logged: list[object] = []
+
+    async def log_full_prompt() -> None:
+        logged.append(current_llm_request_log_context().get("full_prompt"))
+
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[answer("First answer."), [Await(log_full_prompt), *answer("Second answer.")]],
+    )
+    await team.respond(message="First question")
+    await team.respond(message="Second question")
+
+    sent = [message for message in team.models["default"].requests[-1].messages if message.role != "system"]
+    assert "assistant" in {message.role for message in sent}
+    assert logged == [render_prepared_messages_text(sent)]
 
 
 @pytest.mark.asyncio
