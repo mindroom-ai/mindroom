@@ -1147,7 +1147,7 @@ async def test_sliding_join_of_an_unconfigured_room_keeps_it_subscribed_until_ni
             await asyncio.wait_for(subscribed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             # Room setup refreshes the configured subscriptions while the join waits for the room's state.
             refresh = asyncio.create_task(bot.ensure_rooms())
-            # Unordered against the join, the refresh would drop the room's subscription within these steps.
+            # A refresh that subscribed the configured rooms alone would drop the joined room within these steps.
             for _ in range(100):
                 if refresh.done():
                     break
@@ -1183,3 +1183,36 @@ async def test_sliding_reported_join_outside_the_list_subscribes_the_room_nio_ca
         assert await asyncio.wait_for(joining, timeout=SETTLE_TIMEOUT_SECONDS) is True
 
     assert joined == [ROOM]
+
+
+@pytest.mark.asyncio
+async def test_sliding_restart_after_an_interrupted_join_lets_later_membership_commands_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A join nio sent before a restart stays unobserved until a sync reports its room, which Sliding must subscribe.
+
+    The process stopped right after nio's join of an unconfigured room outside the room list, before anything
+    subscribed it. Every later membership command first waits for that join's observation.
+    """
+    bot = _agent_bot(tmp_path)
+    bot.rooms = []
+    joined: list[str] = []
+    request = _sliding_homeserver(bot.agent_user.user_id, joined)
+    async with _owned_session(bot, DurableSyncConfig(sliding=SlidingSyncConfig())) as session:
+        session._transport.request = request
+        assert await session.change_membership(
+            operation_id=uuid4(),
+            room_id=ROOM,
+            previous_membership=None,
+            previous_epoch=0,
+            current_membership="join",
+        )
+    assert joined == [ROOM]
+
+    other = "!other:example.org"
+    async with _sliding_bot_syncing(bot, monkeypatch, request):
+        joining = AgentBot.change_local_membership(bot, other, "join")
+        assert await asyncio.wait_for(joining, timeout=SETTLE_TIMEOUT_SECONDS) is True
+
+    assert joined == [ROOM, other]

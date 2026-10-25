@@ -11,7 +11,6 @@ from nio.durable import DurableSync
 
 from mindroom.event_journal import RoomMembershipPosition
 from mindroom.matrix.durable_membership import change_local_membership
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -31,7 +30,7 @@ async def _change(
     session: Mock,
     target: str,
     position: RoomMembershipPosition | None,
-    subscribe: Callable[[str], Awaitable[None]],
+    subscribe: Callable[[], Awaitable[None]],
 ) -> bool:
     return await change_local_membership(
         session,
@@ -40,7 +39,7 @@ async def _change(
         target_membership=target,
         read_position=AsyncMock(return_value=position),
         admission_progress=asyncio.Event(),
-        subscribe_joined_room=subscribe,
+        subscribe_awaited_rooms=subscribe,
     )
 
 
@@ -55,40 +54,36 @@ async def test_a_join_whose_membership_ends_before_nio_accepts_sends_fails() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("target", "position", "ready", "expected"),
+    ("target", "position", "expected"),
     [
-        ("join", None, False, [f"wait {ROOM}", f"subscribe {ROOM}", f"wait {ROOM}"]),
-        ("join", RoomMembershipPosition("join", 0), False, [f"wait {ROOM}", f"subscribe {ROOM}", f"wait {ROOM}"]),
-        ("join", None, True, [f"wait {ROOM}"]),
-        ("join", RoomMembershipPosition("join", 0), True, [f"wait {ROOM}"]),
-        ("leave", RoomMembershipPosition("join", 0), False, []),
+        ("join", None, ["subscribe", "observed", "join", "subscribe", "ready"]),
+        ("join", RoomMembershipPosition("join", 0), ["subscribe", "observed", "subscribe", "ready"]),
+        ("leave", RoomMembershipPosition("join", 0), ["subscribe", "observed", "leave"]),
     ],
-    ids=["sent-join", "reported-join", "sent-join-sendable", "reported-join-sendable", "leave"],
+    ids=["sent-join", "reported-join", "leave"],
 )
-async def test_a_join_subscribes_its_room_only_when_nio_cannot_send_to_it_yet(
+async def test_each_wait_for_a_sync_follows_a_subscription_of_the_rooms_nio_awaits(
     target: str,
     position: RoomMembershipPosition | None,
-    ready: bool,
     expected: list[str],
 ) -> None:
-    """Sliding Sync may reach a joined room through neither its list nor a subscription, and a ready room needs none."""
+    """The previous command's observation and a join's room state both need a sync that reports the room."""
     session = _session(ready=True)
     steps: list[str] = []
-    room_ready = asyncio.Event()
-    if ready:
-        room_ready.set()
 
-    async def subscribe(room_id: str) -> None:
-        steps.append(f"subscribe {room_id}")
-        room_ready.set()
+    async def subscribe() -> None:
+        steps.append("subscribe")
 
-    async def wait_for_room_ready(room_id: str) -> bool:
-        steps.append(f"wait {room_id}")
-        await room_ready.wait()
-        return True
+    def record(step: str, result: object) -> Callable[..., Awaitable[object]]:
+        async def side_effect(*_args: object, **_kwargs: object) -> object:
+            steps.append(step)
+            return result
 
-    session.wait_for_room_ready.side_effect = wait_for_room_ready
+        return side_effect
 
-    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        assert await _change(session, target, position, subscribe) is True
+    session.wait_for_membership_idle.side_effect = record("observed", None)
+    session.change_membership.side_effect = record(target, True)
+    session.wait_for_room_ready.side_effect = record("ready", True)
+
+    assert await _change(session, target, position, subscribe) is True
     assert steps == expected

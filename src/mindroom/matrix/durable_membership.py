@@ -12,25 +12,6 @@ from mindroom.event_journal.models import RoomMembershipPosition
 _OPERATION_NAMESPACE = UUID("0bd4e975-c3e9-5b10-8d46-68fdda1adc07")
 
 
-async def _wait_until_sendable(
-    session: DurableSync,
-    room_id: str,
-    subscribe: Callable[[str], Awaitable[None]],
-) -> bool:
-    """Wait until nio can send to the joined room, subscribing the room first only when it cannot yet.
-
-    Sliding Sync delivers a room's state only through its room list or a subscription, and a joined room may be in
-    neither. nio answers at once for a room it can already send to, so a zero timeout tells that room apart without
-    touching the subscriptions.
-    """
-    try:
-        async with asyncio.timeout(0):
-            return await session.wait_for_room_ready(room_id)
-    except TimeoutError:
-        await subscribe(room_id)
-    return await session.wait_for_room_ready(room_id)
-
-
 def _require_command(room_id: str, target_membership: str) -> None:
     if type(room_id) is not str or not room_id:
         message = "room_id must be a nonempty str"
@@ -48,7 +29,7 @@ async def change_local_membership(
     target_membership: str,
     read_position: Callable[[str], Awaitable[RoomMembershipPosition | None]],
     admission_progress: asyncio.Event,
-    subscribe_joined_room: Callable[[str], Awaitable[None]],
+    subscribe_awaited_rooms: Callable[[], Awaitable[None]],
     is_authorized: Callable[[], bool] | None = None,
 ) -> bool:
     """Wait for retained source work and retry commands whose position changed.
@@ -61,12 +42,16 @@ async def change_local_membership(
     A join, including one the producer already reports, returns True only once
     nio can send to the room, and False if the room's membership ends first:
     nio refuses plaintext sends into a joined room until a sync delivers the
-    room's complete state. A join whose room nio cannot send to yet first
-    passes the room to ``subscribe_joined_room``, so a Sliding source delivers
-    that state even outside its room list.
+    room's complete state.
+
+    Both waits need a sync to report a room, so each first calls
+    ``subscribe_awaited_rooms``: a Sliding source reports a room only through
+    its room list or a subscription, and the room a join resets, or one whose
+    join a restart left unobserved, may be in neither.
     """
     _require_command(room_id, target_membership)
     while True:
+        await subscribe_awaited_rooms()
         await session.wait_for_membership_idle()
         admission_progress.clear()
         admitted = await read_position(room_id)
@@ -104,4 +89,7 @@ async def change_local_membership(
         # failure at the same settled position remains a failure for the caller.
         if await read_position(room_id) == admitted and await session.next_batch() is None:
             return False
-    return target_membership == "leave" or await _wait_until_sendable(session, room_id, subscribe_joined_room)
+    if target_membership == "leave":
+        return True
+    await subscribe_awaited_rooms()
+    return await session.wait_for_room_ready(room_id)

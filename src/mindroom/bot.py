@@ -1329,11 +1329,7 @@ class AgentBot:
                 target_membership=target_membership,
                 read_position=self.journal_principal().ingestion_membership_position,
                 admission_progress=self._ingestion_admission_progress,
-                subscribe_joined_room=lambda joined: subscribe_sliding_rooms(
-                    session,
-                    self.config,
-                    (*self.rooms, joined),
-                ),
+                subscribe_awaited_rooms=lambda: subscribe_sliding_rooms(session, self.config, self.rooms),
                 is_authorized=is_authorized,
             )
         if changed and target_membership == "join" and self.client is not None:
@@ -1739,11 +1735,8 @@ class AgentBot:
         """
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
-        session = self._ingestion_session
-        if session is not None:
-            # A join waiting for its room's state holds this lock with that room subscribed.
-            async with self._local_membership_lock:
-                await subscribe_sliding_rooms(session, self.config, self.rooms)
+        if self._ingestion_session is not None:
+            await subscribe_sliding_rooms(self._ingestion_session, self.config, self.rooms)
 
     async def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""

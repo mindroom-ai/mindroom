@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from nio.durable import DurableSyncConfig, SlidingSyncConfig
@@ -36,12 +37,29 @@ def _sliding_sync_room_subscriptions(room_ids: Iterable[str], timeline_limit: in
     return {room_id: _sliding_room_config(timeline_limit) for room_id in room_ids if room_id.startswith("!")}
 
 
+async def _awaits_room_state(session: DurableSync, room_id: str) -> bool:
+    """Return whether nio still waits for a sync to deliver this joined room's state; otherwise it answers at once."""
+    try:
+        async with asyncio.timeout(0):
+            await session.wait_for_room_ready(room_id)
+    except TimeoutError:
+        return True
+    return False
+
+
 async def subscribe_sliding_rooms(session: DurableSync, config: Config, room_ids: Iterable[str]) -> None:
-    """Make a Sliding source deliver exactly these rooms beyond its room list; a Classic source syncs every room."""
-    if config.matrix_sync.mode == "sliding":
-        await session.update_sliding_subscriptions(
-            _sliding_sync_room_subscriptions(room_ids, config.matrix_sync.sliding_timeline_limit),
-        )
+    """Subscribe a Sliding source to these rooms and to each joined room whose state nio still waits for.
+
+    Sliding Sync reports a room only through its room list or a subscription, so a joined room outside the list,
+    such as one a join just reset or one whose join a restart left unobserved, needs a subscription until its state
+    arrives; a room nio can already send to needs none. A Classic source syncs every room.
+    """
+    if config.matrix_sync.mode != "sliding":
+        return
+    awaited = [room_id for room_id in tuple(session.client.rooms) if await _awaits_room_state(session, room_id)]
+    await session.update_sliding_subscriptions(
+        _sliding_sync_room_subscriptions((*room_ids, *awaited), config.matrix_sync.sliding_timeline_limit),
+    )
 
 
 def bot_ingestion_config(
