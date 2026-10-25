@@ -414,3 +414,4 @@ _.save_interrupted_record  # Storage v2 interrupted-record save (P4); called fro
 _.patch_run_metadata  # Storage v2 metadata patch (P2); called from the storage cutover on (src/mindroom/session_storage/store_next.py)
 _.rewrite_run_messages  # Storage v2 message rewrite (P3); called from the storage cutover on (src/mindroom/session_storage/store_next.py)
 _.delete_runs  # Storage v2 run discard; called from the storage cutover on (src/mindroom/session_storage/store_next.py)
+write_conversion_backup  # Backup the storage v2 conversion, still to come, takes (src/mindroom/session_storage/legacy_agno3_backup.py)
