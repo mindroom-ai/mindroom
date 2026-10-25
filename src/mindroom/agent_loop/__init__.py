@@ -1,1 +1,5 @@
-"""The agent loop: the request and tool loop shared by agents, team leaders, and skill reviews, agent runs, and approval resumes."""
+"""The agent loop shared by agents, team leaders, and skill reviews.
+
+It holds the request and tool loop, the agent runs and approval resumes over it, system-prompt rendering, structured
+output, the output limit, and one-shot helper calls.
+"""
