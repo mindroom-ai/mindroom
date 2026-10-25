@@ -97,6 +97,7 @@
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -120,9 +121,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -142,7 +145,8 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },

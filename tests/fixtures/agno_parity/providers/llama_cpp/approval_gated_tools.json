@@ -22,6 +22,7 @@
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -45,7 +46,8 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
         "approval_type": "mindroom_policy",
@@ -64,9 +66,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": true
+        "requires_confirmation": true,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Run a task with another agent and return its answer.",
         "external_execution": true,
         "name": "run_subagent",
@@ -87,7 +91,8 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },

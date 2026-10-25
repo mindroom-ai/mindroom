@@ -371,23 +371,6 @@ def output_schema_from_golden(encoded: dict[str, Any] | None) -> type[BaseModel]
     return schema
 
 
-def tool_spec_from_dict(tool: dict[str, Any]) -> ToolSpec:
-    """Return the definition of one ``Function.to_dict()`` dict.
-
-    The capture rebuilt each tool with Agno's ``Function.from_dict``, which defaulted the approval flags to False,
-    so a golden tool without them stands for False; every other omitted field stays None.
-    """
-    return ToolSpec(
-        name=tool["name"],
-        description=tool.get("description"),
-        parameters=tool.get("parameters") or {},
-        strict=tool.get("strict"),
-        requires_confirmation=tool.get("requires_confirmation", False),
-        external_execution=tool.get("external_execution", False),
-        approval_type=tool.get("approval_type"),
-    )
-
-
 def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | None = None) -> ModelRequest:
     """Return the owned request a golden's input describes.
 
@@ -398,7 +381,7 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
     """
     unhandled = set(case_input) - _HANDLED_INPUT_KEYS
     assert not unhandled, f"the harness does not know how to send golden input {sorted(unhandled)}"
-    tools = [tool_spec_from_dict(tool) for tool in case_input["tools"]]
+    tools = [ToolSpec(**tool) for tool in case_input["tools"]]
     if (tool_jobs := case_input.get("tool_jobs")) is not None:
         tools = list(project_definitions(tools, frozenset(tool_jobs["managed"])))
     if case_input.get("provider_tools_disabled"):

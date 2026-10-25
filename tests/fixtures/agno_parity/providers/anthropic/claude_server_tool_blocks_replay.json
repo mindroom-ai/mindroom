@@ -131,6 +131,7 @@
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -154,9 +155,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Look up one order by id.",
         "external_execution": false,
         "name": "lookup_order",
@@ -171,9 +174,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Email the invoice for one order.",
         "external_execution": false,
         "name": "send_invoice",
@@ -188,7 +193,8 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
