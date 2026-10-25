@@ -159,7 +159,9 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
             metadata={},
         ),
     )
-    storage.save_runs(live_session, [_completed_run("run-empty", None)])
+    loop_session = ConversationSession(session_id="session-1", kind="agent", owner_id="general")
+    storage.save_run(loop_session, _completed_run("run-empty", None), record_usage=False)
+    assert [run.run_id for run in live_session.runs] == ["run-good"]
 
     discard_empty_completed_run(
         scope_context=ScopeSessionContext(

@@ -54,7 +54,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, seed_session_row
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -98,7 +98,7 @@ async def _delegation_catalog(
     max_tool_calls_per_turn=None,
     approval_handler=None,
 ):
-    """Return a catalog whose turn may delegate: a stored session, the live parent run, and its requester context."""
+    """Return a delegating turn's catalog: a stored session, the parent run and its checkpoint, and its requester."""
     entity_ids(config, paths)
     catalog = await _catalog(tmp_path, toolkits, max_tool_calls_per_turn=max_tool_calls_per_turn)
     runtime = _delegate_runtime_context(config, paths)
@@ -112,7 +112,7 @@ async def _delegation_catalog(
     identity = build_execution_identity_from_runtime_context(runtime)
     store = create_session_storage("helper", config, paths, identity)
     catalog.store = store
-    store.ensure_session_row(catalog.session)
+    seed_session_row(store, catalog.session)
     catalog.record = RunRecord(
         run_id="run",
         session_id="session",
@@ -120,6 +120,8 @@ async def _delegation_catalog(
         user_id=identity.requester_id,
         status=RunStatus.running,
     )
+    # A delegating CLI call runs inside a Bash call, which first saved the run as its cancelled checkpoint.
+    store.save_run(catalog.session, replace(catalog.record, status=RunStatus.cancelled), record_usage=False)
     return catalog, runtime, identity
 
 
