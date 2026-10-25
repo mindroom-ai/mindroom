@@ -19871,6 +19871,7 @@ MindRoom keeps the allowlist it started with until its own pod restarts, so a re
 
 Agents call `request_network_access(hostnames, ttl_minutes, reason)` with every blocked external hostname the task needs, up to 20 per call, and one Matrix approval covers the whole batch.
 Hostnames must be exact external DNS names; schemes, ports, paths, wildcards, IP literals, single-label names, `localhost`, cluster-local names, and cloud metadata hostnames are rejected, and one invalid hostname rejects the whole request.
+Internationalized hostnames must be written in their `xn--` form, so the approval card shows the name the grant covers.
 Hostnames already on the static allowlist are skipped, and when every requested hostname is allowlisted the tool replies that no grant is needed without asking for approval.
 The granted TTL is the requested `ttl_minutes`, capped at the deployment maximum, and the reply says when the cap applied.
 
