@@ -84,7 +84,7 @@ from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.invocation import current_tool_call
-from mindroom.tool_system.tool_calls import record_tool_success
+from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -3826,15 +3826,15 @@ class TestTeamCompletion:
                 tool_name="demo_tool",
                 arguments={"query": "test"},
                 result={"status": "ok"},
-                duration_ms=1.0,
+                timing=ToolCallTiming(result_ready_ms=1.0),
                 agent_name="team/super_team",
+                channel=execution_identity.channel,
                 room_id=None,
                 thread_id=None,
                 reply_to_event_id=None,
                 requester_id=None,
                 session_id="session-123",
                 correlation_id=correlation_id,
-                execution_identity=execution_identity,
                 runtime_paths=runtime_paths,
             )
             yield TextDelta("Hello ")
