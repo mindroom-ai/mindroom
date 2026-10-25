@@ -183,11 +183,6 @@ _OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "matrix_syn
 class ConfigRuntimeValidationError(ValueError):
     """Runtime-aware config validation failed after Pydantic schema validation."""
 
-    def errors(self, *, include_context: bool = False) -> list[dict[str, object]]:
-        """Return one ValidationError-like payload for shared config UX code."""
-        del include_context
-        return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
-
 
 type ConfigLoadUserError = (
     ValidationError | ConfigRuntimeValidationError | AccessMigrationError | yaml.YAMLError | OSError | UnicodeError
@@ -204,21 +199,30 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
 )
 
 
+def config_validation_issues(
+    exc: Exception,
+) -> list[tuple[tuple[str | int, ...], str]]:
+    """Return the user-facing messages of one config validation exception, each with its config location."""
+    if isinstance(exc, ValidationError):
+        return [(tuple(error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
+    if isinstance(exc, ConfigRuntimeValidationError):
+        return [(("config",), str(exc))]
+    if isinstance(exc, ConfigIncludeError):
+        return [(("config",), str(exc))]
+    if isinstance(exc, yaml.YAMLError):
+        return [(("config",), f"Could not parse configuration YAML: {exc}")]
+    if isinstance(exc, UnicodeError):
+        return [(("config",), f"Could not read configuration text: {exc}")]
+    return [(("config",), f"Could not load configuration: {exc}")]
+
+
 def iter_config_validation_messages(
     exc: Exception,
 ) -> list[tuple[str, str]]:
-    """Return user-facing validation messages from one config validation exception."""
-    if isinstance(exc, ValidationError):
-        return [(" → ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
-    if isinstance(exc, ConfigRuntimeValidationError):
-        return [("config", str(exc))]
-    if isinstance(exc, ConfigIncludeError):
-        return [("config", str(exc))]
-    if isinstance(exc, yaml.YAMLError):
-        return [("config", f"Could not parse configuration YAML: {exc}")]
-    if isinstance(exc, UnicodeError):
-        return [("config", f"Could not read configuration text: {exc}")]
-    return [("config", f"Could not load configuration: {exc}")]
+    """Return the messages of ``config_validation_issues`` with each location written as text."""
+    return [
+        (" → ".join(str(part) for part in location), message) for location, message in config_validation_issues(exc)
+    ]
 
 
 def format_invalid_config_message(
