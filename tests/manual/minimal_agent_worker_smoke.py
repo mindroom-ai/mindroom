@@ -1,4 +1,4 @@
-"""Real Docker/CLI release workflow using fake credentials and a scripted SDK.
+"""Real Docker/CLI release workflow using fake credentials and a scripted model provider.
 
 Run from the repository root with ``just test-minimal-agent-worker-smoke IMAGE DIR``
 or ``uv run python -m tests.manual.minimal_agent_worker_smoke --image IMAGE --evidence-dir DIR``.
@@ -491,7 +491,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         results["steps"].append(
             "minimal subagent: Bash-only child lists tools through the agent's worker without gated ones",
         )
-        audit.capture("provider", "all-sdk-requests", json.dumps(provider.requests, indent=2, default=str))
+        audit.capture("provider", "all-model-requests", json.dumps(provider.requests, indent=2, default=str))
         audit.capture(
             "history",
             runtime.session_id,
@@ -544,7 +544,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         if not failures:
             results["status"] = "passed"
             results["steps"].append(
-                "all worker/runtime logs, presentations, traces, SDK requests and history secret-checked",
+                "all worker/runtime logs, presentations, traces, model requests and history secret-checked",
             )
         (data / "result.json").write_text(json.dumps(results, indent=2))
         print(json.dumps(results, indent=2))
