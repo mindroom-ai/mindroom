@@ -3,9 +3,11 @@
 Each row scripts the wire's answer to every request of one route and stream mode, sends one request through the
 route's real adapter inside the production pipeline, and pins how many HTTP requests it makes before it fails
 (the SDK's own retries included), the normalized error it ends with, and how the error reply the user reads begins.
-A failure that is not transient is final at once. A transient one is retried until the attempt commits, by producing
-output the caller could have shown or by starting a hosted tool that acts or costs, and is final after that; a
-stall is retried only once. A comment explains each other case.
+A failure that is not transient is final at once. After a transient failure the pipeline reissues a streamed request,
+and every request of a route that only streams, at most four times and only until the attempt commits, by producing
+output the caller could have shown or by starting a hosted tool that acts or costs; a stall it reissues only once.
+A blocking request gets only its SDK's own HTTP retries: two on the OpenAI and Anthropic SDKs, none on Gemini's and
+Ollama's. A comment explains each other case.
 Error replies follow the typed error: a rate limit reads as one, any other transient failure as temporary
 unavailability, and a request that no longer fits the context window says so.
 """
@@ -1158,7 +1160,7 @@ _GEMINI_CASES = [
     ),
 ]
 
-# Ollama retries transient failures as every other route does.
+# An Ollama stream retries transient failures as every other route's stream does.
 _OLLAMA_CASES = [
     _Case(
         "http_500",
