@@ -1356,7 +1356,7 @@ class Config(BaseModel):
         return team_name if team_name in self.teams else None
 
     def _default_history_settings(self) -> ResolvedHistorySettings:
-        """Return defaults-only replay settings for ad hoc shared team scope."""
+        """Return the defaults-only replay settings and text compaction config for an ad hoc shared team scope."""
         return ResolvedHistorySettings(
             policy=_history_policy_from_limits(
                 num_history_runs=self.defaults.num_history_runs,
@@ -1381,7 +1381,7 @@ class Config(BaseModel):
         return self._configured_entity(entity_name).display_name
 
     def _entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
-        """Return effective replay settings for one configured agent or team."""
+        """Return the effective replay settings and text compaction config for one configured agent or team."""
         entity = self._configured_entity(entity_name)
 
         num_history_runs = entity.num_history_runs
