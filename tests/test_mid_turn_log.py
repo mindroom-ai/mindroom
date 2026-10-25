@@ -6,7 +6,6 @@ turn when an edit or redaction cuts the history they built on.
 
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,21 +17,21 @@ from mindroom.history.request_messages import TurnMessages, build_request, scope
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
     append_fold,
-    ensure_scope_session_row,
     read_fold_basis,
     read_scope_seen_event_ids,
     remove_runs_answering,
+    run_folded_tool_call_ids,
 )
 from mindroom.history.summary_message import is_scope_summary, mark_summary_follows
-from mindroom.history.summary_rows import Segment, folded_tool_call_ids, segment_tool_call_ids
+from mindroom.history.summary_rows import Fold
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
-from tests.history_helpers import compact_runs, log_of
+from tests.history_helpers import compact_runs, log_of, stored_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -87,8 +86,8 @@ def _seed(storage: ConversationStore, runs: Sequence[RunRecord]) -> Conversation
     )
 
 
-def _save(storage: ConversationStore, run: AnyRunRecord, *, session: ConversationSession | None = None) -> None:
-    storage.save_runs(session or _session(run), [run])
+def _save(storage: ConversationStore, run: AnyRunRecord) -> None:
+    storage.save_run(_session(run), run, record_usage=False)
 
 
 def _fold(
@@ -97,29 +96,20 @@ def _fold(
     summary: str,
     *,
     folded: Sequence[Message] = (),
-    tools: Sequence[ToolExecution] = (),
-    member_responses: Sequence[AnyRunRecord] = (),
+    members: Sequence[str] = (),
 ) -> bool:
     """Fold the stored runs after the latest summary row and part of the running ``run``, as a mid-turn fold does."""
     scope = _TEAM_SCOPE if isinstance(run, TeamRunRecord) else _SCOPE
     session = _session(run)
     basis = read_fold_basis(storage, session, scope)
     assert basis is not None
-    ensure_scope_session_row(storage, session, scope)
     return append_fold(
         storage,
         session=session,
         scope=scope,
         basis=basis,
         summary=summary,
-        summary_model="model",
-        segment=Segment(
-            run_id=run.run_id,
-            metadata=deepcopy(run.metadata or {}),
-            messages=[message.to_dict() for message in folded],
-            tools=[tool.to_dict() for tool in tools],
-            member_responses=[member.to_dict() for member in member_responses],
-        ),
+        fold=Fold(run=run, messages=tuple(folded), member_run_ids=frozenset(members)),
     )
 
 
@@ -150,8 +140,14 @@ def test_a_fold_sorts_after_the_runs_it_covers_and_its_run_after_it(storage: Con
 
 @pytest.mark.parametrize("scope", [_SCOPE, _TEAM_SCOPE], ids=lambda scope: scope.kind)
 def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(storage: ConversationStore, scope: HistoryScope) -> None:
-    """The row a first turn's fold appends to is the kind of session the scope's runs belong to."""
-    ensure_scope_session_row(storage, _session(), scope)
+    """The row a first turn's fold creates is the kind of session the scope's runs belong to."""
+    running: AnyRunRecord = (
+        TeamRunRecord(run_id="live", team_id="crew", session_id="session", status=RunStatus.running)
+        if scope.kind == "team"
+        else _run("live", status=RunStatus.running)
+    )
+
+    assert _fold(storage, running, "S")
 
     row = storage.load_session("session", scope.kind)
     assert row is not None
@@ -186,7 +182,7 @@ def test_a_stored_paused_run_moves_after_its_fold(storage: ConversationStore) ->
     assert log_of(storage, _SCOPE.key, "session") == ["run:r1", "run:r2", "row:S", "run:paused"]
 
 
-def test_a_run_loads_without_the_messages_its_segments_hold(storage: ConversationStore) -> None:
+def test_a_run_loads_without_the_messages_its_folds_took(storage: ConversationStore) -> None:
     """A copy saved before a fold, such as a paused approval, replays only what the fold left in the run."""
     prompt = Message(role="user", content="do it")
     call = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe"}}])
@@ -202,7 +198,7 @@ def test_a_run_loads_without_the_messages_its_segments_hold(storage: Conversatio
         assert [message.content for message in loaded.runs[0].messages] == ["do it", "step after the fold"]
 
 
-def test_a_team_run_loads_without_the_messages_its_segments_hold(storage: ConversationStore) -> None:
+def test_a_team_run_loads_without_the_messages_its_folds_took(storage: ConversationStore) -> None:
     """Team sessions' folded runs load the same way."""
     prompt = Message(role="user", content="do it")
     call = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe"}}])
@@ -246,7 +242,8 @@ def test_an_edit_cuts_at_a_fold_only_for_the_message_its_turn_answered(storage: 
     assert _fold(storage, running, "S")
 
     assert not remove_runs_answering(storage, "session", _SCOPE, "$context")
-    assert log_of(storage, _SCOPE.key, "session") == ["run:r1", "row:S"]
+    # The fold stored the running run, cancelled, after its row.
+    assert log_of(storage, _SCOPE.key, "session") == ["run:r1", "row:S", "run:live"]
     assert remove_runs_answering(storage, "session", _SCOPE, "$live")
     assert log_of(storage, _SCOPE.key, "session") == ["run:r1"]
 
@@ -346,8 +343,7 @@ def test_a_fold_is_refused_when_another_compaction_appended_first(storage: Conve
         scope=_SCOPE,
         basis=basis,
         summary="S-fold",
-        summary_model="model",
-        segment=Segment(run_id="live", metadata=running.metadata or {}, messages=[], tools=[], member_responses=[]),
+        fold=Fold(run=running, messages=(), member_run_ids=frozenset()),
     )
     assert log_of(storage, _SCOPE.key, "session") == ["run:r1", "row:S-pre-reply", "run:r2"]
 
@@ -365,8 +361,7 @@ def test_a_fold_racing_a_retirement_is_refused(storage: ConversationStore) -> No
         scope=_SCOPE,
         basis=basis,
         summary="S",
-        summary_model="model",
-        segment=Segment(run_id="live", metadata={}, messages=[], tools=[], member_responses=[]),
+        fold=Fold(run=_run("live", status=RunStatus.running), messages=(), member_run_ids=frozenset()),
     )
 
 
@@ -400,7 +395,8 @@ def test_a_fold_survives_a_crash_and_a_late_pre_fold_copy_loads_without_what_it_
     loaded = _loaded(storage)
     assert loaded.summary is not None
     assert loaded.summary.text == "S"
-    assert loaded.runs == []
+    # The fold stored the running run cancelled, without what it folded, so it never replays.
+    assert [(run.run_id, run.status, run.messages) for run in loaded.runs] == [("crashed", RunStatus.cancelled, [])]
     crashed.status = RunStatus.cancelled
     _save(storage, crashed)
     stored = next(run for run in _loaded(storage).runs if run.run_id == "crashed")
@@ -435,9 +431,10 @@ def test_redacting_a_team_turn_that_folded_removes_its_member_runs(storage: Conv
         runs=[TeamRunRecord(run_id="t0", team_id="crew", session_id="session")],
     )
     seed_session(storage, team_session)
-    assert _fold(storage, team_run, "S", member_responses=[member])
+    # The member run ended, and saved, before the fold took it; the team run saves when the turn ends.
+    storage.save_run(team_session, member, record_usage=False)
+    assert _fold(storage, team_run, "S", members=["member"])
     _save(storage, team_run)
-    _save(storage, member, session=team_session)
     session = storage.load_session("session", "team")
     assert session is not None
 
@@ -447,20 +444,20 @@ def test_redacting_a_team_turn_that_folded_removes_its_member_runs(storage: Conv
     reloaded = storage.load_session("session", "team")
     assert reloaded is not None
     assert [run.run_id for run in reloaded.runs] == ["t0"]
+    assert stored_run_ids(storage, "session") == ["t0"]
 
 
-def test_a_runs_summary_rows_name_every_tool_call_its_folds_summarized(storage: ConversationStore) -> None:
+def test_a_runs_folds_name_every_tool_call_they_summarized(storage: ConversationStore) -> None:
     """Every interrupted record write reads the folded calls from the rows, so they stay out after a restart too."""
     first = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe"}}])
     second = Message(role="assistant", tool_calls=[{"id": "c2", "type": "function", "function": {"name": "probe"}}])
     _seed(storage, [])
     running = _run("live")
-    assert _fold(storage, running, "S1", folded=[first], tools=[ToolExecution(tool_call_id="execution-call")])
+    assert _fold(storage, running, "S1", folded=[first])
     assert _fold(storage, running, "S2", folded=[second])
 
-    assert segment_tool_call_ids(storage, session_id="session", run_id="live") == {"c1", "execution-call", "c2"}
-    assert segment_tool_call_ids(storage, session_id="session", run_id="other") == set()
-    assert folded_tool_call_ids({}) == set()
+    assert run_folded_tool_call_ids(storage, session_id="session", run_id="live") == {"c1", "c2"}
+    assert run_folded_tool_call_ids(storage, session_id="session", run_id="other") == set()
 
 
 def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: ConversationStore) -> None:
