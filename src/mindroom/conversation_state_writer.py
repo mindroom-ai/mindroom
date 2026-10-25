@@ -63,7 +63,6 @@ class ConversationStateWriter:
                 member_names,
                 config.agents,
                 requester_user_id=requester_user_id,
-                missing_requester_message="Private ad hoc team history scope requires requester_user_id",
             )
             or "team_"
         )
