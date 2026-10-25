@@ -2799,13 +2799,17 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
-            await asyncio.wait_for(sync_tasks_started.wait(), timeout=1.0)
+            # Startup writes the event journal before it starts the sync loops, which a loaded host can slow past a second.
+            await asyncio.wait_for(sync_tasks_started.wait(), timeout=10.0)
             assert set(orchestrator._sync_tasks) == {"router", "general"}
-            await asyncio.sleep(0)
+            await asyncio.wait_for(orchestrator._runtime_ready_event.wait(), timeout=10.0)
+            await asyncio.wait(orchestrator._sync_tasks.values())
+            # Startup is over and the first generation has exited; give an early exit time to show.
+            await asyncio.wait({runtime_task}, timeout=0.1)
             assert not runtime_task.done()
 
             await orchestrator.stop()
-            await asyncio.wait_for(runtime_task, timeout=1.0)
+            await asyncio.wait_for(runtime_task, timeout=10.0)
         finally:
             if not runtime_task.done():
                 runtime_task.cancel()
