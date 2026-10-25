@@ -43,7 +43,7 @@
       "output_tokens": 8,
       "total_tokens": 50
     },
-    "stop_reason": "length"
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {

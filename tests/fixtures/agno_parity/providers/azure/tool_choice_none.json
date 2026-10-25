@@ -100,7 +100,7 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": "stop"
+    "stop_reason": "end"
   },
   "request": {
     "body": {

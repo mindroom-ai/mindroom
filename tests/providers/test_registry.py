@@ -42,13 +42,12 @@ from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
     encoded_response,
-    expected_stop_reason,
     golden_request,
     hide_provider_environment,
     load_golden,
-    normalized_parsed,
     normalized_request,
     ordered_json,
+    parsed_turn,
     sse_response,
 )
 from tests.providers.openai_family_support import write_cli_logins
@@ -663,8 +662,7 @@ async def test_a_golden_of_every_family_replays_through_the_registry(
     assert ordered_json(request["body"]) == ordered_json(golden["request"]["body"])
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
-    assert normalized_parsed(completed.message) == golden["parsed"]
-    assert completed.stop_reason == expected_stop_reason(golden)
+    assert parsed_turn(completed) == golden["parsed"]
 
 
 @pytest.mark.asyncio

@@ -134,7 +134,7 @@
       "reasoning_tokens": 4,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {

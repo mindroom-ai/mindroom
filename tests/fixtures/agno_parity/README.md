@@ -51,7 +51,7 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | `response_raw` | `status`, `headers`, and one of `sse` (events as `{"event"?, "data"}`, where `data` is a JSON object or the literal `[DONE]`), `ndjson` (one object per line), or `json` (the body). |
 | `parsed.message` | The assistant message once the request completes, before the run loop resolves or runs its tool calls, encoded like `input.messages` and without its `metrics`. |
 | `parsed.metrics` | That message's `MessageMetrics.to_dict()`. |
-| `parsed.stop_reason` | The first of `provider_data` `stop_reason`, `finish_reason`, and `response_status`, or `null` when the route records none. |
+| `parsed.stop_reason` | The finished turn's stop reason: `end`, `tool_use`, or `output_limit`; the route's own stop reason, where it records one, stays in `provider_data`. |
 
 The harness writes each `sse` event as its `event:` and `data:` lines plus a blank line, and each `ndjson` entry as one JSON line; SDKs parse both, so the byte layout is not part of the contract.
 

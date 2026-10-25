@@ -17,7 +17,6 @@ from tests.agno_parity.golden_files import render
 from tests.providers.anthropic_family_support import FAMILIES, run_golden
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
-    expected_stop_reason,
     golden_id,
     golden_paths,
     load_golden,
@@ -45,7 +44,6 @@ async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> No
     regenerated = regenerated_golden(fixture, replay)
     assert regenerated == fixture
     assert render(regenerated) == path.read_text(encoding="utf-8")
-    assert replay.stop_reason == expected_stop_reason(fixture)
 
 
 @pytest.mark.asyncio

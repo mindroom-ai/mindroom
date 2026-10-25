@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     import pytest
 
-    from mindroom.llm.provider import ModelProvider, NativeHistoryRoute, StopReason, StreamEvent
+    from mindroom.llm.provider import ModelProvider, NativeHistoryRoute, StreamEvent
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
 
@@ -83,7 +83,6 @@ _VOLATILE_HEADERS = frozenset(
 _UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 GENERATED_ID = "<uuid4>"
 _TIMING_METRIC_KEYS = ("duration", "time_to_first_token")
-_STOP_KEYS = ("stop_reason", "finish_reason", "response_status")
 # The classes the JSON-schema structured-output goldens name, which record no module.
 _GOLDEN_SCHEMAS: dict[str, type[BaseModel]] = {
     schema.__name__: schema for schema in (_RoutingSuggestion, ScheduledWorkflow)
@@ -242,7 +241,6 @@ class Replay:
     request: dict[str, Any]
     parsed: dict[str, Any]
     events: list[StreamEvent]
-    stop_reason: StopReason | None
 
 
 def golden_paths(families: Sequence[str]) -> list[Path]:
@@ -298,18 +296,13 @@ def normalized_request(request: httpx.Request) -> dict[str, Any]:
     }
 
 
-def normalized_parsed(message: Message) -> dict[str, Any]:
-    """Return the assistant message as a turn, its usage, and the stored stop reason."""
-    message_dict = turn_message(message)
-    metrics = message_dict.pop("metrics", {})
+def parsed_turn(completed: TurnCompleted) -> dict[str, Any]:
+    """Return a finished turn as the goldens record it: its message as a turn, its usage, and its stop reason."""
+    message = turn_message(completed.message)
+    metrics = message.pop("metrics", {})
     for key in _TIMING_METRIC_KEYS:
         metrics.pop(key, None)
-    provider_data = message.provider_data or {}
-    parsed = {
-        "message": message_dict,
-        "metrics": metrics,
-        "stop_reason": next((provider_data[key] for key in _STOP_KEYS if provider_data.get(key) is not None), None),
-    }
+    parsed = {"message": message, "metrics": metrics, "stop_reason": completed.stop_reason}
     return scrub_generated_ids(_json_roundtrip(parsed))
 
 
@@ -460,16 +453,4 @@ async def replay_through_pipeline(
     await recorded[0].aread()
     completed = events[-1]
     assert isinstance(completed, TurnCompleted), f"the stream ended with {completed!r}"
-    return Replay(
-        request=normalized_request(recorded[0]),
-        parsed=normalized_parsed(completed.message),
-        events=events,
-        stop_reason=completed.stop_reason,
-    )
-
-
-def expected_stop_reason(golden: dict[str, Any]) -> StopReason:
-    """Return the normalized stop reason a golden's reply ends with: cut off by the limit, a tool call, or done."""
-    if golden["scenario"].startswith("output_limit_stop"):
-        return "output_limit"
-    return "tool_use" if golden["parsed"]["message"].get("tool_calls") else "end"
+    return Replay(request=normalized_request(recorded[0]), parsed=parsed_turn(completed), events=events)

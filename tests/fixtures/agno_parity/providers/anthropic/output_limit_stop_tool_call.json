@@ -123,7 +123,7 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": "max_tokens"
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {

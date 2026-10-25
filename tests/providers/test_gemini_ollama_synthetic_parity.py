@@ -37,7 +37,6 @@ from tests.providers.gemini_ollama_support import (
 )
 from tests.providers.golden_support import (
     comparable_metrics,
-    expected_stop_reason,
     hide_provider_environment,
     regenerated_golden,
 )
@@ -66,7 +65,6 @@ async def test_adapter_reproduces_golden(golden: Golden, tmp_path: Path, monkeyp
     regenerated = regenerated_golden(golden.data, result)
     assert regenerated == golden.data
     assert render(regenerated) == golden.path.read_text(encoding="utf-8")
-    assert result.stop_reason == expected_stop_reason(golden.data)
 
 
 def _chunks_reporting_usage(golden: Golden) -> int:

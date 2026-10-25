@@ -9,7 +9,6 @@ import pytest
 from mindroom.llm.provider import TextDelta, ToolCallReady, TurnCompleted
 from tests.agno_parity.golden_files import render
 from tests.providers.golden_support import (
-    expected_stop_reason,
     golden_id,
     golden_paths,
     load_golden,
@@ -38,7 +37,6 @@ async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> No
     regenerated = regenerated_golden(golden, replay)
     assert regenerated == golden
     assert render(regenerated) == path.read_text(encoding="utf-8")
-    assert replay.stop_reason == expected_stop_reason(golden)
 
 
 @pytest.mark.asyncio

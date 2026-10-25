@@ -48,7 +48,7 @@
       "reasoning_tokens": 7,
       "total_tokens": 61
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
