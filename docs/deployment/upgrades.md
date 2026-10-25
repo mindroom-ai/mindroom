@@ -133,6 +133,7 @@ Smaller changes that need operator action:
   In a sandbox runner, set every proxy variable, or only `all_proxy`, to the same HTTP(S) proxy, or the browser does not start.
   See [Egress Proxy for Browsers](../tools/web-scraping-and-browser.md#egress-proxy-for-browsers) for the full rules.
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
+- **Model providers**: a model whose `provider` is not one of the [supported providers](../configuration/models.md#supported-providers) fails config load, even when no agent uses it, so `mindroom run` and the dashboard do not start until you fix or delete that model in `config.yaml`; this includes models saved earlier with Together, Mistral, Perplexity, Cohere, or xAI.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
 - **MCP gateway and shared agents**: the [MCP gateway](mcp-gateway.md#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
