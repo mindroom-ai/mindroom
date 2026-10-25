@@ -467,8 +467,10 @@ def test_a_function_asking_for_prompt_instructions_loads_only_in_a_deferred_tool
     [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
     assert (warning["tool"], warning["error"]) == (
         "arxiv",
-        "Tool function 'arxiv_lookup' sets instructions for Agno to add to the system prompt, which MindRoom adds only"
-        " per toolkit; set them on the toolkit instead",
+        (
+            "Tool function 'arxiv_lookup' sets instructions for Agno to add to the system prompt, which MindRoom adds"
+            " only per toolkit; set them on the toolkit instead"
+        ),
     )
 
 
