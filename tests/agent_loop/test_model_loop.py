@@ -681,12 +681,14 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     assert len(record.metrics.details["model"]) == 1
 
 
-async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagates() -> None:
+@pytest.mark.parametrize("retried", [False, True], ids=["one-attempt", "retried-sum"])
+async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagates(retried: bool) -> None:
     async def throttle() -> None:
         msg = "slow down"
         raise RateLimited(msg, provider="Synthetic")
 
-    model = ScriptedModel([[UsageReported(usage(7, 0), final=False), Await(throttle)]])
+    # After a retry the reports add up the attempts, which the pipeline marks on them.
+    model = ScriptedModel([[UsageReported(usage(7, 0), final=False, sums_attempts=retried), Await(throttle)]])
     messages = _prompt()
     record = _record()
 
@@ -694,6 +696,10 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
         await _run(spec(model), messages, record=record)
 
     assert messages[-1].metrics == usage(7, 0)
+    assert messages[-1].provider_data == {
+        **({AGGREGATE_USAGE_KEY: True} if retried else {}),
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
     assert record.metrics is not None
     assert record.metrics.tokens.input_tokens == 7
 

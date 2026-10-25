@@ -2657,6 +2657,58 @@ class TestUserIdPassthrough:
         assert payload["context"] == {"input_tokens": estimate, "window_tokens": 100_000}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
+    async def test_a_reply_whose_retried_request_is_cut_off_shows_the_estimate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        streaming: bool,
+    ) -> None:
+        """A request whose every attempt failed mid-stream after reporting its input describes no single context.
+
+        The reply's usage bills every attempt, while its context shows the estimate instead of the attempts' sum. The
+        route only streams, as Codex does, so a blocking reply's requests are retried as a streamed reply's are.
+        """
+        config, runtime_paths = _bound(
+            tmp_path,
+            Config(
+                agents={"general": AgentConfig(display_name="General")},
+                models={"default": ModelConfig(provider="openai", id="test-model", context_window=100_000)},
+            ),
+        )
+        monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+
+        async def drop() -> None:
+            msg = "connection dropped"
+            raise ProviderUnavailable(msg, provider="OpenAI Chat")
+
+        dropped = [UsageReported(usage(700, 0), final=False), Await(drop)]
+        model = _scripted_like(
+            config,
+            runtime_paths,
+            [calls(tool_call("run_shell_command", "call-1", cmd="pwd"), metrics=usage(500, 60)), *[dropped] * 5],
+        )
+        model.capabilities = replace(model.capabilities, streams_only=True)
+        install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
+        run_metadata: dict[str, Any] = {}
+
+        await _respond(
+            make_turn_context("general", session_id="session1"),
+            config,
+            runtime_paths,
+            streaming=streaming,
+            run_metadata_collector=run_metadata,
+        )
+
+        assert len(model.requests) == 6
+        payload = run_metadata[AI_RUN_METADATA_KEY]
+        assert payload["status"] == "error"
+        assert payload["usage"]["input_tokens"] == 4000
+        estimate = payload["prepared_context"]["tokens"]
+        assert payload["context"] == {"input_tokens": estimate, "window_tokens": 100_000}
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("provider", "stored_provider"),
         [("anthropic", "Anthropic"), ("vertexai_claude", "VertexAI")],

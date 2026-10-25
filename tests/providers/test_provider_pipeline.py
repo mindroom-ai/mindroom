@@ -34,6 +34,7 @@ from mindroom.llm.provider import (
     DeferredTools,
     ModelIdentity,
     ModelRequest,
+    ReportedUsage,
     StreamProgress,
     TextDelta,
     ToolCallReady,
@@ -64,7 +65,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.llm.provider import StreamEvent
+    from mindroom.llm.provider import ModelProvider, StreamEvent
 
 _PROMPT = "Use the attached image."
 _FALLBACK_PROMPT = "Media was not inspected."
@@ -125,6 +126,12 @@ def _malformed() -> ProviderError:
 
 async def _drain(provider: WrappedProvider, request: ModelRequest) -> list[StreamEvent]:
     return [event async for event in provider.stream(request)]
+
+
+async def _drain_into(events: list[StreamEvent], provider: ModelProvider, request: ModelRequest) -> None:
+    """Drain the request's stream into ``events``, which keep what a stream that fails yielded before its failure."""
+    async for event in provider.stream(request):
+        events.append(event)  # noqa: PERF401
 
 
 @pytest.fixture(autouse=True)
@@ -329,6 +336,64 @@ async def test_a_failed_attempt_without_tokens_leaves_the_finished_turn_unmarked
         "duration": 3.5,
     }
     assert finished.message.provider_data == {"mindroom_model": {"id": "scripted"}}
+    assert [event.sums_attempts for event in events if isinstance(event, UsageReported)] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_a_request_whose_every_attempt_failed_after_billing_input_reports_usage_that_sums_attempts() -> None:
+    """From the second attempt on, every report is marked, a failed attempt's partial one forwarded as final too.
+
+    A consumer that keeps the usage of a request cut off this way therefore reads it as no single request's.
+    """
+    started = MessageMetrics(tokens=TokenCounts(input_tokens=700, total_tokens=700))
+    inner = _ScriptedProvider([[UsageReported(started, final=False), _transient()] for _ in range(5)])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+    events: list[StreamEvent] = []
+
+    with pytest.raises(ProviderUnavailable):
+        await _drain_into(events, provider, ModelRequest(messages=[_user()]))
+
+    reports = [event for event in events if isinstance(event, UsageReported)]
+    marks = [(event.final, event.sums_attempts) for event in reports]
+    assert marks == [(False, False), (True, False), *[(False, True), (True, True)] * 3, (False, True)]
+    received = ReportedUsage()
+    for event in reports:
+        received.observe(event)
+    assert received.received is not None
+    assert (received.received.tokens.input_tokens, received.sums_attempts) == (3500, True)
+
+
+@pytest.mark.asyncio
+async def test_usage_that_sums_attempts_stays_marked_when_an_outer_stage_forwards_it_again() -> None:
+    """A media retry forwards the failed attempt's partial report again unmarked, as its own first attempt's usage.
+
+    The request's reports already sum the transient retry's two attempts by then, so a consumer keeps the mark it read.
+    """
+    started = MessageMetrics(tokens=TokenCounts(input_tokens=700, total_tokens=700))
+    image_rejection = InvalidRequest(
+        "This model does not support image input",
+        provider="Scripted Chat",
+        status_code=400,
+    )
+    rejection = InvalidRequest("The request was rejected", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(started, final=False), _transient()],
+            [UsageReported(started, final=False), image_rejection],
+            [rejection],
+        ],
+    )
+    events: list[StreamEvent] = []
+
+    with pytest.raises(InvalidRequest, match="rejected"):
+        await _drain_into(events, pipeline_provider(inner), ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 3
+    received = ReportedUsage()
+    for event in events:
+        received.observe(event)
+    assert received.received is not None
+    assert (received.received.tokens.input_tokens, received.sums_attempts) == (1400, True)
 
 
 # --- Media fallback -------------------------------------------------------------------------------------------
@@ -1158,8 +1223,9 @@ async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_tu
 
     events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
-    reports = [(event.usage, event.final) for event in events if isinstance(event, UsageReported)]
-    assert reports == [(started, False), (started, True), (restarted, False), (final, True)]
+    reports = [(event.usage, event.final, event.sums_attempts) for event in events if isinstance(event, UsageReported)]
+    # The retry's reports are marked, since with them the request's reports add up both attempts.
+    assert reports == [(started, False, False), (started, True, False), (restarted, False, True), (final, True, True)]
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)
     assert finished.message.metrics.to_dict() == {
@@ -1220,6 +1286,8 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
     [record] = saved
     assert record.status is RunStatus.error
     assert record.messages[-1].metrics.to_dict() == {"input_tokens": 11, "total_tokens": 11, "cache_read_tokens": 80}
+    # The kept usage sums both attempts, so it reads as no single request's.
+    assert (record.messages[-1].provider_data or {})[AGGREGATE_USAGE_KEY] is True
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.cache_read_tokens) == (11, 80)
 
 
@@ -1281,6 +1349,7 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         "cache_read_tokens": 1840,
         "cache_write_tokens": 40,
     }
+    assert (record.messages[-1].provider_data or {})[AGGREGATE_USAGE_KEY] is True
     assert (
         record.metrics.tokens.input_tokens,
         record.metrics.tokens.cache_read_tokens,

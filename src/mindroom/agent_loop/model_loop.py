@@ -441,8 +441,14 @@ async def _stream_turn(
             billed = turn.message.metrics if turn is not None else reported.received
             if billed is not None and billed.to_dict():
                 provider_data = model_provenance(identity.id, identity.provider_name)
-                if turn is not None and (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True:
-                    # The turn's usage sums retried attempts, which must not read as one request's.
+                # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
+                sums_attempts = (
+                    (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+                    if turn is not None
+                    else reported.sums_attempts
+                )
+                if sums_attempts:
+                    # Usage that sums retried attempts must not read as one request's.
                     provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
                 messages.append(Message(role="assistant", metrics=billed, provider_data=provider_data))
                 _count_request(metrics, billed, identity)
