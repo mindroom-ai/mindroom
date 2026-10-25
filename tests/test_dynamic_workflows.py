@@ -114,6 +114,14 @@ def file_work_waiting_for_the_loop(methods: dict[object, tuple[str, ...]]) -> It
         yield freedom
 
 
+def _only_run_record(tmp_path: Path) -> dict[str, Any]:
+    """Return the one run record the test workflow has."""
+    [run_file] = (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob(
+        "*.json",
+    )
+    return json.loads(run_file.read_text(encoding="utf-8"))
+
+
 def _answering(content: object) -> ParticipantExecutor:
     """Return a participant executor whose every participant answers ``content``."""
 
@@ -1384,42 +1392,6 @@ async def test_service_run_fails_at_deadline_when_cancellation_is_suppressed(
     assert "max_runtime_seconds" in str(loaded.error)
 
 
-@pytest.mark.asyncio
-async def test_service_run_persists_cancelled_status(tmp_path: Path) -> None:
-    """Cancelling an async workflow run should not leave the run stuck as running."""
-    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
-
-    async def cancelled_executor(**_kwargs: object) -> object:
-        raise asyncio.CancelledError
-
-    service = DynamicWorkflowService(store, participant_executor=cancelled_executor)
-    store.create_workflow(
-        spec=_workflow_spec(),
-        scope="agent",
-        owner_id="general",
-        created_by="general",
-        reason="initial design",
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await service.run_workflow(
-            workflow_id="competitor-research-report",
-            scope="agent",
-            owner_id="general",
-            input_data={"topic": "Agno factories"},
-            requested_by="general",
-            base_url="https://acme.mindroom.chat",
-        )
-
-    run_files = list(
-        (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob("*.json"),
-    )
-    assert len(run_files) == 1
-    run_data = json.loads(run_files[0].read_text(encoding="utf-8"))
-    assert run_data["status"] == "failed"
-    assert run_data["error"] == "Workflow run was cancelled."
-
-
 @pytest.mark.parametrize("ending", ["timeout", "cancelled", "failure"])
 @pytest.mark.asyncio
 async def test_service_records_how_a_run_ended_while_the_loop_stays_free(
@@ -1463,10 +1435,7 @@ async def test_service_records_how_a_run_ended_while_the_loop_stays_free(
         else:
             await running
 
-    [run_file] = (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob(
-        "*.json",
-    )
-    run_data = json.loads(run_file.read_text(encoding="utf-8"))
+    run_data = _only_run_record(tmp_path)
     assert freedom.blocked == []
     assert freedom.called == ["start_workflow_run", "load_workflow_revision", "fail_workflow_run"]
     assert run_data["status"] == "failed"
@@ -1541,10 +1510,7 @@ async def test_service_keeps_the_final_record_a_cancellation_interrupts(
         with pytest.raises(asyncio.CancelledError):
             await running
 
-    [run_file] = (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob(
-        "*.json",
-    )
-    run_data = json.loads(run_file.read_text(encoding="utf-8"))
+    run_data = _only_run_record(tmp_path)
     assert still_writing
     assert writes == [f"{ending} started", f"{ending} written"]
     assert (run_data["status"], run_data["error"]) == {
@@ -1603,10 +1569,7 @@ async def test_service_records_a_run_cancelled_while_it_is_prepared_as_cancelled
         with pytest.raises(asyncio.CancelledError):
             await running
 
-    [run_file] = (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob(
-        "*.json",
-    )
-    run_data = json.loads(run_file.read_text(encoding="utf-8"))
+    run_data = _only_run_record(tmp_path)
     assert (run_data["status"], run_data["error"]) == ("failed", rejection or "Workflow run was cancelled.")
     assert executions == []
 
