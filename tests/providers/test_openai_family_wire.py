@@ -832,14 +832,13 @@ _MESSAGE_ITEM = {
 
 @pytest.mark.asyncio
 async def test_a_non_streamed_response_keeps_its_reasoning_summary(tmp_path: Path) -> None:
-    """A helper call on the Responses route reads the reasoning summary; a stored response needs no reasoning copy."""
+    """A helper call on the Responses route reads the reasoning summary."""
     built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(_response(output=[_REASONING_ITEM, _MESSAGE_ITEM])))
 
     turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
 
     assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
     assert turn.message.provider_data["response_id"] == "resp_1"
-    assert "reasoning_output" not in turn.message.provider_data
 
 
 @pytest.mark.asyncio

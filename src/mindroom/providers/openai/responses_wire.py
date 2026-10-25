@@ -161,9 +161,9 @@ def responses_replay(
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
     Portable replay, an unstored request, and a history whose latest response was not stored or holds other system
-    text send the history explicitly, each reply with the ordered output and reasoning it recorded; a stored reply
-    recorded neither, so it is rebuilt without reasoning. A stored request without a stored response sends the
-    history without reasoning.
+    text send the history explicitly, each reply with the ordered output and reasoning it recorded; a reply stored
+    without portable replay recorded neither, so it is rebuilt without reasoning. A stored request without a stored
+    response sends the history without reasoning.
     """
     route = native_compaction.route if native_compaction is not None else None
     history = native_replay_messages(messages, route)
@@ -479,9 +479,8 @@ def _read_ended_response(
     """Record what a response that ended says about its turn, the same whether it streamed or arrived whole.
 
     A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
-    status and the incomplete reason. Both record the response id, its storage provenance, the ``system_digest`` of
-    its request when stored, and, when unstored, its reasoning; only a completed response's output is recorded for
-    replay.
+    status and the incomplete reason. Both record the response id, its storage provenance, and the ``system_digest``
+    of its request when stored; only a completed response's output is recorded for replay.
     """
     parts.status = response.status
     parts.incomplete_reason = _incomplete_reason(response)
@@ -489,10 +488,6 @@ def _read_ended_response(
         parts.usage = _usage(response.usage)
     if response.id:
         parts.provider_data["response_id"] = response.id
-    if store is False:
-        for output in response.output:
-            if output.type == "reasoning":
-                parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
     parts.provider_data[_STORED_KEY] = store is not False
     if store is not False:
         parts.provider_data[_SYSTEM_DIGEST_KEY] = system_digest
