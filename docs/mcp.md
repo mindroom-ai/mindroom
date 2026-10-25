@@ -53,6 +53,9 @@ mcp_servers:
 ```
 
 Remote transports refuse loopback and private-network addresses; run local servers with `stdio` instead.
+A remote server on a private network, such as a cluster-internal service, needs `allow_private_network: true`; loopback, link-local and cloud metadata addresses stay refused.
+The opt-in opens every RFC 1918 and unique-local address to that server's URL and redirects, including MindRoom's own pods and Services, so set it only for a server you trust.
+`localhost` and `*.local` names stay refused, including Kubernetes `*.svc.cluster.local`; use the short Service name or `<service>.<namespace>.svc`.
 
 ### Credentials in Server Config
 
@@ -123,6 +126,7 @@ Without a usable icon, Connections picks one matching the server's name, or a pl
 | `env` | map[string,string] | `{}` | `stdio` environment variables; supports `${ENV_VAR}` |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
 | `headers` | map[string,string] | `{}` | Remote request headers; supports `${ENV_VAR}` |
+| `allow_private_network` | bool | `false` | Let a remote server's URL reach private-network addresses (RFC 1918 or IPv6 unique-local), such as a cluster-internal service; loopback, link-local and cloud metadata addresses stay refused |
 | `auth` | object | `null` | OAuth settings for remote servers; see [OAuth Settings](#oauth-settings) |
 | `tool_prefix` | string | server ID | Prefix for model-visible function names; letters, numbers, and underscores |
 | `include_tools` | list[string] | `[]` | Allowlist of remote tool names |

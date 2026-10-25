@@ -35,6 +35,19 @@ def test_mcp_server_config_rejects_invalid_transport_mix() -> None:
     with pytest.raises(ValueError, match="streamable-http MCP servers do not allow command"):
         MCPServerConfig(transport="streamable-http", url="http://localhost:8000/mcp", command="npx")
 
+    with pytest.raises(ValueError, match="stdio MCP servers do not allow allow_private_network"):
+        MCPServerConfig(transport="stdio", command="npx", allow_private_network=True)
+
+
+def test_mcp_server_config_keeps_private_networks_closed_by_default() -> None:
+    """Remote servers reach private networks only when they opt in."""
+    assert not MCPServerConfig(transport="sse", url="https://mcp.example/sse").allow_private_network
+    assert MCPServerConfig(
+        transport="sse",
+        url="http://internal:8000/sse",
+        allow_private_network=True,
+    ).allow_private_network
+
 
 def test_mcp_server_config_rejects_overlapping_filters() -> None:
     """Reject overlapping include and exclude tool filters."""

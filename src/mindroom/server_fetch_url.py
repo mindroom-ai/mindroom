@@ -263,6 +263,7 @@ def _validate_server_fetch_url(
     allow_private_networks: bool,
     resolve_hostnames: bool,
     allow_loopback: bool = False,
+    private_networks: tuple[_IPNetwork, ...] = (),
 ) -> str:
     """Validate a server-fetch URL, optionally resolving hostnames immediately."""
     normalized_url = url.strip()
@@ -286,6 +287,7 @@ def _validate_server_fetch_url(
         allow_private_networks=allow_private_networks,
         resolve_hostnames=resolve_hostnames,
         allow_loopback=allow_loopback,
+        private_networks=private_networks,
     )
     return normalized_url
 
@@ -296,16 +298,19 @@ def validate_server_fetch_url(
     allow_private_networks: bool = False,
     allow_loopback: bool = False,
     resolve_hostnames: bool = True,
+    private_networks: tuple[_IPNetwork, ...] = (),
 ) -> str:
     """Validate that a URL is safe for a server-side HTTP(S) request.
 
     Callers that validate the dialed address at connect time may skip hostname resolution here.
+    A private address inside `private_networks` is allowed; loopback and metadata addresses never are.
     """
     return _validate_server_fetch_url(
         url,
         allow_private_networks=allow_private_networks,
         resolve_hostnames=resolve_hostnames,
         allow_loopback=allow_loopback,
+        private_networks=private_networks,
     )
 
 

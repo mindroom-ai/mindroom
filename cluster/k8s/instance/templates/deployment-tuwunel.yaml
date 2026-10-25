@@ -32,6 +32,9 @@ spec:
       enableServiceLinks: false
       # Lets a database migration step finish on shutdown.
       terminationGracePeriodSeconds: 1800
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
