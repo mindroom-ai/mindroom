@@ -843,8 +843,7 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
 
         runtime.bind_api("http://primary.test/api/script-gateway/")
         assert runtime._startup_task is not None
-        # Below the startup pass timeout, which would end a stuck startup pass on its own.
-        await asyncio.wait_for(runtime._startup_task, timeout=runtime.pass_timeout_seconds / 2)
+        await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
         assert bound_managers == [manager]
         assert manager.gateway_url == "http://primary.test/api/script-gateway"
 
