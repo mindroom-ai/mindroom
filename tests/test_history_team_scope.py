@@ -108,6 +108,7 @@ def _build_pair(
         execution_identity=None,
         model_name="default",
         configured_team_name=configured_team_name,
+        timezone="UTC",
     )
 
 
@@ -295,6 +296,7 @@ def test_the_team_build_names_its_leader_by_the_members_label_and_identifies_it_
         execution_identity=None,
         model_name="default",
         configured_team_name=None,
+        timezone="UTC",
     )
 
     assert (ad_hoc.spec.leader.id, ad_hoc.spec.leader.name) == ("team_alpha+zeta", "Team (Zeta, Alpha)")

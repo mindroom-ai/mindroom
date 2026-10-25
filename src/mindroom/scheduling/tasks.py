@@ -174,28 +174,20 @@ class CronSchedule(BaseModel):
         """Convert to standard cron format."""
         return f"{self.minute} {self.hour} {self.day} {self.month} {self.weekday}"
 
-    def to_natural_language(
-        self,
-        timezone: str,
-        current_time: datetime | None = None,
-        *,
-        label_timezone: bool = False,
-    ) -> str:
-        """Describe the schedule in the wall time of `timezone`; the cron fields themselves are UTC.
+    def to_natural_language(self, timezone: str, current_time: datetime | None = None) -> str:
+        """Describe the schedule in the wall time of `timezone` and name the zone; the cron fields themselves are UTC.
 
         A fixed time of day is converted with the offset of the next run, so users see their own
-        clock ("At 08:00") instead of the stored UTC hour; other hour patterns are marked UTC.
-        `label_timezone` names `timezone` after a description that is not marked UTC.
+        clock ("At 08:00 (Europe/Amsterdam)") instead of the stored UTC hour; other patterns keep
+        their UTC fields and are marked UTC.
         """
         local = self._in_timezone(ZoneInfo(timezone), current_time or datetime.now(UTC))
         try:
             options = Options(use_24hour_time_format=True)
             description = str(get_description((local or self).to_cron_string(), options))
         except Exception:
-            return f"Cron: {self.to_cron_string()}"
-        if local is None and self.hour != "*" and timezone != "UTC":
-            return f"{description} (UTC)"
-        return f"{description} ({timezone})" if label_timezone else description
+            return f"Cron: {self.to_cron_string()} (UTC)"
+        return f"{description} ({'UTC' if local is None else timezone})"
 
     def _in_timezone(self, zone: ZoneInfo, current_time: datetime) -> CronSchedule | None:
         """Return this schedule in `zone` wall time when it runs at one fixed UTC time of day."""
@@ -2463,11 +2455,8 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
             if workflow.schedule_type == "once" and workflow.execute_at:
                 time_str = _format_scheduled_time(workflow.execute_at, timezone)
             else:
-                # Equal wall times in different zones fire hours apart, so name any zone but the global one.
                 time_str = (
-                    workflow.cron_schedule.to_natural_language(timezone, label_timezone=timezone != config.timezone)
-                    if workflow.cron_schedule
-                    else "recurring"
+                    workflow.cron_schedule.to_natural_language(timezone) if workflow.cron_schedule else "recurring"
                 )
 
             msg_preview = workflow.message[:_MESSAGE_PREVIEW_LENGTH] + (

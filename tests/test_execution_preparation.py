@@ -345,6 +345,7 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         render_messages_text_fn=render_prepared_messages_text,
@@ -399,6 +400,7 @@ async def test_interactive_selection_keeps_context_after_question(
         current_sender_id="@alice:localhost",
         current_event_id="$question",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         render_messages_text_fn=render_prepared_messages_text,
@@ -522,6 +524,7 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         render_messages_text_fn=render_prepared_messages_text,
@@ -565,6 +568,7 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         render_messages_text_fn=render_prepared_messages_text,
@@ -604,6 +608,7 @@ async def test_scheduled_history_limit_ignores_events_after_current() -> None:
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         render_messages_text_fn=render_prepared_messages_text,
@@ -637,6 +642,7 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         render_messages_text_fn=render_prepared_messages_text,
@@ -697,6 +703,7 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
         response_sender_id="@mindroom_general:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         render_messages_text_fn=render_prepared_messages_text,
@@ -822,6 +829,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         thread_history=None,
         runtime_paths=runtime_paths,
         config=config,
+        timezone="UTC",
         team_name=None,
         history_settings=config.resolve_entity(None).history_settings,
         active_model_name=None,
@@ -943,28 +951,35 @@ async def test_prepare_agent_execution_context_names_the_current_prompts_sender_
 
 
 @pytest.mark.asyncio
-async def test_current_message_time_is_rendered_in_the_responding_agents_timezone() -> None:
+async def test_current_message_time_is_rendered_in_the_responding_agents_timezone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An agent with its own timezone sees the current message's time in that zone, not the global one."""
-    config = Config.model_validate(
-        {"timezone": "UTC", "agents": {"atlas": {"display_name": "Atlas", "timezone": "America/Los_Angeles"}}},
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    config.timezone = "UTC"
+    config.agents["test_agent"].timezone = "America/Los_Angeles"
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
     )
 
-    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
-        return _prepared_scope_with_persisted_replay()
-
-    prepared = await _prepare_execution_context_common(
-        make_turn_context("atlas"),
+    build = _build(config, runtime_paths)
+    prepared = await _prepare_agent_execution_context_for_test(
+        make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
         scope_context=None,
+        build=build,
+        system_message=prompt_for_turn(build),
         prompt="Current request",
         thread_history=None,
-        response_sender_id="@mindroom_atlas:localhost",
-        current_sender_id="@alice:localhost",
-        current_timestamp_ms=1_774_018_800_000,
-        current_event_id="$current",
+        runtime_paths=runtime_paths,
         config=config,
-        prepare_scope_history_fn=prepare_scope_history,
-        estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
+        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
+        current_sender_id="@alice:localhost",
+        current_event_id="$current",
+        current_timestamp_ms=1_774_018_800_000,
     )
 
     assert prepared.turn.prompt.content == config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO") + render_msg_tag(

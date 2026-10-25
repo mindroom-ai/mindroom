@@ -193,6 +193,7 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             execution_identity=None,
             model_name="default",
             configured_team_name=None,
+            timezone="UTC",
         )
 
     [member] = members.builds

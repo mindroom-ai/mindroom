@@ -486,6 +486,7 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
             execution_identity=identity,
             model_name="default",
             configured_team_name="pair",
+            timezone="UTC",
         )
         assert any(function.name == "job" for toolkit in built.spec.leader.toolkits for function in toolkit.functions)
         assert built.leader_jobs is not None

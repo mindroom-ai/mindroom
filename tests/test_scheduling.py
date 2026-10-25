@@ -108,6 +108,26 @@ def test_silent_new_thread_confirmation_describes_actual_visible_placement() -> 
     assert "New thread per fire" not in response
 
 
+def test_recurring_confirmation_names_the_tasks_timezone() -> None:
+    """The confirmation an edit or the scheduler tool posts says which zone its wall time is in."""
+    workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="0"),
+        message="post the standup",
+        description="Standup",
+        timezone="Asia/Tokyo",
+    )
+
+    response = scheduling._scheduled_task_response_text(
+        workflow,
+        task_id="task1234",
+        new_thread=False,
+        config=Config(timezone="UTC"),
+    )
+
+    assert "✅ Scheduled recurring task: **At 09:00 (Asia/Tokyo)**\n" in response
+
+
 def _matrix_room(
     room_id: str,
     *,
@@ -231,7 +251,7 @@ def test_scheduled_task_read_model_derives_display_fields_and_sort_order() -> No
     assert once_model.new_thread is True
     assert once_model.silent is False
     assert cron_model.cron_expression == "0 9 * * *"
-    assert cron_model.cron_description == "At 09:00"
+    assert cron_model.cron_description == "At 09:00 (UTC)"
     assert cron_model.next_run_at == datetime(2026, 1, 2, 9, 0, tzinfo=UTC)
     assert cron_model.created_by == "@user:server"
     assert cron_model.thread_id == "$thread1"
@@ -2867,7 +2887,7 @@ async def test_persist_scheduled_task_state_includes_cron_description() -> None:
     )
     workflow = ScheduledWorkflow(
         schedule_type="cron",
-        cron_schedule=CronSchedule(minute="0", hour="9"),
+        cron_schedule=CronSchedule(minute="0", hour="0"),
         message="check logs",
         description="check logs",
         room_id="!test:server",
@@ -2878,11 +2898,11 @@ async def test_persist_scheduled_task_state_includes_cron_description() -> None:
         room_id="!test:server",
         task_id="task1234",
         workflow=workflow,
-        timezone="UTC",
+        timezone="Asia/Tokyo",
     )
 
     content = client.room_put_state.await_args.kwargs["content"]
-    assert content["cron_description"] == "At 09:00"
+    assert content["cron_description"] == "At 09:00 (Asia/Tokyo)"
 
 
 @pytest.mark.asyncio
@@ -3644,7 +3664,7 @@ async def test_a_stored_task_without_a_timezone_keeps_the_global_timezone(tmp_pa
         timezone=scheduled_task_timezone(legacy_task.workflow, config),
         current_time=datetime(2027, 1, 15, tzinfo=UTC),
     )
-    assert read_model.cron_description == "At 09:00"
+    assert read_model.cron_description == "At 09:00 (America/Los_Angeles)"
 
     parse = AsyncMock(side_effect=lambda *_args, **_kwargs: ScheduledWorkflow(**stored_workflow))
     with (
@@ -3681,20 +3701,23 @@ async def test_a_stored_task_without_a_timezone_keeps_the_global_timezone(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_recurring_task_listing_names_a_timezone_other_than_the_global_one(tmp_path: Path) -> None:
-    """Two daily 09:00 tasks fire hours apart when one is stored in another zone, so its line names that zone."""
-    tokyo_task = ScheduledWorkflow(
+async def test_recurring_task_listing_names_each_tasks_timezone(tmp_path: Path) -> None:
+    """Two daily 09:00 tasks in different zones fire hours apart, so every line names its zone, the global one too.
+
+    An agent whose own timezone differs from the global one reads the same listing, so no zone goes unnamed.
+    """
+    kolkata_task = ScheduledWorkflow(
         schedule_type="cron",
-        cron_schedule=CronSchedule(minute="0", hour="0"),
-        message="Tokyo standup",
-        description="Tokyo standup",
+        cron_schedule=CronSchedule(minute="30", hour="3"),
+        message="Kolkata standup",
+        description="Kolkata standup",
         created_by="@alice:server",
         room_id="!test:server",
-        timezone="Asia/Tokyo",
+        timezone="Asia/Kolkata",
     )
     global_task = ScheduledWorkflow(
         schedule_type="cron",
-        cron_schedule=CronSchedule(minute="0", hour="9"),
+        cron_schedule=CronSchedule(minute="0", hour="0"),
         message="Global standup",
         description="Global standup",
         created_by="@alice:server",
@@ -3712,7 +3735,7 @@ async def test_recurring_task_listing_names_a_timezone_other_than_the_global_one
                     "sender": SCHEDULE_WRITER_ID,
                     "origin_server_ts": 1234567890,
                 }
-                for task_id, workflow in [("tokyo", tokyo_task), ("global", global_task)]
+                for task_id, workflow in [("kolkata", kolkata_task), ("global", global_task)]
             ],
             room_id="!test:server",
         ),
@@ -3722,8 +3745,8 @@ async def test_recurring_task_listing_names_a_timezone_other_than_the_global_one
         client=client,
         room_id="!test:server",
         runtime_paths=_test_runtime_paths(tmp_path),
-        config=Config(timezone="UTC"),
+        config=Config(timezone="Asia/Tokyo"),
     )
 
-    assert "• `tokyo` - At 09:00 (Asia/Tokyo)\n" in listed
-    assert "• `global` - At 09:00\n" in listed
+    assert "• `kolkata` - At 09:00 (Asia/Kolkata)\n" in listed
+    assert "• `global` - At 09:00 (Asia/Tokyo)\n" in listed

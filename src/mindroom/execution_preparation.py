@@ -709,6 +709,7 @@ async def _prepare_execution_context_common(
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
+    timezone: str,
     prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
@@ -717,10 +718,12 @@ async def _prepare_execution_context_common(
     attachment_context: _ThreadAttachmentContext | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
-    """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
+    """Prepare one request-scoped prompt/replay plan after unseen-thread handling.
+
+    ``timezone`` is the zone the current message's time is written in.
+    """
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
-    timezone = config.get_entity_timezone(ctx.entity_label)
     # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
     seen_event_ids = await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
     scheduled_history_budget = ctx.scheduled_history_budget
@@ -905,6 +908,7 @@ async def prepare_agent_execution_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        timezone=config.get_entity_timezone(agent_name),
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_messages_text,
@@ -934,6 +938,7 @@ async def _prepare_bound_team_execution_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
+    timezone: str,
     team_name: str | None,
     history_settings: ResolvedHistorySettings,
     active_model_name: str | None,
@@ -989,6 +994,7 @@ async def _prepare_bound_team_execution_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        timezone=timezone,
         prepare_scope_history_fn=_prepare_team_scope_history,
         estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_team_messages_text,
@@ -1019,6 +1025,7 @@ async def prepare_bound_team_run_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
+    timezone: str,
     entity_name: str | None,
     history_settings: ResolvedHistorySettings,
     active_model_name: str | None,
@@ -1049,6 +1056,7 @@ async def prepare_bound_team_run_context(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
+        timezone=timezone,
         team_name=entity_name,
         history_settings=history_settings,
         active_model_name=active_model_name,

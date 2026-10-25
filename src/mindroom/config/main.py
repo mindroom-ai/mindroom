@@ -2183,7 +2183,7 @@ class Config(BaseModel):
         return self
 
     def get_entity_timezone(self, entity_name: str | None) -> str:
-        """Return an agent's own timezone, else the global one, which teams, the router, and room jobs use."""
+        """Return an agent's own timezone, else the global one, which configured teams, the router, and room jobs use."""
         agent = self.agents.get(entity_name) if entity_name is not None else None
         if agent is not None and agent.timezone is not None:
             return agent.timezone

@@ -144,8 +144,8 @@ def test_list_schedules_describes_each_task_in_its_own_timezone(test_client: Tes
 
     assert response.status_code == 200
     tasks_by_id = {task["task_id"]: task for task in response.json()["tasks"]}
-    assert tasks_by_id["tokyo123"]["cron_description"] == "At 09:00"
-    assert tasks_by_id["global12"]["cron_description"] == "At 00:00"
+    assert tasks_by_id["tokyo123"]["cron_description"] == "At 09:00 (Asia/Tokyo)"
+    assert tasks_by_id["global12"]["cron_description"] == "At 00:00 (UTC)"
 
 
 def test_update_schedule_once_success(test_client: TestClient) -> None:

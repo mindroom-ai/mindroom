@@ -661,12 +661,12 @@ class TestAgentBot(AgentBotTestBase):
         assert prepared_message == timestamped_prompt
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_timestamps_history_in_the_global_timezone(
+    async def test_generate_team_response_helper_timestamps_history_in_the_running_agents_timezone(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """An ad hoc team's history uses the global timezone, not the zone of the agent whose bot posts it."""
+        """An ad hoc team's history uses the timezone of the agent whose bot runs it, not the global one."""
         config = self._config_for_storage(tmp_path)
         config.timezone = "UTC"
         config.agents["calculator"].timezone = "America/Los_Angeles"
@@ -716,7 +716,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         [older] = mock_team_response.await_args.kwargs["thread_history"]
-        assert older.body == "[2026-03-20 15:00 UTC] older text"
+        assert older.body == "[2026-03-20 08:00 PDT] older text"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_uses_resolved_thread_root_for_placeholder_and_edit(
