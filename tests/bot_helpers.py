@@ -209,33 +209,32 @@ async def _run_orchestrator_start_until_ready(
 ) -> None:
     """Run start() until readiness, then explicitly shut the runtime down."""
     ready = asyncio.Event()
+    start_sync_task = orchestrator._start_sync_task
 
     def mark_ready() -> None:
         ready.set()
 
-    with patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready):
+    def start_sync_task_and_publish_router_readiness(entity_name: str, bot: object) -> None:
+        # Stand in for the router's first sync, which publishes its reply memberships.
+        start_sync_task(entity_name, bot)
+        if entity_name == ROUTER_AGENT_NAME:
+            orchestrator._router_reply_memberships_live_sync_ready.set()
+
+    with (
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
+        patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task_and_publish_router_readiness),
+    ):
         runtime_task = asyncio.create_task(orchestrator.start())
-
-        async def publish_router_membership_readiness() -> None:
-            while ROUTER_AGENT_NAME not in orchestrator._sync_tasks and not runtime_task.done():  # noqa: ASYNC110
-                await asyncio.sleep(0)
-            if not runtime_task.done():
-                orchestrator._router_reply_memberships_live_sync_ready.set()
-
-        router_ready_task = asyncio.create_task(publish_router_membership_readiness())
         try:
-            await asyncio.wait_for(ready.wait(), timeout=1.0)
+            # Startup finishes on its own; the bound only turns a hang into a failure before pytest's timeout.
+            await asyncio.wait_for(ready.wait(), timeout=10.0)
             if wait_for_startup_maintenance:
                 maintenance_task = orchestrator._startup_maintenance.task
                 assert maintenance_task is not None
                 await maintenance_task
             await orchestrator.stop()
-            await asyncio.wait_for(runtime_task, timeout=1.0)
+            await asyncio.wait_for(runtime_task, timeout=10.0)
         finally:
-            if not router_ready_task.done():
-                router_ready_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await router_ready_task
             if not runtime_task.done():
                 runtime_task.cancel()
                 with suppress(asyncio.CancelledError):
