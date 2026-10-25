@@ -980,6 +980,51 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
 
 
 @pytest.mark.asyncio
+async def test_a_call_a_plugin_hook_declines_answers_with_the_decline_as_an_error(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call a before-call hook declines never runs and answers as an error whose message is the decline's text."""
+    ran: list[str] = []
+
+    @hook("tool:before_call")
+    async def before(event: ToolBeforeCallContext) -> None:
+        event.decline("Accounts are paused")
+
+    def account() -> str:
+        ran.append("body")
+        return "fresh"
+
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[account]))
+    monkeypatch.setattr(
+        gateway,
+        "load_plugins",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                name="policy",
+                entry_config=PluginEntryConfig(path="policy.py"),
+                plugin_order=0,
+                discovered_hooks=(before,),
+                discovered_automations=(),
+            ),
+        ],
+    )
+
+    result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
+
+    assert ran == []
+    assert result == {
+        "error": {
+            "code": "tool_declined",
+            "message": "[TOOL CALL DECLINED]\n"
+            "Tool: account\n"
+            "Reason: Accounts are paused\n\n"
+            "Adjust your approach — try a different tool or different arguments.",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_search_total_size_includes_unicode_and_escaped_text(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
