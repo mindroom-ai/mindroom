@@ -462,6 +462,8 @@ async def test_a_delegating_turns_last_state_save_patches_a_parent_a_summary_cov
                 covered=covered,
                 summary="Summary.",
             )
+            # Marks the patch, so its write shows in the stored row and in the session's copy.
+            changes = {**changes, "patched_after_summary": True}
             patched.append(changes)
         return original_patch(self, session_id, run_id, changes, **kwargs)
 
@@ -472,7 +474,7 @@ async def test_a_delegating_turns_last_state_save_patches_a_parent_a_summary_cov
     [changes] = patched
     stored = store.get_run("parent-run")
     assert stored is not None
-    assert (stored.metadata or {})[DELEGATION_STATE_KEY] == changes[DELEGATION_STATE_KEY]
+    assert {key: (stored.metadata or {}).get(key) for key in changes} == changes
     session = _loaded_session(opened_scopes, "leader")
     assert [run.run_id for run in session.runs] == ["run-0", "parent-run"]
     assert session.runs[1].to_dict() == stored.to_dict()
