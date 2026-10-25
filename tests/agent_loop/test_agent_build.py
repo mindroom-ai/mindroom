@@ -417,6 +417,41 @@ def test_a_configured_function_named_like_a_generated_one_is_what_the_run_offers
     assert not [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
 
 
+def test_a_function_asking_for_prompt_instructions_loads_only_in_a_deferred_toolkit(tmp_path: Path) -> None:
+    """Tool search shows a deferred function's instructions; an eager toolkit offering one is refused, not the agent."""
+    config, runtime_paths = _config(tmp_path, tools=[{"wikipedia": {"defer": True}}, "arxiv"])
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        function = Function(name=f"{tool_name}_lookup", entrypoint=ping, instructions="Look up named pages only.")
+        return Toolkit(name=tool_name, tools=[function])
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+        build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    assert [toolkit.name for toolkit in build.spec.toolkits] == ["wikipedia", "skills"]
+    assert build.request_template.deferred_tools.names == frozenset({"wikipedia_lookup"})
+    [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
+    assert (warning["tool"], warning["error"]) == (
+        "arxiv",
+        "Tool function 'arxiv_lookup' sets instructions for Agno to add to the system prompt, which MindRoom adds only"
+        " per toolkit; set them on the toolkit instead",
+    )
+
+
+def test_the_prompt_shows_a_toolkits_instructions_once_even_when_another_offers_its_names(tmp_path: Path) -> None:
+    """The same toolkit built for two tools shows its instructions once, though a run offers only the first's functions."""
+    config, runtime_paths = _config(tmp_path, tools=["calculator", "wikipedia"])
+
+    def build_toolkit(_tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name="pinger", tools=[ping], instructions="Ping politely.", add_instructions=True)
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit):
+        build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    assert [toolkit.functions != () for toolkit in build.spec.toolkits[:2]] == [True, False]
+    assert build.prompt.tool_instructions == ("Ping politely.",)
+
+
 def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp_path: Path) -> None:
     """A function adaptation refuses costs its own toolkit, deferred or not, and never the agent."""
     config, runtime_paths = _config(tmp_path, tools=["calculator", {"name": "wikipedia", "defer": True}])

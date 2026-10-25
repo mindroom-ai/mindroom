@@ -92,7 +92,13 @@ def test_toolkit_instructions_keep_only_prompt_instructions_once_per_toolkit() -
     math = replace(toolkit(add, name="math"), instructions="Use math.")
     text = toolkit(echo, name="text")  # Agno adds no instructions unless the toolkit asks.
 
-    assert toolkit_instructions((math, text, math, replace(math, name="algebra"))) == ("Use math.", "Use math.")
+    math_with_echo = replace(math, functions=(*math.functions, *text.functions))
+
+    assert toolkit_instructions((math, text, math, replace(math, name="algebra"), math_with_echo)) == (
+        "Use math.",
+        "Use math.",
+        "Use math.",
+    )
 
 
 # --- plan_tool_batch -------------------------------------------------------------------------------------------------
