@@ -600,6 +600,22 @@ def test_build_summary_input_preserves_previous_summary_text() -> None:
     assert "run-1 answer" in summary_input
 
 
+def test_build_summary_input_renders_a_block_list_one_block_per_line() -> None:
+    """A message stored as content blocks reaches the summary input with each block serialized on its own line."""
+    blocks = [{"type": "text", "text": "first block"}, {"type": "text", "text": "second block"}]
+    run = _completed_run("run-1", messages=[Message(role="user", content=blocks)])
+
+    summary_input, _ = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=1_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
+    )
+
+    assert '{"text":"first block","type":"text"}\n{"text":"second block","type":"text"}' in summary_input
+
+
 def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> None:
     run = _completed_run(
         "run-1",
