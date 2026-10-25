@@ -1611,6 +1611,41 @@ async def test_service_records_a_run_cancelled_while_it_is_prepared_as_cancelled
     assert executions == []
 
 
+@pytest.mark.asyncio
+async def test_service_ends_cancelled_when_a_cancelled_preparation_raises(tmp_path: Path) -> None:
+    """A cancellation during a preparation that fails, such as for a deleted workflow, still ends the call cancelled."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    loop = asyncio.get_running_loop()
+    preparation_waiting = asyncio.Event()
+    release_preparation = threading.Event()
+
+    def deleted(*_args: object, **_kwargs: object) -> DynamicWorkflowRun:
+        loop.call_soon_threadsafe(preparation_waiting.set)
+        release_preparation.wait(timeout=5)
+        msg = "YAML mapping was not found."
+        raise DynamicWorkflowError(msg)
+
+    service = DynamicWorkflowService(store, participant_executor=_answering("written"))
+    with patch.object(DynamicWorkflowStore, "start_workflow_run", deleted):
+        running = asyncio.create_task(
+            service.run_workflow(
+                workflow_id="competitor-research-report",
+                scope="agent",
+                owner_id="general",
+                input_data={"topic": "pricing"},
+                requested_by="general",
+            ),
+        )
+        await preparation_waiting.wait()
+        running.cancel()
+        release_preparation.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await running
+
+    assert isinstance(cancelled.value.__cause__, DynamicWorkflowError)
+    assert not (tmp_path / "mindroom_data/dynamic_workflows").exists()
+
+
 def test_validate_workflow_spec_rejects_missing_step_id(tmp_path: Path) -> None:
     """Workflow specs should reject malformed step entries before they are persisted."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
