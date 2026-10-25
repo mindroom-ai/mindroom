@@ -130,17 +130,14 @@ async def _refresh_while_router_applies(
     index: AgentReplyMembershipIndex,
     config: Config,
     runtime_paths: RuntimePaths,
-    room_id: str,
+    answers: dict[str, tuple[str, ...]],
     *,
-    answer: tuple[str, ...],
-    transitions: tuple[tuple[str, str], ...] = (),
-    other_answers: dict[str, tuple[str, ...]] | None = None,
+    transitions: tuple[tuple[str, str, str], ...] = (),
 ) -> None:
-    """Refresh while the router's sync applies (user ID, membership) transitions in one room before Matrix answers.
+    """Refresh while the router's sync applies (room ID, user ID, membership) transitions before Matrix answers.
 
-    ``other_answers`` lists the other rooms the router is joined to and their members.
+    ``answers`` maps each room the router is joined to onto the members Matrix answers for it.
     """
-    answers = {room_id: answer, **(other_answers or {})}
     query_started = asyncio.Event()
     release_query = asyncio.Event()
 
@@ -154,7 +151,7 @@ async def _refresh_while_router_applies(
     client.joined_members.side_effect = joined_members
     refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
     await query_started.wait()
-    for user_id, membership in transitions:
+    for room_id, user_id, membership in transitions:
         index.apply_member_event(
             config,
             room_id,
@@ -626,12 +623,19 @@ async def test_new_current_room_transition_requests_authoritative_refresh(
     assert not index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
 
     if transition == "live":
-        changed = index.apply_member_event(
-            config,
-            room_id,
-            _member_event(control_user_id, "join"),
-            control_user_id=control_user_id,
-        )
+        with capture_logs() as logs:
+            changed = index.apply_member_event(
+                config,
+                room_id,
+                _member_event(control_user_id, "join"),
+                control_user_id=control_user_id,
+            )
+        # A room outside every grant room is logged as a new current room; the named room's unready row is unchanged.
+        assert [
+            (log["room_key"], log["room_id"])
+            for log in logs
+            if log["event"] == "agent_reply_grant_room_membership_transition"
+        ] == ([] if named_room else [(None, room_id)])
     else:
         changed = index.mark_room_unready(config, runtime_paths, room_id, reason="recovered_membership")
 
@@ -754,9 +758,8 @@ async def test_live_departure_during_refresh_revokes_newly_resolved_room_grant(t
         index,
         config,
         runtime_paths,
-        room_id,
-        answer=(_ALICE_ID,),
-        transitions=((_ALICE_ID, "leave"),),
+        {room_id: (_ALICE_ID,)},
+        transitions=((room_id, _ALICE_ID, "leave"),),
     )
 
     assert not index.needs_refresh(config)
@@ -846,9 +849,8 @@ async def test_join_during_refresh_does_not_discard_the_refreshed_grant(tmp_path
         index,
         config,
         runtime_paths,
-        room_id,
-        answer=(_ROUTER_ID, _ALICE_ID),
-        transitions=((_ALICE_ID, "join"),),
+        {room_id: (_ROUTER_ID, _ALICE_ID)},
+        transitions=((room_id, _ALICE_ID, "join"),),
     )
 
     assert is_sender_allowed_for_agent_reply_in_room(
@@ -865,20 +867,22 @@ async def test_join_during_refresh_does_not_discard_the_refreshed_grant(tmp_path
 
 @pytest.mark.asyncio
 async def test_grant_room_is_logged_ready_only_when_its_snapshot_is_published(tmp_path: Path) -> None:
-    """A refresh an invalidation supersedes must not report rooms ready that the published grants still deny."""
+    """Readiness logs must match the published grant rooms: none from a voided refresh, and none for current rooms."""
     room_id = "!project:example.com"
+    lobby_room_id = "!lobby:example.com"
     config, runtime_paths = _runtime_config(tmp_path, member_rooms=["project", "secondary"])
+    config.router.access = ResponderAccessConfig(current_room_members=True, members_of_rooms=[])
     _persist_room(runtime_paths, "project", room_id)
     query_started = asyncio.Event()
     release_query = asyncio.Event()
 
-    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+    async def joined_members(queried_room_id: str) -> nio.JoinedMembersResponse:
         query_started.set()
         await release_query.wait()
-        return _joined_members(room_id, _ALICE_ID)
+        return _joined_members(queried_room_id, _ALICE_ID)
 
     client = AsyncMock()
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id, lobby_room_id])
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="startup")
@@ -894,11 +898,15 @@ async def test_grant_room_is_logged_ready_only_when_its_snapshot_is_published(tm
 
     assert [log for log in superseded_logs if log["event"] == "agent_reply_grant_room_ready"] == []
     assert [
-        (log["room_key"], log["member_count"])
+        (log["event"], log["room_key"], log.get("reason"), log.get("member_count"))
         for log in published_logs
-        if log["event"] == "agent_reply_grant_room_ready"
-    ] == [("project", 1)]
+        if log["event"] in _READINESS_EVENTS
+    ] == [
+        ("agent_reply_grant_room_unready", "secondary", "managed_room_unresolved", None),
+        ("agent_reply_grant_room_ready", "project", None, 1),
+    ]
     assert index.is_allowed(_ALICE_ID, ["project"], config, runtime_paths)
+    assert index.is_current_room_member(_ALICE_ID, lobby_room_id, config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -913,9 +921,8 @@ async def test_departure_during_first_refresh_is_not_lost(tmp_path: Path) -> Non
         index,
         config,
         runtime_paths,
-        room_id,
-        answer=(_ALICE_ID,),
-        transitions=((_ALICE_ID, "leave"),),
+        {room_id: (_ALICE_ID,)},
+        transitions=((room_id, _ALICE_ID, "leave"),),
     )
 
     assert not index.is_allowed(_ALICE_ID, ["project"], config, runtime_paths)
@@ -963,7 +970,7 @@ async def test_join_the_answer_lacks_waits_for_the_next_refresh(
     config, runtime_paths = _runtime_config(tmp_path, member_rooms=["project"])
     _persist_room(runtime_paths, "project", room_id)
     index = AgentReplyMembershipIndex()
-    await _refresh_while_router_applies(index, config, runtime_paths, room_id, answer=(_ROUTER_ID, _BOB_ID))
+    await _refresh_while_router_applies(index, config, runtime_paths, {room_id: (_ROUTER_ID, _BOB_ID)})
     index.invalidate(config, reason="sync_restart")
 
     with capture_logs() as logs:
@@ -971,9 +978,8 @@ async def test_join_the_answer_lacks_waits_for_the_next_refresh(
             index,
             config,
             runtime_paths,
-            room_id,
-            answer=(_ROUTER_ID, _BOB_ID),
-            transitions=((_ALICE_ID, "join"),),
+            {room_id: (_ROUTER_ID, _BOB_ID)},
+            transitions=((room_id, _ALICE_ID, "join"),),
         )
 
     assert not index.is_allowed(_ALICE_ID, ["project"], config, runtime_paths)
@@ -982,7 +988,7 @@ async def test_join_the_answer_lacks_waits_for_the_next_refresh(
         ("agent_reply_grant_room_unready", "live_join_unconfirmed"),
     ]
 
-    await _refresh_while_router_applies(index, config, runtime_paths, room_id, answer=next_answer)
+    await _refresh_while_router_applies(index, config, runtime_paths, {room_id: next_answer})
 
     assert not index.needs_refresh(config)
     assert index.is_allowed(_BOB_ID, ["project"], config, runtime_paths)
@@ -1017,9 +1023,8 @@ async def test_one_users_transitions_during_refresh_replay_in_arrival_order(
         index,
         config,
         runtime_paths,
-        room_id,
-        answer=answer,
-        transitions=tuple((_ALICE_ID, membership) for membership in memberships),
+        {room_id: answer},
+        transitions=tuple((room_id, _ALICE_ID, membership) for membership in memberships),
     )
 
     assert index.is_allowed(_ALICE_ID, ["project"], config, runtime_paths) is alice_allowed
@@ -1033,15 +1038,14 @@ async def test_join_the_answer_lacks_keeps_a_ready_rooms_published_grants(tmp_pa
     config, runtime_paths = _runtime_config(tmp_path, member_rooms=["project"])
     _persist_room(runtime_paths, "project", room_id)
     index = AgentReplyMembershipIndex()
-    await _refresh_while_router_applies(index, config, runtime_paths, room_id, answer=(_ROUTER_ID, _ALICE_ID))
+    await _refresh_while_router_applies(index, config, runtime_paths, {room_id: (_ROUTER_ID, _ALICE_ID)})
 
     await _refresh_while_router_applies(
         index,
         config,
         runtime_paths,
-        room_id,
-        answer=(_ROUTER_ID, _ALICE_ID),
-        transitions=((_BOB_ID, "join"),),
+        {room_id: (_ROUTER_ID, _ALICE_ID)},
+        transitions=((room_id, _BOB_ID, "join"),),
     )
 
     assert not index.needs_refresh(config)
@@ -1067,9 +1071,8 @@ async def test_replayed_control_client_departure_logs_its_room_unready(tmp_path:
             index,
             config,
             runtime_paths,
-            room_id,
-            answer=(_ROUTER_ID, _ALICE_ID),
-            transitions=((_ROUTER_ID, "leave"),),
+            {room_id: (_ROUTER_ID, _ALICE_ID)},
+            transitions=((room_id, _ROUTER_ID, "leave"),),
         )
 
     assert not index.is_allowed(_ALICE_ID, ["project"], config, runtime_paths)
@@ -1093,13 +1096,33 @@ async def test_current_room_replay_checks_each_room_against_its_own_answer(tmp_p
         index,
         config,
         runtime_paths,
-        second_room_id,
-        answer=(_ROUTER_ID,),
-        transitions=((_BOB_ID, "join"),),
-        other_answers={first_room_id: (_ROUTER_ID, _ALICE_ID)},
+        {first_room_id: (_ROUTER_ID, _ALICE_ID), second_room_id: (_ROUTER_ID,)},
+        transitions=((second_room_id, _BOB_ID, "join"),),
     )
 
     assert index.is_current_room_member(_ALICE_ID, first_room_id, config, runtime_paths)
     assert not index.is_current_room_member(_BOB_ID, second_room_id, config, runtime_paths)
     assert index.grants_pending(config, joined_rooms=(), current_room_id=second_room_id)
     assert index.needs_refresh(config)
+
+
+@pytest.mark.asyncio
+async def test_room_the_router_joins_during_refresh_stays_pending(tmp_path: Path) -> None:
+    """A room the router joins after Matrix listed its rooms may be joined, so its messages must wait instead of being denied."""
+    config, runtime_paths = _current_room_runtime_config(tmp_path)
+    lobby_room_id = "!lobby:example.com"
+    new_room_id = "!new:example.com"
+    index = AgentReplyMembershipIndex()
+    index.invalidate(config, reason="sync_restart")
+
+    await _refresh_while_router_applies(
+        index,
+        config,
+        runtime_paths,
+        {lobby_room_id: (_ROUTER_ID, _ALICE_ID)},
+        transitions=((new_room_id, _ROUTER_ID, "join"),),
+    )
+
+    assert index.is_current_room_member(_ALICE_ID, lobby_room_id, config, runtime_paths)
+    assert index.needs_refresh(config)
+    assert index.grants_pending(config, joined_rooms=(), current_room_id=new_room_id)
