@@ -358,18 +358,15 @@ def _chat_client_factory(
                 )
                 raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
             azure: dict[str, Any] = {
+                **options,
+                # Azure has no default endpoint, and the SDK rejects an empty base URL beside azure_endpoint.
+                "base_url": base_url or None,
                 "api_key": key,
                 "api_version": settings.api_version or "2024-10-21",
-                "organization": settings.organization,
-                "timeout": settings.timeout,
-                "max_retries": settings.max_retries,
                 "azure_endpoint": settings.azure_endpoint or process_env.get(AZURE_OPENAI_ENV_BY_KEY["endpoint"]),
                 "azure_deployment": settings.azure_deployment or process_env.get(AZURE_OPENAI_ENV_BY_KEY["deployment"]),
-                "base_url": base_url or None,
                 "azure_ad_token": settings.azure_ad_token,
                 "azure_ad_token_provider": settings.azure_ad_token_provider,
-                "default_headers": settings.default_headers,
-                "default_query": settings.default_query,
             }
             return AsyncAzureOpenAI(**_sdk_client_kwargs(azure, settings, http_client))
 
