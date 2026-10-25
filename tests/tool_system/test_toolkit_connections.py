@@ -383,6 +383,29 @@ async def test_cancelling_a_blocking_connect_closes_the_connection_once_it_is_ma
 
 
 @pytest.mark.asyncio
+async def test_a_reconnect_waits_until_a_cancelled_connect_has_closed_its_connection() -> None:
+    """A later run connects the toolkit only once an earlier cancelled connect closed what it made, so it stays open."""
+    toolkit = _BlockingDatabaseTools()
+    connect = run_connection(toolkit)
+    assert connect is not None
+    cancelled = asyncio.create_task(connect())
+    assert await asyncio.to_thread(toolkit.connecting.wait, 5)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    reconnecting = asyncio.create_task(connect())
+    await asyncio.sleep(0)
+    toolkit.release.set()
+    close = await asyncio.wait_for(reconnecting, timeout=5)
+
+    assert close is not None
+    assert EVENTS == ["database connect", "database close", "database connect"]
+    await close()
+    assert EVENTS[-1] == "database close"
+
+
+@pytest.mark.asyncio
 async def test_a_shielded_lifecycle_hands_its_task_to_retain_only_when_the_caller_is_cancelled() -> None:
     """The caller gets the lifecycle's value; cancelled instead, it leaves the still-running task to ``retain``."""
     retained: list[asyncio.Task[str]] = []
