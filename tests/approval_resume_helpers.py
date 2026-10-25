@@ -1,4 +1,4 @@
-"""Load a paused ``code`` run from its C6 pre-resume dump and continue it, as the capture's approval resumes did.
+"""Load a paused ``code`` run from its pre-resume dump and continue it, as the capture's approval resumes did.
 
 Each resume loads the sessions one approval resume read, as the capture dumped them just before the resume, into the
 stores the ``code`` and ``helper`` agents use, and continues the paused run through ``AgentApprovalExecution`` with

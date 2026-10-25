@@ -45,7 +45,7 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | --- | --- |
 | `family`, `scenario` | The provider route and scenario names. |
 | `input.model_config` | Authored `ModelConfig` fields (`provider`, `id`, `api`, `host`, `api_key`, `extra_kwargs`). |
-| `input.messages` | The request's messages, oldest first, each as `Message.to_dict()` without the storage-only `id`, `created_at`, `from_history`, and `stop_after_tool_call`, which no adapter reads. |
+| `input.messages` | The request's messages, oldest first, each as `Message.to_dict()` without the storage-only `id`, `created_at`, `from_history`, and `stop_after_tool_call`, which no adapter sends or parses. |
 | `input.tools` | The request's `ToolSpec` definitions, every field present and null where the tool sets none; the capture's `Function.to_dict()` dicts left out unset approval flags, which Agno read as false. |
 | `input.tool_choice` | `null` or `"none"`; the owned loop never forces a call. |
 | `input.output_schema` | `null`, or the request's output schema as `{"model": "module:Class", "json_schema": ...}`; the route renders it as its structured-output support asks, and replay fails when the class's JSON schema no longer equals `json_schema`. |
@@ -158,7 +158,7 @@ Normalization:
 - Collaborate-mode members all answer `ok`, because Agno's streaming broadcast result concatenates member output in arrival order, which is not deterministic.
 
 Scenarios use Claude (`anthropic`, `claude-sonnet-5-5`) unless named otherwise.
-Structured-output helpers run on each of the three structured-output paths: `anthropic` and `cerebras` receive the schema natively or as a JSON schema, and `vertexai_claude` is also asked for JSON at the end of its system message.
+Structured-output helpers run on each of the three structured-output paths: `anthropic` and `cerebras` receive the schema natively or as a JSON schema, and `vertexai_claude` receives no schema and is instead asked for JSON at the end of its system message.
 
 ## Tool goldens (`tools/`)
 

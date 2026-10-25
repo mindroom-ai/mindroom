@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 
     from mindroom.llm.messages import Message
 
-# What ``Message.to_dict()`` stores beside the turn itself, none of which a provider adapter reads: the message's
-# storage identity, and the flags saying it was replayed from history and stopped its run's tool loop.
+# What ``Message.to_dict()`` stores beside the turn itself, none of which a provider adapter sends or parses: the
+# message's storage identity, and the flags saying it was replayed from history and stopped its run's tool loop.
 STORAGE_ONLY_MESSAGE_KEYS = frozenset({"id", "created_at", "from_history", "stop_after_tool_call"})
 
 
