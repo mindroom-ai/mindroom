@@ -619,7 +619,7 @@ async def test_an_edit_before_the_replys_create_is_acknowledged_stops_it_and_reg
 
 @pytest.mark.asyncio
 async def test_an_edit_of_a_reply_that_recorded_nothing_to_show_is_ignored(tmp_path: Path) -> None:
-    """A turn that sent nothing yet, as a participation turn still deciding, answers the original text.
+    """A turn that has not sent anything yet, as a participation turn may not have, answers the original text.
 
     Stopping it would post a cancel note where nothing showed, and its
     regeneration would answer without that participation decision.

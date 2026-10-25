@@ -23,8 +23,14 @@ from mindroom.event_journal.replies import ReplyStore
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.response_runner import (
+    PostLockRequestPreparationError,
+    ResponseRequest,
+    ResponseRunner,
+    _mid_turn_for_request,
+)
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
 from mindroom.tool_system.events import ToolTraceEntry
@@ -659,6 +665,7 @@ async def test_an_edit_before_the_create_is_acknowledged_regenerates_the_event_i
         await asyncio.wait_for(sending.wait(), timeout=5)
         creating = await _reply(bot)
         assert creating.event_id is None
+        assert creating.possibly_shown is not None
         # The edit stops it through the bot's own wiring, which needs no event to find the reply.
         await bot._edit_regenerator.deps.stop_reply(creating, 7)
         acknowledged.set()
@@ -677,6 +684,15 @@ async def test_an_edit_before_the_create_is_acknowledged_regenerates_the_event_i
     ]
     assert _sent_bodies(bot) == ["Thinking...", "**[Response cancelled by user]**", "Edited answer."]
     assert not await bot._reply_runtime.store.is_pending("$edit")
+
+
+async def test_an_eventless_regeneration_tells_the_mid_turn_judge_its_answer_may_show() -> None:
+    """A regeneration whose reply's create is unacknowledged replaces what may show, not an empty reply."""
+    gate = MidTurnGate(active_text=None, evaluate=AsyncMock())
+    with patch("mindroom.response_runner.create_mid_turn_gate", return_value=gate):
+        _mid_turn_for_request(_regeneration(answer_event_id=None), MagicMock(), MagicMock(), on_defer=AsyncMock())
+
+    assert gate.visible_response_text is None
 
 
 async def test_an_interrupted_regeneration_leaves_the_answer_it_replaced_shown(tmp_path: Path) -> None:

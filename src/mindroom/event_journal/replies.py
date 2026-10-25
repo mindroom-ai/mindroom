@@ -432,7 +432,7 @@ def _stop_reply(
     receipt_order: int,
     now_ns: int,
 ) -> AppliedTransition | None:
-    """Record a Stop on one reply, whether or not Matrix acknowledged its event yet; ``None`` when it is gone."""
+    """Record a Stop on one reply, before or after Matrix acknowledged its event; ``None`` when no record of it remains."""
     reply = reply_messages.lock(transaction, principal_id, reply_id)
     if reply is None:
         return None

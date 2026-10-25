@@ -73,7 +73,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 
 Edits:
 
-- An edit of a message that no longer waits in the coalescing queue, made before its reply recorded anything it may show, changes no reply, and the turn answers the original text; this includes a participation turn still deciding whether to answer, and a message still waiting for media or voice before it reaches the queue.
+- An edit of a message that no longer waits in the coalescing queue, made before its reply recorded anything it may show, changes no reply, and the turn answers the original text; this includes a participation turn that has not sent anything yet, and a message still waiting for media or voice before it reaches the queue.
   Stopping a reply that shows nothing would post a cancel note where nothing showed, and its regeneration would answer without the participation decision; the message is still answered once.
 - Only a text message is edited in the coalescing queue: an edit of a queued media message's caption changes nothing, and the message is answered with its original caption.
 - An edit applied to a message still in the coalescing queue lives in memory, so a crash before the flush answers the original text.

@@ -93,9 +93,9 @@ def _not_regenerable(reply: Reply | None) -> str | None:
     """Return why an edit regenerates no reply, or ``None`` for one that may show something and is not gone.
 
     A create Matrix has not acknowledged yet may show. A reply that recorded
-    nothing yet, as a participation turn still deciding, is not stopped: it
-    would leave a cancel note where nothing showed, and its regeneration would
-    answer without that decision.
+    nothing yet, as a participation turn that has not sent anything yet, is
+    not stopped: it would leave a cancel note where nothing showed, and its
+    regeneration would answer without the participation decision.
     """
     if reply is None:
         return "no_reply"
