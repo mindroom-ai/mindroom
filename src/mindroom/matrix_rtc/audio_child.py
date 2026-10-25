@@ -24,12 +24,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger, setup_subprocess_logging
 from mindroom.matrix_rtc.audio_protocol import AudioProtocolError, decode_key, encode_frame, read_frame
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse, LiveVoiceAgentOptions
-from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

@@ -28,6 +28,7 @@ Matrix sync callback
 
 | Module | Purpose |
 |--------|---------|
+| `failure_text.py` | The text a caught exception reports: its text, or its type name when it has none |
 | `bounded_bytes.py` | Shared asynchronous and synchronous byte collection that rejects overflowing chunks before buffering them |
 | `origins.py` | Shared browser-origin normalization and allowlist validation for dashboard auth, CORS, Connections same-origin checks, the Computers and Connections MindRoom Chat allowlists, and MCP gateway origins |
 | `matrix_openid.py` | Matrix OpenID verification at the configured homeserver and audience binding, shared by Computers and the Connections portal |
@@ -403,7 +404,6 @@ Matrix sync callback
 | `tool_system/agno_toolkits.py` | Adapts Agno toolkits and functions to `ToolFunction` once, builds the Agno-shaped call-time arguments (run context, actor stand-in) their entrypoints expect, reads the Agno `ToolResult` values they return or stream into `ToolValue`, and is where modules outside the tool packages import Agno's tool types from |
 | `tool_system/toolkit_connections.py` | Connects the Agno toolkits that hold a connection for one run, MCP sessions and `requires_connect` toolkits such as Postgres, as Agno's agent did around a run, and registers an unconnected MCP toolkit's functions while an agent is built |
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |
-| `tool_system/failure_text.py` | The text a caught exception reports wherever it becomes text a model or user reads or a stored outcome holds: the exception's text, or its type name when it has none |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
 | `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |

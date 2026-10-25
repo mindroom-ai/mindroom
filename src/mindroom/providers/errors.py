@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
@@ -22,7 +23,6 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

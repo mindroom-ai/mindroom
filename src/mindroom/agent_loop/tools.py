@@ -162,7 +162,7 @@ def failed_answer(
     tool_args: dict[str, Any] | None = None,
     stop_after_tool_call: bool = False,
 ) -> Message:
-    """Return the tool message that answers a call the loop did not run, marked failed so every wire says so.
+    """Return the tool message that answers a call the loop did not run, marked failed so Claude and Gemini read it as one.
 
     The loop answers this way a call to a tool it does not offer, one whose arguments cannot be decoded, one past the
     per-turn limit, one the output limit cut off, and one whose approval was denied.

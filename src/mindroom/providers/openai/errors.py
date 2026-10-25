@@ -11,9 +11,9 @@ from typing import Any, cast
 
 import httpx
 
+from mindroom.failure_text import failure_text
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.providers.errors import classify_provider_error, provider_failure
-from mindroom.tool_system.failure_text import failure_text
 
 __all__ = [
     "error_body_error",

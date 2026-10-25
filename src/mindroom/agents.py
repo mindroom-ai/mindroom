@@ -33,6 +33,7 @@ from mindroom.delegation.personas import (
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
+from mindroom.failure_text import failure_text
 from mindroom.hooks import HookRegistry
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.llm.provider import DeferredTools, ModelRequest
@@ -77,7 +78,6 @@ from mindroom.tool_system.dynamic_toolkits import (
     defer_toolkit,
     visible_tool_surface,
 )
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext

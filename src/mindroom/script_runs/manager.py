@@ -17,6 +17,7 @@ from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import CONTROL_STATE_PATH_ENV
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import (
     open_directory_within_root,
@@ -52,7 +53,6 @@ from mindroom.shell.supervisor import (
     parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (

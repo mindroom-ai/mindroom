@@ -16,6 +16,7 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.script_runs.models import (
     ScriptCallRecord,
     ScriptCallState,
@@ -34,7 +35,6 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,

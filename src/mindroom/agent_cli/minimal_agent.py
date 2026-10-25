@@ -17,9 +17,9 @@ from mindroom.agent_cli.response_owner import bind_response_owner, tool_catalog
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
+from mindroom.failure_text import failure_text
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 

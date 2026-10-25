@@ -25,9 +25,9 @@ from mindroom.approval.tool_approval import (
     scheduled_call,
 )
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_function import InjectedValue

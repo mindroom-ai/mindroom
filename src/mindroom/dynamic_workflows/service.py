@@ -17,7 +17,7 @@ from mindroom.dynamic_workflows.validation import (
     validate_workflow_spec,
     workflow_runtime_seconds,
 )
-from mindroom.tool_system.failure_text import failure_text
+from mindroom.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

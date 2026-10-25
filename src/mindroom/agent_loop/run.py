@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Protocol
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
 from mindroom.agent_loop.tools import offered_functions, prepare_run_tools
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -28,7 +29,6 @@ from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 
 if TYPE_CHECKING:

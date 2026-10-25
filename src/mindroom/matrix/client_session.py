@@ -19,10 +19,10 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
     runtime_matrix_ssl_verify,
 )
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping

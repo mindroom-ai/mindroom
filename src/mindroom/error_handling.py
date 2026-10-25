@@ -7,6 +7,7 @@ import json
 import re
 from typing import TYPE_CHECKING
 
+from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
@@ -20,7 +21,6 @@ from mindroom.llm.errors import (
 from mindroom.logging_config import get_logger
 from mindroom.providers.errors import classify_provider_error, is_credential_error, whole_words
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths

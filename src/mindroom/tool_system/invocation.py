@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.failure_text import failure_text
 from mindroom.tool_system.agno_toolkits import (
     StreamCollector,
     framework_arguments,
@@ -33,7 +34,6 @@ from mindroom.tool_system.agno_toolkits import (
     tool_value,
 )
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
 from mindroom.tool_system.tool_function import ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint

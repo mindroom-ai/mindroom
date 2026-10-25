@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, cast
 
-from mindroom.tool_system.failure_text import failure_text
+from mindroom.failure_text import failure_text
 
 _TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
 

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.error_handling import is_model_safeguard_refusal
+from mindroom.failure_text import failure_text
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
 from mindroom.history.storage import (
@@ -55,7 +56,6 @@ from mindroom.token_budget import (
     estimate_compaction_input_tokens,
     estimate_text_tokens,
 )
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.runtime_context import (
     get_detached_requester_context,
     get_tool_runtime_context,

@@ -16,6 +16,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.failure_text import failure_text
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
     HookRegistry,
@@ -36,7 +37,6 @@ from mindroom.scheduling.recurring_schedule import (
     prepare_recurring_delivery,
     recurring_delivery_content,
 )
-from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     import nio

@@ -33,6 +33,7 @@ from mindroom.approval.tool_approval import (
     withdraw_scheduled_call_approval,
 )
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import record_system_usage
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -51,7 +52,6 @@ from mindroom.scheduling.recurring_schedule import (
 )
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
-from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

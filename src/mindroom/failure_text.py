@@ -1,8 +1,4 @@
-"""The text a caught exception reports, shared by every writer that turns one into text a reader sees.
-
-Its writers are the generic catches of failed tool calls, tool jobs, subagents, workflows, scheduled runs, and
-replies, whose text a model or user reads or a stored outcome holds, and the log fields that name a failure.
-"""
+"""The text a caught exception reports: its text, or its type name when it has none."""
 
 
 def failure_text(error: BaseException) -> str:

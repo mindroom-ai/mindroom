@@ -20,6 +20,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.background_after import validate_wait_seconds
 from mindroom.tool_jobs.control import (
@@ -31,7 +32,6 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 

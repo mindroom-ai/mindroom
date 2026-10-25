@@ -35,6 +35,7 @@ from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.budgets.monitor import budget_model
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import create_scope_session_storage, load_scope_session
@@ -58,7 +59,6 @@ from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
 )
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.invocation import ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits

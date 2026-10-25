@@ -63,6 +63,7 @@ from mindroom.delegation.state import (
     member_call_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.failure_text import failure_text
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
@@ -92,7 +93,6 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,

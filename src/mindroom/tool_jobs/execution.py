@@ -21,6 +21,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
+from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.types import session_state_snapshot
@@ -53,7 +54,6 @@ from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue

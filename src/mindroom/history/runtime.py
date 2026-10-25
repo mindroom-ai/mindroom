@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
     clear_manual_compaction_request,
@@ -64,7 +65,6 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.timing import timed
-from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence

@@ -19,6 +19,7 @@ from mcp import ClientSession
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import (
     MCPServerConfig,
@@ -66,7 +67,6 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
-from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
