@@ -35,13 +35,14 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
 from tests.bot_helpers import make_matrix_client_mock
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ROOM, Session
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
 from tests.test_room_invites import _handle_invite, _live_router_invite_scenario, _pending_room_invites
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterable
 
     from nio.durable import DurableSync
 
@@ -117,14 +118,14 @@ async def test_personal_room_reconciliation_does_not_delay_sync_ack(
 
 
 @asynccontextmanager
-async def _owned_session(bot: AgentBot) -> AsyncIterator[DurableSync]:
+async def _owned_session(bot: AgentBot, config: DurableSyncConfig | None = None) -> AsyncIterator[DurableSync]:
     opened = await open_owned_matrix_session(
         "https://localhost",
         MatrixCredentials(bot.agent_user.user_id, "DEVICE", "token"),
         bot.runtime_paths,
         consumer_store=bot.journal_principal(),
         new_consumer_generation=uuid4(),
-        config=DurableSyncConfig(),
+        config=config or DurableSyncConfig(),
     )
     bot.client = opened.client
     bot._ingestion_session = opened.session
@@ -144,30 +145,47 @@ def _joined_frame(events: list[dict[str, object]]) -> bytes:
     ).encode()
 
 
+def _rooms_frame(next_batch: str, room_ids: Iterable[str]) -> bytes:
+    room = {"state": {"events": []}, "timeline": {"limited": False, "events": []}}
+    return json.dumps({"next_batch": next_batch, "rooms": {"join": dict.fromkeys(room_ids, room)}}).encode()
+
+
 @asynccontextmanager
-async def _syncing(bot: AgentBot, session: DurableSync, *frames: bytes) -> AsyncIterator[list[str]]:
+async def _syncing(
+    bot: AgentBot,
+    session: DurableSync,
+    *frames: bytes,
+    joined: Iterable[str] = (),
+    complete_state: asyncio.Event | None = None,
+) -> AsyncIterator[list[str]]:
     """Run the real source and pump, answering each join with a sync that observes it.
 
-    Yields the joins and leaves sent to Matrix, in order.
+    Syncs answer with the given frames first, then each join's own frame. A
+    full-state sync with nothing queued answers with every joined room, once
+    `complete_state` is set. Yields the joins and leaves sent to Matrix, in order.
     """
     queued = list(frames)
+    rooms = set(joined)
     memberships: list[str] = []
 
     async def request(_method: str, path: str, *_args: object, **_kwargs: object) -> bytes:
         if "/sync" in path:
-            if not queued:
+            if queued:
+                return queued.pop(0)
+            if "full_state=true" not in path:
                 await asyncio.Event().wait()
-            return queued.pop(0)
+            if complete_state is not None:
+                await complete_state.wait()
+            return _rooms_frame(f"complete-{len(memberships)}", rooms)
         if "/join/" in path:
             memberships.append("join")
             room_id = unquote(path.partition("/join/")[2].partition("?")[0])
-            room = {"state": {"events": []}, "timeline": {"limited": False, "events": []}}
-            queued.append(
-                json.dumps({"next_batch": f"joined-{len(memberships)}", "rooms": {"join": {room_id: room}}}).encode(),
-            )
+            rooms.add(room_id)
+            queued.append(_rooms_frame(f"joined-{len(memberships)}", [room_id]))
             return json.dumps({"room_id": room_id}).encode()
         assert path.partition("?")[0].endswith("/leave")
         memberships.append("leave")
+        rooms.discard(unquote(path.partition("/rooms/")[2].partition("/")[0]))
         return b"{}"
 
     session._transport.request = request
@@ -899,9 +917,9 @@ async def test_startup_reconciles_membership_saved_before_application_admission(
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
         maintenance = asyncio.create_task(bot.ensure_rooms())
         try:
-            await asyncio.wait_for(position_read.wait(), timeout=2)
+            await asyncio.wait_for(position_read.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             async with _syncing(bot, session) as membership_requests:
-                await asyncio.wait_for(maintenance, timeout=2)
+                await asyncio.wait_for(maintenance, timeout=SETTLE_TIMEOUT_SECONDS)
             if target == "join":
                 configured_setup.assert_awaited_once_with(ROOM)
             else:
@@ -913,11 +931,18 @@ async def test_startup_reconciles_membership_saved_before_application_admission(
 
 
 @pytest.mark.asyncio
-async def test_startup_welcome_after_the_routers_own_join_reaches_matrix(
+@pytest.mark.parametrize("ordering", ["join_after_first_sync", "join_before_first_sync", "joined_before_startup"])
+async def test_startup_welcome_reaches_matrix_once_nio_accepts_sends_to_the_room(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    ordering: str,
 ) -> None:
-    """Nio refuses to send into a room it just joined, so the welcome must follow the sync that observes the join."""
+    """Nio refuses plaintext into a joined room until a sync delivers its complete state, so the welcome waits for it.
+
+    The router created the room, so Matrix lists it before the startup pass. The pass joins it after or before the
+    router's first sync, or finds it already joined from an incremental sync. A first sync under the production filter
+    and an incremental sync both leave the room's state incomplete until nio's next full-state sync.
+    """
     bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     bot.rooms = [ROOM]
     welcomed: list[bool] = []
@@ -930,12 +955,17 @@ async def test_startup_welcome_after_the_routers_own_join_reaches_matrix(
         change_membership=AgentBot.change_local_membership.__get__(bot),
         on_configured_room_joined=welcome,
     )
-    first_frame = asyncio.Event()
-    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=first_frame.set))
-    async with _owned_session(bot) as session:
+    frames = {
+        "join_after_first_sync": [json.dumps({"next_batch": "initial"}).encode()],
+        "join_before_first_sync": [],
+        "joined_before_startup": [json.dumps({"next_batch": "initial"}).encode(), _rooms_frame("joined", [ROOM])],
+    }[ordering]
+    synced = asyncio.Semaphore(0)
+    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=synced.release))
+    config = DurableSyncConfig(sync_filter=bot_module._SYNC_FILTER) if ordering == "join_before_first_sync" else None
+    async with _owned_session(bot, config) as session:
         client = bot.client
         assert client is not None
-        # The router created the room, so Matrix lists it before this client has synced it.
         monkeypatch.setattr(client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
         monkeypatch.setattr(
             client,
@@ -944,11 +974,21 @@ async def test_startup_welcome_after_the_routers_own_join_reaches_matrix(
         )
         http_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$welcome", room_id=ROOM))
         monkeypatch.setattr(client, "_send", http_send)
-        async with _syncing(bot, session, json.dumps({"next_batch": "initial"}).encode()) as memberships:
-            await asyncio.wait_for(first_frame.wait(), timeout=2)
-            await asyncio.wait_for(bot._room_lifecycle.join_configured_rooms(), timeout=5)
+        # The room's complete state arrives only once the startup pass waits for it.
+        waiting = asyncio.Event()
+        wait_for_room_ready = session.wait_for_room_ready
 
-    assert memberships == ["join"]
+        async def observe_wait(room_id: str) -> bool:
+            waiting.set()
+            return await wait_for_room_ready(room_id)
+
+        monkeypatch.setattr(session, "wait_for_room_ready", observe_wait)
+        async with _syncing(bot, session, *frames, joined=[ROOM], complete_state=waiting) as memberships:
+            for _ in frames:
+                await asyncio.wait_for(synced.acquire(), timeout=SETTLE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(bot._room_lifecycle.join_configured_rooms(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    assert memberships == ([] if ordering == "joined_before_startup" else ["join"])
     assert welcomed == [True]
     response_class, _method, _path, content, response_data = http_send.await_args_list[0].args
     assert (response_class, response_data) == (nio.RoomSendResponse, (ROOM,))

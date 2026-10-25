@@ -12,7 +12,7 @@ from mindroom.event_journal.models import RoomMembershipPosition
 _OPERATION_NAMESPACE = UUID("0bd4e975-c3e9-5b10-8d46-68fdda1adc07")
 
 
-async def change_local_membership(  # noqa: C901
+async def change_local_membership(
     session: DurableSync,
     *,
     account_id: str,
@@ -29,11 +29,10 @@ async def change_local_membership(  # noqa: C901
     including across restart, so an admitted position alone cannot certify a
     no-op or supply the precondition for a new command.
 
-    A join this command sends returns only after this client's sync has
-    observed it, because nio resets the room's state when the join succeeds and
-    refuses plaintext sends there until a sync establishes it again. The
-    observing sync does not always establish it; see "Nio's durable producer"
-    in docs/architecture/matrix-event-journal-contracts.md.
+    A join, including one the producer already reports, returns True only once
+    nio can send to the room, and False if the room's membership ends first:
+    nio refuses plaintext sends into a joined room until a sync delivers the
+    room's complete state.
     """
     if type(room_id) is not str or not room_id:
         message = "room_id must be a nonempty str"
@@ -57,7 +56,7 @@ async def change_local_membership(  # noqa: C901
         if is_authorized is not None and not is_authorized():
             return False
         if admitted is not None and admitted.membership == target_membership:
-            return True
+            break
         # Unobserved nio state starts at leave/0 but does not prove that an
         # HTTP leave succeeded, so the first command still contacts Matrix.
         position = admitted or RoomMembershipPosition("leave", 0)
@@ -73,11 +72,10 @@ async def change_local_membership(  # noqa: C901
             previous_epoch=position.membership_epoch,
             current_membership=target_membership,
         ):
-            if target_membership == "join":
-                await session.wait_for_membership_idle()
-            return True
+            break
         # nio can finish captured input while taking command ownership. Retry
         # only when admission moved or still owes that producer work; an HTTP
         # failure at the same settled position remains a failure for the caller.
         if await read_position(room_id) == admitted and await session.next_batch() is None:
             return False
+    return target_membership == "leave" or await session.wait_for_room_ready(room_id)

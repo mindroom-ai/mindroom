@@ -655,6 +655,7 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
     session.wait_for_membership_idle = AsyncMock()
     session.next_batch = AsyncMock(return_value=None)
     session.change_membership = AsyncMock(return_value=True)
+    session.wait_for_room_ready = AsyncMock(return_value=True)
     bot.journal_principal = MagicMock(return_value=principal)
     bot._ingestion_session = session
     bot._room_lifecycle.deps = replace(
@@ -672,6 +673,7 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
     session.wait_for_membership_idle.assert_awaited_once_with()
     principal.ingestion_membership_position.assert_awaited_once_with(room_id)
     session.change_membership.assert_not_awaited()
+    session.wait_for_room_ready.assert_awaited_once_with(room_id)
     bot.client.join.assert_not_awaited()
 
 
