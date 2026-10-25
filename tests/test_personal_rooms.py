@@ -481,6 +481,33 @@ async def test_generated_agent_service_serves_only_its_owner(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
+async def test_generated_agent_service_serves_its_owners_bridge_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge alias of the owner gets a personal room from the owner's agent, keyed by the alias account."""
+    server = MatrixServer()
+    server.lobby_members.add("@bridge_alice:localhost")
+    paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(paths)
+    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
+    state.save(paths)
+    append_personal_agent_roster_entry(
+        paths,
+        personal_agent_entry("@alice:localhost", source_room_id="!lobby:localhost"),
+    )
+    data = deepcopy(PERSONAL_AGENTS_BASE)
+    data["authorization"] = {"aliases": {"@alice:localhost": ["@bridge_alice:localhost"]}}
+    config = Config.validate_with_runtime(data, paths)
+    runtime = SimpleNamespace(config=config, client=server, agent_reply_memberships=AgentReplyMembershipIndex())
+    monkeypatch.setattr("mindroom.matrix.personal_rooms.send_message_result", server.deliver)
+    owner = PersonalRoomService("mind_alice", runtime, paths, AsyncMock(return_value=True))
+    room_id = await owner.ensure("@bridge_alice:localhost", "!lobby:localhost", server)
+    assert room_id is not None
+    assert server.membership(room_id, "@bridge_alice:localhost") == "invite"
+
+
+@pytest.mark.asyncio
 async def test_owner_invited_agents_keep_the_room_valid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An owner may bring other MindRoom agents into a personal room."""
     server = MatrixServer()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from copy import deepcopy
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_USER_ID = "@Alice.Smith:example.org"
+_USER_ID = "@Alice.Smith:localhost"
 _SUFFIXED_NAME = f"mind_alice_smith_{sha256(_USER_ID.encode()).hexdigest()[:6]}"
 
 
@@ -38,12 +40,16 @@ def _create_agent_user() -> AsyncMock:
     )
 
 
-async def _provision(config: Config, runtime_paths: RuntimePaths) -> str:
+def _hashed(slug: str, user_id: str) -> str:
+    return f"mind_{slug}_{sha256(user_id.encode()).hexdigest()[:6]}"
+
+
+async def _provision(config: Config, runtime_paths: RuntimePaths, user_id: str = _USER_ID) -> str:
     return await provision_personal_agent(
         config,
         runtime_paths,
         template="mind",
-        user_id=_USER_ID,
+        user_id=user_id,
         user_display_name="Alice",
         source_room_id="!lobby:example.org",
     )
@@ -179,3 +185,122 @@ async def test_custom_matrix_username_gets_namespace(tmp_path: Path) -> None:
 
     assert create_user.await_args.kwargs == {"username": "alice_smith.mind_abcd1234"}
     assert read_personal_agent_roster(paths)[0].matrix_username == "alice_smith.mind_abcd1234"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_id", ["@ali*ce:evil.org", "@a b:evil.org", "@a[b]c:evil.org"])
+async def test_unsupported_owner_id_gets_no_account_or_roster_entry(tmp_path: Path, user_id: str) -> None:
+    """An ID that would break the generated agent's access fails only that user's onboarding, before registration."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(deepcopy(BASE), paths)
+    create_user = _create_agent_user()
+
+    with (
+        patch("mindroom.personal_agents.create_agent_user", new=create_user),
+        pytest.raises(ValueError, match="cannot own a personal agent"),
+    ):
+        await _provision(config, paths, user_id)
+
+    create_user.assert_not_awaited()
+    assert read_personal_agent_roster(paths) == []
+
+
+@pytest.mark.asyncio
+async def test_provision_does_not_adopt_a_leftover_account(tmp_path: Path) -> None:
+    """An account already stored under the plain agent name, such as a removed agent's, counts as taken."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(deepcopy(BASE), paths)
+    state = MatrixState.load(runtime_paths=paths)
+    state.add_account("agent_mind_alice_smith", "mindroom_mind_alice_smith", None, domain="localhost")
+    state.save(runtime_paths=paths)
+    create_user = _create_agent_user()
+
+    with patch("mindroom.personal_agents.create_agent_user", new=create_user):
+        assert await _provision(config, paths) == _SUFFIXED_NAME
+
+    assert create_user.await_args.args[1] == _SUFFIXED_NAME
+
+
+@pytest.mark.asyncio
+async def test_provision_refuses_a_mindroom_account(tmp_path: Path) -> None:
+    """A MindRoom account the live config does not know yet never gets an agent of its own."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(deepcopy(BASE), paths)
+    state = MatrixState.load(runtime_paths=paths)
+    state.add_account("agent_mind_bob", "mindroom_mind_bob", None, domain="localhost")
+    state.save(runtime_paths=paths)
+    create_user = _create_agent_user()
+
+    with (
+        patch("mindroom.personal_agents.create_agent_user", new=create_user),
+        pytest.raises(ValueError, match="MindRoom account"),
+    ):
+        await _provision(config, paths, "@mindroom_mind_bob:localhost")
+
+    create_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remote_user_always_gets_the_hashed_name(tmp_path: Path) -> None:
+    """A user on another server gets the hashed name even when the plain one is free."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(deepcopy(BASE), paths)
+    create_user = _create_agent_user()
+
+    with patch("mindroom.personal_agents.create_agent_user", new=create_user):
+        assert await _provision(config, paths, "@alice:example.org") == _hashed("alice", "@alice:example.org")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_slug_users_get_distinct_names(tmp_path: Path) -> None:
+    """Two users with the same slug onboarding at once get distinct agents, accounts, and roster entries."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(deepcopy(BASE), paths)
+    create_user = _create_agent_user()
+    registered = create_user.side_effect
+
+    async def slow_registration(*args: object, **kwargs: object) -> AgentMatrixUser:
+        await asyncio.sleep(0.05)
+        return registered(*args, **kwargs)
+
+    create_user.side_effect = slow_registration
+    with patch("mindroom.personal_agents.create_agent_user", new=create_user):
+        names = await asyncio.gather(
+            _provision(config, paths, "@alice:localhost"),
+            _provision(config, paths, "@ALICE:localhost"),
+        )
+
+    assert len(set(names)) == 2
+    assert "mind_alice" in names
+    assert sorted(call.args[1] for call in create_user.await_args_list) == sorted(names)
+    assert sorted(entry.agent_name for entry in read_personal_agent_roster(paths)) == sorted(names)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_provisioning_finishes_its_roster_write_under_the_lock(tmp_path: Path) -> None:
+    """Cancelling provisioning mid-write waits for the write, so no other provisioning reads a stale roster."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(deepcopy(BASE), paths)
+    writing, release = threading.Event(), threading.Event()
+
+    def slow_append(*args: Any) -> None:  # noqa: ANN401
+        writing.set()
+        release.wait(5)
+        append_personal_agent_roster_entry(*args)
+
+    with (
+        patch("mindroom.personal_agents.create_agent_user", new=_create_agent_user()),
+        patch("mindroom.personal_agents.append_personal_agent_roster_entry", new=slow_append),
+    ):
+        task = asyncio.create_task(_provision(config, paths))
+        try:
+            assert await asyncio.to_thread(writing.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert [entry.agent_name for entry in read_personal_agent_roster(paths)] == ["mind_alice_smith"]

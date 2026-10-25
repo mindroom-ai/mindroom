@@ -20,6 +20,7 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomValidationError
 from mindroom.matrix.state import resolve_room_aliases
+from mindroom.personal_agents import is_mindroom_account_id
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
@@ -95,6 +96,7 @@ class PersonalRoomLifecycle:
     _retry_candidates: dict[tuple[str, str], bool] = field(default_factory=dict, init=False)
     _reconciliation_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _next_reconciliation_at: float = field(default=0.0, init=False)
+    _target_ready_during_pass: bool = field(default=False, init=False)
 
     @property
     def observes_onboarding_joins(self) -> bool:
@@ -113,6 +115,8 @@ class PersonalRoomLifecycle:
         """Reconcile at once because a user's own agent has just finished its first sync."""
         self._reconciled = False
         self._next_reconciliation_at = 0.0
+        # A running pass may have seen that agent unsynced, so another pass follows it without the cooldown.
+        self._target_ready_during_pass = self._reconciliation_task is not None
         self.schedule_reconciliation()
 
     def _uses_template(self, settings: PersonalRoomsConfig) -> bool:
@@ -161,9 +165,12 @@ class PersonalRoomLifecycle:
             cancelled = True
             raise
         finally:
-            if not cancelled and revision == self._config_revision:
+            nudged, self._target_ready_during_pass = self._target_ready_during_pass, False
+            if not cancelled and not nudged and revision == self._config_revision:
                 self._next_reconciliation_at = monotonic() + _RECONCILIATION_RETRY_SECONDS
             self._reconciliation_task = None
+            if nudged and not cancelled:
+                self.target_ready()
 
     async def cancel_reconciliation(self, *, timeout_seconds: float) -> None:
         """Cancel within the shutdown budget, retaining ownership of unfinished work."""
@@ -200,10 +207,16 @@ class PersonalRoomLifecycle:
             or not is_human_requester_id(user_id, self.runtime.config, self.runtime_paths)
         ):
             return
-        target_name = self._target_name(settings, user_id)
+        # A bridge alias shares its person's agent; the personal room stays keyed by the joining account.
+        owner_id = resolve_human_requester_alias(user_id, self.runtime.config, self.runtime_paths)
+        target_name = self._target_name(settings, owner_id)
         if target_name is None:
+            # A new agent's account can join the lobby before the reload that makes it known.
+            if is_mindroom_account_id(user_id, self.runtime_paths):
+                logger.debug("MindRoom account gets no personal agent", user_id=user_id, room_id=source_room_id)
+                return
             if self.provision_personal_agent is not None:
-                await self.provision_personal_agent(settings.agent, user_id, source_room_id)
+                await self.provision_personal_agent(settings.agent, owner_id, source_room_id)
             msg = "Personal agent is not in the live config yet"
             raise _TargetPendingError(msg)
         target = self.lookup_target(target_name)

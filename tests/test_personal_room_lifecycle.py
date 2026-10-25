@@ -1096,3 +1096,106 @@ async def test_target_ready_allows_immediate_reconciliation(template_coordinatio
     assert lifecycle._reconciled is False
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
     template_coordination.target.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recorded_in", ["matrix_state", "roster"])
+async def test_template_join_by_an_unpublished_mindroom_account_settles_without_provisioning(
+    template_coordination: TemplateCoordination,
+    recorded_in: str,
+) -> None:
+    """An agent's account that joins the lobby before a reload makes it known never gets an agent of its own."""
+    lifecycle = template_coordination.lifecycle
+    paths = lifecycle.runtime_paths
+    if recorded_in == "matrix_state":
+        state = MatrixState.load(paths)
+        state.add_account("agent_mind_bob", "mindroom_mind_bob", None, domain="localhost")
+        state.save(paths)
+    else:
+        append_personal_agent_roster_entry(paths, personal_agent_entry("@bob:localhost"))
+    bot_id = "@mindroom_mind_bob:localhost"
+    join = RoomMemberJoin(LOBBY.room_id, "$join", bot_id, bot_id, None, None, "join", None)
+    with capture_logs() as logs:
+        await lifecycle.baseline_join(join)
+    template_coordination.provision.assert_not_awaited()
+    assert lifecycle._retry_candidates == {}
+    assert not [entry for entry in logs if entry["log_level"] in {"warning", "error"}]
+
+
+@pytest.mark.asyncio
+async def test_template_bridge_alias_onboards_onto_its_persons_agent(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """A bridge alias gets its person's agent, which then serves the alias account's own personal room."""
+    lifecycle = template_coordination.lifecycle
+    paths = lifecycle.runtime_paths
+    data = deepcopy(PERSONAL_AGENTS_BASE)
+    data["authorization"] = {"aliases": {"@alice:localhost": ["@bridge_alice:localhost"]}}
+    lifecycle.runtime.config = Config.validate_with_runtime(data, paths)
+    alias = "@bridge_alice:localhost"
+    await lifecycle.baseline_join(RoomMemberJoin(LOBBY.room_id, "$join", alias, alias, None, None, "join", None))
+    template_coordination.provision.assert_awaited_once_with("mind", "@alice:localhost", "!lobby:localhost")
+
+    append_personal_agent_roster_entry(
+        paths,
+        personal_agent_entry("@alice:localhost", source_room_id="!lobby:localhost"),
+    )
+    lifecycle.runtime.config = Config.validate_with_runtime(data, paths)
+    lifecycle.config_changed()
+    await lifecycle._reconcile()
+    template_coordination.target.ensure.assert_any_await(
+        alias,
+        "!lobby:localhost",
+        lifecycle.runtime.client,
+        reinvite_departed_owner=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_users_provisioning_failure_does_not_stop_another_in_the_same_pass(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """A registration failure for one user still lets the next candidate in that pass onboard."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    # Sorted before alice, so her candidate runs after the failure.
+    lifecycle._queue_retry(("@aaron:localhost", "!lobby:localhost"), reinvite_departed_owner=False)
+    template_coordination.provision.side_effect = RuntimeError("Failed to register personal agent account")
+    await lifecycle._reconcile()
+    template_coordination.provision.assert_awaited_once_with("mind", "@aaron:localhost", "!lobby:localhost")
+    template_coordination.target.ensure.assert_awaited_once_with(
+        "@alice:localhost",
+        "!lobby:localhost",
+        lifecycle.runtime.client,
+        reinvite_departed_owner=False,
+    )
+    assert lifecycle._candidate_backoff[("@aaron:localhost", "!lobby:localhost")].failures == 1
+
+
+@pytest.mark.asyncio
+async def test_target_ready_during_a_pass_starts_the_next_pass_at_once(
+    template_coordination: TemplateCoordination,
+    clock: Clock,
+) -> None:
+    """A user's agent that finishes its first sync while a pass runs is onboarded right after that pass."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    target = template_coordination.target
+    synced = False
+
+    def lookup(name: str) -> PersonalRoomTarget | None:
+        nonlocal synced
+        if name != "mind_alice":
+            return None
+        if synced:
+            return PersonalRoomTarget(target, first_sync_complete=True)
+        # The pass sees the agent unsynced, and its first sync completes before the pass ends.
+        synced = True
+        lifecycle.target_ready()
+        return PersonalRoomTarget(target, first_sync_complete=False)
+
+    template_coordination.lookup.side_effect = lookup
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert clock.now == 1000.0
+    target.ensure.assert_awaited_once()

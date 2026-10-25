@@ -41,7 +41,12 @@ from mindroom.matrix.personal_room_store import (
 from mindroom.matrix.room_power import privileged_creators, user_power_level
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix_identifiers import managed_room_alias_localpart
-from mindroom.requester_identity import is_human_requester_id, is_managed_entity_id, runtime_matrix_domain
+from mindroom.requester_identity import (
+    is_human_requester_id,
+    is_managed_entity_id,
+    resolve_human_requester_alias,
+    runtime_matrix_domain,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -132,10 +137,14 @@ class PersonalRoomService:
     def _current_settings(self, user_id: str, source_room_id: str) -> PersonalRoomsConfig | None:
         """Read current onboarding and access policy at an authority boundary; a user's own agent serves only them."""
         settings = self._settings()
-        instance = self.runtime.config.personal_agent_instance(self.agent_name)
+        config = self.runtime.config
+        instance = config.personal_agent_instance(self.agent_name)
         if (
             settings is None
-            or (instance is not None and user_id != instance.user_id)
+            or (
+                instance is not None
+                and resolve_human_requester_alias(user_id, config, self.runtime_paths) != instance.user_id
+            )
             or source_room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
             or not self._allowed(user_id, source_room_id)
         ):

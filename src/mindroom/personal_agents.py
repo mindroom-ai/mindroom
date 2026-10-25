@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
+from pydantic import ValidationError
+
+from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.config.agent import AgentConfig
 from mindroom.config.personal_agents import (
     PersonalAgentRosterEntry,
     append_personal_agent_roster_entry,
@@ -17,13 +20,16 @@ from mindroom.config.personal_agents import (
 )
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.file_locks import async_exclusive_file_lock
+from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
+from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
     ManagedAccountProvisioningRequest,
     create_agent_user,
     preflight_managed_account_provisioning,
 )
-from mindroom.matrix_identifiers import namespaced_username_localpart
+from mindroom.matrix_identifiers import agent_username_localpart, namespaced_username_localpart
+from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
@@ -48,7 +54,26 @@ def _matrix_username(
     return namespaced_username_localpart(rendered, runtime_paths)
 
 
+def is_mindroom_account_id(user_id: str, runtime_paths: RuntimePaths) -> bool:
+    """Whether a Matrix ID is an account MindRoom manages, including agents the live config does not have yet."""
+    domain = runtime_matrix_domain(runtime_paths)
+    accounts = matrix_state_for_runtime(runtime_paths).accounts.values()
+    if any(matrix_account_user_id(account, domain) == user_id for account in accounts):
+        return True
+    return any(
+        MatrixID.from_username(
+            entry.matrix_username or agent_username_localpart(entry.agent_name, runtime_paths),
+            domain,
+        ).full_id
+        == user_id
+        for entry in read_personal_agent_roster(runtime_paths)
+    )
+
+
 def _localpart_taken(agent_name: str, matrix_username: str | None, runtime_paths: RuntimePaths) -> bool:
+    # An account left under this name, such as a removed agent's, would hand its identity and memory to a new owner.
+    if matrix_state_for_runtime(runtime_paths).get_account(managed_account_key(agent_name)) is not None:
+        return True
     try:
         preflight_managed_account_provisioning(
             [ManagedAccountProvisioningRequest(agent_name, matrix_username)],
@@ -79,7 +104,10 @@ def _new_roster_entry(
         *(entry.agent_name for entry in roster),
     }
     slug = personal_agent_username(user_id)
-    for username in (slug, f"{slug}_{sha256(user_id.encode()).hexdigest()[:6]}"):
+    hashed = f"{slug}_{sha256(user_id.encode()).hexdigest()[:6]}"
+    # Someone on another server must not claim a local person's plain name first.
+    local = user_id.partition(":")[2] == runtime_matrix_domain(runtime_paths)
+    for username in (slug, hashed) if local else (hashed,):
         agent_name = template_config.name_pattern(template).replace(_USERNAME_PLACEHOLDER, username)
         matrix_username = _matrix_username(template_config, username, runtime_paths)
         if agent_name in taken_names or _localpart_taken(agent_name, matrix_username, runtime_paths):
@@ -112,11 +140,19 @@ async def provision_personal_agent(
     registration leaves no entry for a reload to load. Calling again for the same
     user returns the existing agent's name.
     """
+    if "[" in user_id or "]" in user_id:
+        # access.users entries are globs, so brackets would keep the owner out of their own agent.
+        msg = f"{user_id} cannot own a personal agent: brackets in a Matrix ID are not supported"
+        raise ValueError(msg)
     async with async_exclusive_file_lock(personal_agent_roster_lock_path(runtime_paths)):
         roster = read_personal_agent_roster(runtime_paths)
         for entry in roster:
             if entry.template == template and entry.user_id == user_id:
                 return entry.agent_name
+        # A new agent's account can join an onboarding room before the reload that makes it known.
+        if is_mindroom_account_id(user_id, runtime_paths):
+            msg = f"{user_id} is a MindRoom account and cannot own a personal agent"
+            raise ValueError(msg)
         entry = _new_roster_entry(
             config,
             runtime_paths,
@@ -126,13 +162,19 @@ async def provision_personal_agent(
             user_display_name=user_display_name,
             source_room_id=source_room_id,
         )
-        template_data = config.personal_agents[template].model_dump(exclude_unset=True)
+        agent_data = personal_agent_data(config.personal_agents[template].model_dump(exclude_unset=True), entry)
+        try:
+            # An owner ID such as one with a space or a wildcard would make every later config load invalid.
+            AgentConfig.model_validate(agent_data)
+        except ValidationError as exc:
+            msg = f"{user_id} cannot own a personal agent: {exc}"
+            raise ValueError(msg) from exc
         await create_agent_user(
             runtime_matrix_homeserver(runtime_paths),
             entry.agent_name,
-            personal_agent_data(template_data, entry)["display_name"],
+            agent_data["display_name"],
             runtime_paths,
             username=entry.matrix_username,
         )
-        await asyncio.to_thread(append_personal_agent_roster_entry, runtime_paths, entry)
+        await run_blocking_until_complete(append_personal_agent_roster_entry, runtime_paths, entry)
         return entry.agent_name
