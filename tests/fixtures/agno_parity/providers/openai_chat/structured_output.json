@@ -18,8 +18,7 @@
       "id": "gpt-6-astra",
       "provider": "openai"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "description": "Structured output for routing decisions.",
         "properties": {
@@ -41,16 +40,15 @@
         "title": "_RoutingSuggestion",
         "type": "object"
       },
-      "model": "mindroom.routing:_RoutingSuggestion",
-      "type": "pydantic"
+      "model": "mindroom.routing:_RoutingSuggestion"
     },
+    "portable_replay": null,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -59,18 +57,19 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "messages": [
         {
           "role": "developer",
@@ -81,7 +80,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-6-astra",
       "response_format": {
         "type": "json_schema",
         "json_schema": {
@@ -111,7 +109,6 @@
           "strict": true
         }
       },
-      "stream": true,
       "stream_options": {
         "include_usage": true
       }

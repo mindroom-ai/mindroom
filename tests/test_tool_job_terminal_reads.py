@@ -92,6 +92,10 @@ async def test_expired_native_job_stays_unavailable_to_a_wait_after_restart(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     storage = create_session_storage("leader", config, paths, owner)
     executions = 0

@@ -1016,6 +1016,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Tools** - configured tools (green badge) and tools that need no setup
 - **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
+- **Personal agents** - a read-only list of the agents generated from [`personal_agents`](https://docs.mindroom.chat/personal-agents/) templates, with each owner, Matrix ID, template, and status; edit the templates under Settings → Personal rooms
 
 ### Teams
 
@@ -1151,6 +1152,7 @@ The dashboard uses the backend REST API under `/api/`, with the same authenticat
 | PUT | `/api/config/raw` | Replace raw `config.yaml` text |
 | GET | `/api/config/schema` | Configuration JSON schema used by Settings and More settings |
 | GET | `/api/config/agents` | List agents |
+| GET | `/api/config/personal-agents` | List generated personal agents |
 | POST | `/api/config/agents` | Create agent |
 | PUT | `/api/config/agents/{id}` | Update agent |
 | DELETE | `/api/config/agents/{id}` | Delete agent |
@@ -2011,6 +2013,10 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
+Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
+An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
+
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
 Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
@@ -2030,7 +2036,7 @@ With adaptive thinking, the notes these models write between tool calls are hidd
 Provider credentials come from environment variables, stored credentials, CLI logins, or a model-specific key.
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
-A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key, although the provider SDK may still read `ANTHROPIC_API_KEY` or `AZURE_OPENAI_API_KEY` from the process environment.
+A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
@@ -2320,8 +2326,7 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
 Each provider accepts only the keys in the table below.
-A model with any other key fails to load with an `Unsupported extra_kwargs` error that names the unknown keys and lists the accepted ones.
-Retired Agno model settings that older configs still set, such as `retries`, load with a warning and are ignored.
+A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
 
 - `base_url` sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
@@ -2347,7 +2352,7 @@ Retired Agno model settings that older configs still set, such as `retries`, loa
 | `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
 | `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
-When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
+When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
 Some models reject sampling controls:
 
@@ -2607,7 +2612,7 @@ MindRoom forms a team without any `teams:` entry when:
 Tagging exactly one agent gets a reply from that agent alone.
 Threads where two or more people have posted never form a team from earlier thread context; tag the agents again in the current message (see [Multi-Human Thread Protection](https://docs.mindroom.chat/configuration/threads/#multi-human-thread-protection)).
 
-If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available in this room.`
+If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available to you in this room.`
 For teams formed from thread context or a DM room, unavailable agents are left out, and if only one remains it answers alone.
 
 The `default` model picks the mode for each ad hoc team from the request: `coordinate` when the agents have different subtasks, `collaborate` for opinions or brainstorming, and `collaborate` when the choice fails.
@@ -2949,7 +2954,7 @@ With `defer_reaction` set, each message that can wait gets that reaction once.
 
 When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
 If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
-A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
+A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the agent starts sending its reply, leaves the original text as the one answered.
 Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
 While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
 Edits by agents never trigger regeneration, and an agent's message edited while it still waits is answered with its original text.
@@ -2973,7 +2978,7 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
-The retired `compress_tool_results` field is ignored with a warning, and tool results replay unchanged.
+Tool results replay unchanged; the retired `compress_tool_results` field fails validation with `Unknown key`, so remove it.
 
 ## Context Window
 
@@ -3157,6 +3162,7 @@ A `file` member of a team that uses Mem0 does not see that team's memory in its 
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory.
+The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder
 
@@ -3462,7 +3468,7 @@ Save from the Memory page to write the changes to `config.yaml`.
 
 ## Agno Learning
 
-Agno Learning is retired: configs that still set `learning` or `learning_mode` load with a warning and the values are ignored.
+Agno Learning is retired: a config that sets `learning` or `learning_mode` on an agent or in `defaults` fails validation with `Unknown key`, so remove them.
 Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.
 
 # Knowledge Bases
@@ -3567,7 +3573,7 @@ A refresh reuses the stored vectors of unchanged files and only embeds files tha
 Changing `chunk_size`, `chunk_overlap`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, HTTP 408, 429, and 5xx) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, 500, 502, 503, 504, and 529) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
 
 Knowledge base configuration hot-reloads.
 After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
@@ -3919,8 +3925,9 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 ## Storage
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
+They use Chroma, whose `chromadb` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[chromadb]`.
 For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
-Files-mode bases need no vector database.
+Files-mode bases build no vector index, but refreshing them still loads the `chromadb` extra.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 ## Search Limits
@@ -6384,6 +6391,7 @@ Spend is the cost of the user's [recorded token usage](https://docs.mindroom.cha
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 `claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
+Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID that uses Chat Completions, such as one with `api: chat_completions`.
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
@@ -6980,6 +6988,7 @@ MindRoom's own accounts and the internal `mindroom_user` never get an agent.
 
 The dashboard's Settings page edits `personal_agents` next to Personal rooms.
 Its `personal_rooms.agent` dropdown lists the configured agents and the `personal_agents` templates.
+The Agents page lists every generated agent, read-only, with its owner, Matrix ID, template, and whether it is active, pending, or stopped because its template was removed.
 
 ## Switching From a Single Personal-Room Agent
 
@@ -8048,6 +8057,7 @@ The SDK retries transient failures automatically without repeating the side effe
 
 Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
 A denied approval raises a non-retryable error with kind `approval_denied`.
+A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
 
 ## Complete Watcher Example
@@ -10213,6 +10223,7 @@ WebRTC cannot send UDP from these browsers.
 
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
 Pages larger than 2 MiB fail, as do pages a server sends compressed.
+An entry that sets the retired `website.knowledge` option fails config load until you remove it.
 
 ```yaml
 agents:
@@ -16856,7 +16867,7 @@ async def block_secret_reads(ctx):
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None | 5000 |
 | `session:started` | Observer | `SessionHookContext` | Once when a response creates a new persisted session | None | 5000 |
 | `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved | None | 15000 |
-| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary | None | 5000 |
+| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary; the counts size the conversation history before and after a compaction that runs before a reply, and the whole model request before and after one that runs during a reply | None | 5000 |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
 | `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router, after a human joins a room | None | 3000 |
@@ -18040,6 +18051,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `approval_required` | The tool needs confirmation or a configured approval and cannot run through the gateway |
 | `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
+| `tool_declined` | A MindRoom plugin declined the call, so it did not run; `message` gives the plugin's reason |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
 | `duplicate_request` | A call with the same request ID is already running |
@@ -18472,6 +18484,7 @@ See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-pr
 
 With `workers.backend: kubernetes`, the primary runtime creates a worker Deployment and Service per worker on demand and routes tool calls to it.
 Idle workers scale to zero, keeping agent data and worker caches.
+The default image includes the `kubernetes` package this needs; a custom image built without all extras must install `mindroom[kubernetes]` in the primary runtime.
 Each worker keeps its own caches and virtualenvs under `workers.kubernetes.storageSubpathPrefix`.
 [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) describes which workspaces each worker mounts, and [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) describes how tool settings reach workers.
 `google_vertex_adc` tools must run in the primary runtime, because workers receive no Google application default credentials.
@@ -20733,12 +20746,13 @@ notify    at most once per hour
 ```
 
 Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
+Each call to a tool the run does not offer logs a `tool_not_offered` warning, and each call whose arguments cannot be decoded logs an `invalid_tool_arguments` warning with `reason` `decode` or `not_object`; both carry `entity` and `tool_name`, never the arguments.
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
 
 ## Debug Logging
 
-When a request to a model under `models` ends, completed or not, MindRoom logs an `LLM usage` event with provider and model identifiers and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
+When a request to a model under `models` ends, completed or not, MindRoom logs an `LLM usage` event with provider and model identifiers, the `stop_reason` of a reply that finished (`output_limit` or `content_filter` for one the provider cut off), and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
 
 To record full provider requests, enable `debug.log_llm_requests`:
 
@@ -20775,6 +20789,12 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to OpenAI SDK 3
+
+OpenAI-compatible and Claude model requests, and the other OpenAI SDK requests [Model Configuration](https://docs.mindroom.chat/configuration/models/#configuration-examples) lists, now verify certificates against the operating system's trust store instead of certifi's bundle.
+The published images include system CA certificates.
+On a host without them, install them (for example the `ca-certificates` package) before upgrading, or point `SSL_CERT_FILE` at a complete CA bundle, such as certifi's `cacert.pem` with any private CA appended.
 
 ## Upgrading to durable reply records
 
@@ -20901,10 +20921,14 @@ Smaller changes that need operator action:
   In a sandbox runner, set every proxy variable, or only `all_proxy`, to the same HTTP(S) proxy, or the browser does not start.
   See [Egress Proxy for Browsers](https://docs.mindroom.chat/tools/web-scraping-and-browser/#egress-proxy-for-browsers) for the full rules.
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
+- **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode` (see [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning)), `compress_tool_results` (see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings)), and the `website` tool's `knowledge` option (see [`website`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#website)) from `config.yaml`.
+  Configs created by older `mindroom config init` runs set `learning: false` on the `mind` agent.
+  Also delete every `extra_kwargs` key a model's provider does not accept, such as the retired Agno setting `retries` or a misspelled key, on every model, including models no agent uses; [Extra Kwargs](https://docs.mindroom.chat/configuration/models/#extra-kwargs) lists the accepted keys.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
 - **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
+- **Retired prompt overrides**: a [`prompts`](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
 
 ### Compaction History
 
@@ -21124,7 +21148,7 @@ mindroom run --log-level DEBUG
 To debug MindRoom alone, keep the global level at `INFO` and set per-logger overrides with [`MINDROOM_LOGGER_LEVELS`](https://docs.mindroom.chat/configuration/#environment-variables):
 
 ```bash
-LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
+LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpx2:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
 ```
 
 Matrix decrypt warnings from `nio.crypto` are hidden by default; add `nio.crypto:WARNING` to `MINDROOM_LOGGER_LEVELS` to see them while debugging encryption.

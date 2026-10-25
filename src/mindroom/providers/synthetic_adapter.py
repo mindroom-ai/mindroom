@@ -11,12 +11,12 @@ import hashlib
 import json
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted
 from mindroom.providers.assistant_turn import finished_assistant_message
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -40,6 +40,8 @@ SHELL_TOOL = "run_shell_command"
 class SyntheticSettings:
     """The ``extra_kwargs`` a synthetic model accepts."""
 
+    # The shared credential flow can give any model a key; a synthetic model sends no request, so it ignores it.
+    api_key: str | None = field(default=None, metadata=SECRET)
     seed: int = 1
     min_response_chars: int = 320
     max_response_chars: int = 960
@@ -151,11 +153,14 @@ class SyntheticProvider:
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> SyntheticProvider:
     """Build the adapter for a ``synthetic`` model config; a configured API key is ignored."""
     del runtime_paths
-    extra_kwargs = {key: value for key, value in (model_config.extra_kwargs or {}).items() if key != "api_key"}
     return SyntheticProvider(
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
         capabilities=Capabilities(),
-        settings=settings_from_extra_kwargs(SyntheticSettings, extra_kwargs, provider=model_config.provider),
+        settings=settings_from_extra_kwargs(
+            SyntheticSettings,
+            model_config.extra_kwargs,
+            provider=model_config.provider,
+        ),
     )
 
 

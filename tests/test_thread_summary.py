@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -11,11 +12,13 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import httpx
+import httpx2
 import nio
 import pytest
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel, ValidationError
 
+from mindroom import timing
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -70,6 +73,7 @@ from mindroom.thread_tags import (
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, serve_conversation_reader
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.providers.golden_support import SentRequest, httpx2_transport
 from tests.test_thread_export_projected_history import PRINCIPAL as _PROJECTION_PRINCIPAL
 from tests.test_thread_export_projected_history import ROOM as _PROJECTION_ROOM
 from tests.test_thread_export_projected_history import ROOT as _PROJECTION_ROOT
@@ -80,6 +84,7 @@ from tests.test_thread_export_projected_history import raw as _projection_raw
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+    from types import ModuleType
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore, PrincipalStore
@@ -2585,7 +2590,7 @@ class TestGenerateSummary:
     ) -> None:
         """A summary never sends the temperature its model authors, and routes that keep the default send none."""
         wire = _SummaryWire()
-        monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx.AsyncClient(transport=wire.transport).send)
+        monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
         config = _mock_config(summary_temperature=summary_temperature)
         config.models["summary"] = _wire_model_config(model_config, wire)
         runtime_paths = resolve_runtime_paths(
@@ -2607,13 +2612,13 @@ class TestGenerateSummary:
         [None, {"temperature": 0.9, "num_ctx": 8192}],
         ids=["no-options", "authored-options"],
     )
-    async def test_ollama_summaries_send_the_authored_options_unchanged(
+    async def test_ollama_summaries_send_the_summary_temperature_in_the_authored_options(
         self,
         tmp_path: Path,
         summary_temperature: float | None,
         options: dict[str, Any] | None,
     ) -> None:
-        """Ollama summaries never send the summary temperature: Agno's Ollama model had no temperature field."""
+        """Ollama summaries send the summary temperature as ``options.temperature`` and keep the other options."""
         wire = _SummaryWire()
         config = _mock_config(summary_temperature=summary_temperature)
         model_config = _wire_model_config({"provider": "ollama", "id": "qwen3.8:27b"}, wire)
@@ -2631,7 +2636,8 @@ class TestGenerateSummary:
             await _summarize(_make_thread_history(3), config, runtime_paths, model_name="summary")
 
         [body] = wire.bodies
-        assert body.get("options") == options
+        expected = options if summary_temperature is None else {**(options or {}), "temperature": summary_temperature}
+        assert body.get("options") == expected
 
     async def test_prompt_good_examples_are_stable_and_within_hard_limit(self) -> None:
         """Prompt GOOD examples should be short and avoid transient-status wording."""
@@ -2669,13 +2675,18 @@ _GOOGLE_TOKEN = "summary-google-token"  # noqa: S105 - synthetic SDK credential
 
 
 class _SummaryWire:
-    """Record the JSON body of every request and reject it, so the summary request is all the test sees."""
+    """Record the JSON body of every request and reject it, so the summary request is all the test sees.
+
+    ``client`` is the httpx2 client OpenAI and Claude models send through, and ``transport`` the httpx transport
+    Gemini and Ollama SDK clients take.
+    """
 
     def __init__(self) -> None:
         self.bodies: list[dict[str, Any]] = []
         self.transport = httpx.MockTransport(self._respond)
+        self.client = httpx2.AsyncClient(transport=httpx2_transport(self._respond))
 
-    def _respond(self, request: httpx.Request) -> httpx.Response:
+    def _respond(self, request: SentRequest) -> httpx.Response:
         self.bodies.append(json.loads(request.content))
         error = {"type": "invalid_request_error", "message": "bad", "code": 400, "status": "INVALID_ARGUMENT"}
         return httpx.Response(400, json={"type": "error", "error": error})
@@ -2684,7 +2695,7 @@ class _SummaryWire:
 def _wire_model_config(fields: dict[str, Any], wire: _SummaryWire) -> ModelConfig:
     """Return a model config that sends through ``wire`` and authors temperature 0.9 where its route has one."""
     provider = fields["provider"]
-    # Ollama models author sampling inside ``options``, which summaries leave alone.
+    # Ollama models author sampling inside ``options``, not as a temperature setting.
     extra_kwargs: dict[str, Any] = {} if provider == "ollama" else {"temperature": 0.9}
     if provider == "vertexai_claude":
         extra_kwargs |= {
@@ -3357,3 +3368,39 @@ def test_conversation_text_drops_tool_markers() -> None:
     text = _build_conversation_text([message], trusted_sender_ids=set())
     assert "🔧" not in text
     assert "Done." in text
+
+
+@pytest.mark.asyncio
+async def test_summary_generation_and_the_whole_summary_pass_time_under_their_own_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With timing on, the pass that queues a summary and the model call inside it log two distinct durations."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    labels: list[str] = []
+    monkeypatch.setattr(timing, "emit_elapsed_timing", lambda label, _start, **_fields: labels.append(label))
+
+    def timed_copy(module_name: str) -> ModuleType:
+        # A private copy decorates its timers now that timing is on, leaving the imported module untouched.
+        spec = importlib.util.find_spec(module_name)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    effects = timed_copy("mindroom.post_response_effects")
+    summaries = timed_copy("mindroom.thread_summary")
+    await effects.PostResponseEffectsSupport._timed_thread_summary(MagicMock(), summary_coro=asyncio.sleep(0))
+    monkeypatch.setattr(summaries, "_summary_provider", MagicMock())
+    monkeypatch.setattr(summaries, "complete_prompt", AsyncMock(side_effect=RuntimeError("model unavailable")))
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        await summaries._generate_summary(
+            [],
+            _mock_config(model_name="default"),
+            _mock_runtime_paths(),
+            model_name="default",
+            tag_vocabulary=None,
+            trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
+        )
+
+    assert labels == ["maybe_generate_thread_summary", "thread_summary_generation"]

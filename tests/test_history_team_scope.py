@@ -45,7 +45,7 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, seed_session
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call, usage
 from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
 from tests.team_runtime.squad import start_team
 from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, member_approval, squad_turn
@@ -95,6 +95,8 @@ def _build_pair(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     assert members.failed_agent_names == []
     return build_team_spec(
@@ -162,11 +164,18 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
             static_prompt_tokens=estimator.estimate("Current prompt"),
             non_prompt_tokens=estimator.non_prompt_tokens(),
             scope_context=scope_context,
+            team_name=None,
+            active_model_name=None,
+            active_context_window=None,
+            compaction_lifecycle=None,
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
         prepared = finalize_history_preparation(
             prepared_scope_history=prepared_scope_history,
             config=config,
             static_prompt_tokens=expected_static_prompt_tokens,
+            pipeline_timing=None,
         )
 
     assert prepared.replays_persisted_history is True
@@ -434,13 +443,19 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
     ) as mock_prepare:
         await prepare_bound_scope_history(
             member_names=["private_worker", "shared"],
-            model=None,
+            model=estimate_only_model(),
             runtime_paths=runtime_paths,
             config=config,
             history_settings=config.resolve_entity(None).history_settings,
             scope_context=scope_context,
             static_prompt_tokens=5,
             non_prompt_tokens=2,
+            team_name=None,
+            active_model_name=None,
+            active_context_window=None,
+            compaction_lifecycle=None,
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
 
     assert mock_prepare.await_count == 1

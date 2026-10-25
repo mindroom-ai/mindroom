@@ -16,11 +16,12 @@
       "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
       "provider": "llama_cpp"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -44,7 +45,8 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
         "approval_type": "mindroom_policy",
@@ -63,9 +65,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": true
+        "requires_confirmation": true,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Run a task with another agent and return its answer.",
         "external_execution": true,
         "name": "run_subagent",
@@ -86,13 +90,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -102,7 +106,6 @@
         "system_fingerprint": "fp_parity"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {
@@ -119,10 +122,12 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {
+      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -133,8 +138,6 @@
           "content": "Email the invoice for order A-1001."
         }
       ],
-      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

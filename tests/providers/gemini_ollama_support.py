@@ -18,7 +18,7 @@ from google.oauth2.credentials import Credentials
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
-from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
+from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Replay,
@@ -52,6 +52,11 @@ class Golden:
         """The pytest id."""
         return f"{self.family}/{self.scenario}"
 
+    @property
+    def path(self) -> Path:
+        """The golden's file."""
+        return FIXTURE_ROOT / self.family / f"{self.scenario}.json"
+
 
 def goldens() -> list[Golden]:
     """Return every golden of the Gemini, Gemini on Vertex AI, and Ollama routes."""
@@ -81,7 +86,10 @@ def build_adapter(
     if config["provider"] == "ollama":
         extra_kwargs["client_params"] = {"transport": transport}
         return build_ollama_provider(ModelConfig(**config), runtime_paths_for(root))
-    extra_kwargs["client_params"] = {"http_options": {"httpx_async_client": httpx.AsyncClient(transport=transport)}}
+    extra_kwargs["client_params"] = {
+        **extra_kwargs.get("client_params", {}),
+        "http_options": {"httpx_async_client": httpx.AsyncClient(transport=transport)},
+    }
     if extra_kwargs.get("vertexai"):
         extra_kwargs["credentials"] = Credentials(token="parity-google-token")  # noqa: S106 - synthetic credential
     return build_gemini_provider(ModelConfig(**config), runtime_paths_for(root))

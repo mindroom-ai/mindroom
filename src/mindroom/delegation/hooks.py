@@ -68,13 +68,9 @@ async def after_delegation(
     """Emit the terminal tool result once per retained lifecycle, never on pause."""
     if state.after_called:
         return
-    identity = parse_tool_execution_identity_payload(state.execution_identity, strict=True)
-    if identity is None:
-        msg = "Delegation hook is missing its caller identity"
-        raise ValueError(msg)
     await dispatch_external_tool_hooks(
         hook_registry=_registry(config, runtime_paths),
-        execution_identity=identity,
+        execution_identity=parse_tool_execution_identity_payload(state.execution_identity),
         config=config,
         runtime_paths=runtime_paths,
         tool_name=state.tool_name,

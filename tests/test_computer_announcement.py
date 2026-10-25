@@ -320,7 +320,13 @@ async def test_announcement_runs_inside_the_tool_hook_policy(
         entry_config=PluginEntryConfig(path="./plugins/policy", settings={}),
         plugin_order=0,
     )
-    bridge = build_tool_hook_middleware(HookRegistry.from_plugins([plugin]), agent_name="researcher")
+    bridge = build_tool_hook_middleware(
+        HookRegistry.from_plugins([plugin]),
+        agent_name="researcher",
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
     toolkit = _fake_browser(events)
 
@@ -350,7 +356,14 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
     config = bind_runtime_paths(config, runtime_paths)
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
 
-    build = create_agent("researcher", config, runtime_paths, execution_identity=None)
+    build = create_agent(
+        "researcher",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert [middleware.__name__ for middleware in build.tool_policy] == ["bind_live_functions", "middleware"]
     carried = {
@@ -376,7 +389,15 @@ async def test_a_deferred_browser_a_minimal_turn_builds_later_announces_the_comp
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"], deferred=True)
     config = bind_runtime_paths(config, runtime_paths)
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    build = create_agent("researcher", config, runtime_paths, execution_identity=None, agent_mode="minimal")
+    build = create_agent(
+        "researcher",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        agent_mode="minimal",
+        knowledge=None,
+        active_model_name=None,
+    )
     [deferred] = build.surface.deferred
     assert deferred.name == "browser"
 

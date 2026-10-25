@@ -230,7 +230,7 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float,
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None = None,
+    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
 ) -> str:
     """Bound the provider request, then persist returned usage before validating the summary text it returns."""
     provider_done: asyncio.Future[None] = asyncio.get_running_loop().create_future()

@@ -370,18 +370,16 @@ def _has_tool_result_media(result: ToolResult | ToolValue) -> bool:
 
 
 def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
-    # TODO(simplify): The refusals below name an internal version ("in v1") the model cannot act on. Drop the suffix.
-    # Models would notice the changed error text.
     if isinstance(result, ToolResult | ToolValue):
         if _has_tool_result_media(result):
-            return "ToolResult media artifacts cannot be redirected to workspace files in v1."
+            return "ToolResult media artifacts cannot be redirected to workspace files."
         serialized = _SerializedToolOutput(payload=result.content.encode("utf-8"), format="text")
     elif isinstance(result, str):
         serialized = _SerializedToolOutput(payload=result.encode("utf-8"), format="text")
     elif isinstance(result, bytes | bytearray | memoryview):
-        return "Binary tool outputs cannot be redirected to workspace files in v1."
+        return "Binary tool outputs cannot be redirected to workspace files."
     elif inspect.isgenerator(result) or inspect.isasyncgen(result) or isinstance(result, Iterator):
-        return "Generator or stream tool outputs cannot be redirected to workspace files in v1."
+        return "Generator or stream tool outputs cannot be redirected to workspace files."
     else:
         try:
             normalized = _normalize_json_value(result)

@@ -17,11 +17,12 @@
       "id": "openai/gpt-oss-120b",
       "provider": "groq"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -45,7 +46,8 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
         "approval_type": "mindroom_policy",
@@ -64,9 +66,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": true
+        "requires_confirmation": true,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Run a task with another agent and return its answer.",
         "external_execution": true,
         "name": "run_subagent",
@@ -87,13 +91,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "openai/gpt-oss-120b",
@@ -101,7 +105,6 @@
         }
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {
@@ -124,10 +127,12 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -138,8 +143,6 @@
           "content": "Email the invoice for order A-1001."
         }
       ],
-      "model": "openai/gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

@@ -18,7 +18,7 @@ from mindroom.knowledge.read_protocol import ReadRequest
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-_RESULT = b'{"exists":true,"documents":[],"error_type":null}'
+_RESULT = b'{"hits":[],"error_type":null}'
 
 
 async def _wait_until(condition: Callable[[], bool]) -> None:
@@ -35,7 +35,7 @@ def _wait_until_sync(condition: Callable[[], bool]) -> None:
 
 
 async def _prepare_request() -> ReadRequest:
-    return ReadRequest("unused", "published")
+    return ReadRequest("unused", "published", [1.0])
 
 
 class _Child:
@@ -149,7 +149,7 @@ async def test_async_burst_drains_after_reaping_and_leaves_executor_available(ch
             for child in children:
                 child.work.set()
             results = await asyncio.gather(*tasks)
-            assert all(result.exists for result in results)
+            assert all(result.hits == [] for result in results)
             assert all(child.returncode == 0 for child in _serving(children))
         finally:
             for child in children:
@@ -262,7 +262,7 @@ def test_separate_event_loops_share_capacity(
             return acquired
 
     async def read() -> bool:
-        return (await read_process.read_chroma_async(_prepare_request)).exists
+        return (await read_process.read_chroma_async(_prepare_request)).hits == []
 
     monkeypatch.setattr(read_process, "_spawn_reader", _spawner(children, release_first))
     monkeypatch.setattr(read_process, "_read_slots", ObservedSlots(4))

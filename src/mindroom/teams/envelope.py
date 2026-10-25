@@ -28,7 +28,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_run_context,
-    render_prepared_team_messages_text,
+    render_prepared_messages_text,
 )
 from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.native import with_native_history
@@ -148,7 +148,7 @@ class PreparedTeamExecution:
     @property
     def prompt_text(self) -> str:
         """Return the prompt-visible text derived from the turn's messages."""
-        return render_prepared_team_messages_text(self.turn.in_request_order())
+        return render_prepared_messages_text(self.turn.in_request_order())
 
     def run_input(self, media: MediaInputs) -> list[Message]:
         """Return one attempt's request body, media on the prompt: the summary, the replayed history, then the turn."""
@@ -480,7 +480,7 @@ class _TeamTurn:
             ),
             prompt=prompt,
             model_prompt=None,
-            full_prompt=render_prepared_team_messages_text(run_input),
+            full_prompt=render_prepared_messages_text(run_input),
             metadata=metadata,
         )
 

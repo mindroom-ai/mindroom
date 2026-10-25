@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import httpx2
 import pytest
 import structlog
 from agno.tools import Toolkit
@@ -71,7 +72,7 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.providers.golden_support import streamed_reply
+from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -1032,7 +1033,7 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(
 
 
 @pytest.mark.asyncio
-async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(
+async def test_a_review_never_runs_a_call_the_output_limit_cut_off(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1043,7 +1044,6 @@ async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED.removesuffix("test.\n")}),
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
     )
-    model.capabilities = Capabilities(claude_family=True)
     model.cut_off_requests = frozenset({1})
     progress = ReviewProgress()
     install_model_providers(monkeypatch, {"default": model})
@@ -1801,14 +1801,17 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(
     # The response calls a skill tool, then answers; the review answers at once.
     replies = [wire.replies[0], wire.replies[1], wire.replies[1]]
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: SentRequest) -> httpx.Response:
         requests.append(json.loads(request.content))
         return streamed_reply(replies.pop(0))
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+    async with (
+        httpx2.AsyncClient(transport=httpx2_transport(respond)) as model_client,
+        httpx.AsyncClient(transport=httpx.MockTransport(respond)) as gemini_client,
+    ):
         # The OpenAI-family and Claude routes send through the shared model client; Gemini through its own.
-        monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", http_client.send)
-        extra_kwargs = {"client_params": {"http_options": {"httpx_async_client": http_client}}}
+        monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", model_client.send)
+        extra_kwargs = {"client_params": {"http_options": {"httpx_async_client": gemini_client}}}
         config.models["default"] = (
             wire.model.model_copy(update={"extra_kwargs": extra_kwargs})
             if wire.model.provider == "google"

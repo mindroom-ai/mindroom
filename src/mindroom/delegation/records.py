@@ -20,6 +20,7 @@ from weakref import WeakValueDictionary
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import primary_records_dir
+from mindroom.delegation.legacy_records import WorkspaceOnlyRecord, read_workspace_only_record
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.logging_config import get_logger
@@ -357,7 +358,7 @@ class DelegationRecordOwner:
         handle = self._validated_handle(handle)
         with _record_lock(handle):
             state = _load_state(handle)
-            if state is None:
+            if isinstance(state, WorkspaceOnlyRecord):
                 return 0
             indexes = (_event_index(json.loads(line)["event_id"], prefix) for line in _committed_lines(handle, state))
             return max(indexes, default=0)
@@ -366,7 +367,7 @@ class DelegationRecordOwner:
         handle = self._validated_handle(handle)
         with _record_lock(handle):
             state = _load_state(handle)
-            if state is None:
+            if isinstance(state, WorkspaceOnlyRecord):
                 return
             if event.event_id is not None and _event_id_digest(event.event_id) in state.event_ids:
                 _write_exports(handle, state)
@@ -399,7 +400,7 @@ class DelegationRecordOwner:
         handle = self._validated_handle(handle)
         with _record_lock(handle):
             state = _load_state(handle)
-            if state is None:
+            if isinstance(state, WorkspaceOnlyRecord):
                 return
             line = b""
             artifacts: dict[str, bytes] = {}
@@ -491,11 +492,7 @@ def _parse_optional_execution_identity(
 ) -> ToolExecutionIdentity | None:
     if payload is None:
         return None
-    return parse_tool_execution_identity_payload(
-        payload,
-        strict=True,
-        error_prefix=f"Delegation locator {field_name}",
-    )
+    return parse_tool_execution_identity_payload(payload, error_prefix=f"Delegation locator {field_name}")
 
 
 def _validate_metadata(metadata: DelegationMetadata) -> None:
@@ -552,21 +549,12 @@ def _record_lock(handle: DelegationRecordHandle) -> Iterator[None]:
         yield
 
 
-def _load_state(handle: DelegationRecordHandle) -> _RecordState | None:
-    """Return the record's committed state, or None for a record that predates primary-owned state."""
+def _load_state(handle: DelegationRecordHandle) -> _RecordState | WorkspaceOnlyRecord:
+    """Return the record's committed state, or the marker of a record that predates primary-owned state."""
     try:
         payload = (handle.state_dir / _STATE_FILE).read_bytes()
     except FileNotFoundError:
-        # LEGACY_COMPAT: Delegation records whose working state lived only in their workspace files.
-        # Legacy format: A record directory below the child workspace's .mindroom/delegations/ with no state.json below
-        # tracking/; selected when the state file is missing while that workspace directory exists.
-        # Last legacy release: v2026.10.101; replacement: the next release keeps each record's state below tracking/
-        # and writes run.json, events.jsonl, and transcript.md as exports of it.
-        # Handling: Such a record's operations return without reading or writing its workspace files, so a delegation
-        # still in flight at the upgrade settles and its record stays as it was; a record found in neither place is missing.
-        # Coverage: tests/test_delegation_records.py::test_a_record_started_before_primary_state_is_left_as_it_was.
-        with _record_directory(handle):
-            return None
+        return read_workspace_only_record(handle.child_workspace, handle.scoped_path)
     return _RecordState(**json.loads(payload))
 
 
@@ -584,11 +572,10 @@ def _event_index(event_id: object, prefix: str) -> int:
 
 
 @contextmanager
-def _record_directory(handle: DelegationRecordHandle, *, create: bool = False) -> Iterator[int]:
-    """Pin the workspace record directory by a no-follow walk from the child workspace."""
-    if create:
-        handle.child_workspace.mkdir(parents=True, exist_ok=True)
-    with open_directory_within_root(handle.child_workspace, handle.scoped_path, create=create, mode=0o700) as record_fd:
+def _record_directory(handle: DelegationRecordHandle) -> Iterator[int]:
+    """Pin the workspace record directory by a no-follow walk from the child workspace, creating what is missing."""
+    handle.child_workspace.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(handle.child_workspace, handle.scoped_path, create=True, mode=0o700) as record_fd:
         yield record_fd
 
 
@@ -690,7 +677,7 @@ def _write_exports(
     Worker code can replace these files or their directories at will, so a failed write is only logged.
     """
     try:
-        with _record_directory(handle, create=True) as record_fd:
+        with _record_directory(handle) as record_fd:
             if artifacts:
                 with open_directory_within_root(record_fd, "artifacts", create=True, mode=0o700) as artifacts_fd:
                     for artifact_name, encoded in artifacts.items():

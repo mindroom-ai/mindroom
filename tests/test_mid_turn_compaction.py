@@ -25,6 +25,7 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.replay import configured_replay_plan, estimate_request_messages_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
@@ -461,7 +462,7 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     pdf = File(content=b"%PDF-1.7\n" + b"x" * 300_000, mime_type="application/pdf", filename="report.pdf")
     message = Message(role="user", content="Summarize the attached report.", files=[pdf])
 
-    tokens = estimate_request_messages_tokens([message], replay_model=model)
+    tokens = estimate_request_messages_tokens([message], replay_estimator=model)
 
     assert tokens < 10_000
 
@@ -485,6 +486,22 @@ def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
     assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) > 0
 
 
+def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None:
+    """One tool definition costs one amount, whether a running turn's request or the static prompt estimate sizes it."""
+    lookup = ToolSpec(
+        name="lookup",
+        description="Look up a value.",
+        parameters={"type": "object", "properties": {"key": {"type": "string"}}},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
+    static = build_static_token_estimator(Message(role="system", content=""), [lookup], frozenset())
+
+    assert mid_turn_compaction._tool_tokens([lookup], [], frozenset()) == static.estimate("")
+
+
 @pytest.mark.parametrize("provider", ["openai", "claude"])
 def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_them(
     tmp_path: Path,
@@ -496,7 +513,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     replays only references that the provider expands.
     """
     if provider == "openai":
-        replay_model = responses_adapter(tmp_path, "gpt-6-luna", store=False)
+        replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
         provider_data: dict[str, Any] = {
             "tool_search_items": [
                 {
@@ -520,7 +537,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
             ],
         }
     else:
-        replay_model = None
+        replay_estimator = None
         provider_data = {
             "server_tool_blocks": [
                 {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
@@ -539,7 +556,10 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
         Message(role="assistant", provider_data=provider_data),
     ]
 
-    total = estimate_request_messages_tokens(searched, replay_model=replay_model) + mid_turn_compaction._tool_tokens(
+    total = estimate_request_messages_tokens(
+        searched,
+        replay_estimator=replay_estimator,
+    ) + mid_turn_compaction._tool_tokens(
         [BIG_TOOL],
         searched,
         frozenset({"big_tool"}),
@@ -630,13 +650,18 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    *,
+    scoped: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
-    agent = _agent(model, config, paths)
+    agent = (
+        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _agent(model, config, paths)
+    )
 
     with pytest.raises(
         mid_turn_compaction.HistorySummaryBudgetError,
@@ -649,14 +674,20 @@ async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_within_the_model_window_is_sent(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    *,
+    scoped: bool,
 ) -> None:
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     model = ToolLoopModel(tool_rounds=5)
+    agent = (
+        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _agent(model, config, paths)
+    )
 
-    output = await _run(_agent(model, config, paths), [Message(role="user", content="p" * 16_000)])
+    output = await _run(agent, [Message(role="user", content="p" * 16_000)])
 
     assert str(output.content).endswith("done")
     # The prompt alone exceeds the replay window, so compacting again would only summarize every new tool result.
@@ -1355,6 +1386,56 @@ async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: 
     # Two earlier runs and the running turn, however many exchanges the turn folded.
     outcome = next(event for event in lifecycle.events if isinstance(event, CompactionOutcome))
     assert outcome.compacted_run_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_its_fold(tmp_path: Path) -> None:
+    """The notice's after size is the size of the request the fold left, which is smaller than its before size."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    lifecycle = RecordingCompactionLifecycle()
+    model = ToolLoopModel(tool_rounds=5)
+
+    await _run(_scoped_agent(model, config, paths, storage, lifecycle=lifecycle), "Do the task")
+
+    outcome = next(event for event in lifecycle.events if isinstance(event, CompactionOutcome))
+    # The first request after the fold carries its summary.
+    rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
+    rewritten_tokens = (
+        estimate_request_messages_tokens(rewritten.messages, replay_estimator=None)
+        + mid_turn_compaction._thinking_tokens(rewritten.messages)
+        + mid_turn_compaction._tool_tokens(rewritten.request.tools, rewritten.messages, frozenset())
+    )
+    assert outcome.after_tokens == rewritten_tokens
+    assert outcome.after_tokens < outcome.before_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scoped fold estimates the request it rewrote once."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
+    sized: list[tuple[str | None, ...]] = []
+    estimated = mid_turn_compaction._estimated_request_tokens
+
+    def recording(
+        compaction: mid_turn_compaction._MidTurnCompaction,
+        policy: mid_turn_compaction._Policy,
+        messages: list[Message],
+        tools: Sequence[ToolSpec],
+    ) -> int:
+        sized.append(tuple(message.id for message in messages))
+        return estimated(compaction, policy, messages, tools)
+
+    monkeypatch.setattr(mid_turn_compaction, "_estimated_request_tokens", recording)
+
+    await _run(_scoped_agent(model, config, paths, storage), "Do the task")
+
+    rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
+    assert sized.count(tuple(message.id for message in rewritten.messages)) == 1
 
 
 @pytest.mark.asyncio

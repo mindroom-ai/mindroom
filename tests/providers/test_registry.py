@@ -31,25 +31,23 @@ from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageRe
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.gemini.adapter import GeminiProvider
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.ollama_adapter import OllamaProvider
+from mindroom.providers.ollama.adapter import OllamaProvider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.registry import build_model_provider, model_capabilities, stream_idle_timeout_seconds
 from mindroom.providers.synthetic_adapter import SyntheticProvider
+from tests.agno_parity.golden_files import render
 from tests.providers.bare_adapter import bare_adapter
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
     encoded_response,
-    expected_parsed,
-    expected_stop_reason,
     golden_request,
     hide_provider_environment,
     load_golden,
-    normalized_parsed,
     normalized_request,
-    ordered_json,
+    parsed_turn,
     sse_response,
 )
 from tests.providers.openai_family_support import write_cli_logins
@@ -546,12 +544,22 @@ async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shared_key_in", ["credentials", "environment"])
 async def test_an_azure_model_with_an_ad_token_never_sends_the_shared_key(
     runtime_paths: RuntimePaths,
     wire: Wire,
+    tmp_path: Path,
+    shared_key_in: str,
 ) -> None:
     """An Azure model that authenticates with an Entra ID token needs no key, so the shared one stays local."""
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("azure", {"api_key": "sk-shared"})
+    if shared_key_in == "credentials":
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("azure", {"api_key": "sk-shared"})
+    else:
+        runtime_paths = resolve_runtime_paths(
+            config_path=runtime_paths.config_path,
+            storage_path=tmp_path / "data",
+            process_env={"AZURE_OPENAI_API_KEY": "sk-shared"},
+        )
     extra_kwargs = {"azure_ad_token": "entra-token", "azure_endpoint": "https://test.openai.azure.com"}
     model_config = ModelConfig(
         provider="azure",
@@ -661,11 +669,10 @@ async def test_a_golden_of_every_family_replays_through_the_registry(
     await wire.requests[0].aread()
     request = normalized_request(wire.requests[0])
     assert request == golden["request"]
-    assert ordered_json(request["body"]) == ordered_json(golden["request"]["body"])
+    assert render(request["body"]) == render(golden["request"]["body"])
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
-    assert normalized_parsed(completed.message) == expected_parsed(golden)
-    assert completed.stop_reason == expected_stop_reason(golden)
+    assert parsed_turn(completed) == golden["parsed"]
 
 
 @pytest.mark.asyncio

@@ -24,15 +24,14 @@
       "id": "deepseek-flash",
       "provider": "deepseek"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -41,18 +40,19 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -75,8 +75,6 @@
           ]
         }
       ],
-      "model": "deepseek-flash",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

@@ -21,15 +21,14 @@
       "id": "anthropic.claude-sonnet-5-5",
       "provider": "bedrock_claude"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -44,8 +43,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "max_tokens"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -59,7 +57,7 @@
       },
       "total_tokens": 50
     },
-    "stop_reason": "max_tokens"
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {

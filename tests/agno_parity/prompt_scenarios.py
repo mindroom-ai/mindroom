@@ -1,7 +1,7 @@
 """The prompt-golden scenarios: MindRoom's production entry points driven against a recording model.
 
 Each scenario builds its agents, teams, or helper agents through the production builders and runs one turn; the
-recorder keeps every request the model received: messages, tools, tool choice, and response format.
+recorder keeps every request the model received: messages, tools, tool choice, and output schema.
 Requests are recorded below the request pipeline, where the provider adapter would receive them.
 A scenario that starts with a Matrix reply also exposes that reply as an ``AgentTurn``, so the agent it builds can
 be compared with the golden before the reply itself runs on the owned loop.
@@ -30,7 +30,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
-from pydantic import BaseModel
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
@@ -55,7 +54,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry
 from mindroom.providers.assistant_turn import stamp_model
-from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
@@ -74,9 +72,11 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.skills import agent_workspace_skills_root
+from mindroom.tool_system.tool_access import tool_definition
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from mindroom.topic_generator import generate_room_topic_ai
 from mindroom.voice.handler import _process_transcription
+from tests.agno_parity.golden_files import sorted_keys, turn_message
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -91,6 +91,8 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
+    from pydantic import BaseModel
+
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.read_protocol import SearchHit
@@ -102,8 +104,8 @@ if TYPE_CHECKING:
         NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
-        StructuredOutput,
         ToolChoice,
+        ToolSpec,
     )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -165,10 +167,9 @@ class ModelCall:
     # Models in the order MindRoom built them, which is deterministic where concurrent calls are not.
     model_index: int
     messages: list[OwnedMessage]
-    tools: list[dict[str, Any]] | None
+    tools: list[ToolSpec]
     tool_choice: ToolChoice | None
-    # The goldens hold the format Agno's agent resolved for the route (``agno_response_format``).
-    response_format: dict[str, Any] | type[BaseModel] | None
+    output_schema: type[BaseModel] | None
     # Routes with native tool search send these tools with defer_loading below the recorder, so the record names them.
     deferred_tool_names: list[str]
 
@@ -202,10 +203,9 @@ class Recorder:
             model_provider=adapter.identity.provider,
             model_index=index,
             messages=deepcopy(list(request.messages)),
-            # The goldens hold Agno's formatted tools; the owned definition formats the same way, None omitted.
-            tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
+            tools=list(request.tools),
             tool_choice=request.tool_choice,
-            response_format=agno_response_format(request.output_schema, adapter.capabilities.structured_output),
+            output_schema=request.output_schema,
             deferred_tool_names=sorted(request.deferred_tools.names),
         )
         self.calls.append(call)
@@ -297,45 +297,21 @@ class Scenario:
     turn: Callable[[Path], AgentTurn] | None = None
 
 
-def message_dict(message: OwnedMessage) -> dict[str, Any]:
-    """Return a request message as the prompt goldens record it: no volatile keys, transient context marked."""
-    data = {key: value for key, value in message.to_dict().items() if key not in {"id", "created_at", "metrics"}}
-    if not message.add_to_agent_memory:
-        data["add_to_agent_memory"] = False
-    return data
-
-
-def agno_response_format(
-    schema: type[BaseModel] | None,
-    structured_output: StructuredOutput,
-) -> dict[str, Any] | type[BaseModel] | None:
-    """Return the response format Agno's agent resolved for ``schema`` on a route with ``structured_output`` support.
-
-    Agno passed models with native structured output the class, JSON-schema models a ``json_schema`` format, and
-    every other model JSON mode; the owned request carries only the schema, which each adapter renders.
-    """
-    if schema is None or structured_output == "native":
-        return schema
-    if structured_output == "json_schema":
-        return {"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()}}
-    return {"type": "json_object"}
-
-
-def response_format_dict(response_format: object) -> object:
-    """Return a request's response format as the prompt goldens record it."""
-    if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-        return {"pydantic_model": response_format.__name__, "json_schema": response_format.model_json_schema()}
-    return response_format
+def _output_schema_dict(schema: type[BaseModel] | None) -> dict[str, Any] | None:
+    """Return a request's output schema as the goldens record it: its class and its JSON schema."""
+    if schema is None:
+        return None
+    return {"json_schema": schema.model_json_schema(), "model": f"{schema.__module__}:{schema.__qualname__}"}
 
 
 def call_dict(call: ModelCall) -> dict[str, Any]:
     """Return one recorded request as the prompt goldens record it."""
     return {
         "model": {"id": call.model_id, "provider": call.model_provider},
-        "messages": [message_dict(message) for message in call.messages],
-        "tools": call.tools,
+        "messages": [turn_message(message) for message in call.messages],
+        "tools": [tool_definition(tool) for tool in call.tools],
         "tool_choice": call.tool_choice,
-        "response_format": response_format_dict(call.response_format),
+        "output_schema": _output_schema_dict(call.output_schema),
         "deferred_tool_names": call.deferred_tool_names,
     }
 
@@ -348,7 +324,8 @@ def normalize(value: object, root: Path) -> object:
     """
 
     def stable(text: str) -> str:
-        for path in {str(root.resolve()), str(root)}:
+        # The longer path first: a root's real path can contain its own path, as macOS's ``/private/var`` does.
+        for path in sorted({str(root.resolve()), str(root)}, key=len, reverse=True):
             text = text.replace(path, "<TMP>")
         return _DELEGATION_RECORD_DATE.sub("<DATE>", _DATE_PATTERN.sub("<DATE>", text))
 
@@ -617,7 +594,7 @@ def _minimal_shell_turn(root: Path) -> AgentTurn:
 
 
 def _tool_names(call: ModelCall) -> set[str]:
-    return {tool["function"]["name"] for tool in call.tools or [] if "function" in tool}
+    return {tool.name for tool in call.tools}
 
 
 def _tool_call(call_id: str, name: str, arguments: dict[str, object]) -> dict[str, object]:
@@ -1494,6 +1471,43 @@ SCENARIOS: dict[str, Scenario] = {
 }
 
 
+def golden_path(name: str) -> Path:
+    """Return the file of one prompt golden."""
+    return FIXTURE_DIR / f"{name}.json"
+
+
 def load_golden(name: str) -> dict[str, Any]:
     """Return one prompt golden."""
-    return json.loads((FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    return json.loads(golden_path(name).read_text(encoding="utf-8"))
+
+
+@dataclass(frozen=True)
+class RecordedScenario:
+    """What one scenario ran and handed out, and every request it sent, grouped by model in build order."""
+
+    output: ScenarioOutput
+    calls: list[ModelCall]
+
+
+async def record_scenario(name: str, root: Path) -> RecordedScenario:
+    """Run one scenario under ``root`` against the recording provider."""
+    scenario = SCENARIOS[name]
+    recorder = Recorder(responder=scenario.responder)
+    with recorder.installed():
+        output = await scenario.run(root)
+    return RecordedScenario(output, recorder.ordered_calls())
+
+
+def regenerated_golden(name: str, recorded: RecordedScenario, root: Path) -> dict[str, Any]:
+    """Return the prompt golden ``recorded`` regenerates, normalized for its scenario's temporary ``root``.
+
+    The keys of the file and its ``input`` are sorted; ``requests`` and ``exported`` keep the order they were
+    received in, because providers and models receive those values as serialized bytes.
+    """
+    golden: dict[str, Any] = {"description": SCENARIOS[name].description}
+    if recorded.output.exported is not None:
+        golden["exported"] = normalize(recorded.output.exported, root)
+    golden["input"] = sorted_keys(normalize(recorded.output.input, root))
+    golden["requests"] = normalize([call_dict(call) for call in recorded.calls], root)
+    golden["scenario"] = name
+    return golden

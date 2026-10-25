@@ -402,6 +402,8 @@ async def pause_parent(
         identity,
         history_storage=store,
         supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
     )
     session = new_scope_session(session_id=identity.session_id or "", scope_id=agent_name, is_team=False)
     request = [prompt_for_turn(build), OwnedMessage(role="user", content=prompt)]
@@ -540,6 +542,10 @@ async def resume_team(
             prior_tool_trace=paused.tool_trace,
             prior_presentation_state=paused.response_presentation_state,
             progress=None,
+            member_model_names=None,
+            history_scope=None,
+            show_tool_calls=True,
+            tool_trace_collector=[],
         )
 
 

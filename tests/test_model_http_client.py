@@ -25,45 +25,29 @@ from mindroom.orchestrator import _finish_runtime_shutdown
 from mindroom.providers.model_http_client import aclose_model_http_client, closing_model_connections
 from mindroom.providers.registry import build_model_provider
 from tests.conftest import bind_runtime_paths, test_runtime_paths
-from tests.providers.anthropic_family_support import claude_message
-from tests.providers.golden_support import claude_stream_events, responses_events, sse_response
+from tests.providers.family_support import FAMILIES
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.llm.provider import ModelProvider
 
-# A finished streamed reply of each API, as server-sent events, and an empty page every other request accepts.
-# The OpenAI models use the Responses API: the SDK reads a Responses stream to its end, so its connection returns to
-# the pool, while it closes a Chat Completions stream at its ``[DONE]`` sentinel before the body ends.
-_RESPONSE = {
-    "id": "resp_1",
-    "object": "response",
-    "created_at": 1,
-    "model": "test-model",
-    "status": "completed",
-    "output": [
-        {
-            "id": "msg_1",
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": "ok", "annotations": []}],
-        },
-    ],
-    "parallel_tool_calls": True,
-    "tool_choice": "auto",
-    "tools": [],
-    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+# A finished streamed reply of each model API, by the end of its request path, and an empty page every other request
+# accepts.
+_STREAMS = {
+    "/chat/completions": FAMILIES["openai_chat"].reply().content,
+    "/responses": FAMILIES["openai_responses"].reply().content,
+    "/messages": FAMILIES["anthropic"].reply().content,
 }
-_RESPONSES_STREAM = responses_events(_RESPONSE)
-_CLAUDE_STREAM = claude_stream_events(claude_message([{"type": "text", "text": "ok"}]))
 _EMPTY_PAGE = {"object": "list", "data": [], "has_more": False, "first_id": None, "last_id": None}
 _REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")])
 
 
 class _ModelsServer:
-    """A keep-alive server that answers Responses and Messages requests with a streamed reply, anything else empty."""
+    """A keep-alive server that streams a finished reply to every model request and answers anything else empty.
+
+    Each stream is a chunked body whose terminating chunk follows its last event.
+    """
 
     def __init__(self) -> None:
         self.url = ""
@@ -81,13 +65,14 @@ class _ModelsServer:
                 headers = dict(line.lower().split(": ", 1) for line in header_lines if ": " in line)
                 await reader.readexactly(int(headers.get("content-length", "0")))
                 path = request_line.split(" ")[1]
-                if path.endswith(("/responses", "/messages")):
-                    stream = _RESPONSES_STREAM if path.endswith("/responses") else _CLAUDE_STREAM
-                    content_type, body = "text/event-stream", sse_response(stream, named=True).content
+                stream = next((body for end, body in _STREAMS.items() if path.endswith(end)), None)
+                if stream is None:
+                    body = json.dumps(_EMPTY_PAGE).encode()
+                    status = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+                    writer.write(status % len(body) + body)
                 else:
-                    content_type, body = "application/json", json.dumps(_EMPTY_PAGE).encode()
-                status = f"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\n\r\n"
-                writer.write(status.encode() + body)
+                    start = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    writer.write(start + b"%x\r\n%s\r\n0\r\n\r\n" % (len(stream), stream))
                 await writer.drain()
         except asyncio.IncompleteReadError:
             self.closed.set()
@@ -105,12 +90,11 @@ async def server() -> AsyncIterator[_ModelsServer]:
     listener.close()
 
 
-def _provider(tmp_path: Path, provider: str, base_url: str) -> ModelProvider:
+def _provider(tmp_path: Path, provider: str, base_url: str, api: str | None = None) -> ModelProvider:
     """Build the configured model as the runtime does, sending to ``base_url``."""
     runtime_paths = test_runtime_paths(tmp_path)
     client_params = {"base_url": f"{base_url}/v1" if provider == "openai" else base_url, "max_retries": 0}
     extra_kwargs = {"api_key": "test", "client_params": client_params}
-    api = "responses" if provider == "openai" else None
     model = ModelConfig(provider=provider, id="test-model", api=api, extra_kwargs=extra_kwargs)
     config = bind_runtime_paths(Config(models={"default": model}), runtime_paths)
     return build_model_provider(config, runtime_paths)
@@ -153,6 +137,25 @@ async def test_collected_model_leaves_its_pooled_connection_alone(
     finally:
         gc.enable()
     await _send(_provider(tmp_path, provider, server.url))
+    assert server.connections == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "api"),
+    [("openai", "chat_completions"), ("openai", "responses"), ("anthropic", None)],
+)
+async def test_a_streamed_reply_returns_its_connection_to_the_pool(
+    tmp_path: Path,
+    server: _ModelsServer,
+    provider: str,
+    api: str | None,
+) -> None:
+    """A reply streamed to its end leaves its connection pooled, so the next request opens no new one."""
+    model = _provider(tmp_path, provider, server.url, api)
+    for _ in range(2):
+        turn = await complete(model, _REQUEST)
+        assert turn.message.content == "ok"
     assert server.connections == 1
 
 

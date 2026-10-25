@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from openai.types import CompletionUsage
 
 from mindroom.budgets import pricing as pricing_module
 from mindroom.budgets.pricing import (
@@ -22,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
+from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
@@ -198,6 +201,42 @@ def test_price_table_reports_a_priced_model_it_could_not_build(tmp_path: Path) -
         table = _price_table(config, _paths(tmp_path))
 
     assert table == _PriceTable(prices={}, complete=False)
+
+
+def test_openai_memory_extraction_is_priced_by_the_chat_completions_entry_of_its_model(tmp_path: Path) -> None:
+    """Mem0 extracts memories over Chat Completions, so its usage costs what that route's entry for the model costs."""
+    config = Config(
+        models={
+            "luna": ModelConfig(
+                provider="openai",
+                id="gpt-6-luna",
+                api="chat_completions",
+                api_key="key",
+                pricing=ModelPricing(input=0.2, output=1.25),
+            ),
+        },
+    )
+    usage = CompletionUsage(prompt_tokens=1_000_000, completion_tokens=0, total_tokens=1_000_000)
+    create = MagicMock(return_value=SimpleNamespace(usage=usage))
+    llm = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-6-luna"),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+    )
+    install_mem0_usage_capture(llm, "openai")
+    with counted_mem0_usage() as calls:
+        llm.client.chat.completions.create()
+    extraction = mem0_usage_run(calls)
+    assert extraction is not None
+
+    cost = run_cost_usd(
+        extraction.metrics,
+        None,
+        model_provider=extraction.model_provider,
+        model_id=extraction.model,
+        prices=_price_table(config, _paths(tmp_path)).prices,
+    )
+
+    assert cost == pytest.approx(0.2)
 
 
 _GPT_X = PricedModel(ModelPricing(input=2.0, output=8.0), input_includes_cache=True)

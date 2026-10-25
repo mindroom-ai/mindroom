@@ -9,11 +9,9 @@
       },
       {
         "content": "What should I pack for Paris tomorrow?",
-        "from_history": true,
         "role": "user"
       },
       {
-        "from_history": true,
         "metrics": {
           "input_tokens": 42,
           "output_tokens": 12,
@@ -31,7 +29,6 @@
           "response_id": "resp_parity"
         },
         "role": "assistant",
-        "stop_after_tool_call": false,
         "tool_calls": [
           {
             "call_id": "call_parity_weather",
@@ -46,7 +43,6 @@
       },
       {
         "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
-        "from_history": true,
         "role": "tool",
         "tool_args": {
           "city": "Paris",
@@ -63,11 +59,12 @@
       "id": "gpt-6-astra",
       "provider": "openai"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -91,9 +88,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -113,14 +112,14 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6-astra",
@@ -132,18 +131,19 @@
         "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
         "response_id": "resp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "type": "function_call_output",
@@ -151,11 +151,9 @@
           "output": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}"
         }
       ],
-      "model": "gpt-6-astra",
       "previous_response_id": "resp_parity",
       "reasoning": {},
       "store": true,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",

@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-import httpx
+import httpx2
 
 from mindroom.llm.provider import StreamProgress, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
@@ -31,17 +31,25 @@ __all__ = ["ChatAdapter"]
 
 
 @dataclass
-class _WatchedBody(httpx.AsyncByteStream):
-    """A response body that records whether it was read to its end."""
+class _WatchedBody(httpx2.AsyncByteStream):
+    """A response body that records whether the SDK decoded it to its end.
 
-    body: httpx.AsyncByteStream
-    read_to_end: bool = False
+    The SDK decodes the events through its first read of the body. After ``[DONE]`` it drains the rest of an HTTP/1.1
+    body through a second read, so the connection returns to the pool, and that read's end says nothing.
+    """
+
+    body: httpx2.AsyncByteStream
+    reads: int = 0
+    decoded_to_end: bool = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        """Pass the body through, then record that it ended."""
+        """Pass the body through, then record whether the decoding read ended it."""
+        self.reads += 1
+        decoding = self.reads == 1
         async for chunk in self.body:
             yield chunk
-        self.read_to_end = True
+        if decoding:
+            self.decoded_to_end = True
 
     async def aclose(self) -> None:
         """Close the body."""
@@ -104,8 +112,8 @@ class ChatAdapter:
             else:
                 sdk_stream = await client.chat.completions.create(**kwargs)
                 # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
-                # stops reading at the sentinel, so a body read to its end never sent one.
-                body = _WatchedBody(cast("httpx.AsyncByteStream", sdk_stream.response.stream))
+                # stops decoding at the sentinel, so a body decoded to its end never sent one.
+                body = _WatchedBody(cast("httpx2.AsyncByteStream", sdk_stream.response.stream))
                 sdk_stream.response.stream = body
                 try:
                     async for chunk in sdk_stream:
@@ -115,7 +123,7 @@ class ChatAdapter:
                             yield event
                 finally:
                     await sdk_stream.close()
-                if body.read_to_end and accumulator.parts.finish_reason is None:
+                if body.decoded_to_end and accumulator.parts.finish_reason is None:
                     # Servers may omit a finish reason or ``[DONE]``, but a stream with neither was cut off.
                     return
         except sdk_failures() as error:

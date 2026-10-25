@@ -319,6 +319,8 @@ def test_a_shell_that_needs_approval_gets_the_cli_only_as_a_job(tmp_path: Path, 
             build_execution_identity_from_runtime_context(runtime),
             agent_cli_in_shell=True,
             supports_native_tool_approval=True,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         clear_api_server_address()
@@ -344,6 +346,8 @@ def test_a_shell_gets_the_cli_whether_or_not_it_runs_as_a_job(tmp_path: Path, *,
             build_execution_identity_from_runtime_context(runtime),
             agent_cli_in_shell=True,
             supports_native_tool_approval=True,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         clear_api_server_address()
@@ -374,6 +378,8 @@ def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
             runtime.runtime_paths,
             identity,
             agent_cli_in_shell=response_turn,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         clear_api_server_address()
@@ -395,6 +401,8 @@ def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> Non
             build_execution_identity_from_runtime_context(runtime),
             agent_cli_in_shell=True,
             delegation_depth=1,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         clear_api_server_address()

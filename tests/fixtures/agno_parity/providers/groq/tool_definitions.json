@@ -17,11 +17,12 @@
       "id": "openai/gpt-oss-120b",
       "provider": "groq"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -45,9 +46,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -67,13 +70,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "openai/gpt-oss-120b",
@@ -81,7 +84,6 @@
         }
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {
@@ -104,10 +106,12 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -118,8 +122,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "openai/gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

@@ -95,7 +95,7 @@ from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dep
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    import httpx
+    import httpx2
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types.beta import BetaMessage
@@ -200,7 +200,7 @@ class ClaudeProvider:
     capabilities: Capabilities
     route: ClaudeRouteKind
     settings: ClaudeSettings
-    http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
+    http_client: httpx2.AsyncClient = MODEL_HTTP_CLIENT
     google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
     # Claude sizes replayed history canonically.
     replay_estimator: ClassVar[None] = None
@@ -256,10 +256,7 @@ class ClaudeProvider:
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
         try:
-            # Opening the stream runs the SDK's param transform, which walks the whole conversation.
-            manager = await asyncio.to_thread(
-                lambda: client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs),
-            )
+            manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
                 async for event in events:
                     if event.type in _USAGE_EVENT_TYPES:

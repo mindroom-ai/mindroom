@@ -20,11 +20,12 @@
       "id": "gpt-6.1-sol",
       "provider": "codex"
     },
+    "output_schema": null,
     "portable_replay": true,
-    "response_format": null,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -48,9 +49,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -70,13 +73,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6.1-sol",
@@ -110,7 +113,6 @@
       },
       "reasoning_content": "Check the forecast first.",
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "call_id": "call_parity_weather",
@@ -129,10 +131,12 @@
       "reasoning_tokens": 5,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {
+      "model": "gpt-6.1-sol",
+      "stream": true,
       "include": [
         "reasoning.encrypted_content"
       ],
@@ -147,12 +151,10 @@
         }
       ],
       "instructions": "You are a helpful assistant.",
-      "model": "gpt-6.1-sol",
       "reasoning": {
         "effort": "medium"
       },
       "store": false,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",

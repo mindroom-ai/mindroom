@@ -29,30 +29,14 @@
       "id": "anthropic.claude-sonnet-5-5",
       "provider": "bedrock_claude"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [
-          {
-            "cited_text": "Packing list: umbrella, scarf, walking shoes.",
-            "document_index": 0,
-            "document_title": "packing.txt",
-            "end_char_index": 45,
-            "file_id": null,
-            "start_char_index": 0,
-            "type": "char_location"
-          }
-        ],
-        "urls": []
-      },
       "content": "Your list says to bring an umbrella.",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -77,8 +61,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "end_turn"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -92,7 +75,7 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": "end_turn"
+    "stop_reason": "end"
   },
   "request": {
     "body": {

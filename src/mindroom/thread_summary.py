@@ -131,7 +131,8 @@ def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: s
     """Return the summary model's provider without the temperature its config authors.
 
     Summaries send ``defaults.thread_summary_temperature`` instead, and no temperature at all when that is None or
-    the route takes no temperature override, such as one that keeps its provider's sampling default or Ollama.
+    the route keeps its provider's sampling default. Ollama authors sampling in ``options`` instead: it sends the
+    value as ``options.temperature``, and keeps an authored ``options.temperature`` when the value is None.
     """
     model_config = config.models.get(model_name)
     if model_config is not None and model_config.extra_kwargs and "temperature" in model_config.extra_kwargs:
@@ -573,9 +574,7 @@ def _resolve_thread_summary_model_name(
     return config.defaults.thread_summary_model or "default"
 
 
-# TODO(simplify): This timer shares its label with the post-response timer around the whole summary pass, so timing
-# logs show two durations under one name. Label this one thread_summary_generation. Operators would notice.
-@timed("maybe_generate_thread_summary")
+@timed("thread_summary_generation")
 async def _generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
@@ -607,9 +606,6 @@ async def _generate_summary(
         prompt,
         instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),
         schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
-        # TODO(simplify): The Ollama adapter ignores this override and keeps the sampling its model's options author,
-        # kept as main behaves. Send thread_summary_temperature as options.temperature on Ollama too.
-        # Users would notice different Ollama summaries (#3075).
         overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
     )
     await record_system_usage(response.record, runtime_paths=runtime_paths, kind="thread_summary")

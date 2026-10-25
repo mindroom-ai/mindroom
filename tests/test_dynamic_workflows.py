@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -31,7 +33,7 @@ from mindroom.dynamic_workflows.runner import (
     execute_workflow_spec,
 )
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.store import DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.llm.errors import ProviderError
@@ -55,6 +57,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mindroom.dynamic_workflows.runner import ParticipantExecutor
@@ -72,6 +75,51 @@ def _room_agent_model(monkeypatch: pytest.MonkeyPatch, *turns: list[ScriptStep])
 
     monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load)
     return model, loaded
+
+
+@dataclass
+class LoopFreedom:
+    """The wrapped file operations that ran, and the first one another coroutine could not run beside."""
+
+    called: list[str] = field(default_factory=list)
+    blocked: list[str] = field(default_factory=list)
+
+
+@contextmanager
+def file_work_waiting_for_the_loop(methods: dict[object, tuple[str, ...]]) -> Iterator[LoopFreedom]:
+    """Make each named method wait, before its file work, until another coroutine has run on the event loop.
+
+    Another coroutine runs only while the loop is free, so a method called on the loop thread records itself as
+    blocked; the methods after it skip the wait, which would only time out again.
+    """
+    loop = asyncio.get_running_loop()
+    freedom = LoopFreedom()
+
+    def waiting(method: Callable[..., object], name: str) -> Callable[..., object]:
+        def call(*args: object, **kwargs: object) -> object:
+            freedom.called.append(name)
+            if not freedom.blocked:
+                try:
+                    asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=5)
+                except TimeoutError:
+                    freedom.blocked.append(name)
+            return method(*args, **kwargs)
+
+        return call
+
+    with ExitStack() as stack:
+        for owner, names in methods.items():
+            for name in names:
+                stack.enter_context(patch.object(owner, name, waiting(getattr(owner, name), name)))
+        yield freedom
+
+
+def _only_run_record(tmp_path: Path) -> dict[str, Any]:
+    """Return the one run record the test workflow has."""
+    [run_file] = (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob(
+        "*.json",
+    )
+    return json.loads(run_file.read_text(encoding="utf-8"))
 
 
 def _answering(content: object) -> ParticipantExecutor:
@@ -1344,40 +1392,221 @@ async def test_service_run_fails_at_deadline_when_cancellation_is_suppressed(
     assert "max_runtime_seconds" in str(loaded.error)
 
 
+@pytest.mark.parametrize("ending", ["timeout", "cancelled", "failure"])
 @pytest.mark.asyncio
-async def test_service_run_persists_cancelled_status(tmp_path: Path) -> None:
-    """Cancelling an async workflow run should not leave the run stuck as running."""
+async def test_service_records_how_a_run_ended_while_the_loop_stays_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """However a run ends, its records are written while other coroutines keep running on the event loop."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(spec=_workflow_spec(), scope="agent", owner_id="general", created_by="general")
 
-    async def cancelled_executor(**_kwargs: object) -> object:
-        raise asyncio.CancelledError
+    async def executor(**_kwargs: object) -> ParticipantOutput:
+        if ending == "cancelled":
+            raise asyncio.CancelledError
+        await asyncio.sleep(1)
+        return ParticipantOutput("late")
 
-    service = DynamicWorkflowService(store, participant_executor=cancelled_executor)
-    store.create_workflow(
-        spec=_workflow_spec(),
-        scope="agent",
-        owner_id="general",
-        created_by="general",
-        reason="initial design",
-    )
+    async def fail(*_arguments: object, **_options: object) -> None:
+        msg = "runner broke"
+        raise RuntimeError(msg)
 
-    with pytest.raises(asyncio.CancelledError):
-        await service.run_workflow(
+    if ending == "timeout":
+        monkeypatch.setattr(service_module, "workflow_runtime_seconds", lambda _spec: 0.01)
+    if ending == "failure":
+        monkeypatch.setattr(service_module, "execute_workflow_spec", fail)
+    service = DynamicWorkflowService(store, participant_executor=executor)
+
+    with file_work_waiting_for_the_loop(
+        {DynamicWorkflowStore: ("start_workflow_run", "load_workflow_revision", "fail_workflow_run")},
+    ) as freedom:
+        running = service.run_workflow(
             workflow_id="competitor-research-report",
             scope="agent",
             owner_id="general",
-            input_data={"topic": "Agno factories"},
+            input_data={"topic": "pricing"},
             requested_by="general",
-            base_url="https://acme.mindroom.chat",
         )
+        if ending == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        else:
+            await running
 
-    run_files = list(
-        (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob("*.json"),
-    )
-    assert len(run_files) == 1
-    run_data = json.loads(run_files[0].read_text(encoding="utf-8"))
+    run_data = _only_run_record(tmp_path)
+    assert freedom.blocked == []
+    assert freedom.called == ["start_workflow_run", "load_workflow_revision", "fail_workflow_run"]
     assert run_data["status"] == "failed"
-    assert run_data["error"] == "Workflow run was cancelled."
+    assert (
+        run_data["error"]
+        == {
+            "timeout": "Workflow run exceeded permissions.max_runtime_seconds (0.01).",
+            "cancelled": "Workflow run was cancelled.",
+            "failure": "runner broke",
+        }[ending]
+    )
+
+
+@pytest.mark.parametrize("ending", ["timeout", "failure", "completion"])
+@pytest.mark.asyncio
+async def test_service_keeps_the_final_record_a_cancellation_interrupts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """A run cancelled while its final record is written keeps that record, and the call waits for the write."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(spec=_workflow_spec(), scope="agent", owner_id="general", created_by="general")
+    loop = asyncio.get_running_loop()
+    final_write_started = asyncio.Event()
+    release_final_write = threading.Event()
+    writes: list[str] = []
+    final_method = "complete_workflow_run" if ending == "completion" else "fail_workflow_run"
+    original = getattr(DynamicWorkflowStore, final_method)
+
+    def recorded(*args: object, **kwargs: object) -> DynamicWorkflowRun:
+        error = kwargs.get("error")
+        kind = "cancelled" if error == "Workflow run was cancelled." else ending
+        writes.append(f"{kind} started")
+        if kind == ending:
+            loop.call_soon_threadsafe(final_write_started.set)
+            release_final_write.wait(timeout=5)
+        written = original(*args, **kwargs)
+        writes.append(f"{kind} written")
+        return written
+
+    async def executor(**_kwargs: object) -> ParticipantOutput:
+        if ending == "timeout":
+            await asyncio.sleep(1)
+        return ParticipantOutput("written")
+
+    async def fail(*_arguments: object, **_options: object) -> None:
+        msg = "runner broke"
+        raise RuntimeError(msg)
+
+    if ending == "timeout":
+        monkeypatch.setattr(service_module, "workflow_runtime_seconds", lambda _spec: 0.01)
+    if ending == "failure":
+        monkeypatch.setattr(service_module, "execute_workflow_spec", fail)
+    service = DynamicWorkflowService(store, participant_executor=executor)
+    with patch.object(DynamicWorkflowStore, final_method, recorded):
+        running = asyncio.create_task(
+            service.run_workflow(
+                workflow_id="competitor-research-report",
+                scope="agent",
+                owner_id="general",
+                input_data={"topic": "pricing"},
+                requested_by="general",
+            ),
+        )
+        await final_write_started.wait()
+        running.cancel()
+        # The call ends only once the write under way has finished.
+        await asyncio.wait({running}, timeout=0.5)
+        still_writing = not running.done()
+        release_final_write.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    run_data = _only_run_record(tmp_path)
+    assert still_writing
+    assert writes == [f"{ending} started", f"{ending} written"]
+    assert (run_data["status"], run_data["error"]) == {
+        "timeout": ("failed", "Workflow run exceeded permissions.max_runtime_seconds (0.01)."),
+        "failure": ("failed", "runner broke"),
+        "completion": ("completed", None),
+    }[ending]
+
+
+@pytest.mark.parametrize(
+    ("window", "rejection"),
+    [("start_workflow_run", None), ("load_workflow_revision", None), ("load_workflow_revision", "Not allowed.")],
+)
+@pytest.mark.asyncio
+async def test_service_records_a_run_cancelled_while_it_is_prepared_as_cancelled(
+    tmp_path: Path,
+    window: str,
+    rejection: str | None,
+) -> None:
+    """A run cancelled while it is being prepared ends cancelled, unless its preparation already rejected it."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(spec=_workflow_spec(), scope="agent", owner_id="general", created_by="general")
+    loop = asyncio.get_running_loop()
+    preparation_waiting = asyncio.Event()
+    release_preparation = threading.Event()
+    executions: list[object] = []
+    original = getattr(DynamicWorkflowStore, window)
+
+    def waiting(*args: object, **kwargs: object) -> object:
+        loop.call_soon_threadsafe(preparation_waiting.set)
+        release_preparation.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    async def executor(**kwargs: object) -> ParticipantOutput:
+        executions.append(kwargs)
+        return ParticipantOutput("written")
+
+    def reject(_spec: dict[str, object]) -> None:
+        if rejection is not None:
+            raise DynamicWorkflowError(rejection)
+
+    service = DynamicWorkflowService(store, participant_executor=executor, spec_validator=reject)
+    with patch.object(DynamicWorkflowStore, window, waiting):
+        running = asyncio.create_task(
+            service.run_workflow(
+                workflow_id="competitor-research-report",
+                scope="agent",
+                owner_id="general",
+                input_data={"topic": "pricing"},
+                requested_by="general",
+            ),
+        )
+        await preparation_waiting.wait()
+        running.cancel()
+        release_preparation.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    run_data = _only_run_record(tmp_path)
+    assert (run_data["status"], run_data["error"]) == ("failed", rejection or "Workflow run was cancelled.")
+    assert executions == []
+
+
+@pytest.mark.asyncio
+async def test_service_ends_cancelled_when_a_cancelled_preparation_raises(tmp_path: Path) -> None:
+    """A cancellation during a preparation that fails, such as for a deleted workflow, still ends the call cancelled."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    loop = asyncio.get_running_loop()
+    preparation_waiting = asyncio.Event()
+    release_preparation = threading.Event()
+
+    def deleted(*_args: object, **_kwargs: object) -> DynamicWorkflowRun:
+        loop.call_soon_threadsafe(preparation_waiting.set)
+        release_preparation.wait(timeout=5)
+        msg = "YAML mapping was not found."
+        raise DynamicWorkflowError(msg)
+
+    service = DynamicWorkflowService(store, participant_executor=_answering("written"))
+    with patch.object(DynamicWorkflowStore, "start_workflow_run", deleted):
+        running = asyncio.create_task(
+            service.run_workflow(
+                workflow_id="competitor-research-report",
+                scope="agent",
+                owner_id="general",
+                input_data={"topic": "pricing"},
+                requested_by="general",
+            ),
+        )
+        await preparation_waiting.wait()
+        running.cancel()
+        release_preparation.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await running
+
+    assert isinstance(cancelled.value.__cause__, DynamicWorkflowError)
+    assert not (tmp_path / "mindroom_data/dynamic_workflows").exists()
 
 
 def test_validate_workflow_spec_rejects_missing_step_id(tmp_path: Path) -> None:
@@ -2052,6 +2281,27 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
     assert create_kwargs["persist_runtime_state"] is False
     assert create_kwargs["disable_runtime_capabilities"] is True
     assert create_kwargs["execution_identity"].agent_name == "specialist"
+
+
+@pytest.mark.asyncio
+async def test_room_agent_participant_is_resolved_and_built_while_the_loop_stays_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolving a room-agent participant's model and building it, which walk the filesystem, leave the loop free."""
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+    _room_agent_model(monkeypatch, answer("done"))
+
+    with file_work_waiting_for_the_loop({agents: ("create_agent",), Config: ("resolve_runtime_model",)}) as freedom:
+        result = await dynamic_workflow_module._execute_room_agent_participant(
+            context,
+            {"id": "writer_a", "kind": "room_agent", "agent": "specialist"},
+            "Write a report.",
+        )
+
+    assert result == "done"
+    assert freedom.blocked == []
+    assert {"create_agent", "resolve_runtime_model"} <= set(freedom.called)
 
 
 def test_resolve_participant_toolkits_builds_real_instances_with_caller_routing(tmp_path: Path) -> None:

@@ -17,23 +17,21 @@
       "id": "openai/gpt-oss-120b",
       "provider": "groq"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "openai/gpt-oss-120b",
           "provider": "Groq"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -46,10 +44,12 @@
       },
       "total_tokens": 50
     },
-    "stop_reason": null
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -60,8 +60,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "openai/gpt-oss-120b",
-      "stream": true,
       "tools": []
     },
     "headers": {

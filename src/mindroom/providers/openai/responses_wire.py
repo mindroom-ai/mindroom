@@ -333,7 +333,7 @@ def _codex_params(params: dict[str, Any], settings: ResponsesSettings, wire: Res
         elif existing is None:
             extra_body["client_metadata"] = client_metadata
         params["extra_body"] = extra_body
-    # A request's temperature override and raw ``request_params`` reach here; config load retires the authored settings.
+    # Codex ``extra_kwargs`` cannot set these fields, but a request's temperature override and raw ``request_params`` can.
     for name in CODEX_REJECTED_FIELDS:
         params.pop(name, None)
 

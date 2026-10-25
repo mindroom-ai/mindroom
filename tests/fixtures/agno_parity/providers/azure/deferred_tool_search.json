@@ -27,11 +27,12 @@
       "id": "gpt-6-astra",
       "provider": "azure"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -55,9 +56,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
         "external_execution": false,
         "name": "tool_search",
@@ -75,9 +78,11 @@
           "required": [],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
         "external_execution": false,
         "name": "call_tool",
@@ -97,9 +102,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Look up one order by id.",
         "external_execution": false,
         "name": "lookup_order",
@@ -114,9 +121,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Email the invoice for one order.",
         "external_execution": false,
         "name": "send_invoice",
@@ -131,13 +140,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -147,7 +156,6 @@
         "system_fingerprint": "fp_parity"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {
@@ -164,10 +172,12 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -178,8 +188,6 @@
           "content": "Where is order A-1001?"
         }
       ],
-      "model": "gpt-6-astra",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

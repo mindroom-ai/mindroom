@@ -37,7 +37,7 @@ from mindroom.knowledge.registry import (
     published_index_storage_path,
     resolve_published_index_key,
 )
-from mindroom.knowledge.utils import resolve_knowledge_base_access
+from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -395,8 +395,9 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
         assert client.count_collections() == 1
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [False, True])
-def test_published_metadata_lookup_does_not_consume_search_capacity(
+async def test_published_metadata_lookup_does_not_consume_search_capacity(
     published_lookup: tuple[Config, RuntimePaths],
     monkeypatch: pytest.MonkeyPatch,
     cached: bool,
@@ -407,29 +408,34 @@ def test_published_metadata_lookup_does_not_consume_search_capacity(
     monkeypatch.setattr(read_process, "_read_slots", slots)
     config, runtime_paths = published_lookup
     if cached:
-        assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
+        assert (
+            await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
+        ).knowledge is not None
 
     # A running search holds the only reader slot.
     assert slots.acquire(blocking=False)
     try:
-        available = resolve_knowledge_base_access("docs", config, runtime_paths)
+        available = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
         assert available.knowledge is not None
         assert available.availability is KnowledgeAvailability.READY
     finally:
         slots.release()
 
-    recovered = resolve_knowledge_base_access("docs", config, runtime_paths)
+    recovered = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
     assert recovered.knowledge is not None
     assert recovered.availability is KnowledgeAvailability.READY
 
 
-def test_cached_published_lookup_reports_probe_timeout(
+@pytest.mark.asyncio
+async def test_cached_published_lookup_reports_probe_timeout(
     published_lookup: tuple[Config, RuntimePaths],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cached probe timeout must not escape knowledge availability resolution."""
     config, runtime_paths = published_lookup
-    assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
+    assert (
+        await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
+    ).knowledge is not None
 
     def timeout(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
         message = "Knowledge read timed out"
@@ -437,8 +443,10 @@ def test_cached_published_lookup_reports_probe_timeout(
 
     with monkeypatch.context() as patch:
         patch.setattr("mindroom.knowledge.read_proxy.collection_exists", timeout)
-        unavailable = resolve_knowledge_base_access("docs", config, runtime_paths)
+        unavailable = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
         assert unavailable.knowledge is None
         assert unavailable.availability is KnowledgeAvailability.REFRESH_FAILED
 
-    assert resolve_knowledge_base_access("docs", config, runtime_paths).availability is KnowledgeAvailability.READY
+    assert (
+        await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
+    ).availability is KnowledgeAvailability.READY

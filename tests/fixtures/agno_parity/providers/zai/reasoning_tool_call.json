@@ -17,11 +17,12 @@
       "id": "glm-5.3",
       "provider": "zai"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -45,9 +46,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -67,13 +70,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -84,7 +87,6 @@
       },
       "reasoning_content": "Check the forecast first.",
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {
@@ -102,10 +104,12 @@
       "reasoning_tokens": 5,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {
+      "model": "glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -116,8 +120,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "glm-5.3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

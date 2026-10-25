@@ -13,15 +13,14 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted
+from tests.agno_parity.golden_files import render
 from tests.providers.anthropic_family_support import FAMILIES, run_golden
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
-    expected_parsed,
-    expected_stop_reason,
     golden_id,
     golden_paths,
     load_golden,
-    ordered_json,
+    regenerated_golden,
 )
 
 if TYPE_CHECKING:
@@ -39,13 +38,12 @@ def test_every_claude_route_has_goldens() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", _FIXTURES, ids=golden_id)
 async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> None:
-    """Replaying a golden's canned reply yields its exact request and parsed reply."""
+    """Replaying a golden's canned reply regenerates it byte for byte: its exact request and parsed reply."""
     fixture = load_golden(path)
     replay = await run_golden(fixture, tmp_path)
-    assert replay.request == fixture["request"]
-    assert ordered_json(replay.request["body"]) == ordered_json(fixture["request"]["body"])
-    assert replay.parsed == expected_parsed(fixture)
-    assert replay.stop_reason == expected_stop_reason(fixture)
+    regenerated = regenerated_golden(fixture, replay)
+    assert regenerated == fixture
+    assert render(regenerated) == path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

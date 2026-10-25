@@ -942,6 +942,7 @@ async def test_usage_telemetry_is_logged_without_the_request_log(
             "model_id": "scripted",
             "provider": provider,
             "usage_available": True,
+            "stop_reason": "end",
             "correlation_id": "corr-1",
             "input_tokens": 1_000,
             "context_input_tokens": context_tokens,
@@ -1164,6 +1165,18 @@ async def test_composed_pipeline_drains_with_complete() -> None:
 
     assert (turn.content, turn.stop_reason, len(inner.requests)) == ("done", "end", 2)
     assert provider.identity == inner.identity
+
+
+@pytest.mark.asyncio
+async def test_a_guidance_retry_after_a_media_fallback_does_not_resend_the_rejected_media() -> None:
+    rejection = InvalidRequest("Unsupported mime type: image/png", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider([[rejection], [_malformed()], [TextDelta("done"), _turn()]])
+
+    turn = await complete(pipeline_provider(inner), ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert (turn.content, len(inner.requests)) == ("done", 3)
+    assert [request.messages[0].images for request in inner.requests] == [[_image()], None, None]
+    assert inner.requests[2].messages[-1].content == MALFORMED_FUNCTION_CALL_GUIDANCE
 
 
 @pytest.mark.asyncio

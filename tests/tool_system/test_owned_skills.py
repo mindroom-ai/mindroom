@@ -6,9 +6,11 @@ import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 
+import mindroom.tool_system.skills as skills_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -21,6 +23,7 @@ from mindroom.tool_system.skills import (
     _configured_skill_file,
     build_skills_toolkit,
 )
+from mindroom.tool_system.tool_access import tool_definition
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
@@ -54,15 +57,15 @@ def _build(
 ) -> SkillsToolkit:
     storage = tmp_path / "storage"
     config = Config(agents={AGENT_NAME: AgentConfig(display_name="Assistant", role="", skills=configured or [])})
-    toolkit = build_skills_toolkit(
-        AGENT_NAME,
-        config,
-        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
-        output_file_policy=ToolOutputFilePolicy(workspace_root=_workspace(tmp_path)) if output_files else None,
-    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage, process_env={})
+    with patch.object(skills_module, "_get_default_skill_roots", return_value=[tmp_path / "global"]):
+        toolkit = build_skills_toolkit(
+            AGENT_NAME,
+            config,
+            runtime_paths,
+            workspace_root=None,
+            output_file_policy=ToolOutputFilePolicy(workspace_root=_workspace(tmp_path)) if output_files else None,
+        )
     assert toolkit is not None
     return toolkit
 
@@ -76,24 +79,9 @@ def _write_golden_workspace(tmp_path: Path, golden: dict[str, Any]) -> None:
         _write_file(_workspace(tmp_path) / relative_path, text)
 
 
-def _wire_tool(function: ToolFunction) -> dict[str, Any]:
-    """Return the request tool entry the prompt goldens record: Agno's ``Function.to_dict()`` in a function wrapper."""
-    spec = function.definition()
-    fields = {
-        "name": spec.name,
-        "description": spec.description,
-        "parameters": dict(spec.parameters),
-        "strict": spec.strict,
-        "requires_confirmation": spec.requires_confirmation,
-        "external_execution": spec.external_execution,
-        "approval_type": spec.approval_type,
-    }
-    return {"type": "function", "function": {key: value for key, value in fields.items() if value is not None}}
-
-
 def _golden_skill_tools(golden: dict[str, Any]) -> list[dict[str, Any]]:
     tools = golden["requests"][0]["tools"]
-    return [tool for tool in tools if tool["function"]["name"] in SKILL_FUNCTION_NAMES]
+    return [tool for tool in tools if tool["name"] in SKILL_FUNCTION_NAMES]
 
 
 @pytest.mark.parametrize(
@@ -102,13 +90,13 @@ def _golden_skill_tools(golden: dict[str, Any]) -> list[dict[str, Any]]:
     ids=["plain", "output-files"],
 )
 def test_skill_functions_equal_the_prompt_goldens(tmp_path: Path, scenario: str, output_files: bool) -> None:
-    """The adapted skill functions are the request tools Agno sent, with and without output-file wrapping."""
+    """The adapted skill functions are the golden's request tools, with and without output-file wrapping."""
     golden = _golden(scenario)
     _write_golden_workspace(tmp_path, golden)
 
     functions = adapt_toolkit(_build(tmp_path, output_files=output_files)).functions
 
-    assert [_wire_tool(function) for function in functions] == _golden_skill_tools(golden)
+    assert [tool_definition(function.definition()) for function in functions] == _golden_skill_tools(golden)
 
 
 def test_the_prompt_block_equals_the_prompt_golden(tmp_path: Path) -> None:
@@ -334,12 +322,15 @@ async def test_workspace_loads_record_usage_and_configured_skills_do_not(tmp_pat
     assert not (tmp_path / "global" / ".usage.json").exists()
 
 
-def test_skills_from_later_sources_win_a_name(tmp_path: Path) -> None:
-    """A skill from an explicit root wins its name over a workspace skill, so the explicit skill is the one offered."""
+def test_a_workspace_skill_wins_its_name_over_a_default_root_skill(tmp_path: Path) -> None:
+    """Of two skills that share a name, the workspace's is the one offered, not the default root's."""
     _write_skill(_workspace(tmp_path) / "skills", "alpha", "Workspace alpha")
-    _write_skill(tmp_path / "global", "alpha", "Explicit alpha")
+    _write_skill(tmp_path / "global", "alpha", "Default alpha")
 
     toolkit = _build(tmp_path, configured=["alpha"])
 
     [skill] = [skill for skill in toolkit.skills if skill.name == "alpha"]
-    assert (skill.description, skill.source_path) == ("Explicit alpha", (tmp_path / "global" / "alpha").resolve())
+    assert (skill.description, skill.source_path) == (
+        "Workspace alpha",
+        (_workspace(tmp_path) / "skills" / "alpha").resolve(),
+    )

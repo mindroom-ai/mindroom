@@ -22,20 +22,19 @@ from agno.tools import Toolkit
 
 from mindroom import agents, ai_runtime, loop_hooks, response_runner, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
-from mindroom.approval.manager import get_approval_store, initialize_approval_store
+from mindroom.approval.manager import get_approval_store
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.delegation.lifecycle import child_execution_identity
-from mindroom.delegation.state import DelegationState
+from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -60,6 +59,8 @@ from tests.approval_continuation_helpers import carries_approval_receipt, receip
 from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
+    handle_card_response_for_test,
+    initialize_approval_store_for_test,
     install_runtime_journal_support,
     make_matrix_client_mock,
     message_origin,
@@ -1702,7 +1703,6 @@ async def test_a_member_keeps_its_hooks_across_its_delegation_continuation(
     )
     team.models["writer-model"] = ScriptedModel(
         [_cut_off("cut-1"), _cut_off("cut-2"), _delegate_to_helper("Dig"), _cut_off("cut-3"), answer("Rebuilt.")],
-        capabilities=Capabilities(claude_family=True),
     )
 
     await team.stream()
@@ -2427,7 +2427,7 @@ async def _approving_team_bot(
         cards.append(delivery)
         return f"$card-{len(cards)}"
 
-    initialize_approval_store(
+    initialize_approval_store_for_test(
         bot.runtime_paths,
         prepare_event=prepare_event,
         send_delivery=send_card,
@@ -2451,12 +2451,12 @@ async def _approve(bot: TeamBot, card_event_id: str) -> None:
     """Approve one card as the requester does, then hand the request's source to the readied resume, as the journal does."""
     manager = get_approval_store()
     assert manager is not None
-    result = await manager.handle_card_response(
+    result = await handle_card_response_for_test(
+        manager,
         room_id=ROOM_ID,
         sender_id=REQUESTER_ID,
         card_event_id=card_event_id,
         status="approved",
-        reason=None,
         authorize_responder=lambda _entity: True,
     )
     assert result.consumed

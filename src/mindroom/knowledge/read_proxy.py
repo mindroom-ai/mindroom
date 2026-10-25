@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -55,17 +55,13 @@ class ChromaReadProxy:
     embedder: Embedder
     published_settings: IndexingSettings | None = None
 
-    def _request(self) -> ReadRequest:
-        """Return the request that selects this handle's compatible publication."""
-        return ReadRequest(
-            path=self.path,
-            collection=self.collection_name,
-            published_settings=self.published_settings.to_metadata() if self.published_settings is not None else None,
-        )
+    def _published_metadata(self) -> dict[str, str] | None:
+        """Return the settings that select this handle's compatible publication, or None to read its collection."""
+        return self.published_settings.to_metadata() if self.published_settings is not None else None
 
     def exists(self) -> bool:
         """Probe the same compatible publication that a subsequent search resolves."""
-        with read_collection(self._request()) as collection_name:
+        with read_collection(self.path, self.collection_name, self._published_metadata()) as collection_name:
             return collection_exists(self.path, collection_name)
 
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
@@ -73,6 +69,12 @@ class ChromaReadProxy:
 
         async def prepare_request() -> ReadRequest:
             embedding = (await self.embedder.aembed([query], purpose="query"))[0]
-            return replace(self._request(), embedding=embedding, limit=limit)
+            return ReadRequest(
+                path=self.path,
+                collection=self.collection_name,
+                embedding=embedding,
+                limit=limit,
+                published_settings=self._published_metadata(),
+            )
 
         return (await read_chroma_async(prepare_request)).hits

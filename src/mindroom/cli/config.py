@@ -1478,7 +1478,7 @@ def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:
 
 def _provider_env_template(  # noqa: PLR0911
     provider_preset: _ProviderPreset,
-    provider_api_key: str | None = None,
+    provider_api_key: str | None,
 ) -> str:
     """Return the provider-specific section of the starter .env file.
 
@@ -1511,15 +1511,13 @@ def _provider_env_template(  # noqa: PLR0911
         # or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
         """).rstrip()
 
-    # TODO(simplify): the generated .env credits Agno with the default Azure OpenAI API version, which
-    # providers/openai/build.py sets. Say "the default Azure OpenAI API version". Users reading a new .env would notice.
     if provider_preset == "azure":
         return textwrap.dedent(f"""\
         # Azure OpenAI configuration
         {AZURE_OPENAI_ENV_BY_KEY["api_key"]}={ENV_TEMPLATE_PLACEHOLDERS[AZURE_OPENAI_ENV_BY_KEY["api_key"]]}
         {AZURE_OPENAI_ENV_BY_KEY["endpoint"]}={ENV_TEMPLATE_PLACEHOLDERS[AZURE_OPENAI_ENV_BY_KEY["endpoint"]]}
 
-        # Optional: override Agno's Azure OpenAI default API version.
+        # Optional: override the default Azure OpenAI API version.
         # {AZURE_OPENAI_ENV_BY_KEY["api_version"]}=2024-10-21
 
         # In config.yaml, set models.default.id to your Azure OpenAI deployment name.

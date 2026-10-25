@@ -25,13 +25,13 @@ from mindroom.budgets.pricing import model_prices
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
-    child_execution_identity,
     child_tool_runtime_context,
     delegation_grant,
     note_child_run_id,
     observe_child_event,
     observe_child_record,
 )
+from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import persist_interrupted_replay, split_interrupted_tool_trace
@@ -1022,24 +1022,24 @@ async def _prepare_agent_and_prompt(
     prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    scope_context: ScopeSessionContext | None = None,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    knowledge: AgentKnowledge | None = None,
-    include_interactive_questions: bool = True,
-    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    delegation_depth: int = 0,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    include_openai_compat_guidance: bool = False,
-    model_prompt: str | None = None,
-    current_timestamp_ms: float | None = None,
-    current_event_id: str | None = None,
-    current_prompt_is_structured: bool = False,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-    eager_deferred_tools: bool = False,
-    supports_native_tool_approval: bool = False,
-    reusable_build: AgentBuild | None = None,
+    scope_context: ScopeSessionContext | None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    knowledge: AgentKnowledge | None,
+    include_interactive_questions: bool,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_lifecycle: CompactionLifecycle | None,
+    delegation_depth: int,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    include_openai_compat_guidance: bool,
+    model_prompt: str | None,
+    current_timestamp_ms: float | None,
+    current_event_id: str | None,
+    current_prompt_is_structured: bool,
+    pipeline_timing: DispatchPipelineTiming | None,
+    eager_deferred_tools: bool,
+    supports_native_tool_approval: bool,
+    reusable_build: AgentBuild | None,
 ) -> _PreparedAgentRun:
     """Prepare the agent build, this turn's system message, and its request input.
 
@@ -1252,9 +1252,9 @@ async def _prepare_agent_run_context(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     turn_recorder: TurnRecorder | None,
     pipeline_timing: DispatchPipelineTiming | None,
-    eager_deferred_tools: bool = False,
-    supports_native_tool_approval: bool = False,
-    reusable_build: AgentBuild | None = None,
+    eager_deferred_tools: bool,
+    supports_native_tool_approval: bool,
+    reusable_build: AgentBuild | None,
 ) -> _AgentRunContext:
     """Prepare one attempt of an agent response, as its ``continuation`` state asks, through metadata assembly."""
     if continuation.active_model_name is not None:

@@ -114,6 +114,8 @@ from tests.conftest import (
     install_model_providers,
     make_turn_context,
     make_visible_message,
+    prepare_agent_and_prompt_for_test,
+    process_and_respond_for_test,
     seed_session,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
@@ -794,7 +796,8 @@ class TestUserIdPassthrough:
 
             mock_ai.side_effect = fake_ai_response
 
-            await coordinator._process_and_respond(
+            await process_and_respond_for_test(
+                coordinator,
                 _response_request(prompt="Hello", user_id="@alice:localhost"),
             )
 
@@ -846,8 +849,10 @@ class TestUserIdPassthrough:
 
             mock_stream.side_effect = fake_stream_agent_response
 
-            await coordinator._process_and_respond_streaming(
+            await process_and_respond_for_test(
+                coordinator,
                 _response_request(prompt="Hello", user_id="@bob:localhost"),
+                streaming=True,
             )
 
             mock_stream.assert_called_once()
@@ -1038,7 +1043,7 @@ class TestUserIdPassthrough:
             ),
             patch("mindroom.ai.create_agent", wraps=ai.create_agent) as mock_create_agent,
         ):
-            prepared_run = await _prepare_agent_and_prompt(
+            prepared_run = await prepare_agent_and_prompt_for_test(
                 make_turn_context("general"),
                 prompt="test",
                 runtime_paths=runtime_paths,
@@ -1090,7 +1095,7 @@ class TestUserIdPassthrough:
             ),
             capture_logs() as logs,
         ):
-            await _prepare_agent_and_prompt(
+            await prepare_agent_and_prompt_for_test(
                 make_turn_context("general"),
                 prompt="current request",
                 runtime_paths=runtime_paths,
@@ -1138,7 +1143,7 @@ class TestUserIdPassthrough:
                 transient_turn_context="turn context",
             ),
         ) as mock_build_prompt_parts:
-            prepared_run = await _prepare_agent_and_prompt(
+            prepared_run = await prepare_agent_and_prompt_for_test(
                 make_turn_context("general", system_enrichment_items=enrichment),
                 prompt="raw prompt",
                 runtime_paths=runtime_paths,
@@ -1179,7 +1184,7 @@ class TestUserIdPassthrough:
         _install(monkeypatch)
 
         with patch("mindroom.ai.build_memory_prompt_parts", new_callable=AsyncMock, return_value=MemoryPromptParts()):
-            prepared_run = await _prepare_agent_and_prompt(
+            prepared_run = await prepare_agent_and_prompt_for_test(
                 make_turn_context("general", requester_id="@alice:example.com"),
                 prompt="test",
                 runtime_paths=runtime_paths,
@@ -1202,7 +1207,7 @@ class TestUserIdPassthrough:
         _install(monkeypatch)
 
         with patch("mindroom.ai.build_memory_prompt_parts", new_callable=AsyncMock, return_value=MemoryPromptParts()):
-            prepared_run = await _prepare_agent_and_prompt(
+            prepared_run = await prepare_agent_and_prompt_for_test(
                 replace(
                     make_turn_context("general", requester_id="@alice:example.com"),
                     current_sender_id="@mindroom_research:example.com",

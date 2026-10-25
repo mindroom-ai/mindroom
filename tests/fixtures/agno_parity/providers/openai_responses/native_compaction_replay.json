@@ -9,12 +9,10 @@
       },
       {
         "content": "What should I pack for Paris tomorrow?",
-        "from_history": true,
         "role": "user"
       },
       {
         "content": "Pack a light rain jacket and comfortable shoes.",
-        "from_history": true,
         "metrics": {
           "input_tokens": 42,
           "output_tokens": 12,
@@ -30,17 +28,14 @@
           "mindroom_response_stored": true,
           "response_id": "resp_parity"
         },
-        "role": "assistant",
-        "stop_after_tool_call": false
+        "role": "assistant"
       },
       {
         "content": "And for the evening?",
-        "from_history": true,
         "role": "user"
       },
       {
         "content": "Add a warm layer.",
-        "from_history": true,
         "metrics": {
           "input_tokens": 420,
           "output_tokens": 12,
@@ -80,8 +75,7 @@
           "mindroom_response_stored": false,
           "response_id": "resp_parity"
         },
-        "role": "assistant",
-        "stop_after_tool_call": false
+        "role": "assistant"
       },
       {
         "content": "Anything else?",
@@ -98,15 +92,14 @@
       "history_generation": "",
       "threshold": 60000
     },
+    "output_schema": null,
     "portable_replay": true,
-    "response_format": null,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "Walking shoes.",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6-astra",
@@ -121,18 +114,19 @@
         "mindroom_response_stored": false,
         "response_id": "resp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "context_management": [
         {
           "type": "compaction",
@@ -170,10 +164,8 @@
           "content": "Anything else?"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
-      "store": false,
-      "stream": true
+      "store": false
     },
     "headers": {
       "accept": "application/json",
