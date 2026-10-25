@@ -505,7 +505,7 @@ context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
 ```
 
-`resolve_worker_target()` raises `ValueError` in team and router dispatches, which have no single agent scope; catch it if the tool can run inside a team.
+`resolve_worker_target()` raises `ValueError` when the call runs as a team or the router rather than as an agent, as a team leader's own tool calls and router dispatches do; a team member's tool calls run as that member, so catch the error only if a team leader can call the tool.
 
 ## OAuth providers
 
