@@ -356,6 +356,15 @@ async def _call_tool(
     return await func(**args)
 
 
+def _observed(result: _ToolHookResult) -> _ToolHookResult:
+    """Return what a call's observers read for ``result``: a failed outcome's text, as for a call a hook declined.
+
+    A tool that answers its own failure with a failed ``ToolOutcome``, as ``run_scheduled_call`` does, fails its call,
+    while the after-call hooks, the tool-call log, and the reply's record read the text it answered with.
+    """
+    return result.content if isinstance(result, ToolOutcome) and result.is_error else result
+
+
 async def _call_recorded_tool(
     func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
@@ -374,7 +383,7 @@ async def _call_recorded_tool(
         # It ran and failed. A cancelled call stays started, since it may have taken effect.
         await recorder.finished(call_id, tool_name, args, exc)
         raise
-    await recorder.finished(call_id, tool_name, args, result)
+    await recorder.finished(call_id, tool_name, args, _observed(result))
     return result
 
 
@@ -588,8 +597,8 @@ async def _execute_bridge(  # noqa: C901
 
     async def succeed(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
         duration_ms = timing.mark_result_ready()
-        _record_success(tool_name, args, result, duration_ms, timing, resolved_context)
-        await finish(outcome, duration_ms=duration_ms, result=result)
+        _record_success(tool_name, args, _observed(result), duration_ms, timing, resolved_context)
+        await finish(outcome, duration_ms=duration_ms, result=_observed(result))
         return result
 
     if has_before_hooks:
