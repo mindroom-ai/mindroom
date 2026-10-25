@@ -36,7 +36,8 @@ export function PersonalAgents() {
   });
   const agents = query.data ?? [];
   const hasTemplates = Object.keys(config?.personal_agents ?? {}).length > 0;
-  if (!hasTemplates && agents.length === 0) return null;
+  // A failed request keeps the card so its error shows; roster entries can outlive every template.
+  if (!hasTemplates && !query.isError && agents.length === 0) return null;
 
   return (
     <Card>

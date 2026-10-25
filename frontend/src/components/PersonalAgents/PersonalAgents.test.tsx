@@ -38,14 +38,18 @@ const agents: PersonalAgent[] = [
   },
 ];
 
-function renderSection(config: Partial<Config>, payload: PersonalAgent[]) {
+function renderSection(
+  config: Partial<Config>,
+  payload: PersonalAgent[] | { detail: string },
+  status = 200,
+) {
   vi.mocked(useConfigStore).mockReturnValue({
     config,
     committedGeneration: 1,
   } as unknown as ReturnType<typeof useConfigStore>);
   vi.mocked(fetch).mockResolvedValue(
     new Response(JSON.stringify(payload), {
-      status: 200,
+      status,
       headers: { "Content-Type": "application/json" },
     }),
   );
@@ -97,5 +101,16 @@ describe("PersonalAgents", () => {
       ),
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("stays visible with its error when the request fails", async () => {
+    const { client } = renderSection({}, { detail: "Roster unavailable" }, 500);
+
+    await waitFor(() =>
+      expect(client.getQueryState(["personal-agents", 1])?.status).toBe(
+        "error",
+      ),
+    );
+    expect(screen.getByText("Personal agents")).toBeInTheDocument();
   });
 });

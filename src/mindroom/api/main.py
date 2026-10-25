@@ -945,6 +945,7 @@ async def get_personal_agents(
 ) -> list[PersonalAgentResponse]:
     """List every generated personal agent, including pending ones and those whose template was removed."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    roster = await asyncio.to_thread(read_personal_agent_roster, runtime_paths)
     # The roster can be newer than the loaded config, so names render from the template, not config.agents.
     templates = {key: template.model_dump() for key, template in config.personal_agents.items()}
     return [
@@ -961,7 +962,7 @@ async def get_personal_agents(
             pending=entry.pending,
             template_exists=entry.template in templates,
         )
-        for entry in read_personal_agent_roster(runtime_paths)
+        for entry in roster
     ]
 
 
