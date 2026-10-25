@@ -162,6 +162,23 @@ def test_request_network_access_rejects_internal_hostname_before_grant(
         )
 
 
+@pytest.mark.parametrize("hostname", ["\u0430\u0440\u0440\u04cf\u0435.com", "g\u0456thub.com"])
+def test_request_network_access_rejects_unicode_hostname_before_grant(
+    monkeypatch: pytest.MonkeyPatch,
+    hostname: str,
+) -> None:
+    """A Unicode look-alike must not be granted as an xn-- name the approval card never showed."""
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "a Unicode hostname should not create a grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+
+    with pytest.raises(ValueError, match="must be written in ASCII; request 'xn--"):
+        asyncio.run(_approved_egress_tool().request_network_access([hostname], 5, "Need docs"))
+
+
 def test_request_network_access_rejects_whole_batch_on_one_bad_hostname(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

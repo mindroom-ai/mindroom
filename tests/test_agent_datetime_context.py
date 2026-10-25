@@ -173,7 +173,7 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
     [member] = members.builds
     assert member.prompt.role is not None
     assert "## Current Date and Time" not in member.prompt.role
-    message = team.spec.system_message
+    message = team.spec.leader.system_message
     assert message is not None
     assert isinstance(message.content, str)
     assert "Today is Friday, March 20, 2026." in message.content

@@ -41,6 +41,7 @@ Rows name related upstream work where any is known; each source comment records 
 | E2BTools `run_command` waits on the E2B SDK's `commands.run`, which keeps a command's whole stdout and stderr until it ends. | Stop collecting command output past a caller-supplied byte limit. | `custom_tools/e2b.py` |
 | SpotifyTools sends one fixed access token on every request and never renews it, so every call fails once Spotify's one-hour token expires. | Accept a token provider or refresh credentials and renew expiring tokens. | `custom_tools/spotify.py` |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py` |
+| ZoomTools registers `get_access_token` as a toolkit function, so the model can read the account-wide Server-to-Server bearer token. | Keep token minting internal to the toolkit. | `tools/zoom.py` |
 | DaytonaTools treats a null `verify_ssl` like `false` and then disables certificate checks by patching `daytona_api_client.Configuration.__init__` for the whole process until it restarts. | Disable verification only for an explicit `False` and scope it to the toolkit's own client configuration. | `tools/daytona.py` |
 | Luma video creation omits the required model argument in both public methods. | Pass a configurable model on both creation paths. | `tools/lumalabs.py` |
 | Todoist project discovery treats SDK pages as individual projects. | Flatten project pages and serialize SDK date fields safely. | `tools/todoist.py` |

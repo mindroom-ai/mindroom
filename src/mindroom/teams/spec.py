@@ -1,4 +1,4 @@
-"""What a team run is built from: the leader's identity, model, prompt, and own tools, and its members."""
+"""What a team run is built from: the leader, as the agent the loop runs, and the members it works."""
 
 from __future__ import annotations
 
@@ -11,9 +11,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.spec import AgentSpec
-    from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelProvider, ModelRequest
-    from mindroom.tool_system.tool_function import AdaptedToolkit
+    from mindroom.llm.provider import ModelRequest
 
 
 class TeamMode(StrEnum):
@@ -61,21 +59,16 @@ class TeamMember:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TeamSpec:
-    """One team as the leader loop runs it.
+    """One team as the leader loop runs it: the leader, which works its ``members`` as ``mode`` says.
 
-    ``id`` and ``name`` are stored on every team run as ``team_id`` and ``team_name``. ``system_message`` is the
-    rendered leader prompt (``prompt.render_leader_system_message``); ``toolkits`` are the leader's own tools, to
-    which each run adds the delegation tool for ``mode``; ``max_tool_calls_per_turn`` bounds the leader's calls,
-    delegations included.
+    ``leader.id`` is the team's id, stored on every team run as ``team_id``; ``leader.name`` is the team's label, which
+    no run stores. ``leader.system_message`` is the rendered leader prompt (``prompt.render_leader_system_message``);
+    ``leader.toolkits`` are the leader's own tools, to which each run adds the delegation tool for ``mode``;
+    ``leader.max_tool_calls_per_turn`` bounds the leader's calls, delegations included.
     """
 
-    id: str
-    name: str
+    leader: AgentSpec
     mode: TeamMode
-    model: ModelProvider
-    system_message: Message
-    toolkits: tuple[AdaptedToolkit, ...]
-    max_tool_calls_per_turn: int | None
     members: tuple[TeamMember, ...]
 
 

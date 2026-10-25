@@ -118,6 +118,39 @@ async def test_a_team_reply_publishes_the_leader_s_identity_and_the_whole_team_s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
+async def test_a_team_reply_s_context_reads_the_leader_s_last_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """The context block shows what the leader's last request held, not the whole team's summed input."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            _delegate(usage(500, 70, cache_read_tokens=400)),
+            answer("Team answer", usage(650, 50, cache_read_tokens=600)),
+        ],
+        general=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(200, 30)), answer("Member answer")],
+    )
+    team.config.models["default"].context_window = 10_000
+    collector: dict[str, Any] = {}
+
+    await team.reply(stream=stream, run_metadata_collector=collector)
+
+    payload = collector[AI_RUN_METADATA_KEY]
+    assert payload["usage"]["input_tokens"] == 1350
+    assert payload["context"] == {
+        "input_tokens": 650,
+        "window_tokens": 10_000,
+        "cache_read_input_tokens": 600,
+        "uncached_input_tokens": 50,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
 async def test_a_failed_team_reply_still_publishes_the_usage_it_was_billed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

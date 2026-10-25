@@ -394,14 +394,13 @@ class TeamRunRecord(_RunRecordCommon):
     """
 
     team_id: str | None
-    team_name: str | None = None
     member_responses: list[RunRecord] = field(default_factory=list)
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored ``run_data`` dict, keys in stored order; ``member_responses`` is always present."""
         return {
-            **self._scalars_dict({"team_id": self.team_id, "team_name": self.team_name}),
+            **self._scalars_dict({"team_id": self.team_id}),
             **self._metrics_dict(),
             "status": self.status.value,
             **self._history_dict(),
@@ -413,9 +412,16 @@ class TeamRunRecord(_RunRecordCommon):
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> TeamRunRecord:
         """Rebuild from a stored ``run_data`` dict, ignoring keys this record does not model."""
+        # LEGACY_COMPAT: Team run dicts carry the ``team_name`` label of their members.
+        # Legacy format: team ``run_data`` rows hold ``team_name``, ``Team-`` followed by the requested member names
+        # joined by ``-``; no MindRoom code read it.
+        # Last legacy release: v2026.10.506, whose owned runtime wrote it as the Agno-backed runtime before it did;
+        # replacement: unreleased, whose team runs store no ``team_name``.
+        # Handling: the key is ignored on read and never written again, so a rewritten row drops it.
+        # Coverage: tests/llm/test_codecs.py::test_team_run_record_round_trips_agno_dict_minus_dropped_keys,
+        #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
         return cls(
             team_id=data.get("team_id"),
-            team_name=data.get("team_name"),
             member_responses=[RunRecord.from_dict(member) for member in data.get("member_responses") or []],
             **_common_from_dict(data),
         )

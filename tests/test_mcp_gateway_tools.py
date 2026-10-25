@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
+from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno reads tool annotations at runtime.
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -13,7 +15,7 @@ import pytest
 from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
 from agno.tools import Toolkit
 from agno.tools.function import Function
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from mindroom import agents, constants
 from mindroom.api.config_lifecycle import ApiSnapshot
@@ -1268,9 +1270,102 @@ async def test_mcp_selected_catalog_preserves_filters_and_never_initializes_othe
             arguments={},
             manager=manager,
         )
-        assert "hello" in json.dumps(result)
+        assert result == {"result": "hello"}
     finally:
         await manager.shutdown()
+
+
+async def _invoke_mcp_echo(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+    planned: CallToolResult,
+) -> InvocationResult:
+    """Invoke the MCP server's ``echo`` tool through the gateway, the server answering with ``planned``."""
+    _patch_manager(monkeypatch)
+    monkeypatch.setattr(_FakeClientSession, "tool_list", [_tool("echo")])
+    monkeypatch.setattr(_FakeClientSession, "planned_tool_pages", [])
+    monkeypatch.setattr(_FakeClientSession, "planned_tool_results", [planned])
+    context = _mcp_context(context)
+    manager = MCPServerManager(context.runtime_paths)
+    try:
+        await manager.sync_servers(context.config, discover=False)
+        return await gateway.invoke_tool(
+            context,
+            toolkit="mcp_example",
+            function="example_echo",
+            arguments={},
+            manager=manager,
+        )
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_image_reaches_the_gateway_client_as_a_reference_beside_the_text(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An image result fits the result limit: the client gets the text and a reference to the image, not its bytes."""
+    image = ImageContent(type="image", data=base64.b64encode(b"\x89PNG" * 20000).decode(), mime_type="image/png")
+    planned = CallToolResult(content=[TextContent(type="text", text="captured"), image])
+
+    assert await _invoke_mcp_echo(context, monkeypatch, planned) == {
+        "result": {"content": "captured", "attachments": [{"kind": "image", "mime_type": "image/png"}]},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["plain", "async", "sync stream", "async stream"])
+async def test_a_tool_runs_through_the_gateway_only_after_the_selection_check(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """Every kind of tool runs to the end of its result, with the selection checked again after the hooks load."""
+    events: list[str] = []
+
+    def no_plugins(*_args: object, **_kwargs: object) -> list[object]:
+        events.append("hooks loaded")
+        return []
+
+    monkeypatch.setattr("mindroom.mcp_gateway.tools.load_plugins", no_plugins)
+
+    def plain() -> str:
+        """Answer at once."""
+        events.append("tool ran")
+        return "first second"
+
+    async def plain_async() -> str:
+        """Answer at once."""
+        events.append("tool ran")
+        return "first second"
+
+    def sync_stream() -> Iterator[str]:
+        """Stream a result in parts."""
+        events.append("tool ran")
+        yield "first "
+        yield "second"
+
+    async def async_stream() -> AsyncIterator[str]:
+        """Stream a result in parts."""
+        events.append("tool ran")
+        yield "first "
+        yield "second"
+
+    tool = {"plain": plain, "async": plain_async, "sync stream": sync_stream, "async stream": async_stream}[kind]
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[tool]))
+
+    result = await gateway.invoke_tool(
+        context,
+        toolkit="calculator",
+        function=tool.__name__,
+        arguments={},
+        require_current_config=lambda: events.append("selection checked"),
+    )
+
+    assert result == {"result": "first second"}
+    # Selecting and routing check the selection before the hooks load; the entrypoint checks it again, just before the tool.
+    assert events[events.index("hooks loaded") :] == ["hooks loaded", "selection checked", "tool ran"]
 
 
 @pytest.mark.asyncio

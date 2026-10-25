@@ -32,7 +32,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -313,6 +313,8 @@ def _guard_dispatch(function: ToolFunction, require_current_config: Callable[[],
         await run_gateway_sync(require_current_config)
         return await entrypoint(*args, **kwargs)
 
+    # An async generator function is not a coroutine function, so ``guarded_sync`` guards it: the check runs on the
+    # tool thread, which returns the unstarted stream for ``run_tool_call`` to drain on the event loop.
     return replace(function, entrypoint=guarded_async if inspect.iscoroutinefunction(entrypoint) else guarded_sync)
 
 
@@ -335,10 +337,7 @@ async def invoke_tool(
         return _error(context, GatewayErrorCode.INVALID_ARGUMENTS)
 
     async def selected(built: Toolkit) -> InvocationResponse:
-        source = _function(context, built, function)
-        if inspect.isgeneratorfunction(source.entrypoint) or inspect.isasyncgenfunction(source.entrypoint):
-            raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
-        target = adapt_function(source)
+        target = adapt_function(_function(context, built, function))
         _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
         plugins = await run_gateway_sync(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
         policy = build_tool_hook_middleware(
@@ -363,7 +362,7 @@ async def invoke_tool(
             )
         except Exception as exc:
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE) from exc
-        result = to_json_compatible(value)
+        result = to_json_compatible(client_tool_result(value))
         if _connection_required(result):
             raise GatewayError(code=GatewayErrorCode.CONNECTION_REQUIRED)
         payload: InvocationResponse = {"result": result}

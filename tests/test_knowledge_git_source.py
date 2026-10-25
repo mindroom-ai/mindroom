@@ -2010,6 +2010,25 @@ async def test_changed_files_between_preserves_special_character_paths(
 
 
 @pytest.mark.asyncio
+async def test_changed_files_between_never_reads_a_stored_revision_as_an_option(tmp_path: Path) -> None:
+    """A revision read back from index metadata must reach Git as a revision, never as an option such as --output."""
+    _remote_work, remote_bare = _committed_remote(tmp_path, "content")
+    docs_path = tmp_path / "docs"
+    config = _git_docs_config(tmp_path, docs_path, remote_bare)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    head = await manager.git_source.head()
+    output = tmp_path / "written-by-git"
+    assert head is not None
+
+    changed = await manager.git_source.changed_files_between(f"--output={output}", head)
+
+    assert changed is None
+    assert not output.exists()
+
+
+@pytest.mark.asyncio
 async def test_changed_files_between_falls_back_when_attributes_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

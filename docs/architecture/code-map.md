@@ -233,7 +233,7 @@ Matrix sync callback
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `providers/credentials.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
 | `providers/key_checks.py` | The request that proves a provider API key valid, which `mindroom doctor` and the dashboard's provider setup send |
-| `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `canonical_provider`, its normalized spelling, in a module that imports nothing |
+| `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, in a module that imports nothing |
 | `providers/anthropic/messages.py` | The Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names, and the keys each route accepts |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
@@ -252,6 +252,7 @@ Matrix sync callback
 | `providers/gemini/` | Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, reply parsing, and the `extra_kwargs` a Gemini model accepts (`settings.py`, which loads no Google SDK) |
 | `providers/ollama_adapter.py` | Ollama adapter over the native chat API |
 | `providers/ollama_settings.py` | The `extra_kwargs` an Ollama model accepts, in a module that loads no ollama SDK |
+| `providers/ollama_errors.py` | The Ollama SDK's failures as normalized provider errors, shared by the Ollama adapter and the Ollama embedder |
 | `providers/synthetic_adapter.py` | Synthetic provider streaming seeded Lorem Ipsum and shell calls |
 | `providers/model_http_client.py` | The runtime-owned HTTP client the OpenAI and Anthropic SDK clients send their requests through |
 | `providers/prompt_cache_key.py` | Stable prompt-cache routing keys derived from execution identity |
@@ -402,7 +403,7 @@ Matrix sync callback
 | `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, loop flags, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, and `ToolValue`, a finished tool value's text and media |
 | `tool_system/agno_toolkits.py` | Adapts Agno toolkits and functions to `ToolFunction` once, builds the Agno-shaped call-time arguments (run context, actor stand-in) their entrypoints expect, reads the Agno `ToolResult` values they return or stream into `ToolValue`, and is where modules outside the tool packages import Agno's tool types from |
 | `tool_system/toolkit_connections.py` | Connects the Agno toolkits that hold a connection for one run, MCP sessions and `requires_connect` toolkits such as Postgres, as Agno's agent did around a run, and registers an unconnected MCP toolkit's functions while an agent is built |
-| `tool_system/invocation.py` | Decodes a model's tool-call arguments and runs one call through middleware, to its outcome for the loop or to the tool's own value for runners outside it: injection, synchronous offload, generator draining, error text |
+| `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
 | `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |
