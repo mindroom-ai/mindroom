@@ -51,7 +51,6 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.asyncio
 
-TIMED = ["duration", "end_time", "start_time"]
 APPROVED_CALL = "call-checker-multiply-approved"
 
 
@@ -89,13 +88,7 @@ async def test_an_approved_member_call_resumes_into_agno_s_team_approved_rows() 
 
     assert comparable(record.to_dict()) == comparable(team_row)
     [member] = store.members
-    expected_member = comparable(checker_row)
-    # Agno recorded no timing for the call it ran on resume (``metrics: null``); the owned loop times every call it
-    # runs, on the tool entry and on the requirement that shares it. Everything else is equal by value.
-    assert expected_member["tools"][0]["metrics"] is None
-    expected_member["tools"][0]["metrics"] = TIMED
-    expected_member["requirements"][0]["tool_execution"]["metrics"] = TIMED
-    assert comparable(member.to_dict()) == expected_member
+    assert comparable(member.to_dict()) == comparable(checker_row)
     assert paused.to_dict() == before
     assert store.statuses == [("checker", "COMPLETED"), ("squad", "COMPLETED")]
     # The leader reads the member's result where it read the pause notice, and keeps its stored prompt first.

@@ -244,9 +244,7 @@ def test_run_requirement_positional_tool_execution_and_defaults() -> None:
     first, second = RunRequirement(execution), RunRequirement(execution)
 
     assert first.id != second.id
-    assert first.created_at.tzinfo is not None
     assert first.needs_confirmation is True
-    assert first.to_dict()["created_at"] == first.created_at.isoformat()
 
 
 def test_run_record_defaults_and_status() -> None:

@@ -27,7 +27,7 @@ from mindroom.llm.runs import (
     TeamRunRecord,
     ToolExecution,
 )
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts, ToolCallMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from tests.llm.agno_dict_helpers import (
     DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
@@ -129,13 +129,6 @@ def test_message_metrics_addition_matches_agno() -> None:
 
     assert owned.to_dict() == agno("message_metrics_sum")
     assert (MessageMetrics(tokens=TokenCounts(input_tokens=1)) + MessageMetrics()).to_dict() == {"input_tokens": 1}
-
-
-def test_tool_call_metrics_round_trip_agno_dict() -> None:
-    expected = agno("tool_call_metrics")
-
-    assert ToolCallMetrics.from_dict(expected).to_dict() == expected
-    assert ToolCallMetrics.from_dict({**expected, "timer": None}).to_dict() == expected
 
 
 def test_run_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
@@ -315,10 +308,16 @@ def test_a_run_whose_tool_executions_have_no_call_ids_still_loads() -> None:
 
 
 def test_tool_execution_default_dict_matches_agno_minus_dropped_keys() -> None:
-    owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={}, created_at=7)
+    owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={})
 
     assert owned.to_dict() == without(agno("tool_execution_default"), DROPPED_TOOL_EXECUTION_KEYS)
-    assert ToolExecution.from_dict({"tool_name": "t"}).created_at > 0
+
+
+def test_new_tool_executions_and_requirements_store_no_timing() -> None:
+    stored = RunRequirement(ToolExecution(tool_call_id="c", tool_name="t", tool_args={})).to_dict()
+
+    assert "created_at" not in stored
+    assert {"metrics", "created_at"}.isdisjoint(stored["tool_execution"])
 
 
 def test_run_requirement_round_trips_agno_dict() -> None:
@@ -480,7 +479,6 @@ def test_run_requirement_reads_rows_agno_read_leniently() -> None:
     owned = RunRequirement.from_dict(stored)
 
     assert (owned.tool_execution.tool_name, owned.tool_execution.tool_args) == ("unknown", {})
-    assert owned.created_at.tzinfo is not None
     agno_dict, owned_dict = expected_requirement_dict(agno("run_requirement_read_leniently")), owned.to_dict()
     # Agno's placeholder had no call id; the owned one reads with an id, the same on every read.
     assert agno_dict["tool_execution"]["tool_call_id"] is None
@@ -488,7 +486,7 @@ def test_run_requirement_reads_rows_agno_read_leniently() -> None:
     assert owned.tool_execution.tool_call_id
     assert RunRequirement.from_dict(stored).tool_execution.tool_call_id == owned.tool_execution.tool_call_id
     for result in (agno_dict, owned_dict):
-        del result["created_at"], result["tool_execution"]["created_at"], result["tool_execution"]["tool_call_id"]
+        del result["tool_execution"]["tool_call_id"]
     assert owned_dict == agno_dict
 
 
@@ -559,7 +557,6 @@ FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[
     "message_metrics": (MessageMetrics.from_dict, dict),
     "run_metrics": (RunMetrics.from_dict, dict),
     "model_metrics": (ModelMetrics.from_dict, dict),
-    "tool_call_metrics": (ToolCallMetrics.from_dict, dict),
     "session_metrics": (SessionMetrics.from_dict, dict),
 }
 
