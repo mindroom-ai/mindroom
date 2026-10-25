@@ -204,11 +204,9 @@ def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, 
     independently, so a call id alone does not name a call, as the driver's own keys say.
     """
     return {
-        (requirement.member_agent_id, call_id): answer
+        (requirement.member_agent_id, requirement.tool_execution.tool_call_id): answer
         for requirement in response.requirements or ()
-        if _delegation_call(requirement)
-        and (call_id := requirement.tool_execution.tool_call_id) is not None
-        and (answer := requirement.external_execution_result) is not None
+        if _delegation_call(requirement) and (answer := requirement.external_execution_result) is not None
     }
 
 

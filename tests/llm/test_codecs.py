@@ -272,8 +272,8 @@ def test_tool_execution_round_trips_agno_dict_minus_dropped_keys() -> None:
 
 
 @pytest.mark.parametrize("stored_id", [None, "", "absent"])
-def test_a_tool_execution_stored_without_a_call_id_reads_with_a_new_one(stored_id: str | None) -> None:
-    """Agno 2.4.7 stored Ollama's calls without ids; each reads with a new id and every other key as stored."""
+def test_a_tool_execution_stored_without_a_call_id_reads_with_the_same_id(stored_id: str | None) -> None:
+    """Agno 2.4.7 stored Ollama's calls without ids; each read gives such a call the same id, the rest as stored."""
     stored = agno("tool_execution")
     if stored_id == "absent":
         del stored["tool_call_id"]
@@ -283,15 +283,16 @@ def test_a_tool_execution_stored_without_a_call_id_reads_with_a_new_one(stored_i
     first, second = ToolExecution.from_dict(stored), ToolExecution.from_dict(stored)
 
     assert first.tool_call_id
-    assert second.tool_call_id
-    assert first.tool_call_id != second.tool_call_id
+    assert second.tool_call_id == first.tool_call_id
+    # A store that hands the keys back in another order reads the same id.
+    assert ToolExecution.from_dict(dict(reversed(stored.items()))).tool_call_id == first.tool_call_id
     written = first.to_dict()
     assert written.pop("tool_call_id") == first.tool_call_id
     assert written == without(stored, DROPPED_TOOL_EXECUTION_KEYS | {"tool_call_id"})
 
 
 def test_a_run_whose_tool_executions_have_no_call_ids_still_loads() -> None:
-    """A run Agno 2.4.7 stored for Ollama, whose calls carried no ids, loads with a new id on each tool execution."""
+    """A run Agno 2.4.7 stored for Ollama, whose calls had no ids, loads with an id on each, the same on every load."""
     stored = json.loads((FIXTURE_RUNS / "run_output.json").read_text())["agent_code:run-tools"]
     for tool in stored["tools"]:
         tool["tool_call_id"] = None
@@ -303,6 +304,7 @@ def test_a_run_whose_tool_executions_have_no_call_ids_still_loads() -> None:
 
     written = RunRecord.from_dict(stored).to_dict()
 
+    assert RunRecord.from_dict(stored).to_dict() == written
     new_ids = {tool.pop("tool_call_id") for tool in written["tools"]}
     assert len(new_ids) == len(stored["tools"]) == 3
     assert all(isinstance(new_id, str) and new_id for new_id in new_ids)
@@ -480,10 +482,11 @@ def test_run_requirement_reads_rows_agno_read_leniently() -> None:
     assert (owned.tool_execution.tool_name, owned.tool_execution.tool_args) == ("unknown", {})
     assert owned.created_at.tzinfo is not None
     agno_dict, owned_dict = expected_requirement_dict(agno("run_requirement_read_leniently")), owned.to_dict()
-    # Agno's placeholder had no call id; the owned one gets a new id, as any tool execution stored without one.
+    # Agno's placeholder had no call id; the owned one reads with an id, the same on every read.
     assert agno_dict["tool_execution"]["tool_call_id"] is None
     assert owned_dict["tool_execution"]["tool_call_id"] == owned.tool_execution.tool_call_id
     assert owned.tool_execution.tool_call_id
+    assert RunRequirement.from_dict(stored).tool_execution.tool_call_id == owned.tool_execution.tool_call_id
     for result in (agno_dict, owned_dict):
         del result["created_at"], result["tool_execution"]["created_at"], result["tool_execution"]["tool_call_id"]
     assert owned_dict == agno_dict
