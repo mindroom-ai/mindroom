@@ -22,6 +22,7 @@ from mindroom.session_storage.store import persist_to
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import gated, toolkit
+from tests.conftest import seed_session_row
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.team_runtime.squad import approval, collect, resume_team, scripted, start_team, team_spec
 from tests.team_runtime.squad import member as team_member
@@ -111,7 +112,7 @@ def _squad(tmp_path: Path, *, leader: list[list[Any]], member: list[list[Any]], 
         execution_identity=None,
     )
     session = new_scope_session(session_id="session", scope_id="squad", is_team=True)
-    store.ensure_session_row(session)
+    seed_session_row(store, session)
     hanging = asyncio.Event()
 
     async def hang() -> None:
