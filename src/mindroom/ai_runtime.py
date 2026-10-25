@@ -175,9 +175,6 @@ def _ends_with_completed_tool_batch(
     for message in reversed(messages):
         if _is_queued_notice_message(message, response_turn_id=response_turn_id):
             continue
-        # Provider projections can insert trusted context between calls and results.
-        if message.role == "system":
-            continue
         # Formatting may append user-role media after a just-completed batch, and a paused call's
         # result follows that media when the run resumes. Only a trailing user message is real input,
         # so at response entry it still stops this scan.
