@@ -63,8 +63,8 @@ class PersonalAgentTemplateConfig(BaseModel):
     agent: AgentConfig = Field(
         description=(
             "Agent fields shared by every user's agent; display_name, role, and instructions accept "
-            "{user}, {username}, and {user_display_name}. Only the owner may use each agent unless access "
-            "admits others, and the owner is always added to access.users and credential_managers"
+            "{user}, {username}, and {user_display_name}. Only the owner and administrators may use each agent "
+            "unless access admits others, and the owner is always added to access.users and credential_managers"
         ),
     )
     users: dict[str, dict[str, Any]] = Field(
