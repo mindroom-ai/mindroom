@@ -58,7 +58,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, function_instructions_error
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
@@ -108,7 +108,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.provider import ModelProvider
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.tool_system.agno_toolkits import Function, Toolkit
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit
     from mindroom.tool_system.tool_function import ToolFunction
@@ -146,14 +146,14 @@ class _PreloadChunk:
 
 @dataclass(frozen=True)
 class _ToolkitEntry:
-    """One toolkit assembled for an agent: the Agno toolkit built for it, what a run offers of it, and its owner.
+    """One toolkit assembled for an agent: the toolkit built for it, what a run offers of it, and its owner.
 
-    ``adapted`` holds the functions a run may offer of the toolkit; the steps across toolkits leave functions out of
-    it, never out of the Agno toolkit. An eager toolkit keeps a function that an earlier toolkit's same-named
-    function shadows, and each run drops it. A deferred toolkit keeps only the functions a run offers. ``owner`` is
-    the authored toolkit that approvals and tool jobs name its functions by; ``toolkit`` is the concrete toolkit tool
-    jobs check a call's grant and exclusions by. ``deferral`` is set for a toolkit whose functions stay off the
-    provider request until tool search finds them.
+    ``adapted`` holds the functions a run may offer of the toolkit, adapted once right after the toolkit was built;
+    every assembly step leaves functions out of it, never out of the built toolkit. An eager toolkit keeps a function
+    that an earlier toolkit's same-named function shadows, and each run drops it. A deferred toolkit keeps only the
+    functions a run offers. ``owner`` is the authored toolkit that approvals and tool jobs name its functions by;
+    ``toolkit`` is the concrete toolkit tool jobs check a call's grant and exclusions by. ``deferral`` is set for a
+    toolkit whose functions stay off the provider request until tool search finds them.
     """
 
     toolkit: Toolkit
@@ -644,11 +644,11 @@ class _MatrixRoomRuntimeToolCollisionError(ValueError):
 
 def _reject_matrix_room_runtime_tool_function_collisions(
     registered_tool_name: str,
-    toolkit: Toolkit,
+    toolkit: AdaptedToolkit,
 ) -> None:
     """Keep reserved room-runtime functions owned by their registered built-in tool."""
     reserved_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-    function_names = set(toolkit.get_functions()) | set(toolkit.get_async_functions())
+    function_names = {function.name for function in toolkit.functions}
     collisions = sorted(name for name in function_names & reserved_names if registered_tool_name != name)
     if collisions:
         msg = f"Tool function name(s) {', '.join(collisions)} are reserved for Matrix room recovery tools."
@@ -1084,19 +1084,9 @@ def _build_agent_tool_middleware(
     )
 
 
-def _prune_toolkit_functions(
-    toolkit: Toolkit,
-    tool_function_filter: Callable[[Function], bool] | None,
-) -> Toolkit | None:
-    """Apply the final function policy and discard toolkits with no callable surface."""
-    if tool_function_filter is not None:
-        toolkit.functions = {
-            name: function for name, function in toolkit.functions.items() if tool_function_filter(function)
-        }
-        toolkit.async_functions = {
-            name: function for name, function in toolkit.async_functions.items() if tool_function_filter(function)
-        }
-    return toolkit if toolkit.functions or toolkit.async_functions else None
+def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool]) -> AdaptedToolkit:
+    """Return ``toolkit`` offering only the functions ``keep`` accepts."""
+    return replace(toolkit, functions=tuple(function for function in toolkit.functions if keep(function)))
 
 
 def _approval_may_gate(
@@ -1120,63 +1110,44 @@ def _approval_may_gate(
     )
 
 
-def _hide_unresumable_approval_functions(
-    toolkit: Toolkit,
-    config: Config,
-    *,
-    registered_tool_name: str,
-) -> Toolkit | None:
-    """Drop the functions that ask for approval, for a caller that cannot resume a paused run.
-
-    Returns None when no function is left.
-    """
-
-    def offered(function: Function) -> bool:
-        return function.requires_confirmation is not True and not _approval_may_gate(
-            config,
-            function.name,
-            function.approval_type,
-            registered_tool_name,
-        )
-
-    return _prune_toolkit_functions(toolkit, offered)
-
-
 def apply_tool_approval_capability(
     adapted: AdaptedToolkit,
     toolkit: Toolkit,
     config: Config,
     *,
     registered_tool_name: str,
+    resumable: bool,
     approvals_as_jobs: bool,
 ) -> AdaptedToolkit:
-    """Mark the functions of ``adapted`` that pause the run for approval, or whose call's job asks first.
+    """Apply the approval rules to the functions of ``adapted``, the toolkit ``toolkit`` was adapted to.
 
-    ``toolkit`` is the Agno toolkit ``adapted`` came from. With ``approvals_as_jobs``, a gated function whose call can
-    become a managed job asks for its approval as that job's first phase instead of pausing the run.
+    A caller that cannot resume a paused run (``resumable`` False) is offered none of the functions that ask for
+    approval. Otherwise each function an approval rule gates pauses the run for its approval, or, with
+    ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call can become one; the
+    delegation functions pause for their driver, which owns the policy gate and the exact child wait.
     """
 
-    def approved(function: ToolFunction) -> ToolFunction:
+    def offered(function: ToolFunction) -> ToolFunction | None:
+        # A function that asks for its own confirmation keeps its flags; a rule may gate any other.
+        confirms = function.requires_confirmation is True
+        may_gate = _approval_may_gate(config, function.name, function.approval_type, registered_tool_name)
+        if not resumable:
+            return None if confirms or may_gate else function
         if registered_tool_name == "delegate" and function.name in DELEGATION_FUNCTIONS:
-            # The delegation driver owns the policy gate and exact child wait.
             return replace(
                 function,
                 external_execution=True,
                 external_execution_silent=True,
                 requires_confirmation=False,
             )
-        if function.requires_confirmation is True or not _approval_may_gate(
-            config,
-            function.name,
-            function.approval_type,
-            registered_tool_name,
-        ):
+        if confirms or not may_gate:
             return function
         if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
             return replace(function, approval_type=JOB_APPROVAL_TYPE)
         return replace(function, requires_confirmation=True, approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE)
 
-    return replace(adapted, functions=tuple(approved(function) for function in adapted.functions))
+    functions = (offered(function) for function in adapted.functions)
+    return replace(adapted, functions=tuple(function for function in functions if function is not None))
 
 
 @timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
@@ -1256,8 +1227,8 @@ _load_agent_skills = timed("system_prompt_assembly.agent_create.skills_load")(bu
 
 def _generated_function_visible(
     config: Config,
-    tool_function_filter: Callable[[Function], bool] | None,
-    function: Function,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
+    function: ToolFunction,
 ) -> bool:
     """Hide generated functions an approval rule may gate, because they have no toolkit origin to pause and resume."""
     return not tool_may_require_approval(config, function.name) and (
@@ -1267,19 +1238,6 @@ def _generated_function_visible(
 
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
-
-
-def _keep_persona_functions(toolkit: Toolkit, tool_name: str, persona_tools: tuple[str, ...]) -> None:
-    """Drop the functions of one concrete toolkit that an authored persona does not name."""
-    for functions in (toolkit.functions, toolkit.async_functions):
-        for name in [name for name in functions if not persona_allows(persona_tools, tool_name, name)]:
-            del functions[name]
-
-
-def _set_owning_toolkit(toolkit: Toolkit, authored_name: str) -> None:
-    """Attach the configured toolkit identity to its executable functions, for the function filters that read it."""
-    for function in (*toolkit.functions.values(), *toolkit.get_async_functions().values()):
-        function.owning_toolkit = authored_name
 
 
 def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools share one construction path
@@ -1292,7 +1250,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     hook_registry: HookRegistry | None,
     disable_runtime_capabilities: bool,
     disabled_tool_names: frozenset[str],
-    tool_function_filter: Callable[[Function], bool] | None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     supports_native_tool_approval: bool,
@@ -1414,34 +1372,50 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 agent=agent_name,
                 tool=tool_name,
             )
-        built_functions = None
-        if toolkit is not None:
-            _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
-            if persona_tools is not None:
-                # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
-                _keep_persona_functions(toolkit, tool_name, persona_tools)
-            # Function filters match on the owning toolkit, so stamp it before pruning.
-            _set_owning_toolkit(toolkit, authored_name)
-            toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
-            if toolkit is not None and persona_tools is not None:
-                # What survives the caller's filters; hiding unresumable approvals below may still remove gated calls.
-                built_functions = frozenset((*toolkit.functions, *toolkit.async_functions))
-        if toolkit is not None and not supports_native_tool_approval:
-            toolkit = _hide_unresumable_approval_functions(toolkit, config, registered_tool_name=tool_name)
-        entry = adapt_entry(toolkit, tool_entry, authored_name) if toolkit is not None else None
-        if built_functions is not None:
-            persona_built[tool_name] = built_functions
+        if toolkit is None:
+            return None
+        # Adapted once, right after it is built; every step below works on the functions it offers.
+        adapted = adapt_toolkit(toolkit, key=authored_name)
+        _reject_matrix_room_runtime_tool_function_collisions(tool_name, adapted)
+        if persona_tools is not None:
+            # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
+            adapted = _keep_functions(adapted, lambda function: persona_allows(persona_tools, tool_name, function.name))
+        if tool_function_filter is not None:
+            adapted = _keep_functions(adapted, tool_function_filter)
+        if not adapted.functions:
+            return None
+        # What survives the caller's filters; the approval policy below may still hide gated calls.
+        filtered = frozenset(function.name for function in adapted.functions)
+        adapted = apply_tool_approval_capability(
+            adapted,
+            toolkit,
+            config,
+            registered_tool_name=tool_name,
+            resumable=supports_native_tool_approval,
+            # Only a top-level agent's own calls ask as their job; the same setting installs the job executor.
+            approvals_as_jobs=approvals_as_jobs
+            and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
+        )
+        entry = offered_entry(toolkit, adapted, tool_entry, authored_name) if adapted.functions else None
+        if persona_tools is not None:
+            persona_built[tool_name] = filtered
         return entry
 
-    def adapt_entry(toolkit: Toolkit, tool_entry: EffectiveToolConfig, authored_name: str) -> _ToolkitEntry:
+    def offered_entry(
+        toolkit: Toolkit,
+        adapted: AdaptedToolkit,
+        tool_entry: EffectiveToolConfig,
+        authored_name: str,
+    ) -> _ToolkitEntry:
+        """Return the entry of a toolkit that offers ``adapted``'s functions: deferred or eager, with its own policy."""
         tool_name = tool_entry.name
         deferral = None
         # initial deferred tools stay in the rendered prompt prefix as plain non-deferred tools.
         if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:
             metadata = TOOL_METADATA.get(authored_name)
-            # Deferred before it is adapted, so its instructions leave the prompt for the search results.
-            deferral = defer_toolkit(authored_name, metadata.description if metadata else "", toolkit)
-        adapted = adapt_toolkit(toolkit)
+            deferral, adapted = defer_toolkit(authored_name, metadata.description if metadata else "", adapted)
+        if (refusal := function_instructions_error(adapted)) is not None:
+            raise ValueError(refusal)
         announcement = computer_announcement_middleware(
             toolkit,
             tool_name,
@@ -1457,16 +1431,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             adapted = replace(adapted, functions=functions)
         if not routes_through_worker(tool_name):
             adapted = replace(adapted, connect=run_connection(toolkit))
-        if supports_native_tool_approval:
-            adapted = apply_tool_approval_capability(
-                adapted,
-                toolkit,
-                config,
-                registered_tool_name=tool_name,
-                # Only a top-level agent's own calls ask as their job; the same setting installs the job executor.
-                approvals_as_jobs=approvals_as_jobs
-                and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
-            )
         return _ToolkitEntry(toolkit=toolkit, adapted=adapted, owner=authored_name, deferral=deferral)
 
     cli_deferred = []
@@ -1521,7 +1485,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             target_names = worker_routed_tool_names if routes_through_worker(tool_name) else local_tool_names
             target_names.append(tool_name)
     controls = JobTools.build(
-        [entry.toolkit for entry in entries],
+        {function.name for entry in entries for function in entry.adapted.functions},
         runtime_paths,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
         depth=delegation_depth,
@@ -1751,7 +1715,7 @@ def team_background_jobs(
     """
     if not background_tool_jobs_enabled(config, runtime_paths) or owner is None:
         return None
-    controls = JobTools.build([], runtime_paths, owner, depth=0, enabled=True)
+    controls = JobTools.build((), runtime_paths, owner, depth=0, enabled=True)
     if controls is None:
         return None
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1795,7 +1759,7 @@ def _agent_toolkits(
     entries: Sequence[_ToolkitEntry],
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
-    generated_visible: Callable[[Function], bool],
+    generated_visible: Callable[[ToolFunction], bool],
 ) -> tuple[AdaptedToolkit, ...]:
     """Return the agent's tools in the order the model is offered them: configured toolkits, knowledge search, skills.
 
@@ -1804,18 +1768,13 @@ def _agent_toolkits(
     """
     offered = [entry.adapted for entry in entries]
     if knowledge is not None:
-        search = knowledge.search_function(
-            memory_search_available=_offers_function(entries, _MEMORY_SEARCH_TOOL_NAME),
+        search = adapt_function(
+            knowledge.search_function(memory_search_available=_offers_function(entries, _MEMORY_SEARCH_TOOL_NAME)),
         )
         if generated_visible(search):
-            search_toolkit = AdaptedToolkit(
-                name=KNOWLEDGE_SEARCH_TOOL_NAME,
-                functions=(adapt_function(search),),
-                instructions=None,
-            )
-            offered.append(search_toolkit)
-    if skills is not None and (visible_skills := _prune_toolkit_functions(skills, generated_visible)) is not None:
-        offered.append(adapt_toolkit(visible_skills))
+            offered.append(AdaptedToolkit(name=KNOWLEDGE_SEARCH_TOOL_NAME, functions=(search,), instructions=None))
+    if skills is not None and (visible_skills := _keep_functions(adapt_toolkit(skills), generated_visible)).functions:
+        offered.append(visible_skills)
     return tuple(offered)
 
 
@@ -1862,7 +1821,7 @@ def create_agent(
     persist_runtime_state: bool = True,
     disable_runtime_capabilities: bool = False,
     disabled_tool_names: frozenset[str] = frozenset(),
-    tool_function_filter: Callable[[Function], bool] | None = None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     supports_native_tool_approval: bool = False,

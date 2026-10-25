@@ -70,6 +70,13 @@ class _Rejected:
     error: str
 
 
+# Agno adds a function's instructions to the system prompt only with ``add_instructions``.
+_FUNCTION_INSTRUCTIONS = _Rejected(
+    sets=lambda function: function.add_instructions and function.instructions is not None,
+    error="sets instructions for Agno to add to the system prompt, which MindRoom adds only per toolkit; set"
+    " them on the toolkit instead",
+)
+
 # Every field of Agno's ``Function``, each named by one row: "mapped" fields reach the ``ToolFunction``, a rejected
 # field fails the function that sets it, and an "ignored" field is left unread for the reason beside it.
 # tests/tool_system/test_agno_toolkits.py fails when Agno adds a field no row names.
@@ -97,13 +104,9 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
         sets=lambda function: bool(function.requires_user_input),
         error="sets Agno's requires_user_input, but MindRoom never pauses a run to ask its user for input",
     ),
-    # Agno adds a function's instructions to the system prompt only with ``add_instructions``; a deferred toolkit
-    # turns that off once it has captured them for its search results.
-    ("instructions", "add_instructions"): _Rejected(
-        sets=lambda function: function.add_instructions and function.instructions is not None,
-        error="sets instructions for Agno to add to the system prompt, which MindRoom adds only per toolkit; set"
-        " them on the toolkit instead",
-    ),
+    # A toolkit's adapter hands them over as ``function_instructions``, which tool search shows for a deferred
+    # toolkit and an eager agent refuses (``function_instructions_error``); a function adapted alone refuses them.
+    ("instructions", "add_instructions"): _FUNCTION_INSTRUCTIONS,
     # Agno reads these only for a function that requires user input, which is rejected.
     ("user_input_fields", "user_input_schema"): "ignored",
     # Agno also showed the result in the reply text; MindRoom gives a tool's result only to the model.
@@ -112,24 +115,52 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
     ("cache_results", "cache_dir", "cache_ttl"): "ignored",
     # Metadata for people, Agno's discovery, and MCP clients; the model never sees it.
     ("title", "annotations", "has_side_effects"): "ignored",
-    # MindRoom stamps it for the function filters that run before adaptation; a run names each function's owner by
-    # the toolkit entry it was assembled in.
+    # The adapter's caller names each function's toolkit (``ToolFunction.toolkit``).
     ("owning_toolkit",): "ignored",
     # Set only by Agno's component registry, which MindRoom does not use.
     ("source_toolkit",): "ignored",
 }
 
 
-def adapt_toolkit(toolkit: Toolkit) -> AdaptedToolkit:
-    """Adapt the functions of ``toolkit`` in Agno's async-run order; they share one ``actor_state``."""
+def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None) -> AdaptedToolkit:
+    """Adapt the functions of ``toolkit`` in Agno's async-run order, one per name; they share one ``actor_state``.
+
+    ``key`` is the authored toolkit an agent is offered the functions from, which each one carries as its
+    ``toolkit``; None for a toolkit generated for the agent.
+    """
     functions = toolkit.get_async_functions().values()
     actor_state: dict[str, Any] = {}
     return AdaptedToolkit(
         name=toolkit.name,
-        functions=tuple(replace(adapt_function(function), actor_state=actor_state) for function in functions),
+        functions=tuple(
+            replace(adapt_function(_without_instructions(function)), toolkit=key, actor_state=actor_state)
+            for function in functions
+        ),
         instructions=toolkit.instructions if toolkit.add_instructions else None,
         guidance=toolkit.instructions or None,
+        function_instructions={
+            function.name: function.instructions
+            for function in functions
+            if _FUNCTION_INSTRUCTIONS.sets(function) and function.instructions is not None
+        },
     )
+
+
+def function_instructions_error(toolkit: AdaptedToolkit) -> str | None:
+    """Return why an eager agent refuses ``toolkit``: the first function it offers that asks for prompt instructions."""
+    for function in toolkit.functions:
+        if function.name in toolkit.function_instructions:
+            return f"Tool function {function.name!r} {_FUNCTION_INSTRUCTIONS.error}"
+    return None
+
+
+def _without_instructions(function: Function) -> Function:
+    """Return ``function`` without the prompt instructions its toolkit's adapter hands over separately."""
+    if not _FUNCTION_INSTRUCTIONS.sets(function):
+        return function
+    copy = function.model_copy(deep=False)
+    copy.instructions = None
+    return copy
 
 
 def adapt_function(function: Function) -> ToolFunction:
@@ -421,6 +452,7 @@ __all__ = [
     "adapt_function",
     "adapt_toolkit",
     "framework_arguments",
+    "function_instructions_error",
     "injected_parameters",
     "model_arguments",
     "read_tool_value",

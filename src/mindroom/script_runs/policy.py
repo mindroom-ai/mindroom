@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
@@ -143,7 +144,8 @@ def _build_script_toolkits(
 
 
 def _visible_function_names(context: ToolRuntimeContext, toolkit: Toolkit) -> tuple[str, ...]:
-    functions = {**toolkit.functions, **toolkit.async_functions}
+    # One function per name, the one an agent's run offers.
+    functions = toolkit.get_async_functions()
     if context.tool_function_filter is None:
         return tuple(functions)
-    return tuple(name for name, function in functions.items() if context.tool_function_filter(function))
+    return tuple(name for name, function in functions.items() if context.tool_function_filter(adapt_function(function)))

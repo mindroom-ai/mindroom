@@ -32,6 +32,7 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -215,9 +216,8 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path, monke
 
 def test_persona_with_tools_hides_generated_functions_from_the_agent() -> None:
     """An explicit tool list hides functions with no owning toolkit, which the configured agent offers."""
-    generated = Function(name="generated")
-    owned = Function(name="read_file")
-    owned.owning_toolkit = "file"
+    generated = ToolFunction(name="generated", description=None, parameters={}, entrypoint=lambda: None)
+    owned = ToolFunction(name="read_file", toolkit="file", description=None, parameters={}, entrypoint=lambda: None)
 
     configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None, frozenset())
     authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None, frozenset())
@@ -261,8 +261,8 @@ def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: li
     """A named function or toolkit the caller's own function filter hides, such as during a call, stops construction."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"])
 
-    def caller_filter(function: Function) -> bool:
-        return function.name != "save_file" and function.owning_toolkit != "calculator"
+    def caller_filter(function: ToolFunction) -> bool:
+        return function.name != "save_file" and function.toolkit != "calculator"
 
     with pytest.raises(PersonaError, match=f"{missing} is not available to you"):
         _child(runtime, tools, tool_function_filter=caller_filter)

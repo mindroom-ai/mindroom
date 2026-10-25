@@ -49,9 +49,13 @@ class ToolFunction:
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
+    ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, tool
+    jobs, and the agent CLI name it by; None for a function generated for the agent, such as the knowledge search,
+    the skill readers, and a team's delegation.
     """
 
     name: str
+    toolkit: str | None = None
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None = None
@@ -107,6 +111,8 @@ class AdaptedToolkit:
 
     ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
     it describes the toolkit's functions and minimal mode offers as a context document.
+    ``function_instructions`` holds, by function name, the instructions a function asks the prompt to show, which
+    only tool search shows, for a deferred toolkit; an agent refuses an eager toolkit that offers such a function.
     ``connect`` is set for a toolkit that holds a connection for one run, which whoever offers its functions to a
     run connects before the run and closes after it; it returns how to close the connection, or None when the run
     owns none because the toolkit was connected before it or connecting failed.
@@ -116,6 +122,7 @@ class AdaptedToolkit:
     functions: tuple[ToolFunction, ...]
     instructions: str | None
     guidance: str | None = None
+    function_instructions: Mapping[str, str] = field(default_factory=dict)
     connect: ToolkitConnect | None = None
 
 

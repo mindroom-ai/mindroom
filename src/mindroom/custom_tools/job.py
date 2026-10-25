@@ -25,6 +25,8 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -121,7 +123,7 @@ class JobTools(Toolkit):
 
     @staticmethod
     def build(
-        tools: list[Toolkit],
+        offered: Collection[str],
         runtime_paths: RuntimePaths,
         owner: ToolExecutionIdentity | None,
         *,
@@ -129,7 +131,10 @@ class JobTools(Toolkit):
         enabled: bool,
         output_file_policy: ToolOutputFilePolicy | None = None,
     ) -> Toolkit | None:
-        """Build the reserved toolkit for a top-level Matrix caller while the job runtime runs, else nothing."""
+        """Build the reserved toolkit for a top-level Matrix caller while the job runtime runs, else nothing.
+
+        ``offered`` names the functions the caller's other toolkits offer, none of which may be ``job``.
+        """
         if (
             not enabled
             or depth != 0
@@ -138,7 +143,7 @@ class JobTools(Toolkit):
             or get_background_runtime(runtime_paths) is None
         ):
             return None
-        if any("job" in toolkit.get_async_functions() for toolkit in tools):
+        if "job" in offered:
             msg = "Tool function name job is reserved for managed job controls"
             raise ValueError(msg)
         return wrap_toolkit_for_output_files(JobTools(runtime_paths, owner), output_file_policy)

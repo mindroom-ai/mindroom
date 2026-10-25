@@ -27,7 +27,6 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 from tests.conftest import bind_runtime_paths
@@ -80,12 +79,9 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path) -> N
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
-    def job() -> str:
-        return "a plugin's job"
-
     try:
         with pytest.raises(ValueError, match="reserved"):
-            JobTools.build([Toolkit(name="ci", tools=[job])], paths, owner, depth=0, enabled=True)
+            JobTools.build({"job"}, paths, owner, depth=0, enabled=True)
     finally:
         await runtime.shutdown()
 

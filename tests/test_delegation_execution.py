@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agents import _hide_unresumable_approval_functions, apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -39,7 +38,6 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore, persist_to
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.storage import quote_identifier
@@ -582,8 +580,8 @@ def test_detached_delegate_retains_inline_execution() -> None:
         return f"{agent_name}: {task}"
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
-    assert _hide_unresumable_approval_functions(toolkit, Config(), registered_tool_name="delegate") is toolkit
-    assert not toolkit.async_functions["run_subagent"].external_execution
+    functions = gated_functions(toolkit, Config(), registered_tool_name="delegate", resumable=False)
+    assert not functions["run_subagent"].external_execution
 
 
 @pytest.mark.asyncio
@@ -1010,17 +1008,9 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
     config = _config(paths, child_tools=())
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=_leader_identity())
 
-    adapted = apply_tool_approval_capability(
-        adapt_toolkit(toolkit),
-        toolkit,
-        config,
-        registered_tool_name="delegate",
-        approvals_as_jobs=False,
-    )
-
     flags = {
         function.name: (function.external_execution, function.external_execution_silent)
-        for function in adapted.functions
+        for function in gated_functions(toolkit, config, registered_tool_name="delegate").values()
     }
     assert flags == {"run_subagent": (True, True), "continue_subagent": (True, True)}
 

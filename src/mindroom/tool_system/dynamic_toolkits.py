@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.config.models import EffectiveToolConfig
@@ -13,8 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.agno_toolkits import Toolkit
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 
 @dataclass(frozen=True)
@@ -26,11 +25,11 @@ class VisibleToolSurface:
 
 @dataclass(frozen=True)
 class ToolDeferral:
-    """What tool search shows of one authored deferred tool beside its functions, captured before it is adapted."""
+    """What tool search shows of one authored deferred tool beside its functions."""
 
     domain_name: str
     description: str
-    # Instructions the toolkit and its functions render when eager, captured before they are suppressed.
+    # Instructions the toolkit and its functions would render when eager, which the prompt leaves out.
     instructions: str | None
     function_instructions: Mapping[str, str]
 
@@ -67,25 +66,19 @@ def _attachable_deferred_tools(config: Config, agent_name: str, requested_tools:
     ]
 
 
-def defer_toolkit(domain_name: str, description: str, toolkit: Toolkit) -> ToolDeferral:
-    """Record a wire-deferred toolkit's renderable instructions, then keep them out of the system prompt.
+def defer_toolkit(domain_name: str, description: str, toolkit: AdaptedToolkit) -> tuple[ToolDeferral, AdaptedToolkit]:
+    """Return what tool search shows of a wire-deferred toolkit beside its functions, and the toolkit without them.
 
-    The system prompt is sent before tool search finds a toolkit, so its instructions travel with search results.
+    The system prompt is sent before tool search finds a toolkit, so the instructions it and its functions would
+    render travel with search results instead.
     """
     deferral = ToolDeferral(
         domain_name=domain_name,
         description=description,
-        instructions=toolkit.instructions if toolkit.add_instructions else None,
-        function_instructions={
-            name: function.instructions
-            for name, function in toolkit.get_async_functions().items()
-            if function.add_instructions and function.instructions
-        },
+        instructions=toolkit.instructions,
+        function_instructions=toolkit.function_instructions,
     )
-    toolkit.add_instructions = False
-    for function in (*toolkit.get_functions().values(), *toolkit.get_async_functions().values()):
-        function.add_instructions = False
-    return deferral
+    return deferral, replace(toolkit, instructions=None, function_instructions={})
 
 
 def _special_tool_names(

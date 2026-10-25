@@ -31,7 +31,7 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, function_instructions_error
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     defer_toolkit,
@@ -1003,12 +1003,18 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
         add_instructions=True,
     )
     toolkit = Toolkit(name="deferred", tools=[function])
-    deferral = defer_toolkit("deferred", "", toolkit)
+    adapted = adapt_toolkit(toolkit)
+    deferral, deferred = defer_toolkit("deferred", "", adapted)
 
-    assert toolkit.functions["deferred_tool"].add_instructions is False
     assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
-    # Adapting refuses a function that still asks for prompt instructions.
-    adapt_toolkit(toolkit)
+    # An agent offers the deferred toolkit, whose function instructions travel with tool search, and refuses it eager.
+    assert function_instructions_error(deferred) is None
+    assert function_instructions_error(adapted) == (
+        "Tool function 'deferred_tool' sets instructions for Agno to add to the system prompt, which MindRoom adds only"
+        " per toolkit; set them on the toolkit instead"
+    )
+    # The built toolkit is left as it was built.
+    assert toolkit.functions["deferred_tool"].add_instructions is True
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -1039,18 +1045,14 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
         add_instructions=True,
     )
-    defer_toolkit("deferred", "", deferred_toolkit)
+    _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit))
 
-    assert active_toolkit.add_instructions is True
-    assert active_toolkit.functions["shared_tool"].add_instructions is True
-    assert deferred_toolkit.add_instructions is False
-    assert deferred_toolkit.functions["shared_tool"].add_instructions is False
     spec = AgentSpec(
         id="code",
         name="code",
         model=ScriptedModel([]),
         system_message=None,
-        toolkits=(adapt_toolkit(active_toolkit), adapt_toolkit(deferred_toolkit)),
+        toolkits=(adapt_toolkit(active_toolkit), deferred),
     )
     assert prepare_run_tools(spec).instructions == (active_toolkit_marker,)
 
@@ -1419,8 +1421,8 @@ class _WeatherTools(Toolkit):
 
 def _deferred(toolkit: Toolkit, description: str, domain_name: str | None = None) -> DeferredToolkit:
     """Defer ``toolkit`` and adapt it, as agent construction does, offering every function of it."""
-    deferral = defer_toolkit(domain_name or toolkit.name, description, toolkit)
-    return DeferredToolkit(deferral, adapt_toolkit(toolkit).functions)
+    deferral, deferred = defer_toolkit(domain_name or toolkit.name, description, adapt_toolkit(toolkit))
+    return DeferredToolkit(deferral, deferred.functions)
 
 
 def _search_toolkit(*deferred: DeferredToolkit) -> DynamicToolsToolkit:
@@ -1656,7 +1658,6 @@ def test_tool_search_returns_function_instructions_kept_out_of_the_prompt() -> N
     match = _tool_payload(toolkit.tool_search("ping"))["matches"][0]
 
     assert match["instructions"] == "Only ping hosts the user named."
-    assert pings.functions["ping"].add_instructions is False
 
 
 class _GithubTools(Toolkit):
