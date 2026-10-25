@@ -389,7 +389,9 @@ def _reported_history_tokens(
     reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
     if reported is None:
         return None
-    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=model.replay_estimator)
+    # Sized as the next request replays them: as history, whose earlier reasoning a model may render.
+    replayed = [replace(message, from_history=True) for message in messages[anchor:]]
+    newer_tokens = estimate_request_messages_tokens(replayed, replay_model=model.replay_estimator)
     return reported + newer_tokens - non_prompt_tokens
 
 

@@ -3,7 +3,7 @@
 
 History budgets take the larger of this estimate and the canonical one. A typed ``input_image`` block counts by
 the visual patches OpenAI bills for it, read from the image header when the bytes are inline, never by its encoded
-transport bytes.
+transport bytes. Encrypted reasoning counts by the reasoning tokens its response reported, never by its ciphertext.
 """
 
 from __future__ import annotations
@@ -15,7 +15,9 @@ import struct
 from typing import TYPE_CHECKING, Any
 
 from mindroom.history.message_content import image_content_for_token_estimation
+from mindroom.llm.messages import is_own_model_message
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses_wire import responses_input, responses_replay
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
@@ -43,16 +45,15 @@ def estimate_responses_replay_tokens(
     explicit_breakpoint: bool,
 ) -> int:
     """Count the ``input`` an explicitly replayed Responses request sends for ``messages``."""
-    formatted = [
-        _without_reasoning_ciphertext(item)
-        for item in responses_input(
-            responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
-            cache_system_prompt=cache_system_prompt,
-            explicit_breakpoint=explicit_breakpoint,
-        )
-    ]
+    replayed = responses_input(
+        responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
+        cache_system_prompt=cache_system_prompt,
+        explicit_breakpoint=explicit_breakpoint,
+    )
+    formatted = [_without_reasoning_ciphertext(item) for item in replayed]
+    reasoning_tokens = _earlier_reasoning_tokens(messages, replayed)
     if not responses_replay_uses_visual_tokens(model_id):
-        return approximate_o200k_tokens(stable_serialize(formatted))
+        return approximate_o200k_tokens(stable_serialize(formatted)) + reasoning_tokens
     estimated_input = []
     image_tokens = 0
     for item in formatted:
@@ -67,17 +68,43 @@ def estimate_responses_replay_tokens(
                     if isinstance(block, dict) and block.get("type") == "input_image"
                 )
         estimated_input.append(projected)
-    return approximate_o200k_tokens(stable_serialize(estimated_input)) + image_tokens
+    return approximate_o200k_tokens(stable_serialize(estimated_input)) + image_tokens + reasoning_tokens
 
 
 def _without_reasoning_ciphertext(item: Any) -> Any:  # noqa: ANN401
-    """Drop encrypted reasoning, whose base64 length says nothing about the tokens the provider counts.
-
-    History estimates skip thinking; mid-turn sizing adds the running turn's reported thinking itself.
-    """
+    """Drop encrypted reasoning, whose base64 length says nothing about the tokens the provider counts."""
     if isinstance(item, dict) and item.get("type") == "reasoning" and "encrypted_content" in item:
         return {key: value for key, value in item.items() if key != "encrypted_content"}
     return item
+
+
+def _earlier_reasoning_tokens(messages: Sequence[Message], replayed: list[Any]) -> int:
+    """Charge each earlier answer whose encrypted reasoning the request replays the reasoning tokens it reported.
+
+    A model that renders earlier turns' reasoning (``reasoning.context: all_turns``) holds it in context. The
+    running turn's own reasoning is left to mid-turn sizing, which adds each of its responses' reported thinking.
+    """
+    replayed_ids = {
+        item["id"]
+        for item in replayed
+        if isinstance(item, dict)
+        and item.get("type") == "reasoning"
+        and item.get("encrypted_content")
+        and item.get("id")
+    }
+    return sum(
+        message.metrics.tokens.reasoning_tokens
+        for message in messages
+        if message.role == "assistant" and not is_own_model_message(message) and replayed_ids & _reasoning_ids(message)
+    )
+
+
+def _reasoning_ids(message: Message) -> set[object]:
+    """Return the ids of the reasoning items a stored answer can replay."""
+    data = message.provider_data or {}
+    output = data.get(RESPONSE_OUTPUT_KEY)
+    items = [*(output if isinstance(output, list) else []), data.get("reasoning_output")]
+    return {item.get("id") for item in items if isinstance(item, dict) and item.get("type") == "reasoning"}
 
 
 def _image_tokens(block: dict[str, Any], model_id: str) -> int:

@@ -26,8 +26,9 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ScopeSummary
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
 from mindroom.llm.provider import NativeCompactionReplay
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_estimated_tokens
 from mindroom.providers.openai.responses_wire import responses_input, responses_replay
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -414,29 +415,55 @@ def test_responses_image_file_id_retains_unknown_dimension_allowance(tmp_path: P
     assert 3000 <= tokens < 3100
 
 
+def _reasoned_answer(ciphertext: str, *, reasoning_tokens: int = 0, own_turn: bool = False) -> list[Message]:
+    """Return a question and an answer whose stored output carries one encrypted reasoning item."""
+    output = [
+        {"type": "reasoning", "id": "rs_plan", "summary": [], "encrypted_content": ciphertext},
+        {
+            "type": "message",
+            "id": "msg_answer",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Ready", "annotations": []}],
+        },
+    ]
+    provider_data: dict[str, Any] = {"mindroom_response_output": output}
+    if own_turn:
+        provider_data[MODEL_PROVENANCE_KEY] = {"id": "gpt-6-astra", "provider": "openai"}
+    answer = Message(
+        role="assistant",
+        content="Ready",
+        provider_data=provider_data,
+        metrics=MessageMetrics(tokens=TokenCounts(reasoning_tokens=reasoning_tokens)),
+        from_history=not own_turn,
+    )
+    return [Message(role="user", content="Plan the trip.", from_history=not own_turn), answer]
+
+
 def test_responses_budget_ignores_encrypted_reasoning_length(tmp_path: Path) -> None:
     """Encrypted reasoning is opaque base64; its length says nothing about the tokens the provider counts."""
-
-    def answered(ciphertext: str) -> list[Message]:
-        output = [
-            {"type": "reasoning", "id": "rs_plan", "summary": [], "encrypted_content": ciphertext},
-            {
-                "type": "message",
-                "id": "msg_answer",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": "Ready", "annotations": []}],
-            },
-        ]
-        return [
-            Message(role="user", content="Plan the trip."),
-            Message(role="assistant", content="Ready", provider_data={"mindroom_response_output": output}),
-        ]
-
     adapter = responses_adapter(tmp_path, store=False)
-    short, long = answered("gAAAA"), answered("gAAAA" + "Zm9vYmFy" * 5000)
+    short, long = _reasoned_answer("gAAAA"), _reasoned_answer("gAAAA" + "Zm9vYmFy" * 5000)
     assert any(item.get("type") == "reasoning" for item in _replayed_input(adapter, long))
     assert adapter.estimate_portable_replay_tokens(long) == adapter.estimate_portable_replay_tokens(short)
+
+
+@pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-5.2-codex"])
+@pytest.mark.parametrize(("own_turn", "charged"), [(False, 20_000), (True, 0)])
+def test_responses_budget_charges_earlier_reasoning_its_reported_tokens(
+    tmp_path: Path,
+    model_id: str,
+    *,
+    own_turn: bool,
+    charged: int,
+) -> None:
+    """A model that renders earlier turns' reasoning holds it in context; the running turn's is sized mid-turn."""
+    adapter = responses_adapter(tmp_path, model_id, store=False)
+    reasoned = _reasoned_answer("gAAAA", reasoning_tokens=20_000, own_turn=own_turn)
+    unreasoned = _reasoned_answer("gAAAA", own_turn=own_turn)
+    assert any(item.get("type") == "reasoning" for item in _replayed_input(adapter, reasoned))
+    tokens = adapter.estimate_portable_replay_tokens(reasoned) - adapter.estimate_portable_replay_tokens(unreasoned)
+    assert tokens == charged
 
 
 def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments(tmp_path: Path) -> None:
