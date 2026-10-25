@@ -1590,19 +1590,27 @@ async def test_client_params_override_the_configured_client_options(
 
 
 @pytest.mark.asyncio
-async def test_client_params_base_url_is_the_groq_host(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("client_base_url", "host"),
+    [("http://client.test", "http://client.test"), (None, "http://groq.test"), ("", "http://groq.test")],
+)
+async def test_client_params_base_url_is_the_groq_host_when_set(
+    tmp_path: Path,
+    client_base_url: str | None,
+    host: str,
+) -> None:
     config = {
         "provider": "groq",
         "id": "openai/gpt-oss-120b",
         "api_key": "k",
-        "extra_kwargs": {"base_url": "http://groq.test", "client_params": {"base_url": "http://client.test"}},
+        "extra_kwargs": {"base_url": "http://groq.test", "client_params": {"base_url": client_base_url}},
     }
     built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
 
     await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert str(built.requests[0].url) == "http://client.test/openai/v1/chat/completions"
-    assert built.provider.identity.endpoint == "http://client.test/openai/v1"
+    assert str(built.requests[0].url) == f"{host}/openai/v1/chat/completions"
+    assert built.provider.identity.endpoint == f"{host}/openai/v1"
 
 
 @pytest.mark.asyncio
