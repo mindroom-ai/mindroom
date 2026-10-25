@@ -484,13 +484,16 @@ def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> N
             target[key] = value
 
 
-def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Store each call under an id later requests send unchanged, so its result and approval receipt name that id.
+def _completed_tool_calls(calls: list[dict[str, Any]], dialect: ChatDialect) -> list[dict[str, Any]]:
+    """Store each call under the id its later requests send, so its result and approval receipt name that id.
 
-    A server may omit the id or send one outside the Chat rule; either call gets a new id that fits it.
+    The ``openai`` dialect's requests rewrite an id outside the Chat rule, so there a call whose server sent such an
+    id, or none, gets a new id that fits the rule. Groq and Cerebras requests send stored ids unchanged, so there a
+    call keeps its server's id and only an id-less call gets a new one.
     """
     for call in calls:
-        call["id"] = chat_call_id(call.get("id"))
+        if dialect == "openai" or not call.get("id"):
+            call["id"] = chat_call_id(call.get("id"))
     return calls
 
 
@@ -610,13 +613,13 @@ class ChatStream:
         calls = [self._calls[index] for index in sorted(self._calls)]
         if self.wire.dialect == "cerebras":
             calls = [call for call in calls if call.get("id") and call["function"].get("name")]
-        self.parts.tool_calls = _completed_tool_calls(calls)
+        self.parts.tool_calls = _completed_tool_calls(calls, self.wire.dialect)
         return self.parts
 
 
 def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]:  # noqa: ANN401 - SDK message model
     if wire.dialect != "cerebras":
-        return _completed_tool_calls([call.model_dump() for call in message.tool_calls or []])
+        return _completed_tool_calls([call.model_dump() for call in message.tool_calls or []], wire.dialect)
     return _completed_tool_calls(
         [
             {
@@ -626,6 +629,7 @@ def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]
             }
             for call in message.tool_calls or []
         ],
+        wire.dialect,
     )
 
 

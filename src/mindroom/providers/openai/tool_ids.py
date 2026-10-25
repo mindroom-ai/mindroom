@@ -1,10 +1,11 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Rewrite tool-call ids stored by another provider into the shape an OpenAI wire accepts.
+"""Rewrite stored tool-call ids outside an OpenAI wire's id rule, such as another provider's, into its shape.
 
-A thread can switch models mid-conversation, so a Chat request may replay Claude ``toolu_`` ids and a
-Responses request may replay Chat ``call_`` ids. Foreign ids map to deterministic counters, so the same
-history always produces the same request bytes. A Chat turn stores each call under an id that already fits
-the Chat rule (``chat_call_id``), so its own calls reach the model under their stored ids.
+A thread can switch models mid-conversation, so a Chat request of the ``openai`` dialect may replay Claude
+``toolu_`` ids and a Responses request may replay Chat ``call_`` ids; Groq and Cerebras Chat requests send
+stored ids unchanged. Foreign ids map to deterministic counters, so the same history always produces the same
+request bytes. An ``openai``-dialect Chat turn stores each call under an id that already fits the Chat rule
+(``chat_call_id``), so its own calls reach the model under their stored ids.
 """
 
 from __future__ import annotations
@@ -40,11 +41,11 @@ def _fits(call_id: str, rule: _IdRule) -> bool:
 
 
 def chat_call_id(server_id: object) -> str:
-    """Return the id a Chat turn stores its call under: ``server_id`` when it fits the Chat rule, else a new one.
+    """Return ``server_id`` when it fits the Chat rule, else a new id that does, for a Chat turn to store its call under.
 
-    Chat requests rewrite every id outside the rule, so a call stored under the server's id would reach the model
-    under another one, and an approval receipt naming the stored id would name no call the model sees. The new id
-    is ``call_`` and a uuid4's 32 hex digits, which fits the rule's 40 characters.
+    Requests of the ``openai`` Chat dialect rewrite every id outside the rule, so there a call stored under the
+    server's id would reach the model under another one, and an approval receipt naming the stored id would name no
+    call the model sees. The new id is ``call_`` and a uuid4's 32 hex digits, which fits the rule's 40 characters.
     """
     if isinstance(server_id, str) and _fits(server_id, _RULES["chat"]):
         return server_id
