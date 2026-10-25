@@ -411,10 +411,11 @@ class LiveTurnTools(TurnToolBridge):
         async with self._outer:
             self._check_live()
             if self.control_calls:
+                # This call never runs, so it answers as failed, as the loop answers a call it did not run.
                 return _bash_outcome(
                     "Bash cancelled before dispatch: continuation requires a rebuilt tool catalog.",
                     stop_after_call=True,
-                    is_error=False,
+                    is_error=True,
                 )
             if self._binding_retired or key.toolkit != "shell":
                 msg = "Bash binding is unavailable"
