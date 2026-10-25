@@ -79,7 +79,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_CONFIG,
     ),
     dependencies=["google-api-python-client", "google-auth-httplib2", "google-auth-oauthlib"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/google_sheets",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_sheets",
     function_names=(
         "create_sheet",
         "read_sheet",

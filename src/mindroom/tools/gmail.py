@@ -106,7 +106,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.FILE_ACCESS,
     ),
     dependencies=["google-api-python-client", "google-auth", "google-auth-oauthlib", "google-auth-httplib2"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/gmail",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#gmail",
     function_names=(
         "apply_label",
         "create_draft_email",
