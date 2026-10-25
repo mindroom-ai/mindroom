@@ -876,6 +876,33 @@ async def test_usage_telemetry_is_logged_without_the_request_log(
 
 
 @pytest.mark.asyncio
+async def test_usage_telemetry_logs_a_compacted_claude_request_s_final_iteration_context(tmp_path: Path) -> None:
+    """After a native compaction the context fields read the final iteration, while the billed counters sum them all."""
+    usage = MessageMetrics(
+        tokens=TokenCounts(input_tokens=30_000, output_tokens=900, cache_read_tokens=5_000),
+        provider_metrics={
+            "context_usage": {"input_tokens": 1_200, "cache_read_tokens": 300, "cache_write_tokens": 100},
+        },
+    )
+    identity = replace(_IDENTITY, provider="Anthropic")
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], identity=identity)
+    log = _request_log(tmp_path, enabled=False, provider="anthropic")
+
+    with capture_logs() as logs:
+        await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), ModelRequest(messages=[_user()]))
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    fields = ("input_tokens", "cache_read_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
+    assert {field: usage_log[field] for field in fields} == {
+        "input_tokens": 30_000,
+        "cache_read_tokens": 5_000,
+        "context_input_tokens": 1_600,
+        "uncached_input_tokens": 1_300,
+        "cache_read_ratio": 0.1875,
+    }
+
+
+@pytest.mark.asyncio
 async def test_a_request_without_usage_is_reported_and_writes_no_response_record(tmp_path: Path) -> None:
     served = Message(role="assistant", content="ok", provider_data={"model_extra": {"provider": "OpenInference"}})
     inner = _ScriptedProvider([[TurnCompleted(message=served, stop_reason="end")]])

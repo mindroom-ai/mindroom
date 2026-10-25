@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.llm.messages import Message
+    from mindroom.llm.usage import MessageMetrics
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,16 +91,31 @@ def response_context(
     configured_provider: str | None,
     model_id: str | None,
 ) -> ResponseContext | None:
-    """Return the request context one response reported, or None when its usage is absent or sums retried attempts.
+    """Return the request context one response reported, or None when its usage is absent or sums retried attempts."""
+    if isinstance(message.provider_data, dict) and message.provider_data.get("mindroom_aggregate_usage") is True:
+        # The counters sum several retried attempts, so they describe no single request's context.
+        return None
+    return usage_context(
+        message.metrics,
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    )
+
+
+def usage_context(
+    metrics: MessageMetrics,
+    *,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> ResponseContext | None:
+    """Return the request context one request's usage reports, or None when it reported no usage.
 
     A Claude response's ``context_usage`` holds its final iteration's counters, each one reported, a zero one too:
     after a native compaction that iteration alone describes the active context, while the billed counters can
     include the transcript the checkpoint replaced.
     """
-    if isinstance(message.provider_data, dict) and message.provider_data.get("mindroom_aggregate_usage") is True:
-        # The counters sum several retried attempts, so they describe no single request's context.
-        return None
-    metrics = message.metrics
     usage = (metrics.provider_metrics or {}).get("context_usage")
     if isinstance(usage, dict):
         input_tokens = _count(usage, "input_tokens")
