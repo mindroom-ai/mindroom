@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -29,7 +30,7 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.llm.provider import ModelRequest
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.store import ConversationStore
-from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
+from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -212,6 +213,39 @@ def test_a_rule_hiding_one_skill_function_names_it_in_the_prompt(tmp_path: Path)
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"get_skill_instructions", "get_skill_reference"}
     assert build.prompt.skills_block is not None
     assert "These skill functions are not available to you: get_skill_script." in build.prompt.instructions
+
+
+def _write_plugin_skill(plugin_root: Path, name: str) -> None:
+    (plugin_root / "skills" / name).mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": plugin_root.name, "tools_module": None, "skills": ["skills"]}),
+        encoding="utf-8",
+    )
+    (plugin_root / "skills" / name / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: A skill {plugin_root.name} provides.\n---\n\nFollow it.\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_build_offers_the_skills_of_the_plugins_its_config_loads(tmp_path: Path) -> None:
+    """The first build after a start or a config change offers the configured plugins' skills, and no earlier set's."""
+    config, runtime_paths = _config(tmp_path, skills=["fresh-skill", "stale-skill"])
+    _write_plugin_skill(tmp_path / "plugins" / "fresh", "fresh-skill")
+    stale = tmp_path / "stale"
+    _write_plugin_skill(stale, "stale-skill")
+    authored = {**config.authored_model_dump(), "plugins": ["./plugins/fresh"]}
+    config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
+    previous_roots = get_plugin_skill_roots()
+    # The skill roots of the plugins an earlier config loaded.
+    set_plugin_skill_roots([stale / "skills"])
+    try:
+        build = _build(config, runtime_paths, persist_runtime_state=False)
+    finally:
+        set_plugin_skill_roots(previous_roots)
+
+    assert build.prompt.skills_block is not None
+    assert "<name>fresh-skill</name>" in build.prompt.skills_block
+    assert "<name>stale-skill</name>" not in build.prompt.skills_block
 
 
 def test_prompt_for_turn_appends_the_turns_context_blocks(tmp_path: Path) -> None:

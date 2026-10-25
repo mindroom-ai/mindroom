@@ -1265,6 +1265,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
     persona: SubagentPersona | None,
+    plugins: list[HookRegistryPlugin],
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
 ) -> _AgentToolAssembly:
@@ -1277,7 +1278,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     )
     persona_tools = persona.tools if persona is not None else None
-    plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
     # A team member is built under its team turn's identity; its tool hooks and job controls act as the member.
     agent_identity = replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None
@@ -1913,6 +1913,8 @@ def create_agent(
         tool_function_filter,
         disabled_tool_names,
     )
+    # Loaded before the skills, which include the skills of the plugins this config loads.
+    plugins = _load_agent_plugins(config, runtime_paths)
     workspace = agent_runtime.workspace
     output_file_policy = _agent_tool_output_file_policy(
         agent_runtime,
@@ -1965,6 +1967,7 @@ def create_agent(
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
         persona=persona,
+        plugins=plugins,
         knowledge=enabled_knowledge,
         skills=offered_skills,
     )
