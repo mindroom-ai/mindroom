@@ -29,9 +29,11 @@ async def change_local_membership(  # noqa: C901
     including across restart, so an admitted position alone cannot certify a
     no-op or supply the precondition for a new command.
 
-    A join returns only after this client's sync has observed it: nio resets a
-    room's state when the join succeeds and refuses to send there until a sync
-    establishes it again, so a caller can send into the room once this returns.
+    A join this command sends returns only after this client's sync has
+    observed it, because nio resets the room's state when the join succeeds and
+    refuses plaintext sends there until a sync establishes it again. The
+    observing sync does not always establish it; see "Nio's durable producer"
+    in docs/architecture/matrix-event-journal-contracts.md.
     """
     if type(room_id) is not str or not room_id:
         message = "room_id must be a nonempty str"
