@@ -56,8 +56,19 @@ GEMINI_VERTEX = {
     "id": "gemini-3.1-pro-preview",
     "extra_kwargs": {"vertexai": True, "project_id": "test-project", "location": "us-central1"},
 }
-# Vertex AI turned on in the SDK client's own arguments; with an API key the SDK uses Vertex AI express mode.
-GEMINI_VERTEX_CLIENT_PARAMS = {**GEMINI, "extra_kwargs": {"client_params": {"vertexai": True}}}
+# Vertex AI turned on in the SDK client's own arguments instead of ``extra_kwargs.vertexai``.
+GEMINI_VERTEX_CLIENT_PARAMS = {
+    "provider": "gemini",
+    "id": "gemini-3.1-pro-preview",
+    "extra_kwargs": {
+        "client_params": {
+            "vertexai": True,
+            "project": "test-project",
+            "location": "us-central1",
+            "credentials": Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+        },
+    },
+}
 OLLAMA = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
 WEATHER = ToolSpec(
     name="get_weather",
