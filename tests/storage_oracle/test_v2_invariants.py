@@ -3,8 +3,8 @@
 The conversations are the oracle's vocabulary (``tests/storage_oracle/actions.py``) through ``NextBackend``, drawn by
 hypothesis, except that a fold never follows a member's pause within one attempt, since a team run's loop sends no
 request after a member pauses. After every action the raw tables are read and checked against the invariants of
-PLAN-3095 task 7; the replay check (I6) compares a load with the summary rows and with what the backend's own writes
-left of each run, never with the store's load query.
+PLAN-3095 task 7. The replay check (I6) takes its expectations from an independent model: the place spec 3.2 gives
+each run, from the backend's writes alone, the runs each summary's text names, and the message lists the writes stored.
 """
 
 from __future__ import annotations
@@ -28,12 +28,18 @@ from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.usage.storage import quote_identifier
 from tests.storage_oracle.actions import KIND_WEIGHTS, NAMED, OPENING_KINDS, Action, Scenario
-from tests.storage_oracle.backend import SESSION_ID
+from tests.storage_oracle.backend import SESSION_ID, summary_tokens
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.next_backend import NextBackend
 
 if TYPE_CHECKING:
+    from mindroom.delegation.state import DelegationState
+    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store_next import SaveOutcome
+    from mindroom.session_storage.types import ConversationSession
     from tests.storage_oracle.actions import ScenarioKind
+    from tests.storage_oracle.backend import FoldBasisView, FoldInput
     from tests.storage_oracle.determinism import Determinism
 
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
@@ -145,7 +151,73 @@ class _InvariantBackend(NextBackend):
         self.retired_rows: dict[int, tuple[frozenset[str], frozenset[str]]] = {}
         self.row_ids: set[int] = set()
         self.barrier_ids: set[int] = set()
+        # The independent model of spec 3.2's run positions: each top-level run's place, from the writes alone.
+        self.places: dict[str, int] = {}
+        self.ticks = 0
         super().__init__(root, kind, determinism)
+
+    def _place(self, run_id: str) -> None:
+        self.ticks += 1
+        self.places[run_id] = self.ticks
+
+    def _placed(self, run_id: str, parent_run_id: str | None, before: str | None, status: str) -> None:
+        """Place a written top-level run as spec 3.2 does: at its first write, and when it turns visible."""
+        if parent_run_id is None and (before is None or (before in _NON_VISIBLE and status not in _NON_VISIBLE)):
+            self._place(run_id)
+
+    def _stored_status(self, run_id: str) -> str | None:
+        row = self.stored_runs().get(run_id)
+        return None if row is None else row[1]
+
+    @override
+    def _save(
+        self,
+        session: ConversationSession,
+        record: AnyRunRecord,
+        *,
+        usage: bool,
+        state: dict[str, object] | None,
+    ) -> list[str]:
+        before = self._stored_status(record.run_id)
+        outcome = super()._save(session, record, usage=usage, state=state)
+        if outcome == ["written"]:
+            self._placed(record.run_id, record.parent_run_id, before, record.status.value)
+        return outcome
+
+    @override
+    def _persist_delegation(
+        self,
+        session: ConversationSession,
+        record: AnyRunRecord,
+        state: DelegationState,
+    ) -> SaveOutcome | bool:
+        before = self._stored_status(record.run_id)
+        result = super()._persist_delegation(session, record, state)
+        if result == "written":
+            self._placed(record.run_id, record.parent_run_id, before, record.status.value)
+        return result
+
+    @override
+    def _save_interrupted(
+        self,
+        session: ConversationSession,
+        run_id: str,
+        snapshot: InterruptedReplaySnapshot,
+        state: dict[str, object] | None,
+    ) -> tuple[AnyRunRecord, str]:
+        before = self._stored_status(run_id)
+        record, outcome = super()._save_interrupted(session, run_id, snapshot, state)
+        if outcome == "written":
+            self._placed(run_id, None, before, record.status.value)
+        return record, outcome
+
+    @override
+    def append_fold(self, session: ConversationSession, basis: FoldBasisView, summary: str, fold: FoldInput) -> bool:
+        appended = super().append_fold(session, basis, summary, fold)
+        if appended:
+            # A fold's commit places its running run after the fold's summary.
+            self._place(fold.record.run_id)
+        return appended
 
     @override
     def apply(self, action: Action) -> object:
@@ -180,8 +252,8 @@ class _InvariantBackend(NextBackend):
             # I11: every member's team run is a top-level run.
             parent = tables.runs.get(run.parent_run_id) if run.parent_run_id is not None else None
             assert parent is None or parent.parent_run_id is None, f"I11: {run.run_id}'s team run is a member"
-            # I2: a visible top-level run keeps its seq and status; only P4 replaces its content.
-            if run.visible:
+            # I2: a top-level run once visible keeps its seq and status; only P4 replaces its content.
+            if run.visible or run.run_id in self.visible:
                 kept = self.visible.setdefault(run.run_id, (run.seq, run.status))
                 assert kept == (run.seq, run.status), f"I2: visible run {run.run_id} moved or changed status"
         self.visible = {run_id: kept for run_id, kept in self.visible.items() if run_id in tables.runs}
@@ -263,27 +335,47 @@ class _InvariantBackend(NextBackend):
             assert row.fold_seen_event_ids == sorted(seen_event_ids(metadata)), f"I10: row {row.id}'s seen ids"
 
     def _check_replay(self, tables: _Tables) -> None:
-        # I6: replay is the owner scope's latest row's text and its uncovered visible runs in seq order.
+        """I6: replay is the latest summary's text and the runs no summary covered, in the model's order.
+
+        The model places each run from the backend's writes (spec 3.2), and the summary texts the driver writes name
+        every run their summaries covered, so neither the order nor the coverage comes from the store. The load is
+        also checked against the raw tables: their latest row, its ``through``, and each run's unfolded rows.
+        """
+        stored = {run.run_id: run for run in tables.runs.values() if run.parent_run_id is None}
+        self.places = {run_id: place for run_id, place in self.places.items() if run_id in stored}
+        placed = [run_id for run_id in stored if run_id in self.places]
+        by_seq = sorted(placed, key=lambda run_id: stored[run_id].seq)
+        assert by_seq == sorted(placed, key=self.places.__getitem__), f"I6: runs placed as {by_seq}"
         session = self.load()
         if session is None:
             return
+        replayed = [run for run in session.runs if replays_in_scope(run, self.scope)]
+        replayed_ids = [run.run_id for run in replayed]
+        modelled = [run_id for run_id in replayed_ids if run_id in self.places]
+        assert modelled == sorted(modelled, key=self.places.__getitem__), f"I6: replay order {replayed_ids}"
         rows = tables.scope_rows(self.scope.key)
+        if not any(row.summary is None or row.legacy for row in rows):
+            # Without a barrier or a legacy summary, the latest summary's text names exactly the covered runs.
+            named = summary_tokens(rows[-1].summary) if rows else set()
+            visible = {run_id for run_id, run in stored.items() if run.visible and run.scope_key == self.scope.key}
+            assert not named & set(replayed_ids), f"I6: summarized runs replay: {sorted(named & set(replayed_ids))}"
+            assert visible - set(replayed_ids) <= named, f"I6: runs neither replay nor summarized: {visible}"
         latest = rows[-1] if rows else None
         expected_runs = sorted(
             (
                 run
-                for run in tables.runs.values()
+                for run in stored.values()
                 if run.scope_key == self.scope.key and run.visible and run.seq > (latest.through if latest else 0)
             ),
             key=lambda run: run.seq,
         )
-        replayed = [run for run in session.runs if replays_in_scope(run, self.scope)]
         assert (session.summary.text if session.summary else None) == (latest.summary if latest else None), "I6"
-        assert [run.run_id for run in replayed] == [run.run_id for run in expected_runs], "I6: replayed runs"
+        assert replayed_ids == [run.run_id for run in expected_runs], "I6: replayed runs"
         for run in replayed:
-            stored = [data for _id, _ord, folded_by, data in tables.messages.get(run.run_id, []) if folded_by is None]
+            rows_of_run = tables.messages.get(run.run_id, [])
+            stored_view = [data for _id, _ord, folded_by, data in rows_of_run if folded_by is None]
             expected = self.expected_view(run.run_id)
-            assert [message.to_dict() for message in run.messages] == (stored if expected is None else expected), (
+            assert [message.to_dict() for message in run.messages] == (stored_view if expected is None else expected), (
                 f"I6: {run.run_id}'s replayed messages"
             )
 
@@ -317,6 +409,14 @@ def _drive(scenario: Scenario) -> None:
 @pytest.mark.timeout(600)
 @settings(max_examples=40, deadline=None, print_blob=True, suppress_health_check=[HealthCheck.too_slow])
 @given(scenario=_scenarios())
+@example(
+    # A fold of a CLI turn takes messages its checkpoint already stored.
+    scenario=Scenario("agent", (Action("checkpoint"), Action("fold"))),
+)
+@example(
+    # A resumed approval folds after a later turn completed, so its fold moves it after that turn.
+    scenario=Scenario("agent", (Action("pause"), Action("add"), Action("fold", index=1))),
+)
 @example(scenario=NAMED["team_pause_advanced"])
 @example(scenario=NAMED["linked_covered_run_redacted"])
 @example(scenario=NAMED["discarded_fold_owner_redacted"])

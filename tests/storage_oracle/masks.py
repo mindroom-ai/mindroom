@@ -650,6 +650,9 @@ class MaskedBackend(NextBackend):
         return view
 
     def _old_loaded(self, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = self._rows()
+        ids = [run["run_id"] for run in runs]
+        assert ids == sorted(ids, key=lambda run_id: rows[run_id].seq), f"the v2 load is not in seq order: {ids}"
         loaded = [self._old_run(run, loaded=True) for run in runs if not self._hidden(run)]
         if len(loaded) < len(runs):
             self.used.add("fold_stores_cancelled_row")

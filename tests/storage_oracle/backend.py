@@ -128,7 +128,7 @@ class _Turn:
         return [self.system, *history, self.prompt, *summary, *self.body]
 
 
-def _summary_tokens(text: str | None) -> set[str]:
+def summary_tokens(text: str | None) -> set[str]:
     """Return what a summary covers: the runs it names, ``<run>~`` for a fold's part of a running run, or legacy."""
     if not text:
         return set()
@@ -797,7 +797,7 @@ class Driver(ABC):
         if basis is None:
             return "stale-basis"
         self.chunk_summary_usage(session)
-        appended = self.append_chunk(session, basis, chunk, _summary_text(_summary_tokens(previous) | set(chunk)))
+        appended = self.append_chunk(session, basis, chunk, _summary_text(summary_tokens(previous) | set(chunk)))
         if appended and read_scope_state(session, self.scope).force_compact_before_next_run:
             self.set_force(session, forced=False)
         return {"appended": appended, "chunk": chunk}
@@ -819,7 +819,7 @@ class Driver(ABC):
         if basis is None:
             return {"racer": racer, "appended": None}
         self.chunk_summary_usage(session)
-        appended = self.append_chunk(session, basis, chunk, _summary_text(_summary_tokens(previous) | set(chunk)))
+        appended = self.append_chunk(session, basis, chunk, _summary_text(summary_tokens(previous) | set(chunk)))
         return {"racer": racer, "appended": appended}
 
     def _fold(self, action: Action) -> object:
@@ -846,7 +846,7 @@ class Driver(ABC):
         if basis is None:
             return "stale-basis"
         run_id = turn.record.run_id
-        summary = _summary_text(_summary_tokens(basis.summary) | set(basis.run_ids) | {f"{run_id}~"})
+        summary = _summary_text(summary_tokens(basis.summary) | set(basis.run_ids) | {f"{run_id}~"})
         racer = self._compact(Action("compact", count=1)) if racing else None
         self.fold_summary_usage(turn.session)
         if not summary_accepted:
