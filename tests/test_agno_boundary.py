@@ -59,9 +59,131 @@ REEXPORT_AGNO_TYPE_IMPORTERS = frozenset(
     },
 )
 TESTS_ROOT = Path(__file__).resolve().parent
-# How many test modules import Agno at all, and which import its runtime types, until the tests move to MindRoom's
-# seams (#3120).
-TEST_AGNO_IMPORTER_COUNT = 119
+# The modules under ``tests`` that import Agno at all, and those that import its runtime types, until the tests move to
+# MindRoom's seams (#3120).
+TEST_AGNO_IMPORTERS = frozenset(
+    {
+        "agent_loop/helpers.py",
+        "agent_loop/test_agent_build.py",
+        "agent_loop/test_model_loop.py",
+        "agent_loop/test_run.py",
+        "agent_loop/test_tools.py",
+        "api/test_agent_cli_api.py",
+        "api/test_computer_browser_binding.py",
+        "api/test_headless_browser.py",
+        "api/test_mcp_external_auth.py",
+        "api/test_mcp_gateway_api.py",
+        "api/test_sandbox_runner_api.py",
+        "api/test_sandbox_runner_streaming.py",
+        "api/test_view_file.py",
+        "api/test_worker_computer.py",
+        "conftest.py",
+        "delegation_helpers.py",
+        "scripted_agent_helpers.py",
+        "team_runtime/test_continue_team.py",
+        "team_turn_helpers.py",
+        "test_agent_cli_control_tools.py",
+        "test_agent_cli_media.py",
+        "test_agent_cli_standard_mode.py",
+        "test_agent_cli_turn.py",
+        "test_agent_personas.py",
+        "test_agent_tool_calls.py",
+        "test_agent_turn_runtime.py",
+        "test_agent_worker_routing.py",
+        "test_agentql_tools.py",
+        "test_agents.py",
+        "test_agno_tool_wrapping.py",
+        "test_ai_provider_retry.py",
+        "test_approval_dynamic_tools.py",
+        "test_approved_egress_tool.py",
+        "test_attachments_tool.py",
+        "test_background_subagents.py",
+        "test_bot_media_dispatch.py",
+        "test_browser_mcp.py",
+        "test_browser_mcp_outputs.py",
+        "test_browser_tool.py",
+        "test_claude_agent_nightly_soak.py",
+        "test_claude_agent_tool.py",
+        "test_cli_approval_recovery.py",
+        "test_compact_context.py",
+        "test_composio_tools.py",
+        "test_computer_announcement.py",
+        "test_config_manager_consolidated.py",
+        "test_delegation_execution.py",
+        "test_dynamic_toolkits.py",
+        "test_file_access_contract.py",
+        "test_gemini_tools.py",
+        "test_github_oauth_tool.py",
+        "test_gmail_tools.py",
+        "test_google_tool_wrappers.py",
+        "test_init.py",
+        "test_invite_router_tool.py",
+        "test_issue_154_logging_integration.py",
+        "test_knowledge_readers.py",
+        "test_knowledge_resumable_refresh.py",
+        "test_logging_config.py",
+        "test_lumalabs_tool.py",
+        "test_matrix_message_docs.py",
+        "test_matrix_rtc_call_tools.py",
+        "test_matrix_voice_message.py",
+        "test_mcp_gateway_execution.py",
+        "test_mcp_gateway_tools.py",
+        "test_mcp_manager.py",
+        "test_mcp_results.py",
+        "test_mcp_toolkit.py",
+        "test_media_delivery.py",
+        "test_media_transport.py",
+        "test_microsoft_files_tool.py",
+        "test_microsoft_meetings_tool.py",
+        "test_microsoft_onenote_tool.py",
+        "test_microsoft_people_tool.py",
+        "test_microsoft_sharepoint_tool.py",
+        "test_microsoft_teams_tool.py",
+        "test_microsoft_todo_tool.py",
+        "test_mid_turn.py",
+        "test_mid_turn_compaction.py",
+        "test_mid_turn_compaction_resume_and_team.py",
+        "test_minimal_agent_parity.py",
+        "test_openai_compat.py",
+        "test_outlook_calendar_tool.py",
+        "test_outlook_mail_tool.py",
+        "test_queued_message_notify.py",
+        "test_replicate_tools.py",
+        "test_response_runner_focused.py",
+        "test_sandbox_proxy.py",
+        "test_scheduled_tool_approval.py",
+        "test_script_run_policy.py",
+        "test_script_tool_broker.py",
+        "test_shell_async.py",
+        "test_shell_output_files.py",
+        "test_shell_supervisor.py",
+        "test_skill_learning.py",
+        "test_structured_tool_config.py",
+        "test_subagent_personas.py",
+        "test_subagent_runtime.py",
+        "test_team_turn_runtime.py",
+        "test_tool_access.py",
+        "test_tool_config_sync.py",
+        "test_tool_hooks.py",
+        "test_tool_job_approved_work.py",
+        "test_tool_job_execution.py",
+        "test_tool_output_files.py",
+        "test_toolkit_aliases.py",
+        "test_tools_metadata.py",
+        "test_trafilatura_tool.py",
+        "test_view_file_tools.py",
+        "test_worker_computer_acceptance.py",
+        "test_worker_media.py",
+        "test_worker_media_proxy.py",
+        "test_worker_tool_transport.py",
+        "tool_system/agno_parity_support.py",
+        "tool_system/test_agno_toolkits.py",
+        "tool_system/test_string_tool_arguments.py",
+        "tool_system/test_tool_hook_middleware.py",
+        "tool_system/test_tool_invocation.py",
+        "tool_system/test_toolkit_connections.py",
+    },
+)
 AGNO_RUNTIME_MODULES = ("agno.agent", "agno.run", "agno.models", "agno.team", "agno.session")
 TEST_AGNO_RUNTIME_IMPORTERS = frozenset(
     {
@@ -201,8 +323,8 @@ def test_the_modules_that_take_an_agno_type_through_the_reexport_are_exactly_the
     assert not left, f"Delete these modules from REEXPORT_AGNO_TYPE_IMPORTERS, since they no longer import Agno: {left}"
 
 
-def test_the_test_modules_that_import_agno_are_exactly_the_counted_and_listed_ones() -> None:
-    """No new test module may import Agno or its runtime types, and one that stops lowers the cap or leaves the list."""
+def test_the_test_modules_that_import_agno_are_exactly_the_listed_ones() -> None:
+    """No new test module may import Agno or its runtime types, and one that stops leaves the list it no longer fits."""
     imports = agno_test_imports()
     runtime_importers = {
         module
@@ -212,12 +334,10 @@ def test_the_test_modules_that_import_agno_are_exactly_the_counted_and_listed_on
         )
     }
 
-    assert len(imports) <= TEST_AGNO_IMPORTER_COUNT, (
-        f"{len(imports)} test modules import Agno, more than the {TEST_AGNO_IMPORTER_COUNT} allowed"
-    )
-    assert len(imports) == TEST_AGNO_IMPORTER_COUNT, (
-        f"Lower TEST_AGNO_IMPORTER_COUNT to {len(imports)}, since fewer test modules import Agno"
-    )
+    joined = sorted(imports.keys() - TEST_AGNO_IMPORTERS)
+    assert not joined, f"Test modules that newly import Agno: {joined}"
+    left = sorted(TEST_AGNO_IMPORTERS - imports.keys())
+    assert not left, f"Delete these modules from TEST_AGNO_IMPORTERS, since they no longer import Agno: {left}"
     joined = sorted(runtime_importers - TEST_AGNO_RUNTIME_IMPORTERS)
     assert not joined, f"Test modules that newly import Agno runtime types: {joined}"
     left = sorted(TEST_AGNO_RUNTIME_IMPORTERS - runtime_importers)
