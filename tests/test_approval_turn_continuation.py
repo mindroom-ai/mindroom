@@ -431,7 +431,11 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     assert any(message.role == "tool" and message.tool_call_id == "continue" for message in last)
     expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
-    receipt_requests = [index for index, request in enumerate(model.requests) if carries_approval_receipt(request)]
+    receipt_requests = [
+        index
+        for index, request in enumerate(model.requests)
+        if carries_approval_receipt(request, "Trusted approval receipt")
+    ]
     assert receipt_requests == resume_starts
 
 

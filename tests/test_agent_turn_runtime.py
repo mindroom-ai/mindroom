@@ -916,7 +916,6 @@ async def test_a_turn_that_reads_the_approval_receipt_sends_it_with_its_first_re
     assert probe.calls == ["a"]
     first, *later = reply.model.requests
     assert str(first.messages[0].content).endswith("Trusted approval receipt.")
-    assert first.messages[0].provider_data == {"mindroom_approval_receipt": True}
     assert len(later) == 2
     assert all(
         "Trusted approval receipt." not in str(message.content) for request in later for message in request.messages

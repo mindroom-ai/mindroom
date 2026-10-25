@@ -229,7 +229,7 @@ async def test_a_paused_approval_resumes_into_the_rows_agno_stored(
     # The resumed request carries the stored prompt, the turn, the decided call's result, and the receipt once.
     [request] = code.requests
     assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool"]
-    assert request.messages[0].provider_data == {"mindroom_approval_receipt": True}
+    assert str(request.messages[0].content).count("TOOL APPROVAL RECEIPT") == 1
     assert request.messages[-1].tool_call_id == f"call-{run_id}"
 
 

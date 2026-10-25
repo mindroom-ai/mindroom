@@ -176,7 +176,6 @@ def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None
         ("assistant", "calling tool"),
         ("tool", "tool result"),
     ]
-    assert projected[0].provider_data == {"mindroom_approval_receipt": True}
     assert projected[0] is not messages[0]
     assert messages[0].content == "base rules"
     assert messages[0].provider_data is None
@@ -272,9 +271,9 @@ def _leader_delegating_to_code(
     return config, paths, identity
 
 
-def _receipt_flags(model: ScriptedModel) -> list[bool]:
-    """Return, per request the model received, whether it carried the approval receipt."""
-    return [carries_approval_receipt(request) for request in model.requests]
+def _receipt_flags(model: ScriptedModel, receipt: str) -> list[bool]:
+    """Return, per request the model received, whether it carried ``receipt``."""
+    return [carries_approval_receipt(request, receipt) for request in model.requests]
 
 
 @pytest.mark.asyncio
@@ -303,8 +302,8 @@ async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receip
         paused = await respond("leader", "Write the report", **options)
         assert isinstance(paused, PausedAttempt)
         approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
-        decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
-        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+        receipt = build_approval_receipt(tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals))
+        with approval_receipt_context(receipt, run_id=paused.run_id):
             result = await resume(
                 approval_executor(config, paths),
                 paused,
@@ -316,8 +315,8 @@ async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receip
 
     assert isinstance(result, CompletedApprovalRun)
     # The fresh turn's request, the resumed request, and one continuation after each delegation.
-    assert _receipt_flags(leader) == [False, True, False, False]
-    assert _receipt_flags(code) == [False, False]
+    assert _receipt_flags(leader, receipt) == [False, True, False, False]
+    assert _receipt_flags(code, receipt) == [False, False]
 
 
 @pytest.mark.asyncio
@@ -344,8 +343,8 @@ async def test_an_approved_child_and_the_parent_it_answers_each_read_the_receipt
         paused = await respond("leader", "Have the report written", **options)
         assert isinstance(paused, PausedAttempt)
         approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
-        decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
-        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+        receipt = build_approval_receipt(tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals))
+        with approval_receipt_context(receipt, run_id=paused.run_id):
             result = await resume(
                 approval_executor(config, paths),
                 paused,
@@ -357,8 +356,8 @@ async def test_an_approved_child_and_the_parent_it_answers_each_read_the_receipt
 
     assert isinstance(result, CompletedApprovalRun)
     # Each model's fresh request, then its first request after the approval.
-    assert _receipt_flags(code) == [False, True]
-    assert _receipt_flags(leader) == [False, True]
+    assert _receipt_flags(code, receipt) == [False, True]
+    assert _receipt_flags(leader, receipt) == [False, True]
 
 
 @pytest.mark.asyncio
@@ -392,8 +391,8 @@ async def test_every_run_between_the_card_and_a_nested_child_s_approved_call_rea
         paused = await respond("leader", "Have the report written", **options)
         assert isinstance(paused, PausedAttempt)
         approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
-        decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
-        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+        receipt = build_approval_receipt(tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals))
+        with approval_receipt_context(receipt, run_id=paused.run_id):
             result = await resume(
                 approval_executor(config, paths),
                 paused,
@@ -406,9 +405,9 @@ async def test_every_run_between_the_card_and_a_nested_child_s_approved_call_rea
     assert isinstance(result, CompletedApprovalRun)
     assert len(report.written) == 1
     # Each model's fresh request, then its first request after the approval.
-    assert _receipt_flags(helper) == [False, True]
-    assert _receipt_flags(code) == [False, True]
-    assert _receipt_flags(leader) == [False, True]
+    assert _receipt_flags(helper, receipt) == [False, True]
+    assert _receipt_flags(code, receipt) == [False, True]
+    assert _receipt_flags(leader, receipt) == [False, True]
 
 
 @pytest.mark.asyncio
@@ -459,8 +458,8 @@ async def test_a_fresh_turn_the_receipt_names_sends_it_once_across_its_delegatio
 
     assert "".join(streamed_text(chunks)).endswith("Both parts are fine.")
     # The first request, then one continuation after each delegation.
-    assert _receipt_flags(leader) == [True, False, False]
-    assert _receipt_flags(code) == [False, False]
+    assert _receipt_flags(leader, "Trusted approval receipt.") == [True, False, False]
+    assert _receipt_flags(code, "Trusted approval receipt.") == [False, False]
 
 
 @pytest.mark.asyncio
@@ -499,7 +498,7 @@ async def test_a_background_job_an_approval_continuation_starts_never_reads_its_
         await runtime.shutdown()
 
     assert waited.job.result == "done"
-    assert _receipt_flags(model) == [False]
+    assert _receipt_flags(model, "Trusted approval receipt.") == [False]
 
 
 @pytest.mark.asyncio

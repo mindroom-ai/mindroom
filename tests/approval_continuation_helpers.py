@@ -23,9 +23,9 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest
 
 
-def carries_approval_receipt(request: ModelRequest) -> bool:
-    """Return whether ``request`` carries a projected approval receipt, by the marker its projection sets."""
-    return any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
+def carries_approval_receipt(request: ModelRequest, receipt: str) -> bool:
+    """Return whether the prompt of ``request`` carries ``receipt``, where the receipt projection puts it."""
+    return any(message.role == "system" and receipt in str(message.content) for message in request.messages)
 
 
 def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN401

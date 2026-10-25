@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.model_loop import LoopState, RequestDecision
 
-_MARKER_KEY = "mindroom_approval_receipt"
 _SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _APPROVAL_RECEIPT_HEADER = (
     "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
@@ -73,16 +72,9 @@ def messages_with_approval_receipt(messages: Sequence[Message], receipt_text: st
         None,
     )
     if system_index is None:
-        receipt_message = Message(
-            role="system",
-            content=receipt_text,
-            provider_data={_MARKER_KEY: True},
-            add_to_agent_memory=False,
-        )
-        return [receipt_message, *outbound]
+        return [Message(role="system", content=receipt_text, add_to_agent_memory=False), *outbound]
     receipt_message = deepcopy(outbound[system_index])
     receipt_message.content = f"{receipt_message.content}\n\n{receipt_text}"
-    receipt_message.provider_data = {**(receipt_message.provider_data or {}), _MARKER_KEY: True}
     outbound[system_index] = receipt_message
     return outbound
 
