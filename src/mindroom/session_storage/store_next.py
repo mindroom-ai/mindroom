@@ -345,7 +345,7 @@ class ConversationStore:
             for run in edit(runs):
                 if (status := statuses.get(run.run_id)) is not None:
                     messages = [message.to_dict() for message in run.messages]
-                    _set_visible_messages(connection, self.names, run.run_id, messages, status)
+                    set_visible_messages(connection, self.names, run.run_id, messages, status)
 
     def delete_runs(
         self,
@@ -732,14 +732,14 @@ def _write_run(
         # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
         moved = parent_run_id is None and stored.status in _NON_VISIBLE and data["status"] not in _NON_VISIBLE
         created_at, seq = stored.created_at, next_seq(connection, names) if moved else stored.seq
-    _upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
-    _set_visible_messages(connection, names, run_id, data["messages"], data["status"])
+    upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
+    set_visible_messages(connection, names, run_id, data["messages"], data["status"])
     _adopt_requester(connection, names, session_id, data.get("user_id"))
     [written] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
     return _Saved(run_id, "written", created_at, now, moved, written)
 
 
-def _upsert_run(
+def upsert_run(
     connection: sqlite3.Connection,
     names: TableNames,
     session_id: str,
@@ -798,7 +798,7 @@ def _join_covering_row(
         )
 
 
-def _set_visible_messages(
+def set_visible_messages(
     connection: sqlite3.Connection,
     names: TableNames,
     run_id: str,
@@ -983,19 +983,38 @@ def store_fold(
     if not connection.execute(move, (seq, session_id, run.run_id)).rowcount:
         data = {**run.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
         created_at, kind = run.created_at or now, run_type(run)
-        _upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
+        upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
+    folded = [message.to_dict() for message in messages]
+    flag_folded(connection, names, session_id, run.run_id, folded, member_run_ids, summary_id)
+
+
+def flag_folded(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    run_id: str,
+    messages: Sequence[Mapping[str, Any]],
+    member_run_ids: Collection[str],
+    summary_id: int,
+) -> None:
+    """Flag the message dicts ``messages`` of stored run ``run_id`` and its member runs ``member_run_ids`` as folded.
+
+    Summary ``summary_id`` took them, in the caller's transaction. A message the run does not hold yet is stored
+    folded; one it holds keeps its data and gains the flag. A message or member run keeps the flag of the first fold
+    that took it, and none replays again.
+    """
     connection.executemany(
         f"INSERT INTO {quote_identifier(names.log_messages)} (run_id, message_id, ord, folded_by, data) "  # noqa: S608
         "VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, message_id) DO UPDATE SET folded_by = COALESCE(folded_by, excluded.folded_by)",
         [
-            (run.run_id, message.id, position, summary_id, json.dumps(message.to_dict()))
+            (run_id, message["id"], position, summary_id, json.dumps(message))
             for position, message in enumerate(messages)
         ],
     )
     connection.execute(
-        f"UPDATE {runs} SET folded_by = ? WHERE session_id = ? AND parent_run_id = ? AND folded_by IS NULL "  # noqa: S608
-        "AND run_id IN (SELECT value FROM json_each(?))",
-        (summary_id, session_id, run.run_id, json.dumps(sorted(member_run_ids))),
+        f"UPDATE {quote_identifier(names.log_runs)} SET folded_by = ? WHERE session_id = ? AND parent_run_id = ? "  # noqa: S608
+        "AND folded_by IS NULL AND run_id IN (SELECT value FROM json_each(?))",
+        (summary_id, session_id, run_id, json.dumps(sorted(member_run_ids))),
     )
 
 
@@ -1097,14 +1116,17 @@ __all__ = [
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",
+    "flag_folded",
     "is_removed",
     "migrate_database",
     "next_seq",
     "persist_to",
     "runs_without",
     "seen_event_ids",
+    "set_visible_messages",
     "source_event_ids",
     "store_fold",
     "summary_event_sets",
+    "upsert_run",
     "write_with_session_state",
 ]

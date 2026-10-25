@@ -1004,7 +1004,7 @@ def test_a_failed_save_writes_nothing_and_leaves_the_session_as_loaded(
         msg = "disk full"
         raise sqlite3.OperationalError(msg)
 
-    monkeypatch.setattr(store_module, "_set_visible_messages", fail)
+    monkeypatch.setattr(store_module, "set_visible_messages", fail)
 
     with pytest.raises(sqlite3.OperationalError, match="disk full"):
         store.save_run(session, _run("r2"), record_usage=True)

@@ -1130,15 +1130,18 @@ expose = [
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",
+    "flag_folded",
     "is_removed",
     "migrate_database",
     "next_seq",
     "persist_to",
     "runs_without",
     "seen_event_ids",
+    "set_visible_messages",
     "source_event_ids",
     "store_fold",
     "summary_event_sets",
+    "upsert_run",
     "write_with_session_state",
 ]
 
