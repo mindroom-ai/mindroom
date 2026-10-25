@@ -127,6 +127,7 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
         messages,
         calls_so_far=0,
         max_tool_calls_per_turn=1,
+        entity="code",
     )
 
     # Each answer is a failed call, which Claude and Gemini read as a failure.
@@ -143,6 +144,32 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
     assert batch.refused == ()
 
 
+def test_unknown_and_undecodable_calls_are_logged_without_their_arguments() -> None:
+    functions = spec(ScriptedModel([]), toolkit(add)).functions
+
+    with capture_logs() as logs:
+        plan_tool_batch(
+            [
+                tool_call("missing", "c1", x="secret-1"),
+                raw_tool_call("add", "c2", "{'a': secret-2"),
+                raw_tool_call("add", "c3", '"secret-3"'),
+            ],
+            functions,
+            [],
+            calls_so_far=0,
+            max_tool_calls_per_turn=None,
+            entity="code",
+        )
+
+    assert [(entry["log_level"], entry["event"], entry["tool_name"], entry["entity"]) for entry in logs] == [
+        ("warning", "tool_not_offered", "missing", "code"),
+        ("warning", "invalid_tool_arguments", "add", "code"),
+        ("warning", "invalid_tool_arguments", "add", "code"),
+    ]
+    # Arguments can hold user data, so neither they nor the decode error, which can quote them, are logged.
+    assert "secret" not in repr(logs)
+
+
 def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
     functions = spec(ScriptedModel([]), toolkit(add, echo)).functions
 
@@ -152,6 +179,7 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
         [],
         calls_so_far=1,
         max_tool_calls_per_turn=2,
+        entity="code",
     )
 
     assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
@@ -182,6 +210,7 @@ def test_empty_list_arguments_plan_as_no_arguments() -> None:
         [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
+        entity="code",
     )
 
     assert batch.planned[0].execution.tool_args is None
@@ -197,6 +226,7 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
         [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
+        entity="code",
     )
 
     plain, confirmation, external_call = (call.execution for call in batch.planned)
@@ -243,6 +273,7 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
         [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
+        entity="code",
     )
 
     results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
@@ -291,6 +322,7 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
         [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
+        entity="code",
     )
     dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context(), middleware=()))
     for _ in range(5):
@@ -309,7 +341,14 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
     finished: list[str] = []
 
     functions = spec(ScriptedModel([]), toolkit(_linger(release, finished))).functions
-    batch = plan_tool_batch([tool_call("linger", "c1")], functions, [], calls_so_far=0, max_tool_calls_per_turn=None)
+    batch = plan_tool_batch(
+        [tool_call("linger", "c1")],
+        functions,
+        [],
+        calls_so_far=0,
+        max_tool_calls_per_turn=None,
+        entity="code",
+    )
     dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context(), middleware=()))
     for _ in range(5):
         await asyncio.sleep(0)
@@ -333,6 +372,7 @@ async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results(
         [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
+        entity="code",
     )
 
     results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
@@ -360,6 +400,7 @@ async def test_dispatch_skips_paused_calls_and_passes_the_call_id_through_middle
         [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
+        entity="code",
     )
 
     results = await dispatch_tool_calls(batch.planned, run=context(), middleware=[middleware])
@@ -391,6 +432,7 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
         [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
+        entity="code",
     )
     results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
     assert [len(m.images or ()) for m in results] == [1, 0, 1]

@@ -50,9 +50,11 @@ async def send_stop_button(client: AsyncClient, room_id: str, message_id: str) -
 
 @dataclass
 class _LiveSpan:
-    """The task executing one reply span."""
+    """The task executing one reply span, and the room and thread of its reply, which its cancel log names."""
 
     task: asyncio.Task[object]
+    room_id: str
+    thread_id: str | None
     cancel_requested: bool = False
 
 
@@ -73,9 +75,9 @@ class SpanRegistry:
         self._expected: set[str] = set()
         self._cancel_on_start: dict[str, TaskCancelSource | None] = {}
 
-    def register(self, span_id: str, task: asyncio.Task[object]) -> None:
+    def register(self, span_id: str, task: asyncio.Task[object], *, room_id: str, thread_id: str | None) -> None:
         """Remember the task that executes one span, cancelling it at once if a Stop already reached the span."""
-        live = _LiveSpan(task)
+        live = _LiveSpan(task, room_id, thread_id)
         self._spans[span_id] = live
 
         def forget_finished(_task: asyncio.Task[object]) -> None:
@@ -102,7 +104,13 @@ class SpanRegistry:
         if live.cancel_requested:
             return
         live.cancel_requested = True
-        logger.info("Hard cancelling reply span task", span_id=span_id, cancel_source=cancel_source)
+        logger.info(
+            "Hard cancelling reply span task",
+            span_id=span_id,
+            cancel_source=cancel_source,
+            room_id=live.room_id,
+            thread_id=live.thread_id,
+        )
         request_task_cancel(live.task, cancel_source=cancel_source)
 
     def live_span_ids(self) -> frozenset[str]:

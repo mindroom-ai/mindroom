@@ -123,13 +123,15 @@ def plan_tool_batch(
     *,
     calls_so_far: int,
     max_tool_calls_per_turn: int | None,
+    entity: str | None,
 ) -> ToolBatch:
     """Resolve an assistant message's tool calls, apply the limit, and classify the admitted ones.
 
     A call naming no offered function, or whose arguments cannot be decoded, is answered with an error tool message
-    appended to ``messages`` right away and never counts toward the limit. Of the rest, each call past
-    ``max_tool_calls_per_turn`` gets a limit-error result instead of running. An admitted call whose function
-    requires confirmation or external execution is planned paused, with the flags its stored execution carries.
+    appended to ``messages`` right away, logged for ``entity`` without its arguments, and never counts toward the
+    limit. Of the rest, each call past ``max_tool_calls_per_turn`` gets a limit-error result instead of running. An
+    admitted call whose function requires confirmation or external execution is planned paused, with the flags its
+    stored execution carries.
     """
     planned: list[PlannedCall] = []
     refused: list[Message] = []
@@ -140,10 +142,12 @@ def plan_tool_batch(
         name = function_data.get("name")
         function = functions.get(name) if isinstance(name, str) else None
         if function is None:
+            logger.warning("tool_not_offered", entity=entity, tool_name=name)
             messages.append(failed_answer(call_id, name, MISSING_TOOL_ERROR_TEXT))
             continue
         arguments = parse_tool_arguments(function_data.get("arguments"), function)
         if isinstance(arguments, ToolArgumentError):
+            logger.warning("invalid_tool_arguments", entity=entity, tool_name=name)
             messages.append(failed_answer(call_id, name, arguments.error_text))
             continue
         if max_tool_calls_per_turn is not None:

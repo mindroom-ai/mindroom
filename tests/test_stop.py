@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.stop import SpanRegistry
@@ -17,7 +18,7 @@ async def test_a_span_stopped_before_its_task_registers_is_cancelled_when_it_doe
     registry.expect("span-1")
     assert not registry.cancel("span-1", cancel_source="user_stop")
     task = asyncio.create_task(asyncio.Event().wait())
-    registry.register("span-1", task)
+    registry.register("span-1", task, room_id="!room:example.org", thread_id=None)
     with pytest.raises(asyncio.CancelledError):
         await task
 
@@ -31,7 +32,7 @@ async def test_a_cancel_for_a_span_this_instance_does_not_run_is_not_kept() -> N
     registry.forget("span-1")
     assert not registry.cancel("span-1", cancel_source=None)
     task = asyncio.create_task(asyncio.sleep(0))
-    registry.register("span-1", task)
+    registry.register("span-1", task, room_id="!room:example.org", thread_id=None)
     await task
     assert not task.cancelled()
 
@@ -39,7 +40,7 @@ async def test_a_cancel_for_a_span_this_instance_does_not_run_is_not_kept() -> N
 def _registry_running(task: asyncio.Task[None]) -> SpanRegistry:
     """Return a registry whose span ``span-1`` is executed by ``task``."""
     registry = SpanRegistry()
-    registry.register("span-1", task)
+    registry.register("span-1", task, room_id="!room:example.org", thread_id="$thread:example.org")
     return registry
 
 
@@ -64,6 +65,29 @@ async def test_a_stop_hard_cancels_the_spans_task() -> None:
         await task
     assert not completed.is_set()
     assert registry.live_span_ids() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_spans_cancel_log_names_its_room_and_thread() -> None:
+    """The hard-cancel log names the room and thread of the reply the span executes."""
+    task = asyncio.create_task(asyncio.Event().wait())
+    registry = _registry_running(task)
+
+    with capture_logs() as logs:
+        assert registry.cancel("span-1", cancel_source="user_stop") is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert logs == [
+        {
+            "event": "Hard cancelling reply span task",
+            "log_level": "info",
+            "span_id": "span-1",
+            "cancel_source": "user_stop",
+            "room_id": "!room:example.org",
+            "thread_id": "$thread:example.org",
+        },
+    ]
 
 
 @pytest.mark.asyncio

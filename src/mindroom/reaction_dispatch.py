@@ -134,6 +134,7 @@ class ReactionDispatcher:
                 "Stop requested for message",
                 message_id=event.reacts_to,
                 requested_by=event.sender,
+                room_id=room.room_id,
             )
         return True
 

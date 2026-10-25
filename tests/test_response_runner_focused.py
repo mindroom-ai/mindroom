@@ -5149,7 +5149,7 @@ async def test_user_stop_mid_generation_cancels_the_span_task() -> None:
                 target=_target(),
                 response_function=respond,
                 span=SpanAttempt(
-                    register=lambda task: spans.register("span-1", task),
+                    register=lambda task: spans.register("span-1", task, room_id=_target().room_id, thread_id=None),
                     add_stop_button=AsyncMock(),
                     reply_event=AsyncMock(),
                 ),
