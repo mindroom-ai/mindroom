@@ -353,7 +353,7 @@ async def compact_scope_history(
         await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
         return None
 
-    mode = "manual" if state.force_compact_before_next_run else "auto"
+    mode = state.compaction_mode
     loaded_runs = list(session.runs)
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()

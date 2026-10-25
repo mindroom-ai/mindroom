@@ -124,6 +124,11 @@ class HistoryScopeState:
 
     force_compact_before_next_run: bool = False
 
+    @property
+    def compaction_mode(self) -> _CompactionMode:
+        """Return how a compaction of this scope is reported: manual when requested, else automatic."""
+        return "manual" if self.force_compact_before_next_run else "auto"
+
 
 @dataclass(frozen=True)
 class ResolvedHistoryExecutionPlan:

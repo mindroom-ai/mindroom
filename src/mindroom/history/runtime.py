@@ -284,7 +284,7 @@ async def prepare_scope_history(
             else execution_plan.hard_replay_budget_tokens
         )
         compaction_result = await _run_scope_compaction_with_lifecycle(
-            mode="manual" if state.force_compact_before_next_run else "auto",
+            mode=state.compaction_mode,
             session_id=session.session_id,
             scope=scope_context.scope,
             execution_plan=execution_plan,

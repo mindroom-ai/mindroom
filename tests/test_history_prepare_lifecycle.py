@@ -180,7 +180,12 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(
 
     assert prepared.replays_persisted_history is True
     assert prepared.compaction_reply_outcome == "success"
-    assert completed_outcome(lifecycle).summary == "merged summary"
+    start, outcome = lifecycle.events
+    assert isinstance(start, CompactionLifecycleStart)
+    assert isinstance(outcome, CompactionOutcome)
+    assert outcome.summary == "merged summary"
+    # A requested compaction reports itself as manual from its first notice to its outcome.
+    assert (start.mode, outcome.mode) == ("manual", "manual")
 
 
 @pytest.mark.asyncio
@@ -2014,7 +2019,12 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
     assert prepared.compaction_reply_outcome == "success"
-    assert completed_outcome(lifecycle).before_tokens == expected
+    outcome = completed_outcome(lifecycle)
+    assert outcome.before_tokens == expected
+    start = lifecycle.events[0]
+    assert isinstance(start, CompactionLifecycleStart)
+    # A compaction nobody requested reports itself as automatic from its first notice to its outcome.
+    assert (start.mode, outcome.mode) == ("auto", "auto")
 
 
 @pytest.mark.asyncio
