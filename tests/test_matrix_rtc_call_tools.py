@@ -301,7 +301,15 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         active_model_name=None,
     )
     call_build = cache._build(knowledge=None, refresh_scheduler=None)
-    chat_build = create_agent(AGENT, config, runtime_paths, None, supports_native_tool_approval=True)
+    chat_build = create_agent(
+        AGENT,
+        config,
+        runtime_paths,
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
     call_functions = _functions(call_build)
     chat_functions = _functions(chat_build)
 

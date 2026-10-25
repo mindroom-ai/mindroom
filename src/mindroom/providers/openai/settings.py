@@ -232,7 +232,8 @@ RESPONSES_FIELDS = _CLIENT_FIELDS | {
     "request_params",
     "cache_system_prompt",
 }
-# The Responses fields the Codex endpoint rejects; config load retires them and every Codex request drops them.
+# The Responses fields the Codex endpoint rejects; Codex ``extra_kwargs`` do not accept them, and every Codex request
+# drops them.
 CODEX_REJECTED_FIELDS = frozenset({"max_output_tokens", "temperature"})
 CODEX_FIELDS = RESPONSES_FIELDS - CODEX_REJECTED_FIELDS | {
     "codex_home",

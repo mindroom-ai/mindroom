@@ -24,7 +24,6 @@ from mindroom.agent_cli.lifetime import cli_control_calls, response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -54,7 +53,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, live_turn_tools_for_test
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -65,12 +64,14 @@ from tests.test_compact_context import _make_config
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.agent_cli.turn import LiveTurnTools
+
 
 def _owner(catalog, **options) -> LiveTurnTools:
     async def authorize(key, arguments):
         return None
 
-    return LiveTurnTools(
+    return live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -272,11 +273,12 @@ async def test_hidden_delegation_uses_native_child_owner(
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
-    owner = LiveTurnTools(
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
+    owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
-        run_child=child_response,
         delegation_depth=depth,
     )
     call_id = uuid4()
@@ -385,11 +387,12 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
-    owner = LiveTurnTools(
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
+    owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
-        run_child=child_response,
     )
 
     async def checkpoint(parent):
@@ -505,11 +508,12 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 await asyncio.Event().wait()
             return await run_delegated_child_response(child, **kwargs)
 
-        owner = LiveTurnTools(
+        monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
+        owner = live_turn_tools_for_test(
             CliTurnOwner(identity, "turn", "run"),
             catalog=catalog,
             authorize=_allow,
-            run_child=child_response,
         )
 
         async def checkpoint(parent):
@@ -529,7 +533,11 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                     requirement,
                     parent_bash_call_id="bash-parent",
                     delegation_depth=0,
-                    run_child=child_response,
+                    refresh_scheduler=None,
+                    decisions=None,
+                    denial_reasons=None,
+                    approval_calls=(),
+                    on_event=lambda _event: None,
                 )
             assert isinstance(paused, PausedAttempt)
             assert paused.cli_call is not None
@@ -570,6 +578,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 agent_mode="minimal",
                 history_storage=catalog.store,
                 supports_native_tool_approval=True,
+                knowledge=None,
+                active_model_name=None,
             )
 
             async def authorize_binding(binding):

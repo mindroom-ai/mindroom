@@ -80,7 +80,14 @@ def _runtime_paths_for(config: Config, config_path: Path | None = None) -> Runti
 
 def _create_agent_for_test(agent_name: str, config: Config) -> AgentBuild:
     """Create an agent with the explicit runtime bound to the test config."""
-    return create_agent(agent_name, config=config, runtime_paths=_runtime_paths_for(config), execution_identity=None)
+    return create_agent(
+        agent_name,
+        config=config,
+        runtime_paths=_runtime_paths_for(config),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
 
 def _self_config_tools(agent_name: str, config_path: Path) -> SelfConfigTools:
@@ -760,6 +767,8 @@ class TestUpdateOwnConfigAuthorization:
             runtime_paths=_runtime_paths_for(config),
             execution_identity=None,
             supports_native_tool_approval=True,
+            knowledge=None,
+            active_model_name=None,
         )
         update = offered_function(agent, "update_own_config")
         assert update.requires_confirmation is True

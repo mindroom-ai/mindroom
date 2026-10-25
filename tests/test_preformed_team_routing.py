@@ -25,7 +25,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_origin import TurnIntent
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import approval_continuation
@@ -368,7 +368,7 @@ async def test_team_reply_resumed_after_approval_saves_the_conversation(
         entity_kind="team",
         entity_name="t1",
         team_member_names=("a1", "a2"),
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
         memory_prompt="@team remember this",
     )
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -670,7 +670,7 @@ async def test_job_follow_up_hands_no_prompt_to_memory(
         entity_kind="team",
         entity_name="t1",
         team_member_names=("a1", "a2"),
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
         origin=follow_up,
     )
     assert bot._response_runner._approval_memory_persistence(continuation) is None

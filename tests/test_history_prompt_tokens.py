@@ -142,6 +142,7 @@ def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages()
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
     assert estimated_tokens > 0
@@ -176,10 +177,12 @@ def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt
         session=contaminated_session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     ) == estimate_prompt_visible_history_tokens(
         session=clean_session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
 
@@ -219,13 +222,14 @@ def test_estimate_prompt_visible_history_tokens_drops_a_tool_result_whose_call_t
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
     expected_messages = [
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
-    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, replay_model=None)
+    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, replay_estimator=None)
 
 
 def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_removes_all_runs() -> None:
@@ -242,6 +246,7 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
     expected_wrapper = str(compaction_summary_message("merged summary", run_local=False).content)

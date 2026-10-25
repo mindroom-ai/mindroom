@@ -120,7 +120,14 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
                 token = requester.set(f"request-{index}")
                 try:
                     tasks.append(
-                        asyncio.create_task(utils.resolve_knowledge_base_access_async("docs", config, runtime_paths)),
+                        asyncio.create_task(
+                            utils.resolve_knowledge_base_access_async(
+                                "docs",
+                                config,
+                                runtime_paths,
+                                execution_identity=None,
+                            ),
+                        ),
                     )
                 finally:
                     requester.reset(token)

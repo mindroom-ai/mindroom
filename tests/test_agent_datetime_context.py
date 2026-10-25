@@ -77,7 +77,14 @@ def test_render_date_context_invalid_timezone() -> None:
 def _build(config: Config, monkeypatch: pytest.MonkeyPatch) -> AgentBuild:
     """Build the general agent on the scripted provider."""
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    return create_agent("general", config, runtime_paths_for(config), execution_identity=None)
+    return create_agent(
+        "general",
+        config,
+        runtime_paths_for(config),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
 
 def test_agent_prompt_includes_datetime(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,6 +165,8 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=None,
+            refresh_scheduler=None,
+            active_model_names=None,
         )
         team = build_team_spec(
             members=members,

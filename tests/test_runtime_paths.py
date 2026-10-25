@@ -121,3 +121,20 @@ def test_isolated_runtime_paths_excludes_control_state_from_worker_payload(tmp_p
     assert CONTROL_STATE_PATH_ENV not in worker_paths.process_env
     assert CONTROL_STATE_PATH_ENV not in worker_paths.env_file_values
     assert constants.serialize_public_runtime_paths(worker_paths)["process_env"].get(CONTROL_STATE_PATH_ENV) is None
+
+
+def test_isolated_runtime_paths_keep_the_process_env_over_the_env_file(tmp_path: Path) -> None:
+    """An isolated worker sees each layer it may inherit in its own place, so the process env still wins."""
+    (tmp_path / ".env").write_text("MINDROOM_TIMEZONE=from-file\nMINDROOM_LOCALE=file-only\n", encoding="utf-8")
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_TIMEZONE": "from-process"},
+    )
+
+    worker_paths = constants.isolated_runtime_paths(runtime_paths)
+
+    assert "MINDROOM_LOCALE" not in worker_paths.process_env
+    assert worker_paths.env_file_values["MINDROOM_TIMEZONE"] == "from-file"
+    assert worker_paths.env_value("MINDROOM_TIMEZONE") == "from-process"
+    assert worker_paths.env_value("MINDROOM_LOCALE") == "file-only"

@@ -359,13 +359,13 @@ async def continue_paused_team_run(
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    member_model_names: Mapping[str, str] | None = None,
-    approval_calls: Sequence[ApprovalCall] = (),
-    history_scope: HistoryScope | None = None,
-    prior_tool_trace: Sequence[ToolTraceEntry] = (),
-    prior_presentation_state: Mapping[str, object] | None = None,
-    show_tool_calls: bool = True,
-    tool_trace_collector: list[ToolTraceEntry] | None = None,
+    member_model_names: Mapping[str, str] | None,
+    approval_calls: Sequence[ApprovalCall],
+    history_scope: HistoryScope | None,
+    prior_tool_trace: Sequence[ToolTraceEntry],
+    prior_presentation_state: Mapping[str, object] | None,
+    show_tool_calls: bool,
+    tool_trace_collector: list[ToolTraceEntry],
     progress: ProgressPublisher | None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
@@ -379,7 +379,7 @@ async def continue_paused_team_run(
         msg = "The paused team approval names no members"
         raise RuntimeError(msg)
     # None for an ad hoc team, which compacts and stores as no configured entity.
-    team_name = configured_team_name if configured_team_name in config.teams else None
+    team_name = config.configured_team_name(configured_team_name)
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
@@ -512,7 +512,7 @@ async def continue_paused_team_run(
             return continued_team_pause(presentation, paused)
         if continued.status is not RunStatus.completed:
             raise RuntimeError(continued.handover_content or "Team continuation did not complete")
-        if tool_trace_collector is not None and show_tool_calls:
+        if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
         # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
         # note. The document already holds what each run handed over beyond what it carried over, so rendering the

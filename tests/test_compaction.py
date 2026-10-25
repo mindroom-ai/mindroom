@@ -124,12 +124,10 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     ("plan_changes", "force", "history_tokens", "allow_native", "expected"),
     [
         ({}, True, 70_000, True, ("required", "forced", 59_904)),
-        ({}, True, None, True, ("required", "forced", 0)),
         ({"text_compaction_available": False}, True, 5_000, True, ("none", "forced_unavailable", None)),
         ({"authored_compaction_enabled": False}, False, 60_000, True, ("none", "auto_disabled", None)),
         ({"text_compaction_available": False}, False, 60_000, True, ("none", "compaction_unavailable", None)),
         ({"replay_budget_tokens": None}, False, 60_000, True, ("none", "missing_budget", None)),
-        ({}, False, None, True, ("none", "missing_budget", None)),
         ({}, False, 10_000, True, ("none", "under_trigger", 10_000)),
         ({}, False, 60_000, True, ("required", "history_exceeds_hard_budget", 59_904)),
         ({}, False, 12_001, False, ("required", "over_trigger_native_disabled", 10_000)),
@@ -140,7 +138,7 @@ def test_compaction_policy_classifies_every_branch(
     plan_changes: dict[str, object],
     *,
     force: bool,
-    history_tokens: int | None,
+    history_tokens: int,
     allow_native: bool,
     expected: tuple[str, str, int | None],
 ) -> None:
@@ -152,6 +150,7 @@ def test_compaction_policy_classifies_every_branch(
         force_compact_before_next_run=force,
         current_history_tokens=history_tokens,
         allow_native_compaction=allow_native,
+        summary_tokens=0,
     )
 
     assert (decision.mode, decision.reason, decision.fitted_replay_tokens) == expected
@@ -208,6 +207,8 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
             plan=_make_execution_plan(),
             force_compact_before_next_run=False,
             current_history_tokens=12_001,
+            allow_native_compaction=True,
+            summary_tokens=0,
         ),
         compaction_reply_outcome="none",
         replay_plan=ResolvedReplayPlan(

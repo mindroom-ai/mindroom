@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ import pytest
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel, ValidationError
 
+from mindroom import timing
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -80,6 +82,7 @@ from tests.test_thread_export_projected_history import raw as _projection_raw
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+    from types import ModuleType
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore, PrincipalStore
@@ -3357,3 +3360,39 @@ def test_conversation_text_drops_tool_markers() -> None:
     text = _build_conversation_text([message], trusted_sender_ids=set())
     assert "🔧" not in text
     assert "Done." in text
+
+
+@pytest.mark.asyncio
+async def test_summary_generation_and_the_whole_summary_pass_time_under_their_own_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With timing on, the pass that queues a summary and the model call inside it log two distinct durations."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    labels: list[str] = []
+    monkeypatch.setattr(timing, "emit_elapsed_timing", lambda label, _start, **_fields: labels.append(label))
+
+    def timed_copy(module_name: str) -> ModuleType:
+        # A private copy decorates its timers now that timing is on, leaving the imported module untouched.
+        spec = importlib.util.find_spec(module_name)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    effects = timed_copy("mindroom.post_response_effects")
+    summaries = timed_copy("mindroom.thread_summary")
+    await effects.PostResponseEffectsSupport._timed_thread_summary(MagicMock(), summary_coro=asyncio.sleep(0))
+    monkeypatch.setattr(summaries, "_summary_provider", MagicMock())
+    monkeypatch.setattr(summaries, "complete_prompt", AsyncMock(side_effect=RuntimeError("model unavailable")))
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        await summaries._generate_summary(
+            [],
+            _mock_config(model_name="default"),
+            _mock_runtime_paths(),
+            model_name="default",
+            tag_vocabulary=None,
+            trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
+        )
+
+    assert labels == ["maybe_generate_thread_summary", "thread_summary_generation"]

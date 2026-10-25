@@ -115,6 +115,25 @@ def _runtime_paths_for_config(config: Config, process_env: dict[str, str] | None
     return runtime_paths
 
 
+def _team_identity(
+    team_name: str,
+    runtime_paths: RuntimePaths,
+    *,
+    session_id: str = "session-1",
+) -> ToolExecutionIdentity:
+    """Return the identity the endpoint builds for an anonymous request to ``team/<team_name>`` in ``session_id``."""
+    return build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name=f"team/{team_name}",
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+    )
+
+
 def _fake_indexing_settings(base_id: str) -> IndexingSettings:
     return IndexingSettings(
         base_id=base_id,
@@ -469,6 +488,8 @@ def test_openai_compatible_agent_hides_approval_gated_tools(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -510,6 +531,8 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path, m
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -567,6 +590,8 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
@@ -619,6 +644,8 @@ def test_openai_compatible_agent_hides_script_gated_tools(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -1825,6 +1852,7 @@ class TestStreamingCompletion:
             ],
         )
 
+        runtime_paths = _runtime_paths()
         with (
             patch("mindroom.providers.registry._build_adapter", return_value=model),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
@@ -1834,9 +1862,21 @@ class TestStreamingCompletion:
                 "Hello",
                 "session-123",
                 test_config,
-                _runtime_paths(),
+                runtime_paths,
                 None,
                 model_name="default",
+                knowledge=None,
+                execution_identity=build_tool_execution_identity(
+                    channel="openai_compat",
+                    agent_name="general",
+                    session_id="session-123",
+                    runtime_paths=runtime_paths,
+                    requester_id=None,
+                    room_id=None,
+                    thread_id=None,
+                    resolved_thread_id=None,
+                ),
+                refresh_scheduler=None,
             )
 
         assert isinstance(response, openai_compat.OpenAIStreamingResponse)
@@ -1895,6 +1935,7 @@ class TestStreamingCompletion:
                 None,
                 model_name="default",
                 execution_identity=execution_identity,
+                refresh_scheduler=None,
             )
 
         assert isinstance(response, StreamingResponse)
@@ -3355,6 +3396,46 @@ def test_team_run_uses_mapped_requester_instead_of_request_body_user(team_config
 
 
 @pytest.mark.parametrize("stream", [False, True])
+def test_agent_turn_names_the_mapped_keys_requester(test_config: Config, stream: bool) -> None:
+    """An agent turn on a key mapped to a requester names that requester in its turn context."""
+    test_config.agents["general"].access = ResponderAccessConfig(users=["@alice:localhost"])
+    runtime_paths = _runtime_paths(
+        {
+            "OPENAI_COMPAT_API_KEYS": "alice-key",
+            "OPENAI_COMPAT_API_KEY_REQUESTERS": json.dumps({"alice-key": "@alice:localhost"}),
+        },
+    )
+    persist_entity_accounts(test_config, runtime_paths)
+    app = FastAPI()
+    app.include_router(openai_compat.router)
+    initialize_api_app(app, runtime_paths)
+    contexts: list[ResponseTurnContext] = []
+
+    async def respond(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        contexts.append(ctx)
+        return "Response"
+
+    async def stream_response(ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[TextDelta]:
+        contexts.append(ctx)
+        yield TextDelta("Response")
+
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+        patch("mindroom.api.openai_compat.ai_response", new=respond),
+        patch("mindroom.api.openai_compat.stream_agent_response", new=stream_response),
+        TestClient(app, base_url="http://localhost") as client,
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer alice-key"},
+            json={"model": "general", "messages": [{"role": "user", "content": "Hi"}], "stream": stream},
+        )
+
+    assert response.status_code == 200
+    assert [ctx.requester_id for ctx in contexts] == ["@alice:localhost"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
 def test_team_run_records_helper_usage_in_its_conversation(team_app_client: TestClient, stream: bool) -> None:
     """Helper work during an API team run, such as a member's Claude Code session, belongs to the team conversation."""
     owners: list[HelperUsageOwner | None] = []
@@ -3779,6 +3860,7 @@ class TestTeamCompletion:
                 None,
                 openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
+                refresh_scheduler=None,
             )
             if isinstance(response, StreamingResponse):
                 body_chunks = [
@@ -3930,6 +4012,7 @@ class TestTeamCompletion:
                 None,
                 openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
+                refresh_scheduler=None,
             )
 
         assert isinstance(response, StreamingResponse)
@@ -4583,6 +4666,7 @@ class TestTeamCompletion:
                 runtime_paths=runtime_paths,
                 thread_history=[],
                 team_model_name="default",
+                execution_identity=_team_identity("general", runtime_paths, session_id="session-openai-team-prep"),
             )
 
         assert prepared.prompt_text == "assistant: Previous team reply\n\nAnalyze this."
@@ -4632,7 +4716,7 @@ class TestTeamCompletion:
             session_id="session-1",
             runtime_paths=runtime_paths,
             config=config,
-            execution_identity=None,
+            execution_identity=_team_identity("coord_team", runtime_paths),
             team_name="coord_team",
         )
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
@@ -4641,9 +4725,11 @@ class TestTeamCompletion:
             "coord_team",
             config,
             runtime_paths,
-            execution_identity=None,
+            execution_identity=_team_identity("coord_team", runtime_paths),
             scope_context=scope_context,
             models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+            unavailable_bases={},
+            refresh_scheduler=None,
         )
 
         assert (built.spec.leader.id, built.spec.mode) == ("coord_team", expected)
@@ -4688,6 +4774,8 @@ class TestTeamCompletion:
             execution_identity=execution_identity,
             scope_context=scope_context,
             models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
+            unavailable_bases={},
+            refresh_scheduler=None,
         )
 
         assert built.spec.mode is TeamMode.COORDINATE
@@ -4717,7 +4805,7 @@ class TestTeamCompletion:
             session_id="session-1",
             runtime_paths=runtime_paths,
             config=config,
-            execution_identity=None,
+            execution_identity=_team_identity("coord_team", runtime_paths),
             team_name="coord_team",
         )
         assert scope_context is not None
@@ -4730,9 +4818,11 @@ class TestTeamCompletion:
                 "coord_team",
                 config,
                 runtime_paths,
-                execution_identity=None,
+                execution_identity=_team_identity("coord_team", runtime_paths),
                 scope_context=scope_context,
                 models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+                unavailable_bases={},
+                refresh_scheduler=None,
             )
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
@@ -4778,7 +4868,7 @@ class TestTeamCompletion:
                 session_id="session-1",
                 runtime_paths=runtime_paths,
                 config=config,
-                execution_identity=None,
+                execution_identity=_team_identity("team_with_kb", runtime_paths),
                 team_name="team_with_kb",
             )
             assert scope_context is not None
@@ -4786,9 +4876,11 @@ class TestTeamCompletion:
                 "team_with_kb",
                 config,
                 runtime_paths,
-                execution_identity=None,
+                execution_identity=_team_identity("team_with_kb", runtime_paths),
                 scope_context=scope_context,
                 models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
+                unavailable_bases={},
+                refresh_scheduler=None,
             )
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge

@@ -570,6 +570,8 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 coordinator.runtime_paths,
                 execution_identity=owner,
                 persist_runtime_state=False,
+                knowledge=None,
+                active_model_name=None,
             )
             assert build.tool_jobs is not None
             tool = build.tool_jobs.tools[function_name]

@@ -116,13 +116,13 @@ def materialize_exact_team_members(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    active_model_names: Mapping[str, str] | None,
     include_openai_compat_guidance: bool = False,
     materializable_agent_names: set[str] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     reason_prefix: str = "Team request",
     supports_native_tool_approval: bool = False,
-    active_model_names: Mapping[str, str] | None = None,
     required_tool_names: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback."""
@@ -205,10 +205,10 @@ def materialize_team_members(
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    configured_team_name: str | None = None,
+    configured_team_name: str | None,
+    reason_prefix: str,
+    active_model_names: Mapping[str, str],
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
-    reason_prefix: str = "Team request",
-    active_model_names: Mapping[str, str] | None = None,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set from the live orchestrator without silent fallback."""
     assert orchestrator.config is not None

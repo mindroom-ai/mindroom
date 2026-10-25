@@ -10,6 +10,7 @@ from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import list_knowledge_files
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.logging_config import get_logger
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-_SOURCE_PATH_KEY = "source_path"
 _SEMANTIC_TIMING_PREFIX = "system_prompt_assembly.memory_search.semantic"
 _memory_refresh_scheduler = KnowledgeRefreshScheduler()
 
@@ -85,7 +85,7 @@ def _memory_results_from_hits(
 ) -> list[MemoryResult]:
     results: list[MemoryResult] = []
     for rank, hit in enumerate(hits, start=1):
-        source_file = hit.meta_data.get(_SOURCE_PATH_KEY)
+        source_file = hit.meta_data.get(SOURCE_PATH_KEY)
         if not isinstance(source_file, str):
             source_file = "memory"
         content = " ".join(hit.content.split())
@@ -96,11 +96,8 @@ def _memory_results_from_hits(
                 id=f"semantic:{source_file}:{rank}",
                 memory=content,
                 user_id=scope_user_id,
-                # Hits arrive nearest first; the score keeps that order without claiming a similarity.
-                # TODO(simplify): Whatever its distance, a hit scores just under 1.0, so it outranks every merged team
-                # keyword match short of one matching all query words. Score from the hit's distance. Models would see
-                # merged memories in another order.
-                score=1.0 - (rank * 0.000001),
+                # The cosine similarity, which merged keyword matches' word-overlap scores rank against.
+                score=1.0 - hit.meta_data["distances"],
                 metadata={"source_file": source_file, "semantic": True, "search_mode": "semantic"},
             ),
         )

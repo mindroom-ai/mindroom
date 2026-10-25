@@ -8,6 +8,8 @@ from typing import Any
 from pydantic import TypeAdapter
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
+#: The stored chunk metadata key, and so the hit ``meta_data`` key, naming the chunk's source file relative to its base.
+SOURCE_PATH_KEY = "source_path"
 
 
 @dataclass(frozen=True)
@@ -16,9 +18,8 @@ class ReadRequest:
 
     path: str
     collection: str
-    #: The search query's embedding; a request without one asks whether the collection exists, which only tests send,
-    #: since ``ChromaReadProxy.exists`` answers in-process.
-    embedding: list[float] | None = None
+    #: The search query's embedding.
+    embedding: list[float]
     limit: int = 5
     published_settings: dict[str, str] | None = None
 
@@ -37,9 +38,8 @@ class SearchHit:
 
 @dataclass(frozen=True)
 class ReadResult:
-    """Existence or search hits, with an explicit native failure classification."""
+    """Search hits, or an explicit native failure classification."""
 
-    exists: bool = False
     hits: list[SearchHit] = field(default_factory=list)
     error_type: str | None = None
 

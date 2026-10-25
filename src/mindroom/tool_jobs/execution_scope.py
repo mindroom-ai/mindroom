@@ -19,7 +19,7 @@ class _OwnedExecution(Protocol):
     def __call__[FunctionT: Callable[..., object]](self, function: FunctionT, /) -> FunctionT: ...
 
 
-def owned_tool_execution(*, enabled: Callable[..., bool] = lambda *_args, **_kwargs: True) -> _OwnedExecution:
+def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
     """Decorate a coroutine or async stream to own resources, durable result claims, and job notices when ``enabled``.
 
     The decorated function keeps its signature for type checking.
