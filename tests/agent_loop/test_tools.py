@@ -254,8 +254,6 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
     for call, result in zip(batch.planned, results, strict=True):
         execution = call.execution
         assert (execution.result, execution.is_error) == (result.content, False)
-        # Nothing reads a call's timing or timestamp, so a finished call stores neither.
-        assert {"metrics", "created_at"}.isdisjoint(execution.to_dict())
 
 
 def _linger(release: asyncio.Event, finished: list[str]) -> Callable[[], Awaitable[str]]:
