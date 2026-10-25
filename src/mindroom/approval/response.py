@@ -103,8 +103,8 @@ def identify_approval_tools(
     paused: PausedAttempt,
     *,
     default_agent_name: str,
-) -> tuple[tuple[ToolExecution, str, str, str], ...]:
-    """Resolve exact paused call IDs, names, and invoking member ownership."""
+) -> tuple[tuple[ToolExecution, str], ...]:
+    """Pair each paused call with the agent that invokes it, a team member by its config name."""
     # Each frozen member slot's config name, by slot id; a requirement names its member by either.
     slots = _team_config_names_by_provider_id(paused.response_presentation_state)
     owners = {
@@ -112,20 +112,10 @@ def identify_approval_tools(
         for requirement in paused.requirements
         if requirement.member_agent_id
     }
-    identified: list[tuple[ToolExecution, str, str, str]] = []
-    for tool in paused.tools:
-        if not tool.tool_call_id:
-            msg = "Paused approval tool is missing its exact identity"
-            raise RuntimeError(msg)
-        identified.append(
-            (
-                tool,
-                tool.tool_call_id,
-                tool.tool_name,
-                paused.approval_agent_name or owners.get(tool.tool_call_id) or default_agent_name,
-            ),
-        )
-    return tuple(identified)
+    return tuple(
+        (tool, paused.approval_agent_name or owners.get(tool.tool_call_id) or default_agent_name)
+        for tool in paused.tools
+    )
 
 
 def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls: bool) -> None:
@@ -140,17 +130,13 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     if not tool_markers_match_trace(paused.response_text, paused.tool_trace):
         raise RuntimeError(unordered)
     requirements_by_call_id = {
-        requirement.tool_execution.tool_call_id: requirement
-        for requirement in paused.requirements
-        if requirement.tool_execution.tool_call_id
+        requirement.tool_execution.tool_call_id: requirement for requirement in paused.requirements
     }
     is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
     config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
     member_names = config_names_by_provider_id.values()
     for tool in paused.tools:
         call_id = tool.tool_call_id
-        if call_id is None:
-            raise RuntimeError(unordered)
         requirement = requirements_by_call_id.get(call_id)
         member_id, anchor_id = (None, call_id) if requirement is None else pending_call_slot(requirement, member_names)
         matches = [
@@ -188,7 +174,7 @@ def continuation_target(
 
 
 async def plan_approval_calls(
-    identified: tuple[tuple[ToolExecution, str, str, str], ...],
+    identified: tuple[tuple[ToolExecution, str], ...],
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -203,11 +189,11 @@ async def plan_approval_calls(
     """
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
     decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
-    for tool, tool_call_id, tool_name, invoking_agent in identified:
+    for tool, invoking_agent in identified:
         requires_approval, timeout_seconds = await evaluate_tool_approval(
             config,
             runtime_paths,
-            tool_name,
+            tool.tool_name,
             dict(tool.tool_args or {}),
             invoking_agent,
         )
@@ -220,7 +206,7 @@ async def plan_approval_calls(
             auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
             is not None
         )
-        decisions[tool_call_id] = (
+        decisions[tool.tool_call_id] = (
             ContinuationDecision.APPROVED
             if not requires_approval or window_open
             else None
@@ -232,28 +218,30 @@ async def plan_approval_calls(
     now = datetime.now(UTC)
     calls = tuple(
         ApprovalCall(
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
+            tool_call_id=tool.tool_call_id,
+            tool_name=tool.tool_name,
             invoking_agent=invoking_agent,
-            toolkit_name=toolkit_owners.get((invoking_agent, tool_name)),
+            toolkit_name=toolkit_owners.get((invoking_agent, tool.tool_name)),
             arguments_digest=approval_arguments_digest(tool.tool_args),
-            expires_at_ns=int((now + timedelta(seconds=decisions[tool_call_id][1])).timestamp() * 1_000_000_000),
-            decision=decisions[tool_call_id][0],
+            expires_at_ns=int(
+                (now + timedelta(seconds=decisions[tool.tool_call_id][1])).timestamp() * 1_000_000_000,
+            ),
+            decision=decisions[tool.tool_call_id][0],
             reason=(
                 "No approval recipient is configured; the tool was denied safely."
-                if decisions[tool_call_id][0] is ContinuationDecision.DENIED
+                if decisions[tool.tool_call_id][0] is ContinuationDecision.DENIED
                 else None
             ),
-            human_approval_required=decisions[tool_call_id][2],
+            human_approval_required=decisions[tool.tool_call_id][2],
         )
-        for tool, tool_call_id, tool_name, invoking_agent in identified
+        for tool, invoking_agent in identified
     )
     if any(call.toolkit_name is None for call in calls):
         msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"
         raise RuntimeError(msg)
     gated_calls = tuple(call for call in calls if call.decision is None)
     return _ApprovalPausePlan(
-        tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
+        tools=tuple(tool for tool, _invoking_agent in identified),
         calls=calls,
         waiting_text=(
             "Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in gated_calls) if gated_calls else None

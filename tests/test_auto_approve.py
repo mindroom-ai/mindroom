@@ -103,11 +103,11 @@ def test_auto_approve_window_expires_and_survives_unreadable_records(tmp_path: P
 
 async def _plan(runtime_paths: RuntimePaths, tool: ToolExecution, *, requester_id: str, thread_id: str) -> object:
     plan = await plan_approval_calls(
-        ((tool, "call-1", tool.tool_name or "", "code"),),
+        ((tool, "code"),),
         config=Config(tool_approval=ToolApprovalConfig(default="require_approval")),
         runtime_paths=runtime_paths,
         requester_id=requester_id,
-        toolkit_owners={("code", tool.tool_name or ""): "test_toolkit"},
+        toolkit_owners={("code", tool.tool_name): "test_toolkit"},
         room_id=ROOM_ID,
         thread_id=thread_id,
     )

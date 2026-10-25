@@ -270,6 +270,47 @@ def test_tool_execution_round_trips_agno_dict_minus_dropped_keys() -> None:
     assert set(agno_dict) - set(owned) == DROPPED_TOOL_EXECUTION_KEYS
 
 
+@pytest.mark.parametrize("stored_id", [None, "", "absent"])
+def test_a_tool_execution_stored_without_a_call_id_reads_with_a_new_one(stored_id: str | None) -> None:
+    """Agno 2.4.7 stored Ollama's calls without ids; each reads with a new id and every other key as stored."""
+    stored = agno("tool_execution")
+    if stored_id == "absent":
+        del stored["tool_call_id"]
+    else:
+        stored["tool_call_id"] = stored_id
+
+    first, second = ToolExecution.from_dict(stored), ToolExecution.from_dict(stored)
+
+    assert first.tool_call_id
+    assert second.tool_call_id
+    assert first.tool_call_id != second.tool_call_id
+    written = first.to_dict()
+    assert written.pop("tool_call_id") == first.tool_call_id
+    assert written == without(stored, DROPPED_TOOL_EXECUTION_KEYS | {"tool_call_id"})
+
+
+def test_a_run_whose_tool_executions_have_no_call_ids_still_loads() -> None:
+    """A run Agno 2.4.7 stored for Ollama, whose calls carried no ids, loads with a new id on each tool execution."""
+    stored = json.loads((FIXTURE_RUNS / "run_output.json").read_text())["agent_code:run-tools"]
+    for tool in stored["tools"]:
+        tool["tool_call_id"] = None
+    for message in stored["messages"]:
+        for call in message.get("tool_calls") or ():
+            del call["id"]
+        if message["role"] == "tool":
+            del message["tool_call_id"]
+
+    written = RunRecord.from_dict(stored).to_dict()
+
+    new_ids = {tool.pop("tool_call_id") for tool in written["tools"]}
+    assert len(new_ids) == len(stored["tools"]) == 3
+    assert all(isinstance(new_id, str) and new_id for new_id in new_ids)
+    expected = expected_run_dict(stored)
+    for tool in expected["tools"]:
+        del tool["tool_call_id"]
+    assert written == expected
+
+
 def test_tool_execution_default_dict_matches_agno_minus_dropped_keys() -> None:
     owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={}, created_at=7)
 
@@ -438,8 +479,12 @@ def test_run_requirement_reads_rows_agno_read_leniently() -> None:
     assert (owned.tool_execution.tool_name, owned.tool_execution.tool_args) == ("unknown", {})
     assert owned.created_at.tzinfo is not None
     agno_dict, owned_dict = expected_requirement_dict(agno("run_requirement_read_leniently")), owned.to_dict()
+    # Agno's placeholder had no call id; the owned one gets a new id, as any tool execution stored without one.
+    assert agno_dict["tool_execution"]["tool_call_id"] is None
+    assert owned_dict["tool_execution"]["tool_call_id"] == owned.tool_execution.tool_call_id
+    assert owned.tool_execution.tool_call_id
     for result in (agno_dict, owned_dict):
-        del result["created_at"], result["tool_execution"]["created_at"]
+        del result["created_at"], result["tool_execution"]["created_at"], result["tool_execution"]["tool_call_id"]
     assert owned_dict == agno_dict
 
 
@@ -450,7 +495,13 @@ DECISIONS_ON_THE_REQUIREMENT: dict[str, dict[str, Any]] = {
     "external-result": {"external_execution_result": "done"},
     "explicit-tool-decision-wins": {
         "confirmation": False,
-        "tool_execution": {"tool_name": "t", "requires_confirmation": True, "confirmed": True, "created_at": 3},
+        "tool_execution": {
+            "tool_call_id": "call-1",
+            "tool_name": "t",
+            "requires_confirmation": True,
+            "confirmed": True,
+            "created_at": 3,
+        },
     },
 }
 
@@ -460,13 +511,16 @@ def test_run_requirement_moves_a_decision_on_the_requirement_onto_its_tool_execu
     data = {
         "id": "req-1",
         "created_at": "2026-01-02T03:04:05+00:00",
-        "tool_execution": {"tool_name": "t", "requires_confirmation": True, "created_at": 3},
+        "tool_execution": {"tool_call_id": "call-1", "tool_name": "t", "requires_confirmation": True, "created_at": 3},
         **DECISIONS_ON_THE_REQUIREMENT[case],
     }
 
     owned = RunRequirement.from_dict(data).to_dict()
 
-    assert owned == expected_requirement_dict(agno("run_requirement_decision_moved")[case])
+    # Agno's goldens were recorded for these entries without a call id.
+    expected = expected_requirement_dict(agno("run_requirement_decision_moved")[case])
+    expected["tool_execution"]["tool_call_id"] = "call-1"
+    assert owned == expected
 
 
 @pytest.mark.parametrize(

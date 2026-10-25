@@ -82,9 +82,9 @@ class StreamingToolTracker:
         origin: ToolCallOrigin | None = None,
     ) -> tuple[str, ToolTraceEntry | None]:
         """Record one started tool call and return its visible marker, or no trace entry for a call already pending."""
-        call_id = stable_call_id(call)
-        if call_id is not None and any(
-            pending.scope_key == scope_key and pending.tool_call_id == call_id for pending in self.pending_tools
+        if any(
+            pending.scope_key == scope_key and pending.tool_call_id == call.tool_call_id
+            for pending in self.pending_tools
         ):
             return "", None
         visible_text, trace_entry = format_tool_started_event(call, tool_index=tool_index, origin=origin)
@@ -93,7 +93,7 @@ class StreamingToolTracker:
                 scope_key=scope_key,
                 tool_name=trace_entry.tool_name,
                 trace_entry=trace_entry,
-                tool_call_id=call_id,
+                tool_call_id=call.tool_call_id,
                 visible_tool_index=tool_index,
                 visible_text=visible_text,
             ),
@@ -159,12 +159,11 @@ class StreamingToolTracker:
         self.pending_tools = synchronized
 
     def _find_pending_tool_index(self, *, scope_key: str, call: ReportedCall) -> int | None:
-        call_id = stable_call_id(call)
-        if call_id is not None:
-            for pos in range(len(self.pending_tools) - 1, -1, -1):
-                pending_tool = self.pending_tools[pos]
-                if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
-                    return pos
+        for pos in range(len(self.pending_tools) - 1, -1, -1):
+            pending_tool = self.pending_tools[pos]
+            if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call.tool_call_id:
+                return pos
+        # A slot restored from a trace that kept no call ids is matched by its tool's name.
         for pos in range(len(self.pending_tools) - 1, -1, -1):
             pending_tool = self.pending_tools[pos]
             if (
@@ -247,11 +246,6 @@ class CollectedStreamPresentation:
         """Show the current ordered presentation in a live reply, when a progress publisher is attached."""
         if progress is not None:
             await progress(StructuredStreamChunk(content=self.response_text, tool_trace=self.tool_trace))
-
-
-def stable_call_id(call: ReportedCall) -> str | None:
-    """Return the call's provider id without surrounding whitespace, or None when it has none."""
-    return (call.tool_call_id or "").strip() or None
 
 
 def _to_compact_text(value: object) -> str:
@@ -799,7 +793,7 @@ def _tool_args(call: ReportedCall) -> dict[str, object]:
 
 def _identified(trace: ToolTraceEntry, call: ReportedCall, origin: ToolCallOrigin | None) -> ToolTraceEntry:
     """Stamp a trace entry with its call's identity, and with where a hidden CLI call ran."""
-    trace.tool_call_id = stable_call_id(call)
+    trace.tool_call_id = call.tool_call_id
     if origin is not None:
         trace.parent_bash_call_id = origin.parent_bash_call_id
         trace.toolkit_name = origin.toolkit_name

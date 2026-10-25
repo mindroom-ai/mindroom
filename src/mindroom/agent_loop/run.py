@@ -239,8 +239,7 @@ def resumed_record[R: AnyRunRecord](paused: R) -> R:
     by_call = {
         requirement.tool_execution.tool_call_id: requirement.tool_execution
         for requirement in record.requirements
-        if requirement.tool_execution.tool_call_id is not None
-        and (requirement.member_agent_id is None or requirement.member_run_id == paused.run_id)
+        if requirement.member_agent_id is None or requirement.member_run_id == paused.run_id
     }
     record.tools = [by_call.get(tool.tool_call_id) or tool for tool in record.tools or []]
     return record
@@ -257,11 +256,7 @@ def decide_requirements(
 
     Anything but exact coverage of the waiting calls is refused before any decision is recorded.
     """
-    requirements = {
-        requirement.tool_execution.tool_call_id: requirement
-        for requirement in record.requirements or ()
-        if requirement.tool_execution.tool_call_id is not None
-    }
+    requirements = {requirement.tool_execution.tool_call_id: requirement for requirement in record.requirements or ()}
     waiting = [*(record.tools or ()), *(requirement.tool_execution for requirement in record.requirements or ())]
     confirmations = {tool.tool_call_id for tool in waiting if tool.requires_confirmation}
     externals = {tool.tool_call_id for tool in waiting if tool.external_execution_required}

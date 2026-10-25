@@ -68,6 +68,7 @@ def test_split_interrupted_tool_trace_treats_explicit_success_without_result_as_
     completed, interrupted = split_interrupted_tool_trace(
         [
             ToolExecution(
+                tool_call_id="call-noop",
                 tool_name="noop",
                 tool_args={"x": 1},
                 result=None,
@@ -85,6 +86,7 @@ def test_split_interrupted_tool_trace_keeps_missing_terminal_state_as_interrupte
     completed, interrupted = split_interrupted_tool_trace(
         [
             ToolExecution(
+                tool_call_id="call-noop",
                 tool_name="noop",
                 tool_args={"x": 1},
                 result=None,
@@ -102,6 +104,7 @@ def test_interrupted_replay_describes_terminal_tool_errors_without_implying_succ
     completed, interrupted = split_interrupted_tool_trace(
         [
             ToolExecution(
+                tool_call_id="call-request",
                 tool_name="request",
                 tool_args={"url": "https://example.com"},
                 result="HTTP 500",

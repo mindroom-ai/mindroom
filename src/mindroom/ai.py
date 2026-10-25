@@ -105,7 +105,6 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     complete_pending_tool_block,
     format_tool_combined,
-    stable_call_id,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -497,21 +496,17 @@ def _attach_blocking_pause_presentation(
     presentation.append_text(_extract_response_content(record, show_tool_calls=False))
     pending_by_id: dict[str, ToolExecution] = {}
     for tool in paused.tools:
-        call_id = stable_call_id(tool.call)
-        if call_id is None or call_id in pending_by_id:
-            msg = "Paused approval tool is missing its exact identity"
+        if tool.tool_call_id in pending_by_id:
+            msg = "Paused approval tools share a tool-call ID"
             raise RuntimeError(msg)
-        pending_by_id[call_id] = tool
+        pending_by_id[tool.tool_call_id] = tool
 
     # A delegation still waits for its child, or for its turn after a sibling's, until the driver answers it.
     answered = answered_delegation_calls(record)
     seen_ids: set[str] = set()
     for tool in (*tuple(record.tools or ()), *paused.tools):
         call = tool.call
-        call_id = stable_call_id(call)
-        if call_id is None:
-            msg = "Blocking approval output has a tool without stable identity"
-            raise RuntimeError(msg)
+        call_id = call.tool_call_id
         if call_id in seen_ids:
             continue
         seen_ids.add(call_id)
@@ -1719,7 +1714,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     phase="tool_call_started",
                     agent_name=agent_name,
                     tool_name=event.call.tool_name,
-                    tool_call_id=stable_call_id(event.call),
+                    tool_call_id=event.call.tool_call_id,
                     show_tool_calls=show_tool_calls,
                 )
                 _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls)
@@ -1734,7 +1729,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     phase="tool_call_completed",
                     agent_name=agent_name,
                     tool_name=event.call.tool_name,
-                    tool_call_id=stable_call_id(event.call),
+                    tool_call_id=event.call.tool_call_id,
                     show_tool_calls=show_tool_calls,
                 )
                 _track_stream_tool_completed(state, event, show_tool_calls=show_tool_calls, agent_name=agent_name)

@@ -103,7 +103,7 @@ async def ask_tool_call_approval(
         approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
     )
     plan = await plan_approval_calls(
-        ((tool, call_id, name, owner.agent_name),),
+        ((tool, owner.agent_name),),
         config=config,
         runtime_paths=runtime_paths,
         requester_id=owner.requester_id or "",

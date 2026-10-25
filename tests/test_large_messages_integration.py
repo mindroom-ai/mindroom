@@ -671,10 +671,12 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
     client = MockClient()
     config = MockConfig()
 
-    tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
+    tool = ToolExecution(tool_call_id="call-save_file", tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
-        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+        yield ToolStarted(
+            call=ToolExecution(tool_call_id="call-save_file", tool_name="save_file", tool_args={"file": "a.py"}).call,
+        )
         yield ToolCompleted(call=tool.call)
 
     outcome = await send_streaming_response(
@@ -703,7 +705,9 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
-        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+        yield ToolStarted(
+            call=ToolExecution(tool_call_id="call-save_file", tool_name="save_file", tool_args={"file": "a.py"}).call,
+        )
 
     outcome = await send_streaming_response(
         client=client,
@@ -730,11 +734,13 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
     client = MockClient()
     config = MockConfig()
 
-    tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
+    tool = ToolExecution(tool_call_id="call-save_file", tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
-        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+        yield ToolStarted(
+            call=ToolExecution(tool_call_id="call-save_file", tool_name="save_file", tool_args={"file": "a.py"}).call,
+        )
         yield "hello world"
         yield ToolCompleted(call=tool.call)
 
@@ -766,9 +772,11 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
     config = MockConfig()
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
-        yield ToolStarted(call=ToolExecution(tool_name="first_tool", tool_args={}).call)
+        yield ToolStarted(call=ToolExecution(tool_call_id="call-first_tool", tool_name="first_tool", tool_args={}).call)
         await asyncio.sleep(0)
-        yield ToolStarted(call=ToolExecution(tool_name="second_tool", tool_args={}).call)
+        yield ToolStarted(
+            call=ToolExecution(tool_call_id="call-second_tool", tool_name="second_tool", tool_args={}).call,
+        )
         await asyncio.sleep(0)
         yield "Done"
 

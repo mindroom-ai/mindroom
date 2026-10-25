@@ -54,10 +54,7 @@ _STORED_TOOL_KEYS = {"is_error": "tool_call_error", "stop_after_call": "stop_aft
 class ToolExecution:
     """One tool call the model requested, with its outcome or pause state."""
 
-    # TODO(simplify): The call's id is optional though every writer sets it, so readers guard it. Make it required,
-    # the legacy requirement reader supplying a value. Stored data would notice: a tool execution read without an id,
-    # such as that reader's placeholder, writes an id back instead of null.
-    tool_call_id: str | None = None
+    tool_call_id: str
     tool_name: str
     tool_args: dict[str, Any] | None = None
     is_error: bool | None = None
@@ -91,9 +88,24 @@ class ToolExecution:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
-        """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default."""
+        """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default.
+
+        A call stored without an id reads with a new one.
+        """
         values = {_TOOL_FIELDS[key]: value for key, value in data.items() if key in _TOOL_FIELDS}
         metrics = values.pop("metrics", None)
+        # LEGACY_COMPAT: Tool executions stored without a call id.
+        # Legacy format: a stored tool execution whose ``tool_call_id`` is null, empty, or absent. Agno 2.4.7 stored
+        # Ollama's calls so, since Ollama sends no call ids; the ``unknown`` placeholder that ``RunRequirement``
+        # reads for a requirement stored without its tool execution was written back so too.
+        # Last legacy release: v2026.4.35, the last release on Agno 2.4.7; v2026.4.36 moved to Agno 2.5.13, which
+        # gives an id-less call a uuid4 id. The placeholder is unversioned external input.
+        # Handling: the execution reads with a new uuid4 id, as an id-less call from a provider gets one, so its
+        # readers need no missing-id case; a row written back stores that id, and every other key reads as stored.
+        # Coverage: tests/llm/test_codecs.py::test_a_tool_execution_stored_without_a_call_id_reads_with_a_new_one,
+        #   tests/llm/test_codecs.py::test_a_run_whose_tool_executions_have_no_call_ids_still_loads
+        if not values.get("tool_call_id"):
+            values["tool_call_id"] = _new_id()
         return cls(**values, metrics=ToolCallMetrics.from_dict(metrics) if metrics else None)
 
 
@@ -194,22 +206,23 @@ class RunRequirement:
     def from_dict(cls, data: Mapping[str, Any]) -> RunRequirement:
         """Rebuild from a stored dict, ignoring keys this type does not model, such as older rows' user-input keys.
 
-        A missing tool execution becomes an ``unknown`` placeholder, an unreadable ``created_at`` becomes now, and a
-        decision recorded only on the requirement reaches its tool execution, which is what a resume runs from.
+        A missing tool execution becomes an ``unknown`` placeholder with a new call id, an unreadable ``created_at``
+        becomes now, and a decision recorded only on the requirement reaches its tool execution, which is what a
+        resume runs from.
         """
         # LEGACY_COMPAT: Run requirements stored without a tool execution or with an unreadable timestamp.
         # Legacy format: ``requirements`` entries lacking ``tool_execution``, or whose ``created_at`` is not
         # ISO 8601, which Agno's reader accepted as legacy data.
         # Last legacy release: unversioned external input; no MindRoom release is known to write them, and
         # agno 3.0.9 always wrote both.
-        # Handling: the entry reads with an ``unknown`` placeholder tool execution and the current time, as
-        # Agno's reader did, so one such entry never fails the load of its session.
+        # Handling: the entry reads with an ``unknown`` placeholder tool execution under a new call id and the
+        # current time, as Agno's reader did apart from the id, so one such entry never fails the load of its session.
         # Coverage: tests/llm/test_codecs.py::test_run_requirement_reads_rows_agno_read_leniently
         tool_data = data.get("tool_execution")
         requirement = cls(
             ToolExecution.from_dict(tool_data)
             if isinstance(tool_data, Mapping)
-            else ToolExecution(tool_name="unknown", tool_args={}),
+            else ToolExecution(tool_call_id=_new_id(), tool_name="unknown", tool_args={}),
             id=identifier if isinstance(identifier := data.get("id"), str) else _new_id(),
             created_at=_datetime_or_now(data.get("created_at")),
             confirmation=data.get("confirmation"),

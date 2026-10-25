@@ -132,7 +132,7 @@ def plan_tool_batch(
     refused: list[Message] = []
     count = calls_so_far
     for tool_call in tool_calls:
-        call_id = tool_call.get("id")
+        call_id = tool_call["id"]
         function_data = tool_call.get("function") or {}
         name = function_data.get("name")
         function = functions.get(name) if isinstance(name, str) else None

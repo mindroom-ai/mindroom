@@ -123,7 +123,7 @@ def _route_decisions(
     alone, and a call id two members share is refused rather than guessed at; a delegation's result names its member
     and call, which the resume checks against the calls the team waits for.
     """
-    waiting: dict[str | None, list[RunRequirement]] = {}
+    waiting: dict[str, list[RunRequirement]] = {}
     for requirement in persisted.requirements or ():
         if not requirement.is_resolved():
             waiting.setdefault(requirement.tool_execution.tool_call_id, []).append(requirement)

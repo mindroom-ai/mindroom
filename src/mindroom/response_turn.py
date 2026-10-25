@@ -119,13 +119,7 @@ def apply_exact_approval_decisions(
 ) -> list[RunRequirement]:
     """Apply decisions only when they exactly identify one persisted call each."""
     pending = [requirement for requirement in requirements if requirement.needs_confirmation]
-    call_ids: list[str] = []
-    for requirement in pending:
-        tool = requirement.tool_execution
-        if not tool.tool_call_id:
-            msg = "Paused tools no longer match the approval continuation"
-            raise RuntimeError(msg)
-        call_ids.append(tool.tool_call_id)
+    call_ids = [requirement.tool_execution.tool_call_id for requirement in pending]
     decision_ids = set(decisions)
     if len(call_ids) != len(set(call_ids)) or set(call_ids) != decision_ids or set(denial_reasons) != decision_ids:
         msg = "Paused tools no longer match the approval continuation"
@@ -594,17 +588,11 @@ def _paused_attempt_from_pause(
 ) -> PausedAttempt | None:
     """Build one restartable pause from a run's paused tools and confirmation requirements."""
     pending_requirements = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
-    if any(not requirement.tool_execution.tool_call_id for requirement in pending_requirements):
-        msg = "Paused approval requirement is missing its exact tool-call ID"
-        raise RuntimeError(msg)
     requirement_call_ids = [requirement.tool_execution.tool_call_id for requirement in pending_requirements]
     if len(requirement_call_ids) != len(set(requirement_call_ids)):
         msg = "Paused approval requirements contain duplicate tool-call IDs"
         raise RuntimeError(msg)
     pending_tools = [tool for tool in tools if tool.requires_confirmation and tool.confirmed is None]
-    if any(not tool.tool_call_id for tool in pending_tools):
-        msg = "Paused approval tool is missing its exact tool-call ID"
-        raise RuntimeError(msg)
     tool_call_ids = [tool.tool_call_id for tool in pending_tools]
     if len(tool_call_ids) != len(set(tool_call_ids)):
         msg = "Paused approval tools contain duplicate tool-call IDs"

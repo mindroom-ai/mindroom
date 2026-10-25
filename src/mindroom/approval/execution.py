@@ -153,7 +153,7 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
         # An agent's own calls name no member.
         if tool.is_paused and (None, tool.tool_call_id) not in answered:
             presentation.start_tool(tool.call)
-        elif tool.tool_call_id is None or tool.tool_call_id not in completed_call_ids:
+        elif tool.tool_call_id not in completed_call_ids:
             # Repeated terminal completions must not match older public slots by name.
             presentation.complete_tool(tool.call)
 
