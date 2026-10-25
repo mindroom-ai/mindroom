@@ -30,6 +30,7 @@ from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.script_runtime import (
+    _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ScriptRuntimeLifecycle,
     _LiveScriptRuntimeResolver,
     _release_worker_leases_before_deadline,
@@ -842,7 +843,8 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
 
         runtime.bind_api("http://primary.test/api/script-gateway/")
         assert runtime._startup_task is not None
-        await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
+        # Below the startup pass timeout, which would end a stuck startup pass on its own.
+        await asyncio.wait_for(runtime._startup_task, timeout=runtime.pass_timeout_seconds / 2)
         assert bound_managers == [manager]
         assert manager.gateway_url == "http://primary.test/api/script-gateway"
 
@@ -2456,7 +2458,8 @@ async def test_hung_broker_cleanup_cannot_delay_process_exit_recording(
 
     try:
         await asyncio.wait_for(resolver.entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-        assert await asyncio.to_thread(exit_recorded.wait, SETTLE_TIMEOUT_SECONDS)
+        # Below the update's pass timeout, which would end the hung broker obligation on its own.
+        assert await asyncio.to_thread(exit_recorded.wait, runtime.pass_timeout_seconds / 2)
         durable = store.get_run(run.run_id)
         assert durable.state is ScriptRunState.RUNNING
         assert durable.finished_at is not None
@@ -3895,7 +3898,8 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
     shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.05))
     try:
         await asyncio.wait_for(reconciliation_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-        await asyncio.wait_for(shutdown, timeout=SETTLE_TIMEOUT_SECONDS)
+        # Below shutdown's default budget, so a shutdown that drops its explicit budget fails.
+        await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
         assert await asyncio.to_thread(release_started.wait, SETTLE_TIMEOUT_SECONDS)
         assert lease_released.is_set() is False
     finally:
@@ -3998,12 +4002,13 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
         assert await asyncio.to_thread(first_revocation_started.wait, SETTLE_TIMEOUT_SECONDS)
         assert await asyncio.to_thread(lease_released.wait, 0.2) is False
         release_revocations.set()
-        await asyncio.wait_for(shutdown, timeout=SETTLE_TIMEOUT_SECONDS)
+        # Below shutdown's default budget, so a shutdown that drops its explicit budget fails.
+        await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
         assert await asyncio.to_thread(lease_released.wait, SETTLE_TIMEOUT_SECONDS)
     finally:
         release_revocations.set()
         if not shutdown.done():
-            await asyncio.wait_for(shutdown, timeout=SETTLE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
 
     expected_run_ids = {run.run_id for run in runs}
     assert release_observations == [expected_run_ids]

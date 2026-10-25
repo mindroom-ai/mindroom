@@ -36,7 +36,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+from mindroom.orchestration.script_runtime import _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, ScriptRuntimeLifecycle
 from mindroom.script_runs import broker as broker_module
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
@@ -1548,8 +1548,9 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         await asyncio.wait_for(drain_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         await _cancel_cleanup_owner(broker, original_cleanup)
         close_started_before_body_returned = close_started.is_set()
-        # The body stays blocked until the finally below, so shutdown returns only if its drain is bounded.
-        await asyncio.wait_for(shutdown, timeout=SETTLE_TIMEOUT_SECONDS)
+        # The body stays blocked until the finally below, so shutdown returns only if its drain is bounded, and this
+        # bound sits below shutdown's default budget, so a shutdown that drops its explicit budget fails.
+        await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
         cleanup_owned_after_shutdown = bool(broker._cleanup_tasks)
     finally:
         release_body.set()
