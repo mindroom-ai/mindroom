@@ -1837,6 +1837,9 @@ class TestStreamingCompletion:
                 _runtime_paths(),
                 None,
                 model_name="default",
+                knowledge=None,
+                execution_identity=None,
+                refresh_scheduler=None,
             )
 
         assert isinstance(response, openai_compat.OpenAIStreamingResponse)
@@ -1895,6 +1898,7 @@ class TestStreamingCompletion:
                 None,
                 model_name="default",
                 execution_identity=execution_identity,
+                refresh_scheduler=None,
             )
 
         assert isinstance(response, StreamingResponse)
@@ -3779,6 +3783,7 @@ class TestTeamCompletion:
                 None,
                 openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
+                refresh_scheduler=None,
             )
             if isinstance(response, StreamingResponse):
                 body_chunks = [
@@ -3930,6 +3935,7 @@ class TestTeamCompletion:
                 None,
                 openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
+                refresh_scheduler=None,
             )
 
         assert isinstance(response, StreamingResponse)
@@ -4642,6 +4648,8 @@ class TestTeamCompletion:
             execution_identity=None,
             scope_context=scope_context,
             models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+            unavailable_bases=None,
+            refresh_scheduler=None,
         )
 
         assert (built.spec.id, built.spec.mode) == ("coord_team", expected)
@@ -4686,6 +4694,8 @@ class TestTeamCompletion:
             execution_identity=execution_identity,
             scope_context=scope_context,
             models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
+            unavailable_bases=None,
+            refresh_scheduler=None,
         )
 
         assert built.spec.mode is TeamMode.COORDINATE
@@ -4731,6 +4741,8 @@ class TestTeamCompletion:
                 execution_identity=None,
                 scope_context=scope_context,
                 models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+                unavailable_bases=None,
+                refresh_scheduler=None,
             )
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
@@ -4787,6 +4799,8 @@ class TestTeamCompletion:
                 execution_identity=None,
                 scope_context=scope_context,
                 models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
+                unavailable_bases=None,
+                refresh_scheduler=None,
             )
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge

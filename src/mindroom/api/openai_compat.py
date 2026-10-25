@@ -800,11 +800,11 @@ async def _non_stream_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: AgentKnowledge | None = None,
+    knowledge: AgentKnowledge | None,
     *,
     model_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    execution_identity: ToolExecutionIdentity | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     run_metadata: dict[str, Any] = {}
@@ -860,11 +860,11 @@ async def _stream_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: AgentKnowledge | None = None,
+    knowledge: AgentKnowledge | None,
     *,
     model_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    execution_identity: ToolExecutionIdentity | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream = cast(
@@ -978,9 +978,9 @@ def _build_team(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-    scope_context: ScopeSessionContext | None = None,
-    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    scope_context: ScopeSessionContext | None,
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
     *,
     models: TeamTurnModelSelection,
 ) -> BuiltTeam:
@@ -1119,8 +1119,8 @@ async def _non_stream_team_completion(
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     team_models: TeamTurnModelSelection,
-    execution_identity: ToolExecutionIdentity | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    execution_identity: ToolExecutionIdentity | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
     requester_id = execution_identity.requester_id if execution_identity is not None else None
@@ -1203,8 +1203,8 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     team_models: TeamTurnModelSelection,
-    execution_identity: ToolExecutionIdentity | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    execution_identity: ToolExecutionIdentity | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     stream: AsyncGenerator[TeamRunEvent, None] | None = None

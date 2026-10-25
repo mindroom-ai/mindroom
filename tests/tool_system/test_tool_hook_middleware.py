@@ -78,7 +78,13 @@ async def test_before_hooks_block_a_call_and_after_hooks_see_results_and_blocks(
     probes = _Probes()
     echo = next(function for function in adapt_toolkit(probes).functions if function.name == "echo")
     middleware = [
-        build_tool_hook_middleware(HookRegistry.from_plugins([_plugin("policy", [block_secret, observe])]), "code"),
+        build_tool_hook_middleware(
+            HookRegistry.from_plugins([_plugin("policy", [block_secret, observe])]),
+            "code",
+            dispatch_context=None,
+            config=None,
+            runtime_paths=None,
+        ),
     ]
 
     allowed = await execute_tool_call(echo, {"text": "hi"}, _context(), middleware=middleware)
@@ -108,7 +114,15 @@ async def test_every_call_is_recorded_before_it_runs_and_after_it_finishes() -> 
 
     probes = _Probes()
     echo = next(function for function in adapt_toolkit(probes).functions if function.name == "echo")
-    middleware = [build_tool_hook_middleware(HookRegistry.empty(), "code")]
+    middleware = [
+        build_tool_hook_middleware(
+            HookRegistry.empty(),
+            "code",
+            dispatch_context=None,
+            config=None,
+            runtime_paths=None,
+        ),
+    ]
 
     with recording_tool_calls(_Recorder()):
         outcome = await execute_tool_call(echo, {"text": "hi"}, _context(), middleware=middleware)
@@ -122,7 +136,15 @@ async def test_the_running_call_is_visible_to_the_tool_body_through_the_middlewa
     """``current_tool_call`` names the call being executed, even below the policy middleware."""
     probes = _Probes()
     whoami = next(function for function in adapt_toolkit(probes).functions if function.name == "whoami")
-    middleware = [build_tool_hook_middleware(HookRegistry.empty(), "code")]
+    middleware = [
+        build_tool_hook_middleware(
+            HookRegistry.empty(),
+            "code",
+            dispatch_context=None,
+            config=None,
+            runtime_paths=None,
+        ),
+    ]
 
     outcome = await execute_tool_call(whoami, {}, _context(), middleware=middleware)
 

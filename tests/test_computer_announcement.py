@@ -318,7 +318,13 @@ async def test_announcement_runs_inside_the_tool_hook_policy(
         entry_config=PluginEntryConfig(path="./plugins/policy", settings={}),
         plugin_order=0,
     )
-    bridge = build_tool_hook_middleware(HookRegistry.from_plugins([plugin]), agent_name="researcher")
+    bridge = build_tool_hook_middleware(
+        HookRegistry.from_plugins([plugin]),
+        agent_name="researcher",
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
     toolkit = _fake_browser(events)
 

@@ -57,6 +57,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
+def _always_owned(*_args: object, **_kwargs: object) -> bool:
+    """Own every call's execution, as a turn with background jobs on does."""
+    return True
+
+
 def _controls(paths: RuntimePaths, owner: ToolExecutionIdentity, *, team: bool = False) -> JobActor:
     """The actor whose only tool is its job controls, as an agent or a team leader offers them."""
     tools = toolkit_job_tools(JobTools(paths, owner), authored_name="job")
@@ -302,7 +307,7 @@ async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
         await runtime.release_wait("ordinary", waited.claim)
         model = ScriptedModel([calls(tool_call("job", "wait", action="wait", job_id="ordinary")), answer("done")])
 
-        @owned_tool_execution()
+        @owned_tool_execution(enabled=_always_owned)
         async def run() -> RunRecord:
             set_consumption_storage(storage_factory)
             return await run_job_turn(
@@ -583,7 +588,7 @@ async def _collect_in_a_run(
     tools = JobTools(paths, owner)
     actor = job_actor(*toolkit_job_tools(tools, authored_name="job").values())
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=_always_owned)
     async def run() -> RunRecord:
         set_consumption_storage(storage_factory)
         return await run_job_turn(actor, model, "collect", session_id=context.session_id, store=storage)

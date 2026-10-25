@@ -269,11 +269,12 @@ async def test_hidden_delegation_uses_native_child_owner(
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
     owner = LiveTurnTools(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
-        run_child=child_response,
         delegation_depth=depth,
     )
     call_id = uuid4()
@@ -379,11 +380,12 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
     owner = LiveTurnTools(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
-        run_child=child_response,
     )
 
     async def checkpoint(parent):
@@ -498,11 +500,12 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 await asyncio.Event().wait()
             return await run_delegated_child_response(child, **kwargs)
 
+        monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
         owner = LiveTurnTools(
             CliTurnOwner(identity, "turn", "run"),
             catalog=catalog,
             authorize=_allow,
-            run_child=child_response,
         )
 
         async def checkpoint(parent):
@@ -522,7 +525,11 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                     requirement,
                     parent_bash_call_id="bash-parent",
                     delegation_depth=0,
-                    run_child=child_response,
+                    refresh_scheduler=None,
+                    decisions=None,
+                    denial_reasons=None,
+                    approval_calls=(),
+                    on_event=None,
                 )
             assert isinstance(paused, PausedAttempt)
             assert paused.cli_call is not None

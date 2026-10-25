@@ -47,6 +47,11 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.execution_authority import JobTool
 
 
+def _always_owned(*_args: object, **_kwargs: object) -> bool:
+    """Own every call's execution, as a turn with background jobs on does."""
+    return True
+
+
 def _workflow_caller(toolkit: DynamicWorkflowTools, config: Config) -> JobActor:
     """The general agent offering its workflow toolkit, granted as the agent is now."""
     tools = toolkit_job_tools(toolkit, authored_name="dynamic_workflow", snapshot=authority_snapshot(config, "general"))
@@ -219,7 +224,7 @@ async def test_cancel_composite_job_drains_all_sync_children(
     model = ScriptedModel([calls(tool_call("composite", "outer", background_after=0)), answer("done")])
     actor = job_actor(job_tool(composite), name="general")
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=_always_owned)
     async def run() -> str:
         result = await run_job_turn(actor, model, "Start the composite tool.", session_id=context.session_id)
         assert defer_execution_cleanup(cleanup)

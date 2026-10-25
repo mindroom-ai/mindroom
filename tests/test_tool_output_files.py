@@ -1082,7 +1082,15 @@ async def _run_through_hooks(toolkit: Toolkit, registry: HookRegistry, arguments
         adapt_function(_first_function(toolkit)),
         arguments,
         ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
-        middleware=(build_tool_hook_middleware(registry, agent_name="code"),),
+        middleware=(
+            build_tool_hook_middleware(
+                registry,
+                agent_name="code",
+                dispatch_context=None,
+                config=None,
+                runtime_paths=None,
+            ),
+        ),
     )
 
 

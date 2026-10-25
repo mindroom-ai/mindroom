@@ -285,6 +285,8 @@ async def _run_echo_through_middleware(toolkit: Toolkit, registry: HookRegistry)
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
+        config=None,
+        runtime_paths=None,
     )
     return await execute_tool_call(
         adapt_function(_first_function(toolkit)),
@@ -641,7 +643,13 @@ async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
 @pytest.mark.asyncio
 async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
     """A Stop that commits while the start record is written stops a synchronous tool the cancellation cannot reach."""
-    middleware = build_tool_hook_middleware(HookRegistry.empty(), agent_name="code")
+    middleware = build_tool_hook_middleware(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
     ran: list[str] = []
 
     class _StoppedRecorder:

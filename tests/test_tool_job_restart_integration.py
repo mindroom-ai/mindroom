@@ -50,6 +50,11 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
 
 
+def _always_owned(*_args: object, **_kwargs: object) -> bool:
+    """Own every call's execution, as a turn with background jobs on does."""
+    return True
+
+
 @pytest.mark.asyncio
 async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconstruction(  # noqa: C901, PLR0915 - Real crash/restart lifecycle.
     tmp_path: Path,
@@ -90,7 +95,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     original_storage = storage_factory()
     controls = job_actor(*toolkit_job_tools(JobTools(paths, owner), authored_name="job").values())
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=_always_owned)
     async def start_original() -> RunRecord:
         set_consumption_storage(storage_factory)
         return await run_job_turn(
@@ -209,7 +214,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         )
         final_storage = storage_factory()
 
-        @owned_tool_execution()
+        @owned_tool_execution(enabled=_always_owned)
         async def retrieve_after_restart() -> RunRecord:
             set_consumption_storage(storage_factory)
             return await run_job_turn(
