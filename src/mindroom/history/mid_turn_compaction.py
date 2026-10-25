@@ -20,7 +20,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
 from mindroom.history.policy import context_budget_after_reserve
-from mindroom.history.prompt_tokens import tool_definitions
+from mindroom.history.prompt_tokens import tool_definition_tokens
 from mindroom.history.replay import HistorySummaryBudgetError, estimate_request_messages_tokens
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
@@ -46,7 +46,7 @@ from mindroom.native_compaction import checkpoint_items, native_replay_messages
 from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
 
 if TYPE_CHECKING:
@@ -471,11 +471,7 @@ def _tool_tokens(tools: Sequence[ToolSpec], messages: Sequence[Message], deferre
     """
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
-    # TODO(simplify): this sizes each definition inside a Chat ``function`` envelope while the static estimate
-    # (``prompt_tokens.py``) sizes the bare fields, so one tool costs two amounts. Size both without the envelope.
-    # Operators would see compaction trigger, and models see replay trimmed, a few tokens per tool differently.
-    payloads = [{"type": "function", "function": definition} for definition in tool_definitions(tools, deferred)]
-    return estimate_text_tokens(stable_serialize(payloads))
+    return tool_definition_tokens(tools, deferred)
 
 
 def _thinking_tokens(messages: Sequence[Message]) -> int:

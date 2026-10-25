@@ -25,6 +25,7 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.replay import configured_replay_plan, estimate_request_messages_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
@@ -490,6 +491,22 @@ def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
 
     assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) < 1_000
     assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) > 0
+
+
+def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None:
+    """One tool definition costs one amount, whether a running turn's request or the static prompt estimate sizes it."""
+    lookup = ToolSpec(
+        name="lookup",
+        description="Look up a value.",
+        parameters={"type": "object", "properties": {"key": {"type": "string"}}},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
+    static = build_static_token_estimator(Message(role="system", content=""), [lookup], frozenset())
+
+    assert mid_turn_compaction._tool_tokens([lookup], [], frozenset()) == static.estimate("")
 
 
 @pytest.mark.parametrize("provider", ["openai", "claude"])
