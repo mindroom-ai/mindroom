@@ -272,14 +272,13 @@ async def execute_tool_call(
 ) -> ToolOutcome:
     """Run one tool call as ``run_tool_call`` does and return what the model should read.
 
-    Any exception other than cancellation becomes a failed outcome whose content is the exception's text. The run
-    stops after the call when the function always stops it, or when this call returned an outcome that does, as
-    minimal mode's Bash does after a control tool it ran.
+    Any exception other than cancellation becomes a failed outcome whose content is the exception's text, or its type
+    name when it has none, as ``TimeoutError`` has none. The run stops after the call when the function always stops
+    it, or when this call returned an outcome that does, as minimal mode's Bash does after a control tool it ran.
     """
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
-        # Some exceptions, such as ``TimeoutError``, have no text; their type still tells the model what failed.
         return ToolOutcome(
             content=str(error) or type(error).__name__,
             stop_after_call=function.stop_after_call,
