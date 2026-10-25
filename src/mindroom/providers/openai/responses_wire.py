@@ -518,8 +518,8 @@ class ResponsesStream:
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
     its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
-    event order with any summary text, kept as main behaves. ``provider`` is the metrics provider name a failed
-    response's error carries.
+    event order with any summary text (see the TODO in ``responses.py``). ``provider`` is the metrics provider name a
+    failed response's error carries.
     """
 
     provider: str
@@ -646,8 +646,8 @@ def parse_response(
 ) -> ResponsesTurnParts:
     """Read one non-streamed response into a finished turn; ``provider`` is the metrics provider name of its error.
 
-    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary, kept as
-    main behaves.
+    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary (see the
+    TODO in ``responses.py``).
     """
     if response.error:
         raise _response_error(response.error.code, response.error.message, provider=provider)

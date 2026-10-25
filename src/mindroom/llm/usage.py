@@ -56,7 +56,8 @@ class TokenCounts:
 
 
 TOKEN_FIELDS = tuple(item.name for item in fields(TokenCounts))
-# Stored usage dicts list the counters first, in this order, as main stored them; a counter it omits follows them.
+# Stored usage dicts list the counters first, in this order, so every stored row keeps one key order; a counter it
+# omits follows them.
 _STORED_COUNTER_ORDER = (
     "input_tokens",
     "output_tokens",

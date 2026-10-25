@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.tool_system.tool_function import ToolFunction
 
-# What the loop sends the model for a call that names no function it offered, kept as main behaves.
+# What the loop sends the model for a call that names no function it offered.
 MISSING_TOOL_ERROR_TEXT = "Error: The requested tool does not exist or is not available."
 _DECODE_ERROR_TEXT = (
     "Error while decoding function arguments: {error}\n\nPlease make sure we can json.loads() the arguments and retry."
@@ -55,7 +55,7 @@ _LITERAL_WORDS: dict[str, bool | None] = {"none": None, "null": None, "true": Tr
 _MAX_SCHEMA_NODES = 256
 _MAX_ALTERNATIVES = 64
 # The session id of a call that belongs to no conversation, such as an MCP gateway or script-run call. Tools that key
-# state by session, such as ``claude_agent``, share one session across those calls, kept as main behaves.
+# state by session, such as ``claude_agent``, share one session across those calls.
 DETACHED_SESSION_ID = "default"
 
 

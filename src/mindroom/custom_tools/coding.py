@@ -1071,7 +1071,7 @@ def _collect_grep_files(search_path: Path, glob_filter: str | None) -> list[Path
         patterns = [glob_filter]
         if "/" not in glob_filter and "\\" not in glob_filter and not glob_filter.startswith("**/"):
             # pathlib's "*.ext" only matches the top level, while ripgrep's --glob
-            # applies recursively; include both patterns for parity in fallback mode.
+            # applies recursively; include both so the fallback matches what ripgrep would.
             patterns.append(f"**/{glob_filter}")
     else:
         patterns = ["**/*"]

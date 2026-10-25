@@ -61,7 +61,7 @@ _UNBINDABLE_KINDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class _Rejected:
-    """Fields whose value the owned loop cannot honor: a function for which ``sets`` holds is refused with ``error``.
+    """Fields whose value the agent loop cannot honor: a function for which ``sets`` holds is refused with ``error``.
 
     Rejected rather than dropped, because the tool's author relies on what the value asks for. A function adapted
     alone raises it; a toolkit's adapter names the function in ``AdaptedToolkit.refused`` instead, so an agent refuses
@@ -214,7 +214,7 @@ def adapt_function(function: Function) -> ToolFunction:
 
 
 def _refusal(function: Function) -> str | None:
-    """Return why MindRoom refuses ``function``: the first field it sets that the owned loop cannot honor."""
+    """Return why MindRoom refuses ``function``: the first field it sets that the agent loop cannot honor."""
     for handling in _FUNCTION_FIELDS.values():
         if isinstance(handling, _Rejected) and handling.sets(function):
             return f"Tool function {function.name!r} {handling.error}"
@@ -292,7 +292,7 @@ def _bound_by_annotation(hint: object) -> InjectedValue:
 
 # AGNO_COMPAT: Agno toolkits take the calling agent as a parameter.
 # Reason: Agno injects its Agent or Team object into entrypoint parameters named ``agent`` or ``team``, or annotated
-# with those types, and the owned loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
+# with those types, and the agent loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
 # DaytonaTools reads the parameter, and it reads and writes ``agent.session_state``, as Agno's AntigravityTools and
 # SuperserveTools also do. That attribute is the Agno agent's own state, not the run's stored session state, and
 # MindRoom built one agent per reply, so the stand-in carries the adapted toolkit's ``actor_state``, which is never
@@ -324,7 +324,7 @@ def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dic
             metadata=context.metadata,
             session_state=context.session_state,
         ),
-        # The owned loop gives a tool no run media, so each media name receives None.
+        # The agent loop gives a tool no run media, so each media name receives None.
         InjectedValue.MEDIA: None,
     }
     return {name: supplied[value] for name, value in function.injected_params.items() if value in supplied}

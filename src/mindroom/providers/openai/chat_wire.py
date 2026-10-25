@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Chat Completions request bodies and response parsing for every OpenAI-compatible route.
 
-Three dialects keep each route's request bytes as main sends them: ``openai`` (OpenAI, Azure, OpenRouter,
-DeepSeek, Z.ai, llama.cpp, Kimi), ``groq``, and ``cerebras``. Functions here are pure: they build the SDK
+Three dialects shape the request bodies: ``openai`` (OpenAI, Azure, OpenRouter, DeepSeek, Z.ai, llama.cpp,
+Kimi), ``groq``, and ``cerebras``. Functions here are pure: they build the SDK
 call from canonical messages and fold SDK chunks or completions into one finished turn.
 """
 
@@ -75,6 +75,9 @@ class ChatWire:
     """
 
     route: str
+    # TODO(simplify): the ``groq`` and ``cerebras`` dialects format messages, tools, parameters, and usage by rules of
+    # their own, and neither reads reasoning. Collapse them into ``openai``, with per-route data for real API
+    # differences (#3113). Groq and Cerebras request bodies would change, and their reasoning would show.
     dialect: ChatDialect
 
 
@@ -192,7 +195,7 @@ def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSe
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
-    """Return the function definition OpenAI-family wires send: its set fields, in the order main sends them."""
+    """Return the function definition OpenAI-family wires send: its set fields, always in this order."""
     fields = {
         "name": tool.name,
         "description": tool.description,
@@ -502,7 +505,7 @@ def _completed_tool_calls(calls: list[dict[str, Any]], dialect: ChatDialect) -> 
 
 
 def _reply_metadata(reply: ChatCompletion | ChatCompletionChunk) -> dict[str, Any]:
-    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply carried, kept as main stores them."""
+    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply carried, for its stored provider data."""
     data: dict[str, Any] = {}
     if reply.id:
         data["id"] = reply.id

@@ -292,8 +292,8 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
             msg = f"Paused team run {paused.run_id!r} no longer holds member run {run_id!r}"
             raise ValueError(msg)
         decided = decisions.take(member_id, {requirement.tool_execution.tool_call_id for requirement in group})
-        # The member resumes from its own record with its requirements naming the member, as the team run's copies
-        # do, so the resumed member row stores those fields as main stores them.
+        # The member resumes from its own record with its requirements naming the member and its run, as the team
+        # run's copies do, so the member row its resume stores names them too.
         named = replace(
             member_record,
             requirements=[
@@ -360,8 +360,7 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
 class _MemberRuns:
     """Run and resume the members of one team run, forwarding their events tagged with the member.
 
-    ``stream`` is whether the team run's leader requests stream; every member request follows it, kept as main
-    behaves.
+    ``stream`` is whether the team run's leader requests stream; every member request follows it.
     """
 
     record: TeamRunRecord

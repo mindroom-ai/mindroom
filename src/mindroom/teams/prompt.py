@@ -2,8 +2,8 @@
 """The team leader's system message: the ``<team>`` block, the tool instructions, the model note, and the context.
 
 A team has no description, role, or instructions of its own, so the ``<team>`` block (the capability sentence, the
-member roster, and the mode's ``<delegation>`` block) opens the prompt. Texts and layout are kept byte for byte as
-main sends them: they are part of every leader request's prompt-cache prefix.
+member roster, and the mode's ``<delegation>`` block) opens the prompt. Texts and layout are part of every leader
+request's prompt-cache prefix, so each change to them costs every team one prompt-cache miss.
 """
 
 from __future__ import annotations

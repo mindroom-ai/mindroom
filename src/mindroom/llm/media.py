@@ -49,7 +49,7 @@ def _require_one_source(url: str | None, filepath: str | None, content: bytes | 
 
 
 def _decode_base64(text: str) -> bytes:
-    # Text that fails to decode as base64 reads as its UTF-8 bytes, kept as main reads it.
+    # Text that fails to decode as base64 reads as its UTF-8 bytes.
     try:
         return base64.b64decode(text)
     except Exception:

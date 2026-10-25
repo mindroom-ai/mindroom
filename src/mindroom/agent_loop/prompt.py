@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Render an agent's system message from its prompt inputs.
 
-The layout is part of every provider's prompt-cache prefix, so section order, tags, and blank lines stay as main sends
-them.
+The layout is part of every provider's prompt-cache prefix, so each change to its section order, tags, or blank lines
+costs every conversation one prompt-cache miss.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class PromptSpec:
     ``role`` fills ``<your_role>``: an agent's identity, runtime facts, preloaded files, and authored role (only the
     runtime facts under a persona), or a helper's task.
     ``turn_context`` is the date and session context, plus the blocks a turn appends (``build.prompt_for_turn``).
-    ``markdown`` adds the markdown line; callers with an output schema leave it False, as main does.
+    ``markdown`` adds the markdown line; callers with an output schema leave it False, since their answer is JSON.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered.
     ``model_note`` is the text the provider family adds (``model_note_for``), and ``output_format_prompt`` the JSON
     prompt a structured-output request needs (``structured.output_format_prompt``).

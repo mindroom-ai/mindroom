@@ -22,7 +22,9 @@ type ClaudeRouteKind = Literal["anthropic", "vertexai_claude", "bedrock_claude"]
 # ``ANTHROPIC_BASE_URL``.
 ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {"vertexai_claude": "ANTHROPIC_VERTEX_BASE_URL"}
 
-# Kept as main behaves; a reply that reaches this cap is answered as cut off instead of run (the loop's policy).
+# TODO(simplify): a Claude reply whose model config sets no ``max_tokens`` stops at this fixed cap, and a reply that
+# reaches it is answered as cut off instead of run (the loop's policy). Default to the model's maximum or a documented
+# per-model default (#3113). Users would notice longer Claude replies.
 _DEFAULT_MAX_TOKENS = 8192
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past ten minutes unless the
 # client has an explicit timeout; 3600 s is the SDK's own ceiling for non-streaming operations.

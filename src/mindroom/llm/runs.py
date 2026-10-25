@@ -87,7 +87,7 @@ class ToolExecution:
         return ReportedCall(self.tool_call_id, self.tool_name, self.tool_args, self.result, self.is_error)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: every field, None included, under its stored key, kept as main writes it."""
+        """Return the stored dict: every field, None included, under its stored key."""
         values = asdict(self)
         values["metrics"] = self.metrics.to_dict() if self.metrics is not None else None
         return {_STORED_TOOL_KEYS.get(name, name): value for name, value in values.items()}
@@ -439,8 +439,8 @@ class TeamRunRecord(_RunRecordCommon):
         # LEGACY_COMPAT: Team run dicts carry the ``team_name`` label of their members.
         # Legacy format: team ``run_data`` rows hold ``team_name``, ``Team-`` followed by the requested member names
         # joined by ``-``; no MindRoom code read it.
-        # Last legacy release: v2026.10.506, whose owned runtime wrote it as the Agno-backed runtime before it did;
-        # replacement: unreleased, whose team runs store no ``team_name``.
+        # Last legacy release: v2026.10.506, which wrote it as every earlier release did; replacement: v2026.10.507,
+        # whose team runs store no ``team_name``.
         # Handling: the key is ignored on read and never written again, so a rewritten row drops it.
         # Coverage: tests/llm/test_codecs.py::test_team_run_record_round_trips_agno_dict_minus_dropped_keys,
         #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys

@@ -63,7 +63,7 @@ _GET_SKILL_REFERENCE_DESCRIPTION = (
 _GET_SKILL_SCRIPT_DESCRIPTION = (
     "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
 )
-# The fixed header of the skills section, kept as main renders it; get_skill_script only reads scripts.
+# The fixed header of the system prompt's skills section; get_skill_script only reads scripts.
 _PROMPT_HEADER = (
     "<skills_system>",
     "",
@@ -397,7 +397,8 @@ def _unlisted_file_error(
 
 
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-# Configured skill roots read files by path; the paths they accept are kept as main behaves.
+# Configured skill roots read files by path, so a reference or script path resolves only inside its skill folder,
+# through segments every platform can name.
 _WINDOWS_RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)", re.IGNORECASE)
 _WINDOWS_PATH_PREFIX = re.compile(r"^([A-Za-z]:|\\\\)")
 
@@ -782,7 +783,9 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
-# Operator skill roots load leniently, kept as main behaves.
+# TODO(simplify): Operator skill roots load leniently: frontmatter that is not YAML reads as ``key: value`` lines, and
+# a folder that fails to load is skipped with a warning, while workspace skills load strictly and report each refusal.
+# Load both with the strict loader (#3105). Operators would notice: a malformed operator skill would be refused.
 def _read_skill_root(root: Path) -> list[Skill]:
     """Read one skill folder, or every skill folder directly below ``root``, in directory order."""
     return [skill for folder in _skill_folders(root) if (skill := _read_skill_folder(folder)) is not None]
