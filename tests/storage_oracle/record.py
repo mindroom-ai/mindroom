@@ -26,11 +26,11 @@ from mindroom.session_storage.schema import TableNames
 from tests.storage_oracle.actions import CUT_KINDS, NAMED, Scenario, generate
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.legacy import EXTRA_RUN_IDS, write_legacy_inputs
-from tests.storage_oracle.observe import AGNO_LAYOUT_READERS, observe
+from tests.storage_oracle.observe import AGNO_LAYOUT_READERS, Readers, observe
 from tests.storage_oracle.old_backend import OldBackend
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
 
     from tests.storage_oracle.backend import Driver
 
@@ -128,11 +128,19 @@ def storage_name_of(dump: str) -> str:
     return match.group(1)
 
 
-def observe_database(dump: str, root: Path, extra_run_ids: dict[str, list[str]] | None = None) -> dict[str, object]:
+def observe_database(
+    dump: str,
+    root: Path,
+    extra_run_ids: dict[str, list[str]] | None = None,
+    *,
+    open_store: Callable[[str, Path], Any] = create_state_storage,
+    readers: Readers = AGNO_LAYOUT_READERS,
+) -> dict[str, object]:
     """Restore ``dump`` under ``root``, open it as the runtime does, and observe every session it holds.
 
     Each session's folded tool calls are read for the runs ``list_runs`` returns plus ``extra_run_ids``, and the
-    recording keeps those ids, so a later reading asks the same questions.
+    recording keeps those ids, so a later reading asks the same questions. ``open_store`` and ``readers`` open and read
+    the database as another store does, such as the storage v2 one after the conversion.
     """
     storage_name = storage_name_of(dump)
     database = TableNames(storage_name).database_path(root)
@@ -140,7 +148,7 @@ def observe_database(dump: str, root: Path, extra_run_ids: dict[str, list[str]] 
     with deterministic():
         with closing(sqlite3.connect(database)) as connection:
             connection.executescript(dump)
-        store = create_state_storage(storage_name, root)
+        store = open_store(storage_name, root)
         with closing(sqlite3.connect(database)) as connection:
             rows = connection.execute(
                 f'SELECT session_id, session_type, agent_id, team_id FROM "{storage_name}_sessions" ORDER BY session_id',  # noqa: S608
@@ -161,7 +169,7 @@ def observe_database(dump: str, root: Path, extra_run_ids: dict[str, list[str]] 
             sessions[session_id] = {
                 "scope": scope.key,
                 "run_ids": run_ids,
-                "observed": observe(store, session_id, scope, readers=AGNO_LAYOUT_READERS, run_ids=run_ids),
+                "observed": observe(store, session_id, scope, readers=readers, run_ids=run_ids),
             }
     return json.loads(_canonical({"storage_name": storage_name, "sessions": sessions}))
 

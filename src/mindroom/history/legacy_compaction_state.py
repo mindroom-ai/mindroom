@@ -57,6 +57,12 @@ def migrate_to_summary_rows(path: Path, names: TableNames) -> None:
     )
 
 
+def adopt_summary_rows(connection: sqlite3.Connection, names: TableNames) -> None:
+    """Give a database without summary rows its summary rows, as ``migrate_to_summary_rows`` does, in the caller's write transaction."""
+    if _needs_summary_rows(connection, names):
+        _create_summary_rows(connection, names)
+
+
 def _create_summary_rows(connection: sqlite3.Connection, names: TableNames) -> None:
     for statement in run_log_sql(names):
         connection.execute(statement)

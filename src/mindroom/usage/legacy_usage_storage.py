@@ -57,6 +57,12 @@ def migrate_usage_database(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS)
     )
 
 
+def seed_usage_ledger(connection: sqlite3.Connection, names: TableNames) -> None:
+    """Seed the usage ledger of a database that has none, as ``migrate_usage_database`` does, in the caller's write transaction."""
+    if _needs_migration(connection, names):
+        _seed_usage(connection, names)
+
+
 def _needs_migration(connection: sqlite3.Connection, names: TableNames) -> bool:
     tables = table_names(connection)
     return names.sessions in tables and names.usage not in tables

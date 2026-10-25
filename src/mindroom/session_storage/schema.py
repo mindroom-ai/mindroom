@@ -40,7 +40,7 @@ _SESSION_COLUMN_TYPES = {
 SESSION_COLUMNS = tuple(_SESSION_COLUMN_TYPES)
 _SESSION_COLUMN_SQL = ", ".join(f"{column} {column_type}" for column, column_type in _SESSION_COLUMN_TYPES.items())
 # The sessions-table columns storage v2 keeps, every one a current writer or reader uses.
-_LOG_SESSION_COLUMNS = (
+LOG_SESSION_COLUMNS = (
     "session_id",
     "session_type",
     "agent_id",
@@ -51,7 +51,7 @@ _LOG_SESSION_COLUMNS = (
     "created_at",
     "updated_at",
 )
-_LOG_SESSION_COLUMN_SQL = ", ".join(f"{column} {_SESSION_COLUMN_TYPES[column]}" for column in _LOG_SESSION_COLUMNS)
+_LOG_SESSION_COLUMN_SQL = ", ".join(f"{column} {_SESSION_COLUMN_TYPES[column]}" for column in LOG_SESSION_COLUMNS)
 # The layout version ``<sessions>_log_meta`` records; the Agno 3 layout has no marker.
 LOG_VERSION = 2
 _SESSIONS_DIRECTORY = "sessions"
@@ -226,6 +226,7 @@ def _index_sql(table: str, *columns: str) -> str:
 
 
 __all__ = [
+    "LOG_SESSION_COLUMNS",
     "LOG_VERSION",
     "SESSION_COLUMNS",
     "TableNames",
