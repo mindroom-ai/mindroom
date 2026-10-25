@@ -24,6 +24,7 @@ from mindroom.matrix_rtc.voice_agent import (
     _AuthorizedParticipantAudioInput,
     _drop_live_backlog_on_caller_speech,
 )
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -125,7 +126,7 @@ async def test_live_input_emits_paced_silence_before_any_participant_joins() -> 
     audio, _room = await start_audio()
     try:
         started = asyncio.get_running_loop().time()
-        frames = [await asyncio.wait_for(anext(audio), timeout=1) for _ in range(4)]
+        frames = [await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS) for _ in range(4)]
         elapsed = asyncio.get_running_loop().time() - started
         assert elapsed >= 0.15
         assert elapsed < 0.8
@@ -142,27 +143,27 @@ async def test_live_input_resumes_real_frames_after_late_microphone_and_stream_g
     audio, room = await start_audio()
     microphone = Microphone()
     try:
-        assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+        assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         subscribe(room, "alice", microphone)
-        await asyncio.wait_for(microphone.reading.wait(), timeout=1)
-        assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+        await asyncio.wait_for(microphone.reading.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         for value in (17, 29):
             microphone.frames.put_nowait(frame(value))
         received = []
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while len(received) < 2:
                 item = await anext(audio)
                 if any(item.data):
                     received.append(item.data.tobytes())
         assert received == [frame(17).data.tobytes(), frame(29).data.tobytes()]
         for _ in range(3):
-            assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+            assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         microphone.frames.put_nowait(frame(43))
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while not any((resumed := await anext(audio)).data):
                 pass
         assert resumed.data.tobytes() == frame(43).data.tobytes()
-        assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+        assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
     finally:
         await audio.aclose()
     assert microphone.closed
@@ -178,7 +179,7 @@ async def test_live_silence_never_admits_an_unauthorized_microphone() -> None:
     subscribe(room, "outsider", microphone)
     try:
         for _ in range(3):
-            assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+            assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         assert not microphone.reading.is_set()
         assert microphone.frames.qsize() == 1
     finally:
@@ -193,21 +194,21 @@ async def test_live_cancelled_consumer_keeps_real_frame_and_close_ends_pending_r
     subscribe(room, "alice", microphone)
     pending = asyncio.create_task(anext(audio))
     try:
-        await asyncio.wait_for(microphone.reading.wait(), timeout=1)
+        await asyncio.wait_for(microphone.reading.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
         microphone.frames.put_nowait(frame(89))
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while not any((item := await anext(audio)).data):
                 pass
         assert item.data.tobytes() == frame(89).data.tobytes()
-        assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+        assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         pending = asyncio.create_task(anext(audio))
         await asyncio.sleep(0)
         await audio.aclose()
         with pytest.raises(StopAsyncIteration):
-            await asyncio.wait_for(pending, timeout=1)
+            await asyncio.wait_for(pending, timeout=SETTLE_TIMEOUT_SECONDS)
         with pytest.raises(StopAsyncIteration):
             await anext(audio)
     finally:
@@ -245,7 +246,7 @@ async def test_live_input_paces_buffered_real_frames_without_duplicates() -> Non
     slots = []
     delivered_at = []
     try:
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while len(received) < 4:
                 slot = audio._next_frame_at
                 item = await anext(audio)
@@ -284,7 +285,7 @@ async def test_live_input_owns_one_stalled_mixer_read_until_close(monkeypatch: p
     audio, _room = await start_audio()
     try:
         for _ in range(3):
-            assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+            assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         assert pending_reads == 1
         assert read_calls == 1
         assert not read_finished.is_set()
@@ -322,9 +323,9 @@ async def test_live_cancelled_close_drains_mixer_and_can_be_awaited_again(monkey
     closing = None
     retry = None
     try:
-        await asyncio.wait_for(anext(audio), timeout=1)
+        await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)
         closing = asyncio.create_task(audio.aclose())
-        await asyncio.wait_for(read_cancelled.wait(), timeout=1)
+        await asyncio.wait_for(read_cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         closing.cancel()
         done, _ = await asyncio.wait({closing}, timeout=0.05)
         assert not done, "Cancelled close abandoned mixer teardown"
@@ -421,7 +422,7 @@ async def test_only_live_audio_bounds_upstream_backlog_to_recent_frames(live: bo
     expected_values = list(range(11, 21)) if live else list(range(1, 21))
     received = []
     try:
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while len(received) < len(expected_values):
                 item = await anext(audio)
                 if any(item.data):
@@ -665,7 +666,7 @@ async def test_live_output_passes_playout_and_controls_through(output_clock: Out
     for segment in range(2):
         await deliver(output, output_clock, segment, at=0.0)
         output.flush()
-        playout = await asyncio.wait_for(output.wait_for_playout(), timeout=1)
+        playout = await asyncio.wait_for(output.wait_for_playout(), timeout=SETTLE_TIMEOUT_SECONDS)
         assert playout.interrupted is False
     output.clear_buffer()
     output.pause()

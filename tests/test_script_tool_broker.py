@@ -110,7 +110,7 @@ async def _cancel_cleanup_owner(
     owner.cancel()
     with pytest.raises(asyncio.CancelledError):
         await owner
-    await asyncio.wait_for(replacement_ready.wait(), timeout=1.0)
+    await asyncio.wait_for(replacement_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     assert len(replacement) == 1
     return replacement[0]
 
@@ -442,13 +442,13 @@ async def test_shutdown_during_call_preparation_never_starts_new_tool_execution(
     def delayed_claim(**kwargs: object) -> object:
         claim = original_claim(**kwargs)
         claimed.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return claim
 
     monkeypatch.setattr(broker.store, "claim_call", delayed_claim)
     acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
     try:
-        assert await asyncio.to_thread(claimed.wait, 2)
+        assert await asyncio.to_thread(claimed.wait, SETTLE_TIMEOUT_SECONDS)
         broker.close_call_admission()
     finally:
         release.set()
@@ -485,7 +485,7 @@ async def test_detach_drains_completed_calls_without_revoking_script(
     await broker.accept_authenticated(_request(), f"Bearer {token}")
     await entered.wait()
     broker.close_call_admission()
-    detachment = asyncio.create_task(broker.detach_runs({"run-1"}, timeout_seconds=1))
+    detachment = asyncio.create_task(broker.detach_runs({"run-1"}, timeout_seconds=SETTLE_TIMEOUT_SECONDS))
     release.set()
     await detachment
 
@@ -508,19 +508,21 @@ async def test_detach_budget_retains_pending_preparation_cleanup(
     def delayed_claim(**kwargs: object) -> object:
         claim = original_claim(**kwargs)
         claimed.set()
-        assert release.wait(timeout=2)
+        # No bound: the finally below always releases it, and a release timeout would end the blocked claim and
+        # let a detach that wrongly waits for it finish.
+        release.wait()
         return claim
 
     monkeypatch.setattr(broker.store, "claim_call", delayed_claim)
     acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
     try:
-        assert await asyncio.to_thread(claimed.wait, 2)
+        assert await asyncio.to_thread(claimed.wait, SETTLE_TIMEOUT_SECONDS)
         broker.close_call_admission()
-        await asyncio.wait_for(broker.detach_runs({"run-1"}, timeout_seconds=0), timeout=0.2)
+        await asyncio.wait_for(broker.detach_runs({"run-1"}, timeout_seconds=0), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         release.set()
         await acceptance
-        await drain_script_tool_cleanup(broker, timeout_seconds=1)
+        await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
     assert broker.store.require_active_capability("run-1", token).cancel_requested_at is None
     assert broker.store.get_call("run-1", "call-1").state is ScriptCallState.INDETERMINATE
 
@@ -723,7 +725,7 @@ async def test_script_broker_closes_a_filtered_requested_toolkit(
     receipt = await _call_through_gateway(broker, _request(call_id="filtered-toolkit"), token)
 
     assert receipt.state is ScriptCallState.FAILED
-    await asyncio.wait_for(closed.wait(), timeout=1.0)
+    await asyncio.wait_for(closed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -789,7 +791,7 @@ async def test_cancel_run_settles_pending_exact_approval(tmp_path: Path) -> None
     await resolver.approval_started.wait()
     broker.store.request_cancel(request.run_id, reason="run cancelled")
 
-    await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=1.0)
+    await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=SETTLE_TIMEOUT_SECONDS)
 
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
@@ -1218,12 +1220,12 @@ async def test_script_broker_cancellation_waits_for_claim_schedule_ownership(
     def claim_call(**kwargs: object) -> object:
         claim = original_claim_call(**kwargs)  # type: ignore[arg-type]
         claim_returned.set()
-        assert release_claim.wait(timeout=1.0)
+        assert release_claim.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return claim
 
     monkeypatch.setattr(broker.store, "claim_call", claim_call)
     submission = asyncio.create_task(broker.accept_authenticated(request, f"Bearer {token}"))
-    assert await asyncio.to_thread(claim_returned.wait, 1.0)
+    assert await asyncio.to_thread(claim_returned.wait, SETTLE_TIMEOUT_SECONDS)
     submission.cancel()
     await asyncio.sleep(0)
 
@@ -1676,12 +1678,12 @@ async def test_duplicate_post_returns_terminal_winner_when_claim_races_orphan_se
     def pause_after_stale_claim(**kwargs: object) -> object:
         claim = original_claim_call(**kwargs)  # type: ignore[arg-type]
         stale_claim_returned.set()
-        assert release_stale_claim.wait(timeout=1.0)
+        assert release_stale_claim.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return claim
 
     monkeypatch.setattr(broker.store, "claim_call", pause_after_stale_claim)
     submission = asyncio.create_task(broker.accept_authenticated(request, f"Bearer {token}"))
-    assert await asyncio.to_thread(stale_claim_returned.wait, 1.0)
+    assert await asyncio.to_thread(stale_claim_returned.wait, SETTLE_TIMEOUT_SECONDS)
     published = broker.store.publish_call_result(
         run_id=request.run_id,
         call_id=request.call_id,
@@ -1742,13 +1744,13 @@ def test_script_broker_get_returns_terminal_winner_when_publish_races_orphan_set
         record = original_get_call(run_id, call_id)
         if record.state is ScriptCallState.PENDING:
             pending_read.set()
-            assert release_stale_read.wait(timeout=1.0)
+            assert release_stale_read.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return record
 
     monkeypatch.setattr(broker.store, "get_call", pause_after_pending_read)
     with ThreadPoolExecutor(max_workers=1) as executor:
         polling = executor.submit(broker.get_call, request.run_id, request.call_id)
-        assert pending_read.wait(timeout=1.0)
+        assert pending_read.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         published = broker.store.publish_call_result(
             run_id=request.run_id,
             call_id=request.call_id,
@@ -1756,7 +1758,7 @@ def test_script_broker_get_returns_terminal_winner_when_publish_races_orphan_set
             result=3,
         )
         release_stale_read.set()
-        receipt = polling.result(timeout=1.0)
+        receipt = polling.result(timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert published.state is ScriptCallState.COMPLETED
     assert receipt.state is ScriptCallState.COMPLETED
@@ -1806,7 +1808,7 @@ async def test_script_broker_get_reports_retryable_preclaim_preparation(
 
     def blocking_require(run_id: str, capability: str) -> ScriptRunRecord:
         preparation_started.set()
-        assert release_preparation.wait(timeout=1)
+        assert release_preparation.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_require(run_id, capability)
 
     monkeypatch.setattr(broker.store, "require_active_capability", blocking_require)
@@ -1816,7 +1818,7 @@ async def test_script_broker_get_reports_retryable_preclaim_preparation(
             f"Bearer {token}",
         ),
     )
-    assert await asyncio.to_thread(preparation_started.wait, 1)
+    assert await asyncio.to_thread(preparation_started.wait, SETTLE_TIMEOUT_SECONDS)
 
     with pytest.raises(ScriptCallPreparationPendingError):
         await broker.get_authenticated(

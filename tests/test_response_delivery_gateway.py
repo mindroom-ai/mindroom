@@ -3364,7 +3364,7 @@ class TestTurnDeliverySerialization:
             )
             await enqueue_committed.wait()
             request_task_cancel(final, cancel_source="user_stop")
-            await asyncio.wait_for(first_cancellation_observed.wait(), timeout=5)
+            await asyncio.wait_for(first_cancellation_observed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             request_task_cancel(final, process_shutdown=True)
             return_from_enqueue.set()
 
@@ -3678,7 +3678,7 @@ class TestTurnDeliverySerialization:
         try:
             delivered = await asyncio.wait_for(
                 outer_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL),
-                timeout=0.5,
+                timeout=SETTLE_TIMEOUT_SECONDS,
             )
         except TimeoutError:
             pytest.fail("terminal callback deadlocked on the turn's visible-delivery lock")

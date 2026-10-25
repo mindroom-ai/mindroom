@@ -3147,7 +3147,7 @@ async def test_repeated_start_cancellation_keeps_cleanup_owned_until_runtime_clo
     await asyncio.sleep(0)
     task.cancel()
     await asyncio.sleep(0)
-    await asyncio.wait_for(closing_browser.wait(), timeout=1)
+    await asyncio.wait_for(closing_browser.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     task.cancel()
     closing = asyncio.create_task(runtime.close())
     with pytest.raises(TimeoutError):
@@ -3156,7 +3156,7 @@ async def test_repeated_start_cancellation_keeps_cleanup_owned_until_runtime_clo
     adapter.proceed.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    await asyncio.wait_for(closing, timeout=1)
+    await asyncio.wait_for(closing, timeout=SETTLE_TIMEOUT_SECONDS)
     assert adapter.live_resources == set()
 
 

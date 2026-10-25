@@ -29,6 +29,7 @@ from mindroom.mcp.transports import (
 )
 from mindroom.server_fetch_httpx2 import ServerFetchAsyncHTTPX2Transport
 from mindroom.server_fetch_url import ServerFetchUrlError
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -79,7 +80,7 @@ def _nested_exceptions(exc: BaseException) -> list[BaseException]:
 async def _initialize_over(handle: _MCPTransportHandle) -> None:
     """Drive the SDK's own client stack over one MindRoom transport handle."""
     async with (
-        asyncio.timeout(5),
+        asyncio.timeout(SETTLE_TIMEOUT_SECONDS),
         handle.opener() as (read_stream, write_stream),
         ClientSession(read_stream, write_stream) as session,
     ):
@@ -699,7 +700,7 @@ async def test_remote_transports_deliver_results_larger_than_one_mebibyte(
             _runtime_paths(tmp_path),
         )
         async with (
-            asyncio.timeout(20),
+            asyncio.timeout(SETTLE_TIMEOUT_SECONDS),
             handle.opener() as (read_stream, write_stream),
             ClientSession(read_stream, write_stream) as session,
         ):

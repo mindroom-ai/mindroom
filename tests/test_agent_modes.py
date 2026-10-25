@@ -11,6 +11,7 @@ import pytest
 
 from mindroom import agent_modes
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 
 def _paths(tmp_path: Path) -> tuple[RuntimePaths, Path]:
@@ -47,7 +48,7 @@ def test_choices_stay_out_of_worker_mounted_state_roots(tmp_path: Path) -> None:
             daemon=True,
         )
         change.start()
-        change.join(timeout=5)
+        change.join(timeout=SETTLE_TIMEOUT_SECONDS)
         stalled = change.is_alive()
     change.join()
     assert not stalled
