@@ -53,21 +53,30 @@ def formatted_input_with_provider_items(
             message,
             prepared_input[anchor : anchor + size],
         )
-        if replacement is not None:
-            prepared_input[anchor : anchor + size] = replacement
-            cursor = anchor + len(replacement)
-        else:
-            items = data.get(TOOL_SEARCH_ITEMS_KEY) or []
+        if replacement is None:
+            search_items = data.get(TOOL_SEARCH_ITEMS_KEY) or []
             span = prepared_input[anchor : anchor + size]
-            if replay_reasoning:
-                span = _reconstructed_response_input(message, span)
-            prepared_input[anchor : anchor + size] = [*items, *span]
-            cursor = anchor + len(items) + len(span)
+            replacement = (
+                _reconstructed_response_input(message, search_items, span)
+                if replay_reasoning
+                else [*search_items, *span]
+            )
+        prepared_input[anchor : anchor + size] = replacement
+        cursor = anchor + len(replacement)
     return prepared_input
 
 
-def _reconstructed_response_input(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]]:
-    """Build valid input from canonical content when original output cannot be reused."""
+def _reconstructed_response_input(
+    message: Message,
+    search_items: list[dict[str, Any]],
+    formatted_span: list[Any],
+) -> list[dict[str, Any]]:
+    """Build valid input from canonical content when original output cannot be reused.
+
+    The span goes without the reasoning that produced it, so its hosted search items go without their item IDs: the
+    provider rejects a search item ID sent without the reasoning item that preceded it, whether stored or not.
+    """
+    search_input = [{key: value for key, value in item.items() if key != "id"} for item in search_items]
     repaired_span = repair_legacy_responses_span(message, formatted_span)
     content = message.content
     if isinstance(content, list):
@@ -80,10 +89,10 @@ def _reconstructed_response_input(message: Message, formatted_span: list[Any]) -
             for part in content
         ]
     if not message.tool_calls:
-        return [{**repaired_span[0], "content": content if content is not None else ""}]
+        return [*search_input, {**repaired_span[0], "content": content if content is not None else ""}]
     if content:
         repaired_span.insert(0, {"role": "assistant", "content": content})
-    return repaired_span
+    return [*search_input, *repaired_span]
 
 
 def _canonical_response_output(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]] | None:

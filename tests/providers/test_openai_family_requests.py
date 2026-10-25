@@ -63,10 +63,10 @@ _CALL = {
     "arguments": "{}",
     "status": "completed",
 }
+# Hosted search items as the provider writes them: a server-executed search has no ``call_id``.
 _SEARCH_CALL = {
-    "id": "ts_1",
+    "id": "tsc_1",
     "type": "tool_search_call",
-    "call_id": "tsc_1",
     "arguments": {"queries": ["weather"]},
     "execution": "server",
     "status": "completed",
@@ -74,7 +74,6 @@ _SEARCH_CALL = {
 _SEARCH_OUTPUT = {
     "id": "tso_1",
     "type": "tool_search_output",
-    "call_id": "tsc_1",
     "execution": "server",
     "status": "completed",
     "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}],
@@ -396,8 +395,16 @@ def test_reconstructed_assistant_content_is_valid_responses_input(
 # --- Hosted tool-search items ---------------------------------------------------------------------------------
 
 
+def _without_item_id(item: dict[str, Any]) -> dict[str, Any]:
+    """Return a search item as a replay without its reasoning sends it: the provider rejects its ID alone."""
+    return {key: value for key, value in item.items() if key != "id"}
+
+
 def test_search_items_replay_ahead_of_the_discovered_function_call() -> None:
-    """Captured search items go back immediately ahead of the message's replayed function calls."""
+    """Captured search items go back immediately ahead of the message's replayed function calls.
+
+    The message recorded no reasoning, so the items and the call go without their item IDs.
+    """
     assistant = Message(
         role="assistant",
         content="",
@@ -419,8 +426,8 @@ def test_search_items_replay_ahead_of_the_discovered_function_call() -> None:
 
     assert _input(messages) == [
         {"role": "user", "content": "weather?"},
-        _SEARCH_CALL,
-        _SEARCH_OUTPUT,
+        _without_item_id(_SEARCH_CALL),
+        _without_item_id(_SEARCH_OUTPUT),
         {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}", "status": "completed"},
         {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
     ]
@@ -440,7 +447,7 @@ def test_search_replay_anchors_on_its_own_turn_not_an_identical_earlier_one() ->
         {"role": "user", "content": "q1"},
         {"role": "assistant", "content": "same text"},
         {"role": "user", "content": "q2"},
-        _SEARCH_CALL,
+        _without_item_id(_SEARCH_CALL),
         {"role": "assistant", "content": "same text"},
     ]
 
@@ -589,6 +596,33 @@ async def test_an_approval_resume_on_a_stored_chain_replays_its_tool_loop(tmp_pa
     assert "trusted approval receipt" in sent[1]["input"][1]["content"]
     assert sent[1]["input"][2:] == [
         {"role": "user", "content": "Look it up."},
+        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_replay_after_the_prompt_changes_sends_hosted_search_items_without_their_item_ids(
+    tmp_path: Path,
+) -> None:
+    """A stored reply records no reasoning, so its replayed search items and call drop the IDs that reasoning owns.
+
+    The provider rejects a search item's ID sent without the reasoning item that preceded it, stored or not.
+    """
+    output = [_REASONING, _SEARCH_CALL, _SEARCH_OUTPUT, {**_REASONING, "id": "rs_second"}, _CALL]
+    adapter, sent = _stored_reply_route(tmp_path, output)
+    question = Message(role="user", content="Look it up.")
+    call = await _reply(adapter, [_dated_prompt("Monday"), question])
+    result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
+
+    await _reply(adapter, _next_day([_dated_prompt("Monday"), question, call, result]))
+
+    assert sent[1]["store"] is True
+    assert "previous_response_id" not in sent[1]
+    assert sent[1]["input"][2:] == [
+        {"role": "user", "content": "Look it up."},
+        _without_item_id(_SEARCH_CALL),
+        _without_item_id(_SEARCH_OUTPUT),
         {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
         {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
     ]
