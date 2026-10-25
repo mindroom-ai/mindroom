@@ -2610,13 +2610,13 @@ class TestGenerateSummary:
         [None, {"temperature": 0.9, "num_ctx": 8192}],
         ids=["no-options", "authored-options"],
     )
-    async def test_ollama_summaries_send_the_authored_options_unchanged(
+    async def test_ollama_summaries_send_the_summary_temperature_in_the_authored_options(
         self,
         tmp_path: Path,
         summary_temperature: float | None,
         options: dict[str, Any] | None,
     ) -> None:
-        """Ollama summaries never send the summary temperature: Agno's Ollama model had no temperature field."""
+        """Ollama summaries send the summary temperature as ``options.temperature`` and keep the other options."""
         wire = _SummaryWire()
         config = _mock_config(summary_temperature=summary_temperature)
         model_config = _wire_model_config({"provider": "ollama", "id": "qwen3.8:27b"}, wire)
@@ -2634,7 +2634,8 @@ class TestGenerateSummary:
             await _summarize(_make_thread_history(3), config, runtime_paths, model_name="summary")
 
         [body] = wire.bodies
-        assert body.get("options") == options
+        expected = options if summary_temperature is None else {**(options or {}), "temperature": summary_temperature}
+        assert body.get("options") == expected
 
     async def test_prompt_good_examples_are_stable_and_within_hard_limit(self) -> None:
         """Prompt GOOD examples should be short and avoid transient-status wording."""
@@ -2687,7 +2688,7 @@ class _SummaryWire:
 def _wire_model_config(fields: dict[str, Any], wire: _SummaryWire) -> ModelConfig:
     """Return a model config that sends through ``wire`` and authors temperature 0.9 where its route has one."""
     provider = fields["provider"]
-    # Ollama models author sampling inside ``options``, which summaries leave alone.
+    # Ollama models author sampling inside ``options``, not as a temperature setting.
     extra_kwargs: dict[str, Any] = {} if provider == "ollama" else {"temperature": 0.9}
     if provider == "vertexai_claude":
         extra_kwargs |= {
