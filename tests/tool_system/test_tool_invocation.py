@@ -19,7 +19,7 @@ from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
 
-from mindroom.llm.media import File, Image, Video
+from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import (
     ToolArgumentError,
@@ -453,6 +453,8 @@ def test_clients_get_a_tool_values_text_with_references_to_its_media() -> None:
     drawn = ToolValue(
         content="drawn",
         images=(Image(url="https://example.org/cat.png"),),
+        audios=(Audio(content=b"RIFF", mime_type="audio/wav"),),
+        videos=(Video(url="https://example.org/cat.mp4", mime_type="video/mp4"),),
         files=(File(content=b"a,b", mime_type="text/csv"),),
     )
 
@@ -462,6 +464,8 @@ def test_clients_get_a_tool_values_text_with_references_to_its_media() -> None:
         "content": "drawn",
         "attachments": [
             {"kind": "image", "mime_type": None, "url": "https://example.org/cat.png"},
+            {"kind": "audio", "mime_type": "audio/wav"},
+            {"kind": "video", "mime_type": "video/mp4", "url": "https://example.org/cat.mp4"},
             {"kind": "file", "mime_type": "text/csv"},
         ],
     }
