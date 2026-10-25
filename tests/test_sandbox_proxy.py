@@ -5724,7 +5724,7 @@ def _live_primary_config(runtime_paths: RuntimePaths) -> Config:
                     "provider": "openai",
                     "id": "gpt-6-astra",
                     "api_key": "sk-live-model-key",
-                    "extra_kwargs": {"aws_secret_access_key": "live-model-extra-kwarg-secret"},
+                    "extra_kwargs": {"default_headers": {"X-Upstream-Key": "live-model-extra-kwarg-secret"}},
                 },
             },
             "router": {"model": "default"},
