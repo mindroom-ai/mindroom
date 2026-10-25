@@ -33,7 +33,7 @@ from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Collection
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
@@ -184,8 +184,12 @@ class ChatUITools(Toolkit):
 
     @property
     def instructions(self) -> str:
-        """Map only the functions this agent has; include_tools and exclude_tools remove the others."""
-        enabled = {*self.functions, *self.async_functions}
+        """Map only the functions this toolkit was built with; include_tools and exclude_tools remove the others."""
+        return self.instructions_for({*self.functions, *self.async_functions})
+
+    def instructions_for(self, function_names: Collection[str]) -> str:
+        """Map only ``function_names``, the functions an agent is offered of this toolkit once its filters ran."""
+        enabled = set(function_names)
         lines = [
             _SHOW_COMPUTER_ALIAS if name == "show_computer" and "open_panel" in enabled else line
             for name, line in _FUNCTION_INSTRUCTIONS.items()

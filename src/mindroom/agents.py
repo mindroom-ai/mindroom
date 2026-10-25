@@ -59,7 +59,12 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, offered_refusal
+from mindroom.tool_system.agno_toolkits import (
+    adapt_function,
+    adapt_toolkit,
+    offered_refusal,
+    with_offered_instructions,
+)
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
@@ -1405,6 +1410,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             approvals_as_jobs=approvals_as_jobs
             and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
         )
+        # A toolkit whose instructions describe its functions describes only the ones left.
+        adapted = with_offered_instructions(toolkit, adapted)
         entry = offered_entry(toolkit, adapted, tool_entry, authored_name) if adapted.functions else None
         if persona_tools is not None:
             persona_built[tool_name] = filtered

@@ -13,7 +13,7 @@ import inspect
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_type_hints, runtime_checkable
 
 from agno.media import Audio as AgnoAudio
 from agno.media import File as AgnoFile
@@ -36,7 +36,7 @@ from mindroom.tool_system.declarations import finished_tool_schema
 from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from mindroom.tool_system.invocation import ToolCallContext
 
@@ -124,6 +124,15 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 }
 
 
+@runtime_checkable
+class FunctionScopedInstructions(Protocol):
+    """A toolkit whose instructions describe its functions, so they name only the ones an agent is offered."""
+
+    def instructions_for(self, function_names: Collection[str]) -> str:
+        """Return the toolkit's instructions for an agent offered ``function_names`` of it."""
+        ...
+
+
 def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None) -> AdaptedToolkit:
     """Adapt the functions of ``toolkit`` in Agno's async-run order, one per name; they share one ``actor_state``.
 
@@ -141,11 +150,12 @@ def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None) -> AdaptedToolkit
         if (refusal := _refusal(offered)) is not None:
             refused[function.name] = refusal
         adapted.append(replace(_adapt(offered), toolkit=key, actor_state=actor_state))
+    instructions, guidance = _prompt_and_guidance(toolkit, toolkit.instructions)
     return AdaptedToolkit(
         name=toolkit.name,
         functions=tuple(adapted),
-        instructions=toolkit.instructions if toolkit.add_instructions else None,
-        guidance=toolkit.instructions or None,
+        instructions=instructions,
+        guidance=guidance,
         function_instructions={
             function.name: function.instructions
             for function in functions
@@ -153,6 +163,23 @@ def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None) -> AdaptedToolkit
         },
         refused=refused,
     )
+
+
+def with_offered_instructions(toolkit: Toolkit, adapted: AdaptedToolkit) -> AdaptedToolkit:
+    """Return ``adapted``, the functions an agent offers of ``toolkit``, with the instructions ``toolkit`` gives for them.
+
+    Only a toolkit whose instructions describe its functions (``FunctionScopedInstructions``) gives other ones.
+    """
+    if not isinstance(toolkit, FunctionScopedInstructions):
+        return adapted
+    rendered = toolkit.instructions_for([function.name for function in adapted.functions])
+    instructions, guidance = _prompt_and_guidance(toolkit, rendered)
+    return replace(adapted, instructions=instructions, guidance=guidance)
+
+
+def _prompt_and_guidance(toolkit: Toolkit, instructions: str | None) -> tuple[str | None, str | None]:
+    """Return what the prompt shows of ``instructions``, only when ``add_instructions`` asks, and the guidance."""
+    return (instructions if toolkit.add_instructions else None), instructions or None
 
 
 def offered_refusal(toolkit: AdaptedToolkit) -> str | None:
@@ -473,6 +500,7 @@ __all__ = [
     "AgnoImage",
     "AgnoVideo",
     "Function",
+    "FunctionScopedInstructions",
     "StreamCollector",
     "ToolCallActor",
     "ToolResult",
@@ -486,4 +514,5 @@ __all__ = [
     "read_tool_value",
     "tool_value",
     "warm_agno_tool_imports",
+    "with_offered_instructions",
 ]

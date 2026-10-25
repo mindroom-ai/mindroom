@@ -22,6 +22,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import update_awareness
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
+from mindroom.delegation.state import SubagentPersona
 from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
@@ -1208,6 +1209,42 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
         assert f"{name}(" not in instructions
         assert f"{name}(" not in description
     assert f"- {available}(" in _build_prompt(agent)
+
+
+@pytest.mark.parametrize("narrowed_by", ["function_filter", "persona", "approval"])
+def test_chat_ui_instructions_name_only_the_functions_a_narrowed_agent_is_offered(
+    tmp_path: Path,
+    narrowed_by: str,
+) -> None:
+    """The persona list, the function filter, and approval hiding narrow the chat_ui map as include_tools does."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["chat_ui"]  # type: ignore[index]
+    if narrowed_by == "approval":
+        raw["tool_approval"] = {
+            "rules": [{"match": name, "action": "require_approval"} for name in ("open_panel", "show_computer")],
+        }
+    config = _validated_config(tmp_path, raw)
+    narrowing: dict[str, Any] = {
+        "function_filter": {"tool_function_filter": lambda function: function.name == "open_settings"},
+        "persona": {
+            "persona": SubagentPersona(
+                source_kind="inline",
+                source_name="",
+                system_prompt="You open settings.",
+                tools=("chat_ui.open_settings",),
+            ),
+        },
+        "approval": {},
+    }[narrowed_by]
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, **narrowing)
+    chat_ui = _toolkit(agent, "chat_ui")
+
+    assert [function.name for function in chat_ui.functions] == ["open_settings"]
+    for text in (_build_prompt(agent), chat_ui.guidance or ""):
+        assert "- open_settings(" in text
+        assert "show_computer(" not in text
+        assert "open_panel(" not in text
 
 
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
