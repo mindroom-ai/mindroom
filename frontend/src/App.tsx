@@ -33,6 +33,7 @@ import { showSaveFailureToastIfNeeded } from "@/components/shared";
 import {
   getConfigValidationIssues,
   getGlobalConfigDiagnostics,
+  getLocatedConfigValidationIssues,
   type GlobalConfigDiagnostic,
 } from "@/lib/configValidation";
 import {
@@ -115,6 +116,7 @@ function AppContent() {
     NAV_ITEMS.find((item) => item.value === currentTab) || NAV_ITEMS[0];
   const previousSelectedRoomIdRef = useRef(selectedRoomId);
   const validationIssues = getConfigValidationIssues(diagnostics);
+  const locatedValidationIssues = getLocatedConfigValidationIssues(diagnostics);
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
   const blockingDiagnostic =
     globalDiagnostics.find(
@@ -428,7 +430,7 @@ function AppContent() {
           </div>
         ))}
 
-        {config != null && validationIssues.length > 0 && (
+        {config != null && locatedValidationIssues.length > 0 && (
           <div className="border-b border-destructive/20 bg-destructive/5 px-3 py-4 text-sm text-destructive sm:px-6">
             <div className="space-y-2">
               <p className="font-medium">
@@ -439,7 +441,7 @@ function AppContent() {
                 replace <code>config.yaml</code>.
               </p>
               <ul className="list-disc space-y-1 pl-5">
-                {validationIssues.map((issue, index) => (
+                {locatedValidationIssues.map((issue, index) => (
                   <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
                     <span className="font-medium">
                       {issue.loc.join(" → ") || "config"}

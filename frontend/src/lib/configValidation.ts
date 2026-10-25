@@ -36,6 +36,15 @@ export function getConfigValidationIssues(
     .map((diagnostic) => diagnostic.issue);
 }
 
+/** Validation issues tied to a config location; root-level issues show as global diagnostics instead. */
+export function getLocatedConfigValidationIssues(
+  diagnostics: ConfigDiagnostic[],
+): ConfigValidationIssue[] {
+  return getConfigValidationIssues(diagnostics).filter(
+    (issue) => issue.loc.length > 0,
+  );
+}
+
 export function getGlobalConfigDiagnostics(
   diagnostics: ConfigDiagnostic[],
 ): GlobalConfigDiagnostic[] {
