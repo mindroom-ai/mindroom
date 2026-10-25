@@ -1110,7 +1110,7 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
 
 @pytest.mark.asyncio
 async def test_requests_get_an_hour_unless_the_model_authors_no_timeout(tmp_path: Path) -> None:
-    """The one-hour default lets long non-streamed answers finish; an authored null keeps the SDK's own limits."""
+    """Requests get the one-hour default until #3119 drops it; an authored null keeps the SDK's own limits."""
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     request = ModelRequest(messages=_user())
     await claude_turn(route_provider("anthropic", tmp_path, wire), request)

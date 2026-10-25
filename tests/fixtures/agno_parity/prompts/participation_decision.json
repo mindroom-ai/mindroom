@@ -1,5 +1,5 @@
 {
-  "description": "Participation check of an agent with participation config and no judgment backend: the reply model's non-streaming decision request with tool_choice none and the decision prompt appended, then the reply.",
+  "description": "Participation check of an agent with participation config and no judgment backend: the reply model's decision request with tool_choice none and the decision prompt appended, then the reply.",
   "input": {
     "config": {
       "agents": {

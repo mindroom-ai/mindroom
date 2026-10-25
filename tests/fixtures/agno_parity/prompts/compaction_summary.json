@@ -1,5 +1,5 @@
 {
-  "description": "History compaction: a turn calls compact_context, so the next reply first sends the non-streaming summary request, then replies with the summary in place of the compacted run.",
+  "description": "History compaction: a turn calls compact_context, so the next reply first sends the summary request, then replies with the summary in place of the compacted run.",
   "input": {
     "config": {
       "agents": {

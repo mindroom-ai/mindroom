@@ -3,7 +3,7 @@
 
 Stored responses continue with ``previous_response_id``; ``store: false`` responses and portable replay
 send the history explicitly, with ordered output items and encrypted reasoning so a later request can
-replay a tool loop exactly. A streamed turn counts only when ``response.completed`` arrives.
+replay a tool loop exactly. A turn ends only when ``response.completed`` or ``response.incomplete`` arrives.
 """
 
 from __future__ import annotations

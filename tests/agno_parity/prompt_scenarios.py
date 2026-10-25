@@ -1226,7 +1226,7 @@ def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
 async def _run_compaction_summary(root: Path) -> ScenarioOutput:
     first, follow_up = _compaction_turns(root)
     await _agent_turn(first)
-    # The next reply in the scope compacts its history first, with a non-streaming summary request.
+    # The next reply in the scope compacts its history first, with a summary request.
     await _agent_turn(follow_up)
     return ScenarioOutput(first.input)
 
@@ -1463,14 +1463,14 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     "participation_decision": Scenario(
         "Participation check of an agent with participation config and no judgment backend: the reply model's "
-        "non-streaming decision request with tool_choice none and the decision prompt appended, then the reply.",
+        "decision request with tool_choice none and the decision prompt appended, then the reply.",
         _run_participation_decision,
         answer_participation,
         turn=_participation_turn,
     ),
     "compaction_summary": Scenario(
-        "History compaction: a turn calls compact_context, so the next reply first sends the non-streaming summary "
-        "request, then replies with the summary in place of the compacted run.",
+        "History compaction: a turn calls compact_context, so the next reply first sends the summary request, then "
+        "replies with the summary in place of the compacted run.",
         _run_compaction_summary,
         answer_compaction,
         turn=lambda root: _compaction_turns(root)[0],

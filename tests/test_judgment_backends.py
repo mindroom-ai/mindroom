@@ -264,7 +264,7 @@ async def test_llm_decision_request_offers_no_tools_and_disables_provider_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The decision is one non-streaming request with tool choice none, sent while provider tools are disabled."""
+    """The decision is one request with tool choice none, sent while provider tools are disabled."""
     disabled: list[bool] = []
 
     async def observe() -> None:
