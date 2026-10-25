@@ -75,11 +75,6 @@ logger = get_logger(__name__)
 _NO_MEMBER_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType({})
 
 _IN_PROGRESS_REPLY_LABEL = "You (reply still streaming)"
-# TODO(simplify): no MindRoom code writes the interrupted-draft and partial-reply labels; only a trusted relay claim
-# could carry them. Match only the in-progress label. Models would notice only for such a relayed claim.
-_PARTIAL_REPLY_GUIDANCE_LABELS = frozenset(
-    {"You (interrupted reply draft)", _IN_PROGRESS_REPLY_LABEL, "You (partial reply)"},
-)
 _HOOK_OUTPUT_LABEL = "[posted automatically by hook {hook_source}, not written by you or any agent]"
 # Claims about who wrote a message; only MindRoom's own accounts may make them.
 _AUTHORSHIP_CLAIM_KEYS = (ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY)
@@ -248,7 +243,7 @@ def _context_message_from_visible_message(
         body = f"{_HOOK_OUTPUT_LABEL.format(hook_source=hook_source)}\n{body}"
     event_id = message.event_id or None
     speaker_label = _relayed_sender(message) or message.sender or missing_sender_label
-    if speaker_label in _PARTIAL_REPLY_GUIDANCE_LABELS and response_sender_id is not None:
+    if speaker_label == _IN_PROGRESS_REPLY_LABEL and response_sender_id is not None:
         content = render_msg_tag(
             sender=response_sender_id,
             body=f"{speaker_label}: {body}",
@@ -410,9 +405,6 @@ def _build_unseen_context_messages(
         member_display_names=member_display_names,
     )
     # Unseen context keeps only in-progress drafts of this sender, so only their header can apply.
-    # TODO(simplify): Nothing renders DEFAULT_UNSEEN_MESSAGES_HEADER, INTERRUPTED_PARTIAL_REPLY_HEADER,
-    # MIXED_PARTIAL_REPLY_HEADER, or PREVIOUS_CONVERSATION_THREAD_HEADER, yet each can be overridden. Retire the four
-    # from the prompt registry. Operators who override them would notice their overrides rejected.
     if partial_reply_kinds:
         context_messages = (
             Message(role="user", content=config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")),

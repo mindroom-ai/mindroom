@@ -86,6 +86,21 @@ def test_config_rejects_unknown_prompt_override() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "DEFAULT_UNSEEN_MESSAGES_HEADER",
+        "INTERRUPTED_PARTIAL_REPLY_HEADER",
+        "MIXED_PARTIAL_REPLY_HEADER",
+        "PREVIOUS_CONVERSATION_THREAD_HEADER",
+    ],
+)
+def test_config_rejects_overrides_of_headers_no_prompt_renders(name: str) -> None:
+    """Only prompts MindRoom renders can be overridden, so an override always changes what a model reads."""
+    with pytest.raises(ValidationError, match=f"Unknown prompt override\\(s\\): {name}\\."):
+        Config.model_validate({"prompts": {name: "Custom header."}})
+
+
 def test_config_rejects_prompt_override_with_unsupported_placeholder() -> None:
     """Prompt placeholder overrides must use fields supplied by their call site."""
     with pytest.raises(ValidationError, match="Unsupported prompt placeholder"):

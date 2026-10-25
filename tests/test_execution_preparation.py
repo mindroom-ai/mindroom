@@ -1519,6 +1519,37 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
     )
 
 
+@pytest.mark.parametrize("relayed_sender", ["You (interrupted reply draft)", "You (partial reply)"])
+def test_unseen_context_names_a_relayed_sender_that_reads_like_a_draft_label_as_written(relayed_sender: str) -> None:
+    """Only the agent's own in-progress draft renders under its account; a relayed sender keeps the name it carries."""
+    thread_history = [
+        make_visible_message(
+            sender="@mindroom_code:localhost",
+            body="Relayed text",
+            event_id="$relayed",
+            content={"body": "Relayed text", ORIGINAL_SENDER_KEY: relayed_sender},
+        ),
+        make_visible_message(sender="@alice:localhost", body="What happened?", event_id="$question"),
+    ]
+
+    turn, _unseen_event_ids = _build_unseen_context_messages(
+        "What happened?",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$question",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert turn.in_request_order()[0].content == render_msg_tag(
+        sender=relayed_sender,
+        body="Relayed text",
+        event_id="$relayed",
+    )
+
+
 def test_unseen_context_stops_at_current_thread_event() -> None:
     """A backlog turn must not include newer events from its hydrated thread."""
     thread_history = [
