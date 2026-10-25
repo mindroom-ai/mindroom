@@ -1,6 +1,6 @@
 """Agent runs end in exactly one stored record, and approval resumes run exactly the approved calls.
 
-The resume tests replay C4's paused rows (``run-paused-approval``, the ``team-paused`` member, and
+The resume tests replay the storage goldens' paused rows (``run-paused-approval``, the ``team-paused`` member, and
 ``run-paused-delegation``) through ``resume_agent`` and compare the result with the rows Agno stored after the
 same resume (``run-approved``, ``run-rejected``, the ``team-approved`` member, ``run-delegation-approved``).
 """
@@ -457,7 +457,7 @@ async def test_a_run_without_a_system_message_sends_only_its_input() -> None:
     assert [message.role for message in record.messages] == ["user", "assistant"]
 
 
-# --- resumes against the C4 goldens ---------------------------------------------------------------------------------
+# --- resumes against the storage goldens ----------------------------------------------------------------------------
 
 
 def _golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:

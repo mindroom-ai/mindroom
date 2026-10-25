@@ -1,6 +1,6 @@
 """Team resumes route each decision to the member that waits for it, then continue the leader as Agno did.
 
-The C6 pre-resume dump of ``team-approved`` (a team paused on its checker's ``multiply``) is resumed with the
+The pre-resume dump of ``team-approved`` (a team paused on its checker's ``multiply``) is resumed with the
 member's approval and compared with the ``team-approved`` rows Agno stored after the same resume.
 """
 # ruff: noqa: D103
@@ -925,7 +925,7 @@ async def test_a_member_whose_resumed_run_fails_reaches_the_leader_as_its_redact
 
 
 async def test_a_failed_resume_stores_its_error_over_the_paused_team_row_as_agno_did() -> None:
-    """A leader request that fails after the member resumed ends the team run ``ERROR`` over its ``PAUSED`` row (D15).
+    """A leader request that fails after the member resumed ends the team run ``ERROR`` over its ``PAUSED`` row.
 
     The member's resumed row is stored completed first, so the approved call is not offered again.
     """

@@ -1,4 +1,4 @@
-"""Production approval resumes continue the C6 pre-resume dumps into the rows Agno stored, and refuse what they must.
+"""Production approval resumes continue the pre-resume dumps into the rows Agno stored, and refuse what they must.
 
 Each test loads a paused run from its pre-resume dump (``tests.approval_resume_helpers``) and continues it through
 ``AgentApprovalExecution`` with the decisions the capture took. The stored rows are compared with the ones Agno wrote

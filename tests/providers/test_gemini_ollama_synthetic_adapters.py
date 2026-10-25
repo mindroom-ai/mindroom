@@ -1,4 +1,4 @@
-"""Behavior of the owned Gemini, Ollama, and synthetic adapters that the C1 goldens do not exercise."""
+"""Behavior of the owned Gemini, Ollama, and synthetic adapters that the provider goldens do not exercise."""
 
 from __future__ import annotations
 

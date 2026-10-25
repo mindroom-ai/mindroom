@@ -1,6 +1,6 @@
 """Team runs on the owned loop store the rows Agno stored and tell the leader what Agno told it.
 
-The C4 goldens are the reference: ``team-completed`` (a member used a tool), ``team-member-error`` (a member's run
+The storage goldens are the reference: ``team-completed`` (a member used a tool), ``team-member-error`` (a member's run
 failed), ``team-paused`` (a member's call waits for approval), and the streamed collaborate run ``panel-completed``.
 """
 # ruff: noqa: D103

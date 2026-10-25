@@ -1,6 +1,6 @@
 """The owned Gemini, Ollama, and synthetic adapters reproduce what the Agno-backed provider layer produced.
 
-For Gemini, Gemini on Vertex AI, and Ollama, each C1 golden's request (method, URL, kept headers, JSON body)
+For Gemini, Gemini on Vertex AI, and Ollama, each provider golden's request (method, URL, kept headers, JSON body)
 and parsed reply (message dict, usage, stored stop reason) must match, with the request sent through the
 production pipeline stages; non-streaming goldens are sent as the non-streaming provider call they recorded.
 The synthetic model has no golden, so its streamed plans are pinned from ``SyntheticModel`` for the same inputs.
@@ -118,7 +118,7 @@ async def test_stream_events_match_the_finished_message(
 
 
 # ---------------------------------------------------------------------------
-# Synthetic: no C1 golden exists, so each case pins what the Agno-backed SyntheticModel (synthetic_model.py)
+# Synthetic: no provider golden exists, so each case pins what the Agno-backed SyntheticModel (synthetic_model.py)
 # streamed for the same settings and messages: chunk count, text length, a sha256 prefix of the text, and the
 # shell call id.
 # ---------------------------------------------------------------------------
