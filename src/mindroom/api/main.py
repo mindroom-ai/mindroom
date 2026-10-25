@@ -59,7 +59,7 @@ from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.config.personal_agents import read_personal_agent_roster
+from mindroom.config.personal_agents import personal_agent_data, read_personal_agent_roster
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.credentials.sync import sync_env_to_credentials
 from mindroom.embeddings.embedder_health import get_embedder_failure
@@ -945,20 +945,21 @@ async def get_personal_agents(
 ) -> list[PersonalAgentResponse]:
     """List every generated personal agent, including pending ones and those whose template was removed."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    # The roster can be newer than the loaded config, so names render from the template, not config.agents.
+    templates = {key: template.model_dump() for key, template in config.personal_agents.items()}
     return [
         PersonalAgentResponse(
             template=entry.template,
             user_id=entry.user_id,
             agent_name=entry.agent_name,
             matrix_user_id=personal_agent_user_id(entry, runtime_paths),
-            # Only an active agent of an existing template is in the runtime config.
             display_name=(
-                config.agents[entry.agent_name].display_name
-                if config.personal_agent_instance(entry.agent_name)
+                personal_agent_data(templates[entry.template], entry).get("display_name")
+                if entry.template in templates
                 else None
             ),
             pending=entry.pending,
-            template_exists=entry.template in config.personal_agents,
+            template_exists=entry.template in templates,
         )
         for entry in read_personal_agent_roster(runtime_paths)
     ]

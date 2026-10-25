@@ -1474,7 +1474,10 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     test_client: TestClient,
     temp_config_file: Path,
 ) -> None:
-    """Every roster entry is listed with its account, status, and whether its template still exists."""
+    """Every roster entry is listed with its account, status, and whether its template still exists.
+
+    Dave is onboarded after the config was loaded, so the loaded config has no agent for him yet.
+    """
     runtime_paths = main._app_runtime_paths(main.app)
     for entry in (
         personal_agent_entry(),
@@ -1486,6 +1489,10 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     config_data["personal_agents"] = {"mind": {"agent": {"display_name": "{user_display_name}'s Mind"}}}
     temp_config_file.write_text(yaml.dump(config_data))
     assert config_lifecycle.load_config_into_app(runtime_paths, main.app)
+    _append_personal_agent_roster_entry(
+        runtime_paths,
+        personal_agent_entry("@dave:localhost", agent_name="mind_dave", user_display_name="Dave"),
+    )
 
     response = test_client.get("/api/config/personal-agents")
 
@@ -1505,7 +1512,7 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
             "user_id": "@bob:localhost",
             "agent_name": "mind_bob",
             "matrix_user_id": "@bob.mind:localhost",
-            "display_name": None,
+            "display_name": "Alice's Mind",
             "pending": True,
             "template_exists": True,
         },
@@ -1517,6 +1524,15 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
             "display_name": None,
             "pending": False,
             "template_exists": False,
+        },
+        {
+            "template": "mind",
+            "user_id": "@dave:localhost",
+            "agent_name": "mind_dave",
+            "matrix_user_id": "@mindroom_mind_dave:localhost",
+            "display_name": "Dave's Mind",
+            "pending": False,
+            "template_exists": True,
         },
     ]
 
