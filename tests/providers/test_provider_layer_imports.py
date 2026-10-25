@@ -124,8 +124,8 @@ from mindroom.constants import resolve_runtime_paths
 with tempfile.TemporaryDirectory() as root:
     config_path = Path(root) / "config.yaml"
     paths = resolve_runtime_paths(config_path=config_path, storage_path=Path(root) / "data", process_env={})
-    families = ("openai", "codex", "anthropic", "vertexai_claude", "google", "ollama", "synthetic")
-    models = {name: {"provider": name, "id": "m", "extra_kwargs": {"timeout": 5}} for name in families[:-1]}
+    families = ("openai", "codex", "anthropic", "vertexai_claude", "google", "ollama")
+    models = {name: {"provider": name, "id": "m", "extra_kwargs": {"timeout": 5}} for name in families}
     Config.validate_with_runtime({"models": {**models, "synthetic": {"provider": "synthetic", "id": "m"}}}, paths)
     print(json.dumps(sorted(set(sys.argv[1:]) & set(sys.modules))))
 """
