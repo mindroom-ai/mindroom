@@ -19,6 +19,7 @@ from mindroom.event_journal.approval_continuations import (
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.response_sources import ResponseSources
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import message_origin, unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
@@ -72,10 +73,20 @@ def request_call_ids(request: ModelRequest) -> list[str]:
 def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN401
     """Return a ready continuation of one user's message in ``!room:localhost``, with ``changes`` applied.
 
-    Its origin is the requester's own message unless ``changes`` names one.
+    Its origin is the requester's own message, and its run executed as the requester's Matrix turn with ``general``,
+    unless ``changes`` names others.
     """
     requester_id = changes.get("requester_id", "@user:localhost")
     defaults: dict[str, Any] = {
+        "execution_identity": ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=changes.get("entity_name", "general"),
+            requester_id=requester_id,
+            room_id=changes.get("room_id", "!room:localhost"),
+            thread_id=changes.get("thread_id", "$thread"),
+            resolved_thread_id=changes.get("thread_id", "$thread"),
+            session_id=changes.get("session_id", "session-1"),
+        ),
         "approval_id": "approval",
         "run_id": "run-1",
         "session_id": "session-1",

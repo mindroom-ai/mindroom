@@ -185,6 +185,7 @@ Update that page in the same PR when a change alters the trust model or anything
 - **NixOS Test Shell**: On NixOS hosts, enter the Node.js 24 dev shell with `nix-shell shell.nix` before running tests; without it, `uv run pytest` fails with `module 'mindroom' has no attribute 'bot'` because `libstdc++.so.6` is missing.
   If `<nixpkgs>` is unresolved, use `nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix`.
   Inside it, run `uv run pytest tests/<file>.py -x -n 0 --no-cov -v`, `just test-backend`, or `just test-saas-backend`; recipe regression tests require `just`, which `shell.nix` and CI install.
+  Prefix core runs with `env -u TMPDIR -u TEMP -u TMP` and never set `TMPDIR` yourself: an exported `TMPDIR`, which `nix-shell` always sets, switches `pytest-shm` off and moves test temp files from `/dev/shm` to disk; the pytest header shows `shm: temp root /dev/shm` when it is on.
 - **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing to enforce code style and quality.
 - **Update Tach Boundaries in the Same PR**: If your PR changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
 - **Handle Linter Issues**:

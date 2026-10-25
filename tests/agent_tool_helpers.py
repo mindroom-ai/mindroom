@@ -67,9 +67,14 @@ def tool_policy(
 ) -> Callable[[str, Callable[..., Awaitable[object]], dict[str, Any]], Awaitable[object]]:
     """Return the tool-call policy as a call around a named async function and its keyword arguments.
 
-    The policy is ``build_tool_hook_middleware``'s, run on its own outside any loop or run.
+    The policy is ``build_tool_hook_middleware``'s, run on its own outside any loop or run; ``policy`` names what a
+    test sets, and the rest is a policy with no dispatch, config, or runtime paths.
     """
-    middleware = build_tool_hook_middleware(hook_registry, agent_name, **policy)
+    middleware = build_tool_hook_middleware(
+        hook_registry,
+        agent_name,
+        **({"dispatch_context": None, "config": None, "runtime_paths": None} | policy),
+    )
 
     async def call(name: str, func: Callable[..., Awaitable[object]], arguments: dict[str, Any]) -> object:
         function = ToolFunction(name=name, description=None, parameters={}, entrypoint=func)

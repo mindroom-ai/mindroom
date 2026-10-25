@@ -210,10 +210,8 @@ def bind_minimal_owner(
         raise RuntimeError(msg)
     return bind_response_owner(
         catalog,
-        runtime=runtime,
         lifetime=lifetime,
         response_context=response_context,
-        run_id=catalog.run.run_id,
         context_documents=context_documents,
         output_file_policy=build.surface.output_file_policy,
         delegation_depth=delegation_depth,

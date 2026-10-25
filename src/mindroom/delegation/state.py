@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
+from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
+
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
 
@@ -13,6 +15,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRequirement
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
@@ -145,6 +148,15 @@ class DelegationChild:
         fields: dict[str, Any] = dict(data)
         persona = fields.pop("persona", None)
         return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
+
+
+def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
+    """Validate the retained session and agent before resolving any child resource."""
+    identity = parse_tool_execution_identity_payload(child.execution_identity)
+    if identity.agent_name != child.child_agent_name or identity.session_id != child.session_id:
+        msg = "Delegation child execution identity does not match its retained wait"
+        raise RuntimeError(msg)
+    return identity
 
 
 @dataclass

@@ -37,7 +37,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import test_runtime_paths
+from tests.conftest import handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 
@@ -80,6 +80,7 @@ async def test_terminal_wire_edits_preserve_thread_scope_for_grant_and_revocatio
             card_event_id=card,
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
         )
         await asyncio.wait_for(revoked.wait(), timeout=2)
         edits = list(wire_edits.values())
@@ -453,7 +454,8 @@ async def test_automatic_receipt_reply_is_consumed_before_maintenance(
         assert delivery is not None
         assert delivery.acknowledged_event_id == (None if lost_acknowledgement else receipt_event_id)
         before_consume = AsyncMock()
-        result = await manager.handle_card_response(
+        result = await handle_card_response_for_test(
+            manager,
             room_id="!room:test",
             sender_id="@human:test",
             card_event_id=receipt_event_id,
@@ -535,7 +537,8 @@ async def test_republished_receipt_aliases_remain_terminal(
         transport = ApprovalMatrixTransport(bot_provider=lambda name: router if name == "router" else None)
         manager.resolve_action_delivery = transport.resolve_approval_action_delivery
         for event_id in ("$untrusted-receipt", "$unknown-delivery"):
-            result = await manager.handle_card_response(
+            result = await handle_card_response_for_test(
+                manager,
                 room_id="!room:test",
                 sender_id="@human:test",
                 card_event_id=event_id,
@@ -547,7 +550,8 @@ async def test_republished_receipt_aliases_remain_terminal(
             assert not await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=event_id)
         for event_id in (old_event_id, "$replacement-receipt"):
             before_consume = AsyncMock()
-            result = await manager.handle_card_response(
+            result = await handle_card_response_for_test(
+                manager,
                 room_id="!room:test",
                 sender_id="@human:test",
                 card_event_id=event_id,
@@ -885,12 +889,12 @@ async def test_changed_binding_refuses_originating_timed_action(
     manager = _manager(journal, tmp_path)
     try:
         card = await _card(journal, manager, "first")
-        await manager.handle_card_response(
+        await handle_card_response_for_test(
+            manager,
             room_id="!room:test",
             sender_id="@human:test",
             card_event_id=card,
             status="approved",
-            reason=None,
             auto_approve_seconds=600,
             current_binding="new-binding",
             authorize_responder=lambda _agent: True,
@@ -1008,6 +1012,7 @@ async def test_revocation_ack_waits_for_original_edit_and_recovers_after_restart
             card_event_id=card,
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
         )
         assert [delivery for delivery in delivered if delivery.stage is DeliveryStage.FINAL] == []
     finally:
@@ -1096,12 +1101,12 @@ async def test_grant_maintenance_removes_unused_retired_card_scope(
     manager = _manager(journal, tmp_path)
     try:
         card = await _card(journal, manager, "ordinary")
-        await manager.handle_card_response(
+        await handle_card_response_for_test(
+            manager,
             room_id="!room:test",
             sender_id="@human:test",
             card_event_id=card,
             status=status,
-            reason=None,
             authorize_responder=lambda _agent: True,
         )
         await manager.recover_cards_on_startup()
@@ -1328,12 +1333,12 @@ async def _approve(
     seconds: int | None = 600,
     sender: str = "@human:test",
 ) -> ApprovalActionResult:
-    return await manager.handle_card_response(
+    return await handle_card_response_for_test(
+        manager,
         room_id="!room:test",
         sender_id=sender,
         card_event_id=card,
         status="approved",
-        reason=None,
         auto_approve_seconds=seconds,
         authorize_responder=lambda _agent: True,
     )
@@ -1439,6 +1444,7 @@ async def test_revoke_survives_card_retirement_and_replay_cannot_regrant(
             card_event_id=first,
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
         )
         assert not result.consumed
         result = await manager.handle_grant_revocation(
@@ -1447,6 +1453,7 @@ async def test_revoke_survives_card_retirement_and_replay_cannot_regrant(
             card_event_id=first,
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
         )
         assert result.consumed
         await _approve(manager, first)
@@ -1530,6 +1537,7 @@ async def test_timed_action_delivers_its_scope_without_startup_recovery(
             card_event_id=first,
             grant_id=grant.grant_id,
             authorize_responder=lambda _name: True,
+            before_consume=None,
         )
         recover.assert_not_awaited()
         assert len(sent) == 1
@@ -1746,6 +1754,7 @@ async def test_job_call_outside_an_active_grant_still_asks(
             card_event_id=first,
             grant_id=grant.grant_id,
             authorize_responder=lambda _entity_name: True,
+            before_consume=None,
         )
         assert revoked.consumed
     if outside == "expired":

@@ -52,7 +52,6 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.agent_cli.session import CliTurnOwner
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import ReportedCall
     from mindroom.llm.runs import RunRequirement
@@ -157,11 +156,10 @@ class LiveTurnTools(TurnToolBridge):
         *,
         catalog: PreparedAgentToolCatalog,
         authorize: Callable[[ToolKey, dict[str, object]], Awaitable[None]],
-        context: Mapping[str, str] | None = None,
-        output_file_policy: ToolOutputFilePolicy | None = None,
-        run_child: ChildResponseRunner | None = None,
-        delegation_depth: int = 0,
-        refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+        context: Mapping[str, str],
+        output_file_policy: ToolOutputFilePolicy | None,
+        delegation_depth: int,
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> None:
         if owner.execution_identity != build_execution_identity_from_runtime_context(catalog.runtime_context):
             msg = "CLI catalog execution identity does not match its turn owner"
@@ -172,11 +170,10 @@ class LiveTurnTools(TurnToolBridge):
         # Set once the response's grant exists, before any Bash call.
         self.shell_env: AgentCliShellEnv | None = None
         self._authorize = authorize
-        self._context = dict(context or {})
+        self._context = dict(context)
         self._output_file_policy = output_file_policy
         # Media from admitted calls, kept per owning Bash window until that window's result is built.
         self._media: dict[str, list[ToolValue]] = {}
-        self._run_child = run_child
         self._delegation_depth = delegation_depth
         self._refresh_scheduler = refresh_scheduler
         self._outer = asyncio.Lock()
@@ -315,7 +312,7 @@ class LiveTurnTools(TurnToolBridge):
             raise CliOperationError(msg)
         end = min(len(value), operation.offset + operation.limit)
         while True:
-            page = {
+            page: dict[str, object] = {
                 "name": operation.name,
                 "text": value[operation.offset : end],
                 "next_offset": end if end < len(value) else None,
@@ -633,7 +630,6 @@ class LiveTurnTools(TurnToolBridge):
                     requirement,
                     parent_bash_call_id=parent,
                     delegation_depth=self._delegation_depth,
-                    run_child=self._run_child,
                     refresh_scheduler=self._refresh_scheduler,
                     decisions=decisions,
                     denial_reasons=denial_reasons,

@@ -97,7 +97,7 @@ def test_empty_tool_list_means_no_tools() -> None:
     persona = inline_persona("P", [], None, None)
     assert persona.tools == ()
     assert not persona_allows((), "file", "read_file")
-    _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None, frozenset())
+    _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None)
     assert disabled == frozenset({"file", "shell", "dynamic_tools"})
 
 
@@ -263,6 +263,7 @@ def _resolve(workspace: Path, **arguments: object) -> PersonaRequest | str:
         "available_toolkits": lambda: ["file", "shell"],
         "available_skills": lambda: ["research", "writing"],
         "available_knowledge": lambda: ["docs", "faq"],
+        "cap": None,
     }
     return resolve_persona_request(**{**defaults, **arguments})
 
@@ -362,16 +363,16 @@ def test_render_profile_listing_empty() -> None:
 
 def test_validate_persona_tools_accepts_subset_and_function_entries() -> None:
     """Toolkit and toolkit.function entries pass when the caller has the toolkit."""
-    validate_persona_tools(("file", "gmail.search_emails"), ["file", "gmail"])
-    validate_persona_tools(None, ["file"])
-    validate_persona_tools((), [])
+    validate_persona_tools(("file", "gmail.search_emails"), ["file", "gmail"], cap=None)
+    validate_persona_tools(None, ["file"], cap=None)
+    validate_persona_tools((), [], cap=None)
 
 
 @pytest.mark.parametrize("entry", ["shell", "gmail.send_email_x", "gmail.", ".search_emails"])
 def test_validate_persona_tools_rejects_unknown_toolkit_and_function(entry: str) -> None:
     """Entries outside the caller's toolkits, or unknown functions, fail with the available names."""
     with pytest.raises(PersonaError) as error:
-        validate_persona_tools((entry,), ["file", "gmail"])
+        validate_persona_tools((entry,), ["file", "gmail"], cap=None)
     assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: file, gmail."
 
 
@@ -394,7 +395,6 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
         ("gmail.search_emails", "file"),
         lambda: ["file", "gmail", "shell"],
         caller_filter,
-        frozenset({"memory"}),
     )
 
     assert visible is not None
@@ -402,8 +402,8 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
     assert not visible(_function("write_file", "file"))
     assert not visible(_function("generated", None))
     assert visible(_function("get_skill_instructions", None))
-    assert disabled == frozenset({"memory", "shell", "dynamic_tools"})
-    assert persona_tool_policy(None, lambda: ["file"], caller_filter, frozenset()) == (caller_filter, frozenset())
+    assert disabled == frozenset({"shell", "dynamic_tools"})
+    assert persona_tool_policy(None, lambda: ["file"], caller_filter) == (caller_filter, frozenset())
 
 
 def test_function_level_cap_admits_only_named_functions() -> None:
@@ -431,9 +431,9 @@ def test_mcp_function_entries_are_not_checked_against_bridge_metadata(monkeypatc
             function_names=("mcp_demo_connect",),
         ),
     )
-    validate_persona_tools(("mcp_demo.demo_echo",), ["mcp_demo"])
+    validate_persona_tools(("mcp_demo.demo_echo",), ["mcp_demo"], cap=None)
     with pytest.raises(PersonaError):
-        validate_persona_tools(("mcp_other.demo_echo",), ["mcp_demo"])
+        validate_persona_tools(("mcp_other.demo_echo",), ["mcp_demo"], cap=None)
 
 
 def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path) -> None:
@@ -666,7 +666,7 @@ def test_profile_cannot_combine_with_inline_knowledge(tmp_path: Path) -> None:
 
 def test_persona_tool_policy_keeps_knowledge_search() -> None:
     """An explicit tool list still offers knowledge search, which loads only when the persona keeps a base."""
-    visible, _disabled = persona_tool_policy(("file",), lambda: ["file"], None, frozenset())
+    visible, _disabled = persona_tool_policy(("file",), lambda: ["file"], None)
 
     assert visible is not None
     assert visible(_function("search_knowledge_base", None))

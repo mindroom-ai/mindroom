@@ -173,6 +173,10 @@ def test_delegated_child_model_follows_the_owners_budget(tmp_path: Path, spend: 
         runtime_paths=runtime_paths,
         depth=0,
         budget_monitor=_spent(runtime_paths, spend),
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     assert child.model_name == expected
@@ -191,6 +195,10 @@ def test_delegated_follow_up_returns_to_the_requested_model_under_budget(tmp_pat
         runtime_paths=runtime_paths,
         depth=0,
         budget_monitor=_spent(runtime_paths, 12.0),
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     follow_up = prepare_child_turn(
@@ -203,6 +211,9 @@ def test_delegated_follow_up_returns_to_the_requested_model_under_budget(tmp_pat
         depth=0,
         budget_monitor=_spent(runtime_paths, 3.0),
         previous=first,
+        model=None,
+        agent_mode="standard",
+        persona=None,
     )
 
     assert (first.model_name, first.requested_model_name) == ("luna", "default")
@@ -223,6 +234,10 @@ def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: 
         runtime_paths=runtime_paths,
         depth=0,
         budget_monitor=_spent(runtime_paths, 0.0),
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     note_child_run_id(child, "after-switch", runtime_paths, model_name="alternate")
@@ -236,6 +251,9 @@ def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: 
         depth=0,
         budget_monitor=_spent(runtime_paths, 0.0),
         previous=child,
+        model=None,
+        agent_mode="standard",
+        persona=None,
     )
 
     assert (follow_up.model_name, follow_up.requested_model_name) == ("alternate", "alternate")
@@ -255,6 +273,10 @@ def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path
             runtime_paths=runtime_paths,
             depth=0,
             budget_monitor=_spent(runtime_paths, 0.0),
+            model=None,
+            agent_mode="standard",
+            previous=None,
+            persona=None,
         ),
         requested_model_name=None,
     )
@@ -269,6 +291,9 @@ def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path
         depth=0,
         budget_monitor=_spent(runtime_paths, 12.0),
         previous=saved,
+        model=None,
+        agent_mode="standard",
+        persona=None,
     )
 
     assert (follow_up.model_name, follow_up.requested_model_name) == ("luna", "default")

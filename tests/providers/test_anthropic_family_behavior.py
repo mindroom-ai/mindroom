@@ -868,6 +868,49 @@ async def test_tool_choice_is_left_out_of_a_request_without_tools(tmp_path: Path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native_source", ["extra_body", "mcp_servers", "function_extra_body"])
+async def test_claude_native_tools_cannot_execute_during_decision(tmp_path: Path, native_source: str) -> None:
+    """A decision turns tool selection off for server tools and MCP servers authored in raw request params too.
+
+    The SDK merges ``extra_body`` over the named fields, so what it carries counts as offered. The reply keeps the
+    authored choice and offers the same tools.
+    """
+    request_params: dict[str, Any] = {"tool_choice": {"type": "auto"}}
+    extra_kwargs: dict[str, Any] = {"request_params": request_params}
+    tools: list[ToolSpec] = []
+    if native_source == "extra_body":
+        request_params["extra_body"] = {
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "tool_choice": {"type": "auto"},
+        }
+    elif native_source == "mcp_servers":
+        request_params["mcp_servers"] = [{"type": "url", "url": "https://example.com/mcp", "name": "remote"}]
+        extra_kwargs["betas"] = ["mcp-client-2025-04-04"]
+    else:
+        request_params["extra_body"] = {"tool_choice": {"type": "auto"}}
+        tools = [
+            ToolSpec(
+                name="lookup",
+                description="Look it up.",
+                parameters={"type": "object", "properties": {}},
+                strict=None,
+                requires_confirmation=None,
+                external_execution=None,
+                approval_type=None,
+            ),
+        ]
+    wire = Wire(json_reply([{"type": "text", "text": "{}"}]))
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=extra_kwargs)
+    for tool_choice in ("none", None):
+        await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, tool_choice=tool_choice, stream=False))
+
+    decision, reply = wire.body(0), wire.body(1)
+    assert decision["tool_choice"] == {"type": "none"}
+    assert reply["tool_choice"] == {"type": "auto"}
+    assert (decision.get("tools"), decision.get("mcp_servers")) == (reply.get("tools"), reply.get("mcp_servers"))
+
+
+@pytest.mark.asyncio
 async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpoint(tmp_path: Path) -> None:
     """The request asks Claude to compact; the checkpoint it returns replaces the earlier prefix next time."""
     checkpoint = {"type": "compaction", "content": "Summary so far.", "encrypted_content": "opaque"}

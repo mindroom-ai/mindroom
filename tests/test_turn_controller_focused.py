@@ -359,9 +359,8 @@ class _SpyTurnPolicy:
         self,
         room: nio.MatrixRoom,
         requester_user_id: str,
-        availability: ResponderAvailability | None = None,
     ) -> list[object]:
-        return list(await self.inner.responder_candidates_for_room(room, requester_user_id, availability))
+        return list(await self.inner.responder_candidates_for_room(room, requester_user_id))
 
     def adaptive_participation(self, **kwargs: Any) -> Any:  # noqa: ANN401
         return self.inner.adaptive_participation(**kwargs)

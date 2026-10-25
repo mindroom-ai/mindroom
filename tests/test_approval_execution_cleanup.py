@@ -91,6 +91,12 @@ async def test_team_approval_finalizes_consumption_after_member_assembly_fails(t
             refresh_scheduler=None,
             history_scope=scope.scope,
             progress=None,
+            member_model_names=None,
+            approval_calls=(),
+            prior_tool_trace=(),
+            prior_presentation_state=None,
+            show_tool_calls=True,
+            tool_trace_collector=[],
         )
 
     assert finalized == [True]

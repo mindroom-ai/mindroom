@@ -573,9 +573,7 @@ def _resolve_thread_summary_model_name(
     return config.defaults.thread_summary_model or "default"
 
 
-# TODO(simplify): This timer shares its label with the post-response timer around the whole summary pass, so timing
-# logs show two durations under one name. Label this one thread_summary_generation. Operators would notice.
-@timed("maybe_generate_thread_summary")
+@timed("thread_summary_generation")
 async def _generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,

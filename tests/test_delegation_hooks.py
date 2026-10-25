@@ -169,8 +169,8 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
                 else _delegate_runtime_context(config, paths, execution_identity=identity, hook_registry=registry)
             )
             with tool_runtime_context(context):
-                await _cancel_delegations(stored, config=config, runtime_paths=paths)
-                await _cancel_delegations(stored, config=config, runtime_paths=paths)
+                await _cancel_delegations(stored, config=config, runtime_paths=paths, reason="Delegation cancelled.")
+                await _cancel_delegations(stored, config=config, runtime_paths=paths, reason="Delegation cancelled.")
         else:
             if outcome == "revoke":
                 config.agents["leader"].delegate_to = []

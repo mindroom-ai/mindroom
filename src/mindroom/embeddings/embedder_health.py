@@ -153,10 +153,7 @@ def probe_embedder(
     from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
 
     try:
-        if health_recorder is None:
-            embedder = create_configured_embedder(config, runtime_paths)
-        else:
-            embedder = create_configured_embedder(config, runtime_paths, health_recorder=health_recorder)
+        embedder = create_configured_embedder(config, runtime_paths, health_recorder=health_recorder)
         _bound_probe_client_timeout(embedder)
         vector = embedder.embed([_PROBE_TEXT], purpose="query")[0]
     except Exception as exc:

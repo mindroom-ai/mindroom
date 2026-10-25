@@ -41,6 +41,7 @@ from mindroom.tool_system.runtime_context import (
     worker_runtime_context,
 )
 from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -60,14 +61,15 @@ _MESSAGES: dict[GatewayErrorCode, str] = {
     GatewayErrorCode.UNAUTHORIZED: "Agent access has changed. Check your selection in Connections.",
     GatewayErrorCode.APPROVAL_REQUIRED: "This tool requires approval and cannot run through this gateway.",
     GatewayErrorCode.TOOL_UNAVAILABLE: "This tool is currently unavailable.",
+    GatewayErrorCode.TOOL_DECLINED: "A MindRoom plugin declined this call, so it did not run.",
     GatewayErrorCode.INVALID_ARGUMENTS: "Tool arguments are invalid or exceed the allowed size.",
     GatewayErrorCode.RESULT_TOO_LARGE: "The tool result exceeds the allowed size.",
     GatewayErrorCode.SCHEMA_TOO_LARGE: "The tool schema exceeds the allowed size.",
 }
 
 
-def _error(context: AgentToolContext, code: GatewayErrorCode) -> GatewayErrorResponse:
-    error: GatewayErrorDetail = {"code": code, "message": _MESSAGES[code]}
+def _error(context: AgentToolContext, code: GatewayErrorCode, message: str | None = None) -> GatewayErrorResponse:
+    error: GatewayErrorDetail = {"code": code, "message": message or _MESSAGES[code]}
     if code is GatewayErrorCode.CONNECTION_REQUIRED:
         origin = (context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/")
         error["connection_url"] = f"{origin}/connections"
@@ -174,7 +176,7 @@ async def _guard[T: GatewaySuccessResponse](
     try:
         return await operation
     except GatewayError as exc:
-        return _error(context, exc.code)
+        return _error(context, exc.code, exc.message)
     except OAuthConnectionRequired:
         return _error(context, GatewayErrorCode.CONNECTION_REQUIRED)
     except Exception:
@@ -364,6 +366,9 @@ async def invoke_tool(
             )
         except Exception as exc:
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE) from exc
+        if isinstance(value, ToolOutcome) and value.is_error:
+            # The policy answers a call a plugin hook declined with a failed outcome, whose text says why.
+            raise GatewayError(code=GatewayErrorCode.TOOL_DECLINED, message=value.content)
         result = to_json_compatible(client_tool_result(value))
         if _connection_required(result):
             raise GatewayError(code=GatewayErrorCode.CONNECTION_REQUIRED)

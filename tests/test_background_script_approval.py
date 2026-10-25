@@ -22,7 +22,7 @@ from mindroom.event_journal import (
 )
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
-from tests.conftest import test_runtime_paths
+from tests.conftest import handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_script_run_manager import _context as _manager_context
 from tests.test_script_run_manager import _manager
@@ -241,19 +241,20 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         stored = await _wait_for_pending_card(journal)
         await read_started.wait()
         assert stored.target_kind == "background_script"
-        wrong_actor = await manager.handle_card_response(
+        wrong_actor = await handle_card_response_for_test(
+            manager,
             room_id="!room:localhost",
             sender_id="@mallory:localhost",
             card_event_id="$approval",
             status="approved",
-            reason=None,
             authorize_responder=lambda _entity_name: True,
         )
         assert wrong_actor.consumed is False
         assert decision_task.done() is False
         assert await cards.background_approval_decision(run_id="run-1", call_id="call-1") is None
 
-        result = await manager.handle_card_response(
+        result = await handle_card_response_for_test(
+            manager,
             room_id="!room:localhost",
             sender_id="@alice:localhost",
             card_event_id="$approval",
@@ -274,7 +275,8 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             room_id="!room:localhost",
             card_event_id="$approval",
         )
-        repeated = await manager.handle_card_response(
+        repeated = await handle_card_response_for_test(
+            manager,
             room_id="!room:localhost",
             sender_id="@alice:localhost",
             card_event_id="$approval",

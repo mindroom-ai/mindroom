@@ -1447,6 +1447,7 @@ async def test_a_compaction_summary_attempt_sends_one_request_on_every_route(rou
             summary_input="Conversation",
             summary_prompt="Summarize",
             timeout_seconds=10,
+            on_usage=None,
         )
 
     assert len(sent) == 1
