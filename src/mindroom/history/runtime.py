@@ -150,25 +150,6 @@ class PreparedScopeHistory:
     replay_estimator: PortableReplayEstimator | None = None
 
 
-def _native_history(
-    model: ModelProvider,
-    resolved_inputs: HistoryPreparationInputs,
-    session: ConversationSession | None,
-    *,
-    allowed: bool,
-    runs: Sequence[AnyRunRecord] = (),
-) -> NativeHistory | None:
-    """Return the native settings of the run's requests, or None when the provider route keeps no history itself."""
-    return configure_native_history(
-        model,
-        plan=resolved_inputs.execution_plan,
-        history_settings=resolved_inputs.history_settings,
-        session=session,
-        allowed=allowed,
-        runs=runs,
-    )
-
-
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_scope_history(
     *,
@@ -190,7 +171,14 @@ async def prepare_scope_history(
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
-            native_history=_native_history(model, resolved_inputs, None, allowed=allow_native_compaction),
+            native_history=configure_native_history(
+                model,
+                plan=resolved_inputs.execution_plan,
+                history_settings=resolved_inputs.history_settings,
+                session=None,
+                allowed=allow_native_compaction,
+                runs=(),
+            ),
             replay_estimator=replay_estimator,
         )
 
@@ -210,10 +198,11 @@ async def prepare_scope_history(
         ),
     )
     visible_runs = scope_visible_runs(session, scope_context.scope)
-    native_history = _native_history(
+    native_history = configure_native_history(
         model,
-        resolved_inputs,
-        session,
+        plan=execution_plan,
+        history_settings=resolved_inputs.history_settings,
+        session=session,
         allowed=allow_native_compaction,
         runs=visible_runs,
     )
