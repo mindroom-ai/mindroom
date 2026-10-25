@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 _OWNER: ContextVar[ConsumptionOwner | None] = ContextVar("tool_job_consumption", default=None)
 logger = get_logger(__name__)
 
+# What a failed job reads as when it recorded no error text, as jobs that older releases stored may have.
+JOB_FAILED_TEXT = "Background tool job failed."
+
 
 @dataclass(frozen=True)
 class _Consumption:

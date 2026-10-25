@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from agno.tools import Toolkit
 
-from mindroom.tool_jobs.consumption import consume_tool_job
+from mindroom.tool_jobs.consumption import JOB_FAILED_TEXT, consume_tool_job
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
@@ -54,7 +54,7 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
     value, payload = await consume_tool_job(runtime, job, claim)
     if job.status == "failed":
         text = value.content if isinstance(value, ToolValue) else value
-        raise RuntimeError(str(payload.error or text or "Background tool job failed."))
+        raise RuntimeError(str(payload.error or text or JOB_FAILED_TEXT))
     return value
 
 

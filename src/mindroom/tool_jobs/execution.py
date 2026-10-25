@@ -33,7 +33,7 @@ from mindroom.tool_jobs.background_after import (
     application_arguments,
     read_background_after,
 )
-from mindroom.tool_jobs.consumption import consume_tool_job, session_state_delta
+from mindroom.tool_jobs.consumption import JOB_FAILED_TEXT, consume_tool_job, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.execution_authority import (
@@ -430,7 +430,7 @@ async def _run_managed_call(
             )
             retained = True
             # Every outcome but completion tells the model why, such as the reason an approval was denied.
-            error = None if waited.job.status == "completed" else payload.error or waited.job.result or ""
+            error = None if waited.job.status == "completed" else payload.error or waited.job.result or JOB_FAILED_TEXT
         # A released wait's call returned its job handle, which names the job a restart's account points to.
         await record_return(value if error is None else error)
     except JobAccessError as refused:
