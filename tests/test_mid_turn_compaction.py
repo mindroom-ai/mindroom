@@ -657,13 +657,18 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    *,
+    scoped: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
-    agent = _agent(model, config, paths)
+    agent = (
+        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _agent(model, config, paths)
+    )
 
     with pytest.raises(
         mid_turn_compaction.HistorySummaryBudgetError,
@@ -676,14 +681,20 @@ async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_within_the_model_window_is_sent(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    *,
+    scoped: bool,
 ) -> None:
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     model = ToolLoopModel(tool_rounds=5)
+    agent = (
+        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _agent(model, config, paths)
+    )
 
-    output = await _run(_agent(model, config, paths), [Message(role="user", content="p" * 16_000)])
+    output = await _run(agent, [Message(role="user", content="p" * 16_000)])
 
     assert str(output.content).endswith("done")
     # The prompt alone exceeds the replay window, so compacting again would only summarize every new tool result.
@@ -1411,6 +1422,33 @@ async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_i
     )
     assert outcome.after_tokens == rewritten_tokens
     assert outcome.after_tokens < outcome.before_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The size the fold reports also decides whether the rewritten request fits, so it is estimated once."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
+    sized: list[tuple[str | None, ...]] = []
+    estimated = mid_turn_compaction._estimated_request_tokens
+
+    def recording(
+        compaction: mid_turn_compaction._MidTurnCompaction,
+        policy: mid_turn_compaction._Policy,
+        messages: list[Message],
+        tools: Sequence[ToolSpec],
+    ) -> int:
+        sized.append(tuple(message.id for message in messages))
+        return estimated(compaction, policy, messages, tools)
+
+    monkeypatch.setattr(mid_turn_compaction, "_estimated_request_tokens", recording)
+
+    await _run(_scoped_agent(model, config, paths, storage), "Do the task")
+
+    rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
+    assert sized.count(tuple(message.id for message in rewritten.messages)) == 1
 
 
 @pytest.mark.asyncio
