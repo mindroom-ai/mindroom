@@ -409,8 +409,3 @@ _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/scrip
 _.child_run_id  # Stored tool-execution field of the Agno 3 run dict shape; MindRoom writes None and nothing reads it (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field the owned agent loop writes and nothing reads (src/mindroom/llm/usage.py)
 _.audio_total_tokens  # Token counter read by name in the stored, reported, and published usage dicts (src/mindroom/llm/usage.py)
-_.save_run  # Storage v2 run save (P1); its callers move to it at the storage cutover (src/mindroom/session_storage/store_next.py)
-_.save_interrupted_record  # Storage v2 interrupted-record save (P4); called from the storage cutover on (src/mindroom/session_storage/store_next.py)
-_.patch_run_metadata  # Storage v2 metadata patch (P2); called from the storage cutover on (src/mindroom/session_storage/store_next.py)
-_.rewrite_run_messages  # Storage v2 message rewrite (P3); called from the storage cutover on (src/mindroom/session_storage/store_next.py)
-_.delete_runs  # Storage v2 run discard; called from the storage cutover on (src/mindroom/session_storage/store_next.py)

@@ -233,21 +233,26 @@ async def persist_delegation_state(
 ) -> None:
     """Save native child ownership on its real parent run, including hidden calls, in ``store`` and ``session``.
 
-    The run's row is rewritten in place without touching the usage ledger: the loop recorded the run's usage when
-    it stored the pause, and records the continuation's when that ends. ``session`` then holds the run as
-    stored.
+    A paused run is saved whole, since its requirements carry the child answers, without touching the usage ledger:
+    the loop recorded the run's usage when it stored the pause, and records the continuation's when that ends. Any
+    other run, such as a minimal-mode turn's checkpoint or a continued run, or a paused run the store holds as final,
+    gets only its delegation key. ``session`` then holds the run as stored.
     """
-    response.metadata = {**(response.metadata or {}), DELEGATION_STATE_KEY: state.to_dict()}
+    changes = {DELEGATION_STATE_KEY: state.to_dict()}
+    response.metadata = {**(response.metadata or {}), **changes}
     if store is None:
         msg = "Durable delegation requires persisted session storage"
         raise RuntimeError(msg)
     # The copy is taken before the lane is awaited, so the row lands as it was handed over, whatever the driver
     # changes on the record while the lane is busy.
     handed_over = deepcopy(response)
-    await run_session_storage_operation(
-        lambda: store,
-        lambda opened: opened.save_runs(session, [handed_over]),
-    )
+
+    def persist(opened: ConversationStore) -> None:
+        paused = handed_over.status is RunStatus.paused
+        if not paused or opened.save_run(session, handed_over, record_usage=False) == "final":
+            opened.patch_run_metadata(session.session_id, handed_over.run_id, changes, session=session)
+
+    await run_session_storage_operation(lambda: store, persist)
 
 
 async def _run_child(
