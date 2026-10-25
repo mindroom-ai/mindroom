@@ -274,14 +274,15 @@ def normalize_error_text(text: str) -> str:
     return _PYDANTIC_ERROR_URL.sub(_PYDANTIC_ERROR_URL_PLACEHOLDER, text)
 
 
-def golden_entry(toolkit: Toolkit, adapted: AdaptedToolkit) -> dict[str, object]:
-    """Return the golden entry of one built toolkit: Agno's toolkit settings, then each function as the adapter reports it.
+def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
+    """Return the golden entry of one adapted toolkit: its texts for the model, then each function the adapter made.
 
-    The functions are in Agno's async-run order, which the adapter keeps.
+    ``instructions`` is what the system prompt shows, and ``guidance`` what the agent CLI and minimal mode show; the
+    functions are in Agno's async-run order, which the adapter keeps.
     """
     entry = {
-        "instructions": toolkit.instructions,
-        "add_instructions": toolkit.add_instructions,
+        "instructions": adapted.instructions,
+        "guidance": adapted.guidance,
         "functions": [
             {
                 "name": function.name,

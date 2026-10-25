@@ -7,7 +7,7 @@
       "enable_scrape_website": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "scrape_website",
@@ -82,7 +82,7 @@
       "enable_save_dag_file": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "save_dag_file",
@@ -164,7 +164,7 @@
       "enable_search_arxiv": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_arxiv_and_return_articles",
@@ -248,7 +248,7 @@
       "enable_list_functions": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_functions",
@@ -320,7 +320,7 @@
       "enable_send_email": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_email",
@@ -370,7 +370,7 @@
       "enable_baidu_search": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "baidu_search",
@@ -419,7 +419,7 @@
       "enable_search_by_identifier": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_by_identifier",
@@ -496,7 +496,7 @@
       "enable_web_data_feed": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "scrape_as_markdown",
@@ -656,7 +656,7 @@
       "enable_screenshot": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "navigate_to",
@@ -800,7 +800,7 @@
       "enable_reschedule_booking": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_available_slots",
@@ -994,7 +994,7 @@
       "enable_text_to_speech": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "localize_voice",
@@ -1113,7 +1113,7 @@
       "enable_show_canvas": true
     },
     "instructions": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill something in; their answer comes back as their next message. For a quick choice between a few options, just ask in your reply.\n- read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with share_state=True, such as a checklist, without them sending anything.\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.\n- To show the user a real website, open it in your worker browser, whose first call in a conversation shows the Computer panel; a canvas cannot.\n- Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, such as <script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js\"></script>, or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked.",
-    "add_instructions": true,
+    "guidance": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill something in; their answer comes back as their next message. For a quick choice between a few options, just ask in your reply.\n- read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with share_state=True, such as a checklist, without them sending anything.\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.\n- To show the user a real website, open it in your worker browser, whose first call in a conversation shows the Computer panel; a canvas cannot.\n- Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, such as <script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js\"></script>, or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked.",
     "functions": [
       {
         "name": "show_computer",
@@ -1325,7 +1325,7 @@
       "enable_crawl": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "crawl",
@@ -1390,7 +1390,7 @@
       "enable_read_csv_file": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_csv_file",
@@ -1530,7 +1530,7 @@
       "enable_make_request": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "make_request",
@@ -1656,7 +1656,7 @@
       "enable_send_message": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_message",
@@ -1837,7 +1837,7 @@
       "enable_search": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "web_search",
@@ -1919,7 +1919,7 @@
       "enable_text_to_speech": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_voices",
@@ -2023,7 +2023,7 @@
       "enable_email_user": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "email_user",
@@ -2077,7 +2077,7 @@
       "enable_search": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_exa",
@@ -2274,7 +2274,7 @@
       "enable_image_to_image": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_media",
@@ -2365,7 +2365,7 @@
       "enable_search_files": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "save_file",
@@ -2687,7 +2687,7 @@
       "enable_txt_generation": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_json_file",
@@ -3004,7 +3004,7 @@
       "enable_search": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "scrape_website",
@@ -3149,7 +3149,7 @@
       "enable_generate_video": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_image",
@@ -3218,7 +3218,7 @@
       "enable_search_gifs": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_gifs",
@@ -3259,7 +3259,7 @@
       "all": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_tables",
@@ -3359,7 +3359,7 @@
       "download_file": true
     },
     "instructions": "You have access to Google Drive tools for searching, reading, uploading, and downloading files.\n\n## Drive Query Syntax\nUse these operators in search and list query parameters:\n- `name contains 'report'` — files with \"report\" in the name\n- `name = 'Budget 2025.xlsx'` — exact name match\n- `mimeType = 'application/vnd.google-apps.document'` — Google Docs only\n- `mimeType = 'application/vnd.google-apps.spreadsheet'` — Google Sheets only\n- `mimeType = 'application/pdf'` — PDF files only\n- `mimeType = 'application/vnd.google-apps.folder'` — folders only\n- `modifiedTime > '2025-01-01T00:00:00'` — modified after date\n- `'<folder_id>' in parents` — files inside a specific folder\n- `sharedWithMe` — files shared with the user\n- `starred` — starred files\n- Combine with `and` / `or`: `name contains 'report' and mimeType = 'application/pdf'`\n- Trashed files are filtered automatically. Do not add trashed clauses.\n\n## Handling Incomplete Results\nIf search returns `incompleteSearch: true`, some shared drives could not be searched.\nThis is a server-side limitation of the `allDrives` corpus, not a problem with your query.\n- Inform the user that results may be incomplete due to shared drive limitations\n- Do NOT retry the same query — the limitation is server-side\n- For complete results, the user must reconfigure with `corpora=\"user\"` or `corpora=\"drive\"`",
-    "add_instructions": true,
+    "guidance": "You have access to Google Drive tools for searching, reading, uploading, and downloading files.\n\n## Drive Query Syntax\nUse these operators in search and list query parameters:\n- `name contains 'report'` — files with \"report\" in the name\n- `name = 'Budget 2025.xlsx'` — exact name match\n- `mimeType = 'application/vnd.google-apps.document'` — Google Docs only\n- `mimeType = 'application/vnd.google-apps.spreadsheet'` — Google Sheets only\n- `mimeType = 'application/pdf'` — PDF files only\n- `mimeType = 'application/vnd.google-apps.folder'` — folders only\n- `modifiedTime > '2025-01-01T00:00:00'` — modified after date\n- `'<folder_id>' in parents` — files inside a specific folder\n- `sharedWithMe` — files shared with the user\n- `starred` — starred files\n- Combine with `and` / `or`: `name contains 'report' and mimeType = 'application/pdf'`\n- Trashed files are filtered automatically. Do not add trashed clauses.\n\n## Handling Incomplete Results\nIf search returns `incompleteSearch: true`, some shared drives could not be searched.\nThis is a server-side limitation of the `allDrives` corpus, not a problem with your query.\n- Inform the user that results may be incomplete due to shared drive limitations\n- Do NOT retry the same query — the limitation is server-side\n- For complete results, the user must reconfigure with `corpora=\"user\"` or `corpora=\"drive\"`",
     "functions": [
       {
         "name": "google_drive_list_files",
@@ -3743,7 +3743,7 @@
       "enable_search": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "web_search",
@@ -3825,7 +3825,7 @@
       "enable_translate_audio": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "transcribe_audio",
@@ -3932,7 +3932,7 @@
       "enable_get_user_details": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_top_hackernews_stories",
@@ -4005,7 +4005,7 @@
       "enable_search_query": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_url",
@@ -4083,7 +4083,7 @@
       "enable_search_issues": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_issue",
@@ -4290,7 +4290,7 @@
       "enable_web_search_with_linkup": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "web_search_with_linkup",
@@ -4339,7 +4339,7 @@
       "enable_image_to_video": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_video",
@@ -4468,7 +4468,7 @@
       "enable_search_memory": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "add_memory",
@@ -4611,7 +4611,7 @@
       "enable_process_video": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "extract_audio",
@@ -4754,7 +4754,7 @@
       "enable_run_cypher": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_labels",
@@ -4877,7 +4877,7 @@
       "enable_read_article": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_article",
@@ -4921,7 +4921,7 @@
       "enable_update_page": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_page",
@@ -5041,7 +5041,7 @@
       "enable_transcription": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "transcribe_audio",
@@ -5151,7 +5151,7 @@
       "enable_search_company_symbol": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_stock_price",
@@ -5327,7 +5327,7 @@
       "enable_geocoding": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_current_weather",
@@ -5472,7 +5472,7 @@
       "enable_run_dataframe_operation": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_pandas_dataframe",
@@ -5584,7 +5584,7 @@
       "enable_search_pubmed": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_pubmed",
@@ -5636,8 +5636,8 @@
       "enable_analyze": true,
       "enable_think": true
     },
-    "instructions": "<reasoning_instructions>\nYou have access to the `think` and `analyze` tools to work through problems step-by-step and structure your thought process. You must ALWAYS `think` before making tool calls or generating a response.\n\n1. **Think** (scratchpad):\n    - Purpose: Use the `think` tool as a scratchpad to break down complex problems, outline steps, and decide on immediate actions within your reasoning flow. Use this to structure your internal monologue.\n    - Usage: Call `think` before making tool calls or generating a response. Explain your reasoning and specify the intended action (e.g., \"make a tool call\", \"perform calculation\", \"ask clarifying question\").\n\n2. **Analyze** (evaluation):\n    - Purpose: Evaluate the result of a think step or a set of tool calls. Assess if the result is expected, sufficient, or requires further investigation.\n    - Usage: Call `analyze` after a set of tool calls. Determine the `next_action` based on your analysis: `continue` (more reasoning needed), `validate` (seek external confirmation/validation if possible), or `final_answer` (ready to conclude).\n    - Explain your reasoning highlighting whether the result is correct/sufficient.\n\n## IMPORTANT GUIDELINES\n- **Always Think First:** You MUST use the `think` tool before making tool calls or generating a response.\n- **Iterate to Solve:** Use the `think` and `analyze` tools iteratively to build a clear reasoning path. The typical flow is `Think` -> [`Tool Calls` if needed] -> [`Analyze` if needed] -> ... -> `final_answer`. Repeat this cycle until you reach a satisfactory conclusion.\n- **Make multiple tool calls in parallel:** After a `think` step, you can make multiple tool calls in parallel.\n- **Keep Thoughts Internal:** The reasoning steps (thoughts and analyses) are for your internal process only. Do not share them directly with the user.\n- **Conclude Clearly:** When your analysis determines the `next_action` is `final_answer`, provide a concise and accurate final answer to the user.\n</reasoning_instructions>\n",
-    "add_instructions": false,
+    "instructions": null,
+    "guidance": "<reasoning_instructions>\nYou have access to the `think` and `analyze` tools to work through problems step-by-step and structure your thought process. You must ALWAYS `think` before making tool calls or generating a response.\n\n1. **Think** (scratchpad):\n    - Purpose: Use the `think` tool as a scratchpad to break down complex problems, outline steps, and decide on immediate actions within your reasoning flow. Use this to structure your internal monologue.\n    - Usage: Call `think` before making tool calls or generating a response. Explain your reasoning and specify the intended action (e.g., \"make a tool call\", \"perform calculation\", \"ask clarifying question\").\n\n2. **Analyze** (evaluation):\n    - Purpose: Evaluate the result of a think step or a set of tool calls. Assess if the result is expected, sufficient, or requires further investigation.\n    - Usage: Call `analyze` after a set of tool calls. Determine the `next_action` based on your analysis: `continue` (more reasoning needed), `validate` (seek external confirmation/validation if possible), or `final_answer` (ready to conclude).\n    - Explain your reasoning highlighting whether the result is correct/sufficient.\n\n## IMPORTANT GUIDELINES\n- **Always Think First:** You MUST use the `think` tool before making tool calls or generating a response.\n- **Iterate to Solve:** Use the `think` and `analyze` tools iteratively to build a clear reasoning path. The typical flow is `Think` -> [`Tool Calls` if needed] -> [`Analyze` if needed] -> ... -> `final_answer`. Repeat this cycle until you reach a satisfactory conclusion.\n- **Make multiple tool calls in parallel:** After a `think` step, you can make multiple tool calls in parallel.\n- **Keep Thoughts Internal:** The reasoning steps (thoughts and analyses) are for your internal process only. Do not share them directly with the user.\n- **Conclude Clearly:** When your analysis determines the `next_action` is `final_answer`, provide a concise and accurate final answer to the user.\n</reasoning_instructions>\n",
     "functions": [
       {
         "name": "think",
@@ -5735,7 +5735,7 @@
       "enable_generate_media": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_media",
@@ -5777,7 +5777,7 @@
       "enable_send_email": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_email",
@@ -5831,7 +5831,7 @@
       "enable_smartscraper": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "smartscraper",
@@ -6028,7 +6028,7 @@
       "enable_search_youtube": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_google",
@@ -6108,7 +6108,7 @@
       "enable_search_scholar": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_web",
@@ -6258,7 +6258,7 @@
       "enable_run_shell_command": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "run_shell_command",
@@ -6338,7 +6338,7 @@
       "enable_upload_file": true
     },
     "instructions": "## Slack Tool Selection\n\n**search_workspace** — semantic and keyword search across the workspace.\nWhen to use: finding discussions about a topic, catching up, summarizing activity.\nReturns: messages with channel, author, timestamp, and surrounding context.\n\n**get_channel_history** — recent top-level messages from a specific channel.\nWhen to use: reading the latest activity in a known channel.\nNote: returns only top-level messages, not thread replies.\nLook for thread_ts and reply_count, then use get_thread to expand.\nRequires: bot must be a member of the channel.\n\n**get_thread** — full thread replies given a channel and thread timestamp.\nWhen to use: expanding a message with replies into its full discussion.\nChain after get_channel_history or search_workspace for complete context.\n\n**get_channel_info** — channel metadata (topic, purpose, member count).\nWhen to use: understanding what a channel is about.\n\n**search_messages** — legacy search API. Requires a user token.\nWhen to use: only when search_workspace is unavailable.\n\n**send_message** vs **send_message_thread** — choosing correctly:\n- If you have a `Slack thread_ts` in your context/dependencies, ALWAYS use send_message_thread with that thread_ts. Never use send_message when replying inside a thread.\n- Only use send_message for new top-level channel messages.\n\n**@mentions in Slack messages:**\n- To mention a user, use the format `<@USER_ID>` (e.g., `<@U0AQXMJ3FUP>`).\n- Plain text like `@username` does NOT create a real mention.\n- Use list_users to find a user's ID if you need to mention them.\n\n## When to use which\n- Topic search, catch-up, cross-channel → search_workspace\n- Latest messages in a specific channel → get_channel_history\n- Deep-dive into a message → get_thread with channel_id and ts\n- Always expand threads with high reply_count before summarizing\n- Fallback (user-token only) → search_messages\n- Replying in a thread → send_message_thread (use Slack thread_ts from context)\n- New top-level channel message → send_message",
-    "add_instructions": true,
+    "guidance": "## Slack Tool Selection\n\n**search_workspace** — semantic and keyword search across the workspace.\nWhen to use: finding discussions about a topic, catching up, summarizing activity.\nReturns: messages with channel, author, timestamp, and surrounding context.\n\n**get_channel_history** — recent top-level messages from a specific channel.\nWhen to use: reading the latest activity in a known channel.\nNote: returns only top-level messages, not thread replies.\nLook for thread_ts and reply_count, then use get_thread to expand.\nRequires: bot must be a member of the channel.\n\n**get_thread** — full thread replies given a channel and thread timestamp.\nWhen to use: expanding a message with replies into its full discussion.\nChain after get_channel_history or search_workspace for complete context.\n\n**get_channel_info** — channel metadata (topic, purpose, member count).\nWhen to use: understanding what a channel is about.\n\n**search_messages** — legacy search API. Requires a user token.\nWhen to use: only when search_workspace is unavailable.\n\n**send_message** vs **send_message_thread** — choosing correctly:\n- If you have a `Slack thread_ts` in your context/dependencies, ALWAYS use send_message_thread with that thread_ts. Never use send_message when replying inside a thread.\n- Only use send_message for new top-level channel messages.\n\n**@mentions in Slack messages:**\n- To mention a user, use the format `<@USER_ID>` (e.g., `<@U0AQXMJ3FUP>`).\n- Plain text like `@username` does NOT create a real mention.\n- Use list_users to find a user's ID if you need to mention them.\n\n## When to use which\n- Topic search, catch-up, cross-channel → search_workspace\n- Latest messages in a specific channel → get_channel_history\n- Deep-dive into a message → get_thread with channel_id and ts\n- Always expand threads with high reply_count before summarizing\n- Fallback (user-token only) → search_messages\n- Replying in a thread → send_message_thread (use Slack thread_ts from context)\n- New top-level channel message → send_message",
     "functions": [
       {
         "name": "send_message",
@@ -6812,7 +6812,7 @@
       "enable_sleep": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "sleep",
@@ -6856,7 +6856,7 @@
       "enable_search": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_web",
@@ -6970,7 +6970,7 @@
       "enable_run_sql_query": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_tables",
@@ -7076,7 +7076,7 @@
       "enable_search_context": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "web_search_with_tavily",
@@ -7162,7 +7162,7 @@
       "enable_send_video": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_message",
@@ -7632,7 +7632,7 @@
       "enable_html_to_text": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "extract_text",
@@ -7819,7 +7819,7 @@
       "enable_send_sms": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_sms",
@@ -7934,7 +7934,7 @@
       "enable_search_photos": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_photos",
@@ -8087,7 +8087,7 @@
       "admin_scope": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_my_usage",
@@ -8191,7 +8191,7 @@
       "enable_create_scatter_plot": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_bar_chart",
@@ -8619,7 +8619,7 @@
       "enable_open_page": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "open_page",
@@ -8665,7 +8665,7 @@
       "enable_send_message": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_message",
@@ -8745,7 +8745,7 @@
       "enable_send_text_message": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_text_message",
@@ -9193,7 +9193,7 @@
       "all": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_wikipedia",
@@ -9244,7 +9244,7 @@
       "enable_technical_indicators": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_current_stock_price",
@@ -9556,7 +9556,7 @@
       "enable_get_video_timestamps": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_youtube_video_captions",
@@ -9662,7 +9662,7 @@
       "enable_search_zendesk": true
     },
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_zendesk",
@@ -9705,8 +9705,8 @@
       "enable_get_zep_memory": true,
       "enable_search_zep_memory": true
     },
-    "instructions": "<Memory Instructions>\nYou have access to the users memories stored in Zep. You can interact with them using the following tools:\n- `add_zep_message`: Add a message to the Zep session memory. Use this to add messages to the Zep session memory.\n- `get_zep_memory`: Get the memory for the current Zep session. Use this to get the memory for the current Zep session.\n- `search_zep_memory`: Search the Zep user graph for relevant facts. Use this to search the Zep user graph for relevant facts.\n\nGuidelines:\n- Use `add_zep_message` tool to add relevant messages to the users memories. You can use this tool multiple times to add multiple messages.\n- Use `get_zep_memory` tool to get the memory for the current Zep session for additional context. This will give you a entire context of the user's memories with relevant facts.\n- Use `search_zep_memory` tool to search the Zep user memories for relevant facts. This will give you a list of relevant facts.\n\n</Memory Instructions>",
-    "add_instructions": false,
+    "instructions": null,
+    "guidance": "<Memory Instructions>\nYou have access to the users memories stored in Zep. You can interact with them using the following tools:\n- `add_zep_message`: Add a message to the Zep session memory. Use this to add messages to the Zep session memory.\n- `get_zep_memory`: Get the memory for the current Zep session. Use this to get the memory for the current Zep session.\n- `search_zep_memory`: Search the Zep user graph for relevant facts. Use this to search the Zep user graph for relevant facts.\n\nGuidelines:\n- Use `add_zep_message` tool to add relevant messages to the users memories. You can use this tool multiple times to add multiple messages.\n- Use `get_zep_memory` tool to get the memory for the current Zep session for additional context. This will give you a entire context of the user's memories with relevant facts.\n- Use `search_zep_memory` tool to search the Zep user memories for relevant facts. This will give you a list of relevant facts.\n\n</Memory Instructions>",
     "functions": [
       {
         "name": "add_zep_message",

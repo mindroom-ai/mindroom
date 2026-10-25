@@ -133,12 +133,12 @@ def _tool_schemas(root: Path) -> tuple[dict[str, object], dict[str, object]]:
                 msg = f"{tool_name} needs {missing}; the goldens cover every tool, so sync every extra first"
                 raise SystemExit(msg)
             toolkit = support.build_toolkit(tool_name, config, runtime_paths)
-            schemas[tool_name] = support.golden_entry(toolkit, adapt_toolkit(toolkit))
+            schemas[tool_name] = support.golden_entry(adapt_toolkit(toolkit))
             if overrides := support.all_enabled_overrides(tool_name):
                 toolkit = support.build_toolkit(tool_name, config, runtime_paths, overrides)
                 all_enabled[tool_name] = {
                     "overrides": overrides,
-                    **support.golden_entry(toolkit, adapt_toolkit(toolkit)),
+                    **support.golden_entry(adapt_toolkit(toolkit)),
                 }
     return schemas, all_enabled
 

@@ -1,7 +1,7 @@
 {
   "agent_vault_access": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "request_vault_access",
@@ -34,7 +34,7 @@
   },
   "agentql": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "scrape_website",
@@ -72,7 +72,7 @@
   },
   "airflow": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "save_dag_file",
@@ -148,8 +148,8 @@
     ]
   },
   "approved_egress": {
-    "instructions": "Use this tool when a worker needs temporary access to external hostnames that the egress proxy blocks. Request every needed exact hostname in one call so a single approval covers all of them, with a TTL in minutes and a concise reason. The request_network_access tool definition lists static allowlist patterns that do not need an approval request.",
-    "add_instructions": false,
+    "instructions": null,
+    "guidance": "Use this tool when a worker needs temporary access to external hostnames that the egress proxy blocks. Request every needed exact hostname in one call so a single approval covers all of them, with a TTL in minutes and a concise reason. The request_network_access tool definition lists static allowlist patterns that do not need an approval request.",
     "functions": [
       {
         "name": "request_network_access",
@@ -198,7 +198,7 @@
   },
   "arxiv": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_arxiv_and_return_articles",
@@ -277,7 +277,7 @@
   },
   "atlassian": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "jira_search_issues",
@@ -889,7 +889,7 @@
   },
   "attachments": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_attachments",
@@ -1044,7 +1044,7 @@
   },
   "aws_lambda": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_functions",
@@ -1112,7 +1112,7 @@
   },
   "aws_ses": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_email",
@@ -1158,7 +1158,7 @@
   },
   "baidusearch": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "baidu_search",
@@ -1202,7 +1202,7 @@
   },
   "bitbucket": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_repositories",
@@ -1469,7 +1469,7 @@
   },
   "brandfetch": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_by_identifier",
@@ -1507,7 +1507,7 @@
   },
   "brightdata": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "scrape_as_markdown",
@@ -1660,7 +1660,7 @@
   },
   "browser": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "browser_control",
@@ -2040,7 +2040,7 @@
   },
   "browser_mcp": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "browser_close",
@@ -3399,7 +3399,7 @@
   },
   "browserbase": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "navigate_to",
@@ -3535,7 +3535,7 @@
   },
   "cal_com": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_available_slots",
@@ -3723,7 +3723,7 @@
   },
   "calculator": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "add",
@@ -4005,7 +4005,7 @@
   },
   "callback_manager": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "mint_callback",
@@ -4043,7 +4043,7 @@
   },
   "cartesia": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "text_to_speech",
@@ -4111,7 +4111,7 @@
   },
   "chat_ui": {
     "instructions": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
-    "add_instructions": true,
+    "guidance": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
     "functions": [
       {
         "name": "show_computer",
@@ -4217,7 +4217,7 @@
   },
   "claude_agent": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "claude_start_session",
@@ -4439,7 +4439,7 @@
   },
   "clickup": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_tasks",
@@ -4674,7 +4674,7 @@
   },
   "coding": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_file",
@@ -4957,7 +4957,7 @@
   },
   "compact_context": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "compact_context",
@@ -4990,7 +4990,7 @@
   },
   "config_manager": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_info",
@@ -5316,7 +5316,7 @@
   },
   "confluence": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_page_content",
@@ -5535,7 +5535,7 @@
   },
   "crawl4ai": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "crawl",
@@ -5593,7 +5593,7 @@
   },
   "csv": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_csv_file",
@@ -5729,7 +5729,7 @@
   },
   "custom_api": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "make_request",
@@ -5846,8 +5846,8 @@
     ]
   },
   "daytona": {
-    "instructions": "You have access to a persistent Daytona sandbox for code execution. The sandbox maintains state across interactions.\nAvailable tools:\n- `run_code`: Execute code in the sandbox\n- `run_shell_command`: Execute shell commands (bash)\n- `create_file`: Create or update files\n- `read_file`: Read file contents\n- `list_files`: List directory contents\n- `delete_file`: Delete files or directories\n- `change_directory`: Change the working directory\nMANDATORY: When users ask for code (Python, JavaScript, TypeScript, etc.), you MUST:\n1. Write the code\n2. Execute it using run_code tool\n3. Show the actual output/results\n4. Never just provide code without executing it\nCRITICAL WORKFLOW:\n1. Before running Python scripts, check if required packages are installed\n2. Install missing packages with: run_shell_command(\"pip install package1 package2\")\n3. When running scripts, capture both output AND errors\n4. If a script produces no output, check for errors or add print statements\n\nIMPORTANT: Always use single quotes for the content parameter when creating files\n\nRemember: Your job is to provide working, executed code examples, not just code snippets!\n",
-    "add_instructions": false,
+    "instructions": null,
+    "guidance": "You have access to a persistent Daytona sandbox for code execution. The sandbox maintains state across interactions.\nAvailable tools:\n- `run_code`: Execute code in the sandbox\n- `run_shell_command`: Execute shell commands (bash)\n- `create_file`: Create or update files\n- `read_file`: Read file contents\n- `list_files`: List directory contents\n- `delete_file`: Delete files or directories\n- `change_directory`: Change the working directory\nMANDATORY: When users ask for code (Python, JavaScript, TypeScript, etc.), you MUST:\n1. Write the code\n2. Execute it using run_code tool\n3. Show the actual output/results\n4. Never just provide code without executing it\nCRITICAL WORKFLOW:\n1. Before running Python scripts, check if required packages are installed\n2. Install missing packages with: run_shell_command(\"pip install package1 package2\")\n3. When running scripts, capture both output AND errors\n4. If a script produces no output, check for errors or add print statements\n\nIMPORTANT: Always use single quotes for the content parameter when creating files\n\nRemember: Your job is to provide working, executed code examples, not just code snippets!\n",
     "functions": [
       {
         "name": "run_code",
@@ -6078,8 +6078,8 @@
     ]
   },
   "delegate": {
-    "instructions": "You can run the following configured agents as fresh subagents:\nhelper\n  - Helps with delegated work.\n  - Tools: scheduler\n\nUse run_subagent(task, agent_name=None, model=None) for a bounded subtask whose result you need before continuing.\nThe caller waits for the child to finish; this is not background work.\nThe child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.\nIt retains its configured tools, workspace, and memory.\nSet model to a configured model name to choose a different model for the child session, including follow-ups.\nOmit agent_name or pass null to run a fresh copy of yourself, if your own name is listed in Allowed subagents.\nDelegation is limited to three nested child levels.\nFor an ongoing conversation, use matrix_message(recipient=\"agent_name\", message=\"...\") to request a response.\nIt uses the current conversation; set new_thread=True to start a separate thread.\nIn Matrix, child tools that require approval pause both runs until the user approves or denies them.\nOther runtimes retain their approval restrictions.\nThe result includes the child's answer, Subagent ID, and a child-agent-scoped audit reference.\nUse continue_subagent(subagent_id, message) for follow-ups after that child returns; it reuses the child's own history and waits for an answer.\nKeep the returned ID: it stays valid across turns and restarts for this caller, requester, and originating conversation.\nEach follow-up has its own audit record and does not add nesting depth.\nA running child or one awaiting approval must finish its current turn before accepting a follow-up.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
-    "add_instructions": false,
+    "instructions": null,
+    "guidance": "You can run the following configured agents as fresh subagents:\nhelper\n  - Helps with delegated work.\n  - Tools: scheduler\n\nUse run_subagent(task, agent_name=None, model=None) for a bounded subtask whose result you need before continuing.\nThe caller waits for the child to finish; this is not background work.\nThe child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.\nIt retains its configured tools, workspace, and memory.\nSet model to a configured model name to choose a different model for the child session, including follow-ups.\nOmit agent_name or pass null to run a fresh copy of yourself, if your own name is listed in Allowed subagents.\nDelegation is limited to three nested child levels.\nFor an ongoing conversation, use matrix_message(recipient=\"agent_name\", message=\"...\") to request a response.\nIt uses the current conversation; set new_thread=True to start a separate thread.\nIn Matrix, child tools that require approval pause both runs until the user approves or denies them.\nOther runtimes retain their approval restrictions.\nThe result includes the child's answer, Subagent ID, and a child-agent-scoped audit reference.\nUse continue_subagent(subagent_id, message) for follow-ups after that child returns; it reuses the child's own history and waits for an answer.\nKeep the returned ID: it stays valid across turns and restarts for this caller, requester, and originating conversation.\nEach follow-up has its own audit record and does not add nesting depth.\nA running child or one awaiting approval must finish its current turn before accepting a follow-up.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
     "functions": [
       {
         "name": "run_subagent",
@@ -6177,7 +6177,7 @@
   },
   "desktop": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "desktop",
@@ -6430,7 +6430,7 @@
   },
   "discord": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_message",
@@ -6607,7 +6607,7 @@
   },
   "docker": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_containers",
@@ -7496,7 +7496,7 @@
   },
   "duckdb": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "show_tables",
@@ -7967,7 +7967,7 @@
   },
   "duckduckgo": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "web_search",
@@ -8043,7 +8043,7 @@
   },
   "dynamic_tools": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "tool_search",
@@ -8097,7 +8097,7 @@
   },
   "dynamic_workflow": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_workflow",
@@ -8476,7 +8476,7 @@
   },
   "e2b": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "run_python_code",
@@ -9155,7 +9155,7 @@
   },
   "egress_credentials": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_egress_credentials",
@@ -9188,7 +9188,7 @@
   },
   "eleven_labs": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_voices",
@@ -9288,7 +9288,7 @@
   },
   "email": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "email_user",
@@ -9334,7 +9334,7 @@
   },
   "exa": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_exa",
@@ -9483,7 +9483,7 @@
   },
   "external_trigger_manager": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_trigger",
@@ -9730,7 +9730,7 @@
   },
   "fal": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_media",
@@ -9768,7 +9768,7 @@
   },
   "file": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "save_file",
@@ -10048,7 +10048,7 @@
   },
   "file_generation": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_json_file",
@@ -10358,7 +10358,7 @@
   },
   "financial_datasets_api": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_income_statements",
@@ -10864,7 +10864,7 @@
   },
   "firecrawl": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "scrape_website",
@@ -10902,7 +10902,7 @@
   },
   "gemini": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_image",
@@ -10967,7 +10967,7 @@
   },
   "giphy": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_gifs",
@@ -11005,7 +11005,7 @@
   },
   "github": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_repositories",
@@ -12579,7 +12579,7 @@
   },
   "gmail": {
     "instructions": "You have access to Gmail tools for reading, composing, and organizing emails.\n\n## Pagination\nList methods return `nextPageToken` in the response when more results exist.\nPass this value as the `page_token` parameter to fetch the next page.\n\n## Gmail Query Syntax\nUse these operators in search and context query parameters:\n- `from:user@example.com` / `to:user@example.com` — filter by sender/recipient\n- `subject:\"meeting notes\"` — filter by subject\n- `is:unread` / `is:starred` / `is:important` — filter by status\n- `has:attachment` — emails with attachments\n- `newer_than:7d` / `older_than:1m` — relative date (d=days, m=months, y=years)\n- `after:2024/01/01` / `before:2024/12/31` — absolute date range\n- `label:work` — filter by label\n- `from:me` — emails sent by the user\n- Combine with spaces (AND): `from:me newer_than:7d has:attachment`\n## Composing Emails\n- **New email:** `send_email(to, subject, body)` or `create_draft_email(to, subject, body)`\n- **Reply (send now):** `send_email_reply(message_id, body)` keeps the message in the thread\n- **Reply (draft):** `create_draft_email(to, subject, body, thread_id=..., message_id=...)` creates a draft reply in the thread. Get thread_id and message_id from the original message first.",
-    "add_instructions": true,
+    "guidance": "You have access to Gmail tools for reading, composing, and organizing emails.\n\n## Pagination\nList methods return `nextPageToken` in the response when more results exist.\nPass this value as the `page_token` parameter to fetch the next page.\n\n## Gmail Query Syntax\nUse these operators in search and context query parameters:\n- `from:user@example.com` / `to:user@example.com` — filter by sender/recipient\n- `subject:\"meeting notes\"` — filter by subject\n- `is:unread` / `is:starred` / `is:important` — filter by status\n- `has:attachment` — emails with attachments\n- `newer_than:7d` / `older_than:1m` — relative date (d=days, m=months, y=years)\n- `after:2024/01/01` / `before:2024/12/31` — absolute date range\n- `label:work` — filter by label\n- `from:me` — emails sent by the user\n- Combine with spaces (AND): `from:me newer_than:7d has:attachment`\n## Composing Emails\n- **New email:** `send_email(to, subject, body)` or `create_draft_email(to, subject, body)`\n- **Reply (send now):** `send_email_reply(message_id, body)` keeps the message in the thread\n- **Reply (draft):** `create_draft_email(to, subject, body, thread_id=..., message_id=...)` creates a draft reply in the thread. Get thread_id and message_id from the original message first.",
     "functions": [
       {
         "name": "get_latest_emails",
@@ -13567,7 +13567,7 @@
   },
   "google_bigquery": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_tables",
@@ -13664,7 +13664,7 @@
   },
   "google_calendar": {
     "instructions": "You have access to Google Calendar tools for managing events and scheduling.\n\n## Date/Time Formats\n- All dates use ISO format: YYYY-MM-DDTHH:MM:SS\n- Always specify timezone when creating events\n\n## Tips\n- Use get_event to fetch full details before updating an event\n- Use check_availability to check multiple people's schedules at once\n- Use quick_add_event for simple events from natural language descriptions\n- Use search_events for full-text search across event fields\n- Event IDs from list_events can be used with get_event, update_event, delete_event",
-    "add_instructions": true,
+    "guidance": "You have access to Google Calendar tools for managing events and scheduling.\n\n## Date/Time Formats\n- All dates use ISO format: YYYY-MM-DDTHH:MM:SS\n- Always specify timezone when creating events\n\n## Tips\n- Use get_event to fetch full details before updating an event\n- Use check_availability to check multiple people's schedules at once\n- Use quick_add_event for simple events from natural language descriptions\n- Use search_events for full-text search across event fields\n- Event IDs from list_events can be used with get_event, update_event, delete_event",
     "functions": [
       {
         "name": "list_events",
@@ -14201,7 +14201,7 @@
   },
   "google_docs": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "google_docs_create_document",
@@ -14386,7 +14386,7 @@
   },
   "google_drive": {
     "instructions": "You have access to Google Drive tools for searching, reading, uploading, and downloading files.\n\n## Drive Query Syntax\nUse these operators in search and list query parameters:\n- `name contains 'report'` — files with \"report\" in the name\n- `name = 'Budget 2025.xlsx'` — exact name match\n- `mimeType = 'application/vnd.google-apps.document'` — Google Docs only\n- `mimeType = 'application/vnd.google-apps.spreadsheet'` — Google Sheets only\n- `mimeType = 'application/pdf'` — PDF files only\n- `mimeType = 'application/vnd.google-apps.folder'` — folders only\n- `modifiedTime > '2025-01-01T00:00:00'` — modified after date\n- `'<folder_id>' in parents` — files inside a specific folder\n- `sharedWithMe` — files shared with the user\n- `starred` — starred files\n- Combine with `and` / `or`: `name contains 'report' and mimeType = 'application/pdf'`\n- Trashed files are filtered automatically. Do not add trashed clauses.\n\n## Handling Incomplete Results\nIf search returns `incompleteSearch: true`, some shared drives could not be searched.\nThis is a server-side limitation of the `allDrives` corpus, not a problem with your query.\n- Inform the user that results may be incomplete due to shared drive limitations\n- Do NOT retry the same query — the limitation is server-side\n- For complete results, the user must reconfigure with `corpora=\"user\"` or `corpora=\"drive\"`",
-    "add_instructions": true,
+    "guidance": "You have access to Google Drive tools for searching, reading, uploading, and downloading files.\n\n## Drive Query Syntax\nUse these operators in search and list query parameters:\n- `name contains 'report'` — files with \"report\" in the name\n- `name = 'Budget 2025.xlsx'` — exact name match\n- `mimeType = 'application/vnd.google-apps.document'` — Google Docs only\n- `mimeType = 'application/vnd.google-apps.spreadsheet'` — Google Sheets only\n- `mimeType = 'application/pdf'` — PDF files only\n- `mimeType = 'application/vnd.google-apps.folder'` — folders only\n- `modifiedTime > '2025-01-01T00:00:00'` — modified after date\n- `'<folder_id>' in parents` — files inside a specific folder\n- `sharedWithMe` — files shared with the user\n- `starred` — starred files\n- Combine with `and` / `or`: `name contains 'report' and mimeType = 'application/pdf'`\n- Trashed files are filtered automatically. Do not add trashed clauses.\n\n## Handling Incomplete Results\nIf search returns `incompleteSearch: true`, some shared drives could not be searched.\nThis is a server-side limitation of the `allDrives` corpus, not a problem with your query.\n- Inform the user that results may be incomplete due to shared drive limitations\n- Do NOT retry the same query — the limitation is server-side\n- For complete results, the user must reconfigure with `corpora=\"user\"` or `corpora=\"drive\"`",
     "functions": [
       {
         "name": "google_drive_list_files",
@@ -14724,7 +14724,7 @@
   },
   "google_maps": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_places",
@@ -15069,7 +15069,7 @@
   },
   "google_scholar": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_google_scholar",
@@ -15117,7 +15117,7 @@
   },
   "google_sheets": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_sheet",
@@ -15274,7 +15274,7 @@
   },
   "google_tasks": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "google_tasks_list_task_lists",
@@ -15538,7 +15538,7 @@
   },
   "googlesearch": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "web_search",
@@ -15614,7 +15614,7 @@
   },
   "groq": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "transcribe_audio",
@@ -15716,7 +15716,7 @@
   },
   "hackernews": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_top_hackernews_stories",
@@ -15784,7 +15784,7 @@
   },
   "homeassistant": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_entity_state",
@@ -16170,7 +16170,7 @@
   },
   "invite_router": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "invite_router",
@@ -16203,7 +16203,7 @@
   },
   "jina": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_url",
@@ -16241,7 +16241,7 @@
   },
   "jira": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_issue",
@@ -16444,7 +16444,7 @@
   },
   "knowledge_graph": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_graph",
@@ -16517,7 +16517,7 @@
   },
   "linear": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_user_details",
@@ -16782,7 +16782,7 @@
   },
   "linkup": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "web_search_with_linkup",
@@ -16826,7 +16826,7 @@
   },
   "lumalabs": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_video",
@@ -16948,7 +16948,7 @@
   },
   "matrix_api": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "matrix_api",
@@ -17133,7 +17133,7 @@
   },
   "matrix_message": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "matrix_message",
@@ -17306,7 +17306,7 @@
   },
   "matrix_room": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "matrix_room",
@@ -17402,7 +17402,7 @@
   },
   "matrix_voice_message": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "matrix_voice_message",
@@ -17480,7 +17480,7 @@
   },
   "mem0": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "add_memory",
@@ -17617,7 +17617,7 @@
   },
   "memory": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "add_memory",
@@ -17820,7 +17820,7 @@
   },
   "microsoft_files": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "microsoft_files_search",
@@ -18239,7 +18239,7 @@
   },
   "microsoft_meetings": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "microsoft_meetings_find",
@@ -18365,7 +18365,7 @@
   },
   "microsoft_onenote": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "microsoft_onenote_list_notebooks",
@@ -18681,7 +18681,7 @@
   },
   "microsoft_people": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "microsoft_people_search",
@@ -18796,7 +18796,7 @@
   },
   "microsoft_sharepoint": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "microsoft_sharepoint_search_sites",
@@ -19185,7 +19185,7 @@
   },
   "microsoft_teams": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "microsoft_teams_list_teams",
@@ -19674,7 +19674,7 @@
   },
   "microsoft_todo": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "microsoft_todo_list_lists",
@@ -19955,7 +19955,7 @@
   },
   "modelslabs": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_media",
@@ -19993,7 +19993,7 @@
   },
   "moviepy_video_tools": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "extract_audio",
@@ -20129,7 +20129,7 @@
   },
   "neo4j": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_labels",
@@ -20248,7 +20248,7 @@
   },
   "newspaper": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_article",
@@ -20286,7 +20286,7 @@
   },
   "notion": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_page",
@@ -20400,7 +20400,7 @@
   },
   "oauth_connections": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "reset_oauth_connection",
@@ -20438,7 +20438,7 @@
   },
   "openai": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "transcribe_audio",
@@ -20540,7 +20540,7 @@
   },
   "openbb": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_stock_price",
@@ -20578,12 +20578,12 @@
   },
   "openclaw_compat": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": []
   },
   "openweather": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_current_weather",
@@ -20723,7 +20723,7 @@
   },
   "outlook_calendar": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "outlook_calendar_list_calendars",
@@ -21230,7 +21230,7 @@
   },
   "outlook_mail": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "outlook_mail_search",
@@ -21814,7 +21814,7 @@
   },
   "oxylabs": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_google",
@@ -21963,7 +21963,7 @@
   },
   "pandas": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_pandas_dataframe",
@@ -22071,7 +22071,7 @@
   },
   "postgres": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "show_tables",
@@ -22272,7 +22272,7 @@
   },
   "pubmed": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_pubmed",
@@ -22320,7 +22320,7 @@
   },
   "python": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "save_to_file_and_run",
@@ -22569,8 +22569,8 @@
     ]
   },
   "reasoning": {
-    "instructions": "<reasoning_instructions>\nYou have access to the `think` and `analyze` tools to work through problems step-by-step and structure your thought process. You must ALWAYS `think` before making tool calls or generating a response.\n\n1. **Think** (scratchpad):\n    - Purpose: Use the `think` tool as a scratchpad to break down complex problems, outline steps, and decide on immediate actions within your reasoning flow. Use this to structure your internal monologue.\n    - Usage: Call `think` before making tool calls or generating a response. Explain your reasoning and specify the intended action (e.g., \"make a tool call\", \"perform calculation\", \"ask clarifying question\").\n\n2. **Analyze** (evaluation):\n    - Purpose: Evaluate the result of a think step or a set of tool calls. Assess if the result is expected, sufficient, or requires further investigation.\n    - Usage: Call `analyze` after a set of tool calls. Determine the `next_action` based on your analysis: `continue` (more reasoning needed), `validate` (seek external confirmation/validation if possible), or `final_answer` (ready to conclude).\n    - Explain your reasoning highlighting whether the result is correct/sufficient.\n\n## IMPORTANT GUIDELINES\n- **Always Think First:** You MUST use the `think` tool before making tool calls or generating a response.\n- **Iterate to Solve:** Use the `think` and `analyze` tools iteratively to build a clear reasoning path. The typical flow is `Think` -> [`Tool Calls` if needed] -> [`Analyze` if needed] -> ... -> `final_answer`. Repeat this cycle until you reach a satisfactory conclusion.\n- **Make multiple tool calls in parallel:** After a `think` step, you can make multiple tool calls in parallel.\n- **Keep Thoughts Internal:** The reasoning steps (thoughts and analyses) are for your internal process only. Do not share them directly with the user.\n- **Conclude Clearly:** When your analysis determines the `next_action` is `final_answer`, provide a concise and accurate final answer to the user.\n</reasoning_instructions>\n",
-    "add_instructions": false,
+    "instructions": null,
+    "guidance": "<reasoning_instructions>\nYou have access to the `think` and `analyze` tools to work through problems step-by-step and structure your thought process. You must ALWAYS `think` before making tool calls or generating a response.\n\n1. **Think** (scratchpad):\n    - Purpose: Use the `think` tool as a scratchpad to break down complex problems, outline steps, and decide on immediate actions within your reasoning flow. Use this to structure your internal monologue.\n    - Usage: Call `think` before making tool calls or generating a response. Explain your reasoning and specify the intended action (e.g., \"make a tool call\", \"perform calculation\", \"ask clarifying question\").\n\n2. **Analyze** (evaluation):\n    - Purpose: Evaluate the result of a think step or a set of tool calls. Assess if the result is expected, sufficient, or requires further investigation.\n    - Usage: Call `analyze` after a set of tool calls. Determine the `next_action` based on your analysis: `continue` (more reasoning needed), `validate` (seek external confirmation/validation if possible), or `final_answer` (ready to conclude).\n    - Explain your reasoning highlighting whether the result is correct/sufficient.\n\n## IMPORTANT GUIDELINES\n- **Always Think First:** You MUST use the `think` tool before making tool calls or generating a response.\n- **Iterate to Solve:** Use the `think` and `analyze` tools iteratively to build a clear reasoning path. The typical flow is `Think` -> [`Tool Calls` if needed] -> [`Analyze` if needed] -> ... -> `final_answer`. Repeat this cycle until you reach a satisfactory conclusion.\n- **Make multiple tool calls in parallel:** After a `think` step, you can make multiple tool calls in parallel.\n- **Keep Thoughts Internal:** The reasoning steps (thoughts and analyses) are for your internal process only. Do not share them directly with the user.\n- **Conclude Clearly:** When your analysis determines the `next_action` is `final_answer`, provide a concise and accurate final answer to the user.\n</reasoning_instructions>\n",
     "functions": [
       {
         "name": "think",
@@ -22664,7 +22664,7 @@
   },
   "reddit": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_user_info",
@@ -22955,7 +22955,7 @@
   },
   "redshift": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "show_tables",
@@ -23152,7 +23152,7 @@
   },
   "replicate": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "generate_media",
@@ -23190,7 +23190,7 @@
   },
   "report_publishing": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "publish_report",
@@ -23295,7 +23295,7 @@
   },
   "resend": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_email",
@@ -23341,7 +23341,7 @@
   },
   "scheduler": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "schedule",
@@ -23624,7 +23624,7 @@
   },
   "scrapegraph": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "smartscraper",
@@ -23666,7 +23666,7 @@
   },
   "script": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "start_script",
@@ -23861,7 +23861,7 @@
   },
   "searxng": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_web",
@@ -24147,7 +24147,7 @@
   },
   "self_config": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_own_config",
@@ -24382,7 +24382,7 @@
   },
   "serpapi": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_google",
@@ -24423,7 +24423,7 @@
   },
   "serper": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_web",
@@ -24569,7 +24569,7 @@
   },
   "shared_directories": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_shared_directory",
@@ -24738,7 +24738,7 @@
   },
   "shell": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "run_shell_command",
@@ -24803,7 +24803,7 @@
   },
   "shopify": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_shop_info",
@@ -25299,7 +25299,7 @@
   },
   "skill_manage": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "skill_manage",
@@ -25397,7 +25397,7 @@
   },
   "slack": {
     "instructions": "## Slack Tool Selection\n\n**get_channel_history** — recent top-level messages from a specific channel.\nWhen to use: reading the latest activity in a known channel.\nNote: returns only top-level messages, not thread replies.\nRequires: bot must be a member of the channel.\n\n**send_message** vs **send_message_thread** — choosing correctly:\n- If you have a `Slack thread_ts` in your context/dependencies, ALWAYS use send_message_thread with that thread_ts. Never use send_message when replying inside a thread.\n- Only use send_message for new top-level channel messages.\n\n**@mentions in Slack messages:**\n- To mention a user, use the format `<@USER_ID>` (e.g., `<@U0AQXMJ3FUP>`).\n- Plain text like `@username` does NOT create a real mention.\n- Use list_users to find a user's ID if you need to mention them.\n\n## When to use which\n- Replying in a thread → send_message_thread (use Slack thread_ts from context)\n- New top-level channel message → send_message",
-    "add_instructions": true,
+    "guidance": "## Slack Tool Selection\n\n**get_channel_history** — recent top-level messages from a specific channel.\nWhen to use: reading the latest activity in a known channel.\nNote: returns only top-level messages, not thread replies.\nRequires: bot must be a member of the channel.\n\n**send_message** vs **send_message_thread** — choosing correctly:\n- If you have a `Slack thread_ts` in your context/dependencies, ALWAYS use send_message_thread with that thread_ts. Never use send_message when replying inside a thread.\n- Only use send_message for new top-level channel messages.\n\n**@mentions in Slack messages:**\n- To mention a user, use the format `<@USER_ID>` (e.g., `<@U0AQXMJ3FUP>`).\n- Plain text like `@username` does NOT create a real mention.\n- Use list_users to find a user's ID if you need to mention them.\n\n## When to use which\n- Replying in a thread → send_message_thread (use Slack thread_ts from context)\n- New top-level channel message → send_message",
     "functions": [
       {
         "name": "send_message",
@@ -25637,7 +25637,7 @@
   },
   "sleep": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "sleep",
@@ -25675,7 +25675,7 @@
   },
   "spider": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_web",
@@ -25783,7 +25783,7 @@
   },
   "spotify": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_tracks",
@@ -26455,7 +26455,7 @@
   },
   "sql": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_tables",
@@ -26555,7 +26555,7 @@
   },
   "stop_reply": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "stop_agent_reply",
@@ -26593,7 +26593,7 @@
   },
   "tavily": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "web_search_using_tavily",
@@ -26634,7 +26634,7 @@
   },
   "telegram": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_message",
@@ -26672,7 +26672,7 @@
   },
   "thread_model": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "list_models",
@@ -26798,7 +26798,7 @@
   },
   "thread_move": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "move_thread",
@@ -26846,7 +26846,7 @@
   },
   "thread_resolution": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "resolve_thread",
@@ -26926,7 +26926,7 @@
   },
   "thread_summary": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "set_thread_summary",
@@ -26987,7 +26987,7 @@
   },
   "thread_tags": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "tag_thread",
@@ -27213,8 +27213,8 @@
     ]
   },
   "todo": {
-    "instructions": "Use these tools to manage a per-thread work plan with dependencies. Create plans, add tasks, complete items, update priorities, and use templates for repeated workflows. Items are scoped to the current conversation thread.",
-    "add_instructions": false,
+    "instructions": null,
+    "guidance": "Use these tools to manage a per-thread work plan with dependencies. Create plans, add tasks, complete items, update priorities, and use templates for repeated workflows. Items are scoped to the current conversation thread.",
     "functions": [
       {
         "name": "plan",
@@ -27459,7 +27459,7 @@
   },
   "todoist": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_task",
@@ -27727,7 +27727,7 @@
   },
   "trafilatura": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "extract_text",
@@ -27908,7 +27908,7 @@
   },
   "trello": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_card",
@@ -28161,7 +28161,7 @@
   },
   "twilio": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_sms",
@@ -28269,7 +28269,7 @@
   },
   "unsplash": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_photos",
@@ -28387,7 +28387,7 @@
   },
   "update_awareness": {
     "instructions": "<mindroom_update_awareness>\nThis runtime is running MindRoom <MINDROOM_VERSION>.\nToday's PyPI check failed, so the latest published MindRoom release is unknown.\nDo not claim this runtime is up to date while the latest release is unknown or stale.\n</mindroom_update_awareness>",
-    "add_instructions": true,
+    "guidance": "<mindroom_update_awareness>\nThis runtime is running MindRoom <MINDROOM_VERSION>.\nToday's PyPI check failed, so the latest published MindRoom release is unknown.\nDo not claim this runtime is up to date while the latest release is unknown or stale.\n</mindroom_update_awareness>",
     "functions": [
       {
         "name": "get_mindroom_update_status",
@@ -28420,7 +28420,7 @@
   },
   "usage_stats": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_my_usage",
@@ -28486,7 +28486,7 @@
   },
   "visualization": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_bar_chart",
@@ -28910,7 +28910,7 @@
   },
   "web_browser_tools": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "open_page",
@@ -28951,7 +28951,7 @@
   },
   "webex": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_message",
@@ -29020,7 +29020,7 @@
   },
   "website": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "read_url",
@@ -29058,7 +29058,7 @@
   },
   "whatsapp": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "send_text_message",
@@ -29154,7 +29154,7 @@
   },
   "wikipedia": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_wikipedia",
@@ -29193,7 +29193,7 @@
   },
   "x": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "create_post",
@@ -29400,7 +29400,7 @@
   },
   "yfinance": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_current_stock_price",
@@ -29438,7 +29438,7 @@
   },
   "youtube": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "get_youtube_video_captions",
@@ -29540,7 +29540,7 @@
   },
   "zendesk": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "search_zendesk",
@@ -29577,8 +29577,8 @@
     ]
   },
   "zep": {
-    "instructions": "<Memory Instructions>\nYou have access to the users memories stored in Zep. You can interact with them using the following tools:\n- `add_zep_message`: Add a message to the Zep session memory. Use this to add messages to the Zep session memory.\n- `get_zep_memory`: Get the memory for the current Zep session. Use this to get the memory for the current Zep session.\n- `search_zep_memory`: Search the Zep user graph for relevant facts. Use this to search the Zep user graph for relevant facts.\n\nGuidelines:\n- Use `add_zep_message` tool to add relevant messages to the users memories. You can use this tool multiple times to add multiple messages.\n- Use `get_zep_memory` tool to get the memory for the current Zep session for additional context. This will give you a entire context of the user's memories with relevant facts.\n- Use `search_zep_memory` tool to search the Zep user memories for relevant facts. This will give you a list of relevant facts.\n\n</Memory Instructions>",
-    "add_instructions": false,
+    "instructions": null,
+    "guidance": "<Memory Instructions>\nYou have access to the users memories stored in Zep. You can interact with them using the following tools:\n- `add_zep_message`: Add a message to the Zep session memory. Use this to add messages to the Zep session memory.\n- `get_zep_memory`: Get the memory for the current Zep session. Use this to get the memory for the current Zep session.\n- `search_zep_memory`: Search the Zep user graph for relevant facts. Use this to search the Zep user graph for relevant facts.\n\nGuidelines:\n- Use `add_zep_message` tool to add relevant messages to the users memories. You can use this tool multiple times to add multiple messages.\n- Use `get_zep_memory` tool to get the memory for the current Zep session for additional context. This will give you a entire context of the user's memories with relevant facts.\n- Use `search_zep_memory` tool to search the Zep user memories for relevant facts. This will give you a list of relevant facts.\n\n</Memory Instructions>",
     "functions": [
       {
         "name": "add_zep_message",
@@ -29685,7 +29685,7 @@
   },
   "zoom": {
     "instructions": null,
-    "add_instructions": false,
+    "guidance": null,
     "functions": [
       {
         "name": "schedule_meeting",

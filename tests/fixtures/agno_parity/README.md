@@ -163,8 +163,8 @@ The schema files list tools in sorted order and keep every other key in the orde
 
 ### `tools/schemas.json`
 
-The file maps each built-in tool registration name to `{"instructions", "add_instructions", "functions"}`.
-`instructions` and `add_instructions` are the toolkit's own values; Agno adds `instructions` to the system prompt only when `add_instructions` is true, and no function adds instructions of its own.
+The file maps each built-in tool registration name to `{"instructions", "guidance", "functions"}`, the adapted toolkit's fields.
+`instructions` is the text the system prompt shows for the toolkit, null unless the toolkit asks for its instructions there, and `guidance` the toolkit's instructions whether or not the prompt shows them, which the agent CLI and minimal mode show; no function adds instructions of its own.
 `functions` lists the functions in the order Agno prepares them for an async run: sync functions in registration order, each replaced in place by an async variant of the same name, then async-only functions.
 Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, and `stop_after_tool_call` after Agno's per-run preparation (`parse_tools`), which runs `process_entrypoint` and MindRoom's schema postprocessors; the owned adapter (`adapt_toolkit`) repeats that preparation, and a regeneration records its output.
 The function's `ToolSpec`, the definition a provider adapter receives, is the same entry, in the same key order, without `stop_after_tool_call`; Agno's `show_result`, which the adapter ignores because MindRoom gives a tool's result only to the model, is not recorded.
@@ -192,7 +192,7 @@ Agno behavior the golden pins as it is:
 
 ### `tools/schemas_all_enabled.json`
 
-The file maps each captured tool that has function switches to `{"overrides", "instructions", "add_instructions", "functions"}`, built as for `tools/schemas.json` but with `overrides` as the agent's authored tool config.
+The file maps each captured tool that has function switches to `{"overrides", "instructions", "guidance", "functions"}`, built as for `tools/schemas.json` but with `overrides` as the agent's authored tool config.
 `overrides` sets every boolean `all` and `enable_*` field to true, plus the extra settings in `EXTRA_ENABLING_OVERRIDES` that some functions need (`agentql_query`, `google_drive`'s `download_file`, `usage_stats`'s `admin_scope`); the dummy Slack credentials include a user token so `search_messages` registers.
 Some switches replace a default function instead of adding one, such as `tavily`'s `enable_search_context`, so a tool's functions are the union of both files.
 

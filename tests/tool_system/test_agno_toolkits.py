@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 # Importing these SDKs to build their tools warns about their own deprecated usage.
 pytestmark = [
@@ -40,10 +39,8 @@ def assert_same_json(actual: object, golden: object) -> None:
     assert json.dumps(actual, indent=2) == json.dumps(golden, indent=2)
 
 
-def assert_instructions_as_golden(toolkit: Toolkit, adapted: AdaptedToolkit, golden: dict[str, Any]) -> None:
-    """The adapter carries the toolkit's instructions only when Agno added them, and no function sets its own."""
-    expected = golden["instructions"] if golden["add_instructions"] else None
-    assert support.normalize_version(adapted.instructions) == expected
+def assert_no_function_instructions(toolkit: Toolkit) -> None:
+    """No function sets instructions of its own, so the toolkit's are all the prompt and the guidance carry."""
     assert all(function.instructions is None for function in toolkit.get_async_functions().values())
 
 
@@ -81,8 +78,8 @@ def test_adapted_tool_matches_golden(tool_name: str, golden_runtime: tuple[Path,
         toolkit = support.build_toolkit(tool_name, config, runtime_paths)
         adapted = adapt_toolkit(toolkit)
     assert adapted.name == toolkit.name
-    assert_same_json(support.golden_entry(toolkit, adapted), SCHEMAS[tool_name])
-    assert_instructions_as_golden(toolkit, adapted, SCHEMAS[tool_name])
+    assert_same_json(support.golden_entry(adapted), SCHEMAS[tool_name])
+    assert_no_function_instructions(toolkit)
 
 
 @pytest.mark.parametrize("tool_name", sorted(ALL_ENABLED_SCHEMAS))
@@ -99,8 +96,8 @@ def test_adapted_all_enabled_tool_matches_golden(
         overrides = support.all_enabled_overrides(tool_name)
         toolkit = support.build_toolkit(tool_name, config, runtime_paths, overrides)
         adapted = adapt_toolkit(toolkit)
-    assert_same_json({"overrides": overrides, **support.golden_entry(toolkit, adapted)}, golden)
-    assert_instructions_as_golden(toolkit, adapted, golden)
+    assert_same_json({"overrides": overrides, **support.golden_entry(adapted)}, golden)
+    assert_no_function_instructions(toolkit)
 
 
 def test_adapting_leaves_the_shared_function_untouched() -> None:
