@@ -875,6 +875,28 @@ def test_a_retired_agno_model_field_fails_config_load_and_names_the_model(
     )
 
 
+@pytest.mark.parametrize(
+    ("extra_kwargs", "error"),
+    [
+        ({"client_params": "http://127.0.0.1:9/v1"}, "extra_kwargs.client_params must be a mapping, not str"),
+        ({"base_url": 9}, "extra_kwargs.base_url must be a string, not int"),
+        ({"client_params": {"base_url": 9}}, "extra_kwargs.client_params.base_url must be a string, not int"),
+    ],
+)
+def test_a_wrongly_typed_openai_endpoint_fails_config_load_and_names_the_model_and_key(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+    error: str,
+) -> None:
+    """Config load reads an ``openai`` model's endpoint to pick its API, so a wrongly typed one is a config error."""
+    data = {"models": {"default": {"provider": "openai", "id": "gpt-6-astra", "extra_kwargs": extra_kwargs}}}
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+
+    assert str(exc_info.value) == f"models.default: {error}"
+
+
 _OPENAI_ENDPOINT_ENV = {"OPENAI_BASE_URL": "http://127.0.0.1:9/v1"}
 
 
