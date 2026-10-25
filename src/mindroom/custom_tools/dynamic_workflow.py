@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.delegation.state import DelegationChild, SubagentPersona
-    from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor
+    from mindroom.dynamic_workflows.runner import ParticipantExecutor
     from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
@@ -441,10 +441,10 @@ class DynamicWorkflowTools(Toolkit):
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
             service = DynamicWorkflowService(
                 store,
-                async_participant_executor=_aparticipant_executor(context, state),
+                participant_executor=_participant_executor(context, state),
                 spec_validator=lambda spec: state.requests.update(_validate_workflow_policy_for_context(context, spec)),
             )
-            run = await service.arun_workflow(
+            run = await service.run_workflow(
                 workflow_id=workflow_id,
                 scope=scope,
                 owner_id=owner_id,
@@ -474,7 +474,7 @@ class DynamicWorkflowTools(Toolkit):
         return self.list_workflow_revisions(workflow_id, scope=scope)
 
 
-def _aparticipant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> AsyncParticipantExecutor:
+def _participant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> ParticipantExecutor:
     async def execute(
         *,
         participant: dict[str, object],
@@ -483,12 +483,12 @@ def _aparticipant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> 
         step_outputs: dict[str, object],
     ) -> ParticipantOutput:
         del input_data, step_outputs
-        return await _aexecute_participant(context, participant, prompt, state)
+        return await _execute_participant(context, participant, prompt, state)
 
     return execute
 
 
-async def _aexecute_participant(
+async def _execute_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,

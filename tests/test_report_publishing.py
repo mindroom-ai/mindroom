@@ -809,7 +809,7 @@ async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_p
             created_by=context.agent_name or "general",
             reason="initial design",
         )
-        run = await DynamicWorkflowService(store).arun_workflow(
+        run = await DynamicWorkflowService(store).run_workflow(
             workflow_id="competitor-research-report",
             scope="agent",
             owner_id=owner_id,

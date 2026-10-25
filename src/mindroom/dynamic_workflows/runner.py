@@ -31,7 +31,7 @@ class ParticipantOutput:
     delegation_id: str | None = None
 
 
-class AsyncParticipantExecutor(Protocol):
+class ParticipantExecutor(Protocol):
     """Async callable that executes one resolved Dynamic Workflow participant."""
 
     def __call__(
@@ -87,11 +87,11 @@ class _DynamicWorkflowExecution:
         return {step.step_id: step.to_json() for step in self.steps}
 
 
-async def async_execute_workflow_spec(
+async def execute_workflow_spec(
     spec: dict[str, object],
     input_data: dict[str, object],
     *,
-    participant_executor: AsyncParticipantExecutor | None = None,
+    participant_executor: ParticipantExecutor | None = None,
 ) -> _DynamicWorkflowExecution:
     """Execute a declarative Dynamic Workflow spec sequentially on the current event loop."""
     steps: list[_DynamicWorkflowStepResult] = []
@@ -100,7 +100,7 @@ async def async_execute_workflow_spec(
 
     for raw_step in _workflow_steps(spec):
         try:
-            result = await _async_execute_workflow_step(
+            result = await _execute_workflow_step(
                 raw_step,
                 input_data=input_data,
                 step_outputs=step_outputs,
@@ -129,19 +129,19 @@ async def async_execute_workflow_spec(
     )
 
 
-async def _async_execute_workflow_step(
+async def _execute_workflow_step(
     step: dict[str, object],
     *,
     input_data: dict[str, object],
     step_outputs: Mapping[str, object],
-    participant_executor: AsyncParticipantExecutor | None = None,
+    participant_executor: ParticipantExecutor | None = None,
     participants_by_id: Mapping[str, dict[str, object]] | None = None,
 ) -> _DynamicWorkflowStepResult:
     """Execute one declarative workflow step on the current event loop."""
     step_id = _required_text(step, "id")
     step_type = str(step.get("type", "agent_step"))
     started_at = _utc_now()
-    output = await _aexecute_step_content(
+    output = await _execute_step_content(
         step,
         step_type=step_type,
         input_data=input_data,
@@ -189,13 +189,13 @@ def _rendered_step_content(
     raise DynamicWorkflowExecutionError(msg)
 
 
-async def _aexecute_step_content(
+async def _execute_step_content(
     step: dict[str, object],
     *,
     step_type: str,
     input_data: dict[str, object],
     step_outputs: Mapping[str, object],
-    participant_executor: AsyncParticipantExecutor | None,
+    participant_executor: ParticipantExecutor | None,
     participants_by_id: Mapping[str, dict[str, object]] | None,
 ) -> ParticipantOutput:
     if step_type != "agent_step":

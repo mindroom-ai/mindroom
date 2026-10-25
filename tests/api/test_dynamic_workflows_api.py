@@ -43,7 +43,7 @@ def _workflow_spec() -> dict[str, object]:
 
 def _run(service: DynamicWorkflowService, **options: object) -> DynamicWorkflowRun:
     """Run one workflow to its end, as the workflow tool runs it."""
-    return asyncio.run(service.arun_workflow(**options))
+    return asyncio.run(service.run_workflow(**options))
 
 
 def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client: TestClient) -> None:

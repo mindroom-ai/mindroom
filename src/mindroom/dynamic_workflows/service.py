@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-from mindroom.dynamic_workflows.runner import async_execute_workflow_spec
+from mindroom.dynamic_workflows.runner import execute_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 from mindroom.dynamic_workflows.validation import (
     validate_workflow_input,
@@ -17,7 +17,7 @@ from mindroom.dynamic_workflows.validation import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor
+    from mindroom.dynamic_workflows.runner import ParticipantExecutor
     from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 
 
@@ -28,14 +28,14 @@ class DynamicWorkflowService:
         self,
         store: DynamicWorkflowStore,
         *,
-        async_participant_executor: AsyncParticipantExecutor | None = None,
+        participant_executor: ParticipantExecutor | None = None,
         spec_validator: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self._store = store
-        self._async_participant_executor = async_participant_executor
+        self._participant_executor = participant_executor
         self._spec_validator = spec_validator
 
-    async def arun_workflow(
+    async def run_workflow(
         self,
         *,
         workflow_id: str,
@@ -58,7 +58,7 @@ class DynamicWorkflowService:
             return prepared
 
         run, spec = prepared
-        return await self._aexecute_and_persist(run, spec, input_data)
+        return await self._execute_and_persist(run, spec, input_data)
 
     def _prepare_run(
         self,
@@ -94,7 +94,7 @@ class DynamicWorkflowService:
             return self._store.fail_workflow_run(run, error=str(exc))
         return run, spec
 
-    async def _aexecute_and_persist(
+    async def _execute_and_persist(
         self,
         run: DynamicWorkflowRun,
         spec: dict[str, object],
@@ -102,10 +102,10 @@ class DynamicWorkflowService:
     ) -> DynamicWorkflowRun:
         timeout_seconds = workflow_runtime_seconds(spec)
         execution_task = asyncio.create_task(
-            async_execute_workflow_spec(
+            execute_workflow_spec(
                 spec,
                 input_data,
-                participant_executor=self._async_participant_executor,
+                participant_executor=self._participant_executor,
             ),
         )
         try:
