@@ -22,7 +22,7 @@ from agno.tools import Toolkit
 
 from mindroom import agents, ai_runtime, loop_hooks, response_runner, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
-from mindroom.approval.manager import get_approval_store, initialize_approval_store
+from mindroom.approval.manager import get_approval_store
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
@@ -59,6 +59,8 @@ from tests.approval_continuation_helpers import carries_approval_receipt, receip
 from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
+    handle_card_response_for_test,
+    initialize_approval_store_for_test,
     install_runtime_journal_support,
     make_matrix_client_mock,
     message_origin,
@@ -2427,7 +2429,7 @@ async def _approving_team_bot(
         cards.append(delivery)
         return f"$card-{len(cards)}"
 
-    initialize_approval_store(
+    initialize_approval_store_for_test(
         bot.runtime_paths,
         prepare_event=prepare_event,
         send_delivery=send_card,
@@ -2435,10 +2437,6 @@ async def _approving_team_bot(
         cards=bot._journal_store.principal("router@shared"),
         transport_sender=lambda: "@router:localhost",
         sending_device=lambda: "DEVICE",
-        resolve_action_delivery=None,
-        continuation_ready=None,
-        recovery=None,
-        responder_principal=None,
     )
     try:
         with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):
@@ -2455,17 +2453,13 @@ async def _approve(bot: TeamBot, card_event_id: str) -> None:
     """Approve one card as the requester does, then hand the request's source to the readied resume, as the journal does."""
     manager = get_approval_store()
     assert manager is not None
-    result = await manager.handle_card_response(
+    result = await handle_card_response_for_test(
+        manager,
         room_id=ROOM_ID,
         sender_id=REQUESTER_ID,
         card_event_id=card_event_id,
         status="approved",
-        reason=None,
         authorize_responder=lambda _entity: True,
-        before_consume=None,
-        auto_approve_seconds=None,
-        current_binding=None,
-        scheduled_scope=None,
     )
     assert result.consumed
     runner = bot._response_runner

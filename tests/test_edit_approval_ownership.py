@@ -13,7 +13,6 @@ import pytest
 import pytest_asyncio
 
 from mindroom import reply_lifecycle as rl
-from mindroom.approval.manager import initialize_approval_store
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -35,6 +34,8 @@ from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconc
 from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import (
     finish_edit_regenerations,
+    handle_card_response_for_test,
+    initialize_approval_store_for_test,
     journal_edit_regenerator_deps,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
@@ -78,17 +79,13 @@ class _ApprovalCase:
 
     async def approve(self) -> None:
         if self.requires_human:
-            result = await self.manager.handle_card_response(
+            result = await handle_card_response_for_test(
+                self.manager,
                 room_id=self.room.room_id,
                 sender_id="@user:localhost",
                 card_event_id="$approval-card",
                 status="approved",
-                reason=None,
                 authorize_responder=lambda _entity: True,
-                before_consume=None,
-                auto_approve_seconds=None,
-                current_binding=None,
-                scheduled_scope=None,
             )
             assert result.consumed
 
@@ -376,7 +373,7 @@ async def _paused_case(  # noqa: PLR0915
     async def send_delivery(_delivery: MatrixDelivery) -> str:
         return "$approval-card"
 
-    manager = initialize_approval_store(
+    manager = initialize_approval_store_for_test(
         runner.deps.runtime_paths,
         prepare_event=prepare_event,
         send_delivery=send_delivery,
@@ -384,10 +381,6 @@ async def _paused_case(  # noqa: PLR0915
         cards=journal_store.principal("router@shared"),
         transport_sender=lambda: "@router:localhost",
         sending_device=lambda: "DEVICE",
-        resolve_action_delivery=None,
-        continuation_ready=None,
-        recovery=None,
-        responder_principal=None,
     )
     resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
     model = AsyncMock(side_effect=ResponsePausedForApproval(pause))

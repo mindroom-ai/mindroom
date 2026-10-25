@@ -85,6 +85,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     message_origin,
     patch_response_runner_module,
+    process_and_respond_for_test,
     push_stream_chunk,
     replace_response_runner_deps,
     request_envelope,
@@ -2236,13 +2237,7 @@ class TestStreamingBehavior:
             ),
         ):
             async with response_span(runner, request):
-                generation = await runner._process_and_respond_streaming(
-                    request,
-                    run_id=None,
-                    on_delivery_started=None,
-                    attempt_run_id_collector=None,
-                    runtime=await runner.prepare_response_runtime(request),
-                )
+                generation = await process_and_respond_for_test(runner, request, streaming=True)
 
         assert generation.delivery.event_id == "$stream_1"
         assert sent_contents
@@ -2411,7 +2406,8 @@ class TestStreamingBehavior:
                 typing_indicator=_noop_typing_indicator,
             ),
         ):
-            generation = await bot._response_runner._process_and_respond(
+            generation = await process_and_respond_for_test(
+                bot._response_runner,
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -2425,26 +2421,6 @@ class TestStreamingBehavior:
                         reply_to_event_id="$event",
                         prompt="Please check the docs",
                         user_id="@user:localhost",
-                    ),
-                ),
-                run_id=None,
-                on_delivery_started=None,
-                attempt_run_id_collector=None,
-                runtime=await bot._response_runner.prepare_response_runtime(
-                    ResponseRequest(
-                        sources=ResponseSources(
-                            pending_event_ids=("$event",),
-                            logical_source_event_ids=("$event",),
-                        ),
-                        thread_history=[],
-                        prompt="Please check the docs",
-                        user_id="@user:localhost",
-                        response_envelope=request_envelope(
-                            room_id="!test:localhost",
-                            reply_to_event_id="$event",
-                            prompt="Please check the docs",
-                            user_id="@user:localhost",
-                        ),
                     ),
                 ),
             )

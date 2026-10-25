@@ -40,7 +40,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.conftest import patch_response_runner_module, process_and_respond_for_test, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:
@@ -188,13 +188,7 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
         patch.object(DeliveryGateway, "deliver_final", new=spy_deliver_final),
         patch_response_runner_module(ai_response=fake_ai_response, typing_indicator=_noop_typing),
     ):
-        generation = await coordinator._process_and_respond(
-            _plain_request(_target()),
-            run_id=None,
-            on_delivery_started=None,
-            attempt_run_id_collector=None,
-            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
-        )
+        generation = await process_and_respond_for_test(coordinator, _plain_request(_target()))
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
@@ -291,13 +285,7 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
         patch.object(DeliveryGateway, "finalize_streamed_response", new=spy_finalize),
         patch_response_runner_module(stream_agent_response=fake_stream_agent_response, typing_indicator=_noop_typing),
     ):
-        generation = await coordinator._process_and_respond_streaming(
-            _plain_request(_target()),
-            run_id=None,
-            on_delivery_started=None,
-            attempt_run_id_collector=None,
-            runtime=await coordinator.prepare_response_runtime(_plain_request(_target())),
-        )
+        generation = await process_and_respond_for_test(coordinator, _plain_request(_target()), streaming=True)
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2

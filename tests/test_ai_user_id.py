@@ -115,6 +115,7 @@ from tests.conftest import (
     make_turn_context,
     make_visible_message,
     prepare_agent_and_prompt_for_test,
+    process_and_respond_for_test,
     seed_session,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
@@ -794,14 +795,9 @@ class TestUserIdPassthrough:
 
             mock_ai.side_effect = fake_ai_response
 
-            await coordinator._process_and_respond(
+            await process_and_respond_for_test(
+                coordinator,
                 _response_request(prompt="Hello", user_id="@alice:localhost"),
-                run_id=None,
-                on_delivery_started=None,
-                attempt_run_id_collector=None,
-                runtime=await coordinator.prepare_response_runtime(
-                    _response_request(prompt="Hello", user_id="@alice:localhost"),
-                ),
             )
 
             mock_ai.assert_called_once()
@@ -852,14 +848,10 @@ class TestUserIdPassthrough:
 
             mock_stream.side_effect = fake_stream_agent_response
 
-            await coordinator._process_and_respond_streaming(
+            await process_and_respond_for_test(
+                coordinator,
                 _response_request(prompt="Hello", user_id="@bob:localhost"),
-                run_id=None,
-                on_delivery_started=None,
-                attempt_run_id_collector=None,
-                runtime=await coordinator.prepare_response_runtime(
-                    _response_request(prompt="Hello", user_id="@bob:localhost"),
-                ),
+                streaming=True,
             )
 
             mock_stream.assert_called_once()

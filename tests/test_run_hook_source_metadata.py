@@ -11,7 +11,7 @@ import pytest
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.message_target import MessageTarget
 from mindroom.turn_origin import TurnIntent
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import process_and_respond_for_test, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request
 
 if TYPE_CHECKING:
@@ -65,8 +65,8 @@ async def test_agent_turn_records_its_origin_in_run_metadata(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["_process_and_respond", "_process_and_respond_streaming"])
-async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: Path, method: str) -> None:
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: Path, *, streaming: bool) -> None:
     """The turn recorder starts with the turn's origin, so a turn interrupted while it prepares is stored with it."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _request("automation/exploration", TurnIntent.JOB_FOLLOW_UP)
@@ -75,13 +75,7 @@ async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: P
         patch.object(runner, "_build_turn_recorder", side_effect=_BuiltRecorder) as build,
         pytest.raises(_BuiltRecorder),
     ):
-        await getattr(runner, method)(
-            request,
-            run_id=None,
-            on_delivery_started=None,
-            attempt_run_id_collector=None,
-            runtime=await runner.prepare_response_runtime(request),
-        )
+        await process_and_respond_for_test(runner, request, streaming=streaming)
 
     metadata = build.call_args.kwargs["matrix_run_metadata"]
     assert metadata[TURN_INTENT_RUN_METADATA_KEY] == TurnIntent.JOB_FOLLOW_UP
@@ -89,8 +83,8 @@ async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["_process_and_respond", "_process_and_respond_streaming"])
-async def test_a_turn_stopped_before_its_run_starts_keeps_its_room(tmp_path: Path, method: str) -> None:
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_a_turn_stopped_before_its_run_starts_keeps_its_room(tmp_path: Path, *, streaming: bool) -> None:
     """The turn recorder starts with the turn's room and thread, so a turn that fails while it prepares names them."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     build_recorder = runner._build_turn_recorder
@@ -106,13 +100,7 @@ async def test_a_turn_stopped_before_its_run_starts_keeps_its_room(tmp_path: Pat
         patch.object(runner, "_build_turn_recorder", side_effect=build_then_stop),
         pytest.raises(_BuiltRecorder),
     ):
-        await getattr(runner, method)(
-            request,
-            run_id=None,
-            on_delivery_started=None,
-            attempt_run_id_collector=None,
-            runtime=await runner.prepare_response_runtime(request),
-        )
+        await process_and_respond_for_test(runner, request, streaming=streaming)
 
     metadata = recorders[0].run_metadata
     assert (metadata["room_id"], metadata["thread_id"]) == ("!room:localhost", "$thread")

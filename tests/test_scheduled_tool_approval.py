@@ -65,7 +65,13 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import install_model_providers, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    handle_card_response_for_test,
+    install_model_providers,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
@@ -165,17 +171,14 @@ async def _decide(
     scheduled_scope: str | None = None,
     sender: str = _REQUESTER,
 ) -> ApprovalActionResult:
-    return await manager.handle_card_response(
+    return await handle_card_response_for_test(
+        manager,
         room_id=_ROOM,
         sender_id=sender,
         card_event_id=_SCHEDULED_CARD,
         status=status,
-        reason=None,
         authorize_responder=lambda _agent: True,
         scheduled_scope=scheduled_scope,
-        before_consume=None,
-        auto_approve_seconds=None,
-        current_binding=None,
     )
 
 
@@ -787,17 +790,14 @@ async def test_scope_is_ignored_on_an_ordinary_approval_card(
     try:
         await _ordinary_card(journal, manager, "plain")
 
-        result = await manager.handle_card_response(
+        result = await handle_card_response_for_test(
+            manager,
             room_id=_ROOM,
             sender_id=_REQUESTER,
             card_event_id="$card-plain",
             status="approved",
-            reason=None,
             authorize_responder=lambda _agent: True,
             scheduled_scope="any_arguments",
-            before_consume=None,
-            auto_approve_seconds=None,
-            current_binding=None,
         )
 
         assert result.consumed is False

@@ -66,6 +66,7 @@ import mindroom.tool_jobs.instances as tool_jobs_instances
 from mindroom import ai as mindroom_ai
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import ResponseTurnContext
+from mindroom.approval.manager import ApprovalActionResult, ApprovalManager, initialize_approval_store
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing.batch import PendingEvent
@@ -153,7 +154,12 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.response_runner import (
+    PostLockRequestPreparationError,
+    ResponseRequest,
+    ResponseRunner,
+    _ResponseGenerationOutcome,
+)
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.store import persist_to
 from mindroom.thread_utils import decide_agent_response
@@ -460,6 +466,8 @@ __all__ = [
     "dispatch_context_result",
     "drain_coalescing",
     "enforce_turn_authorization",
+    "handle_card_response_for_test",
+    "initialize_approval_store_for_test",
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
@@ -478,6 +486,7 @@ __all__ = [
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
     "prepared_dispatch_result",
+    "process_and_respond_for_test",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -543,6 +552,54 @@ async def prepare_agent_and_prompt_for_test(
         config=config,
         **(turn_options | options),
     )
+
+
+async def process_and_respond_for_test(
+    runner: ResponseRunner,
+    request: ResponseRequest,
+    *,
+    streaming: bool = False,
+    **options: Any,  # noqa: ANN401
+) -> _ResponseGenerationOutcome:
+    """Deliver ``request`` through the runner's streaming or non-streaming driver with a plain turn's options.
+
+    ``options`` names the driver options a test sets; the run id, delivery callback, and run-id collector otherwise
+    stay unset, and the runtime is prepared from ``request`` itself.
+    """
+    driver = runner._process_and_respond_streaming if streaming else runner._process_and_respond
+    driver_options: dict[str, Any] = {"run_id": None, "on_delivery_started": None, "attempt_run_id_collector": None}
+    if "runtime" not in options:
+        driver_options["runtime"] = await runner.prepare_response_runtime(request)
+    return await driver(request, **(driver_options | options))
+
+
+def initialize_approval_store_for_test(runtime_paths: RuntimePaths, **collaborators: Any) -> ApprovalManager:  # noqa: ANN401
+    """Initialize the approval store with the collaborators a test names, and none of the others."""
+    unset = dict.fromkeys(
+        (
+            "prepare_event",
+            "send_delivery",
+            "resolve_delivery",
+            "resolve_action_delivery",
+            "cards",
+            "transport_sender",
+            "sending_device",
+            "continuation_ready",
+            "recovery",
+            "responder_principal",
+        ),
+    )
+    return initialize_approval_store(runtime_paths, **(unset | collaborators))
+
+
+async def handle_card_response_for_test(manager: ApprovalManager, **response: Any) -> ApprovalActionResult:  # noqa: ANN401
+    """Answer one approval card through ``manager.handle_card_response`` as a plain card response does.
+
+    ``response`` names the card, its responder, the decision, and whatever else a test sets; the reason, consume
+    callback, timed approval, and binding and schedule scopes otherwise stay unset.
+    """
+    unset = dict.fromkeys(("reason", "before_consume", "auto_approve_seconds", "current_binding", "scheduled_scope"))
+    return await manager.handle_card_response(**(unset | response))
 
 
 async def prepare_history_for_run_for_test(

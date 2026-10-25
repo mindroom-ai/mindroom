@@ -111,6 +111,7 @@ from tests.conftest import (
     install_runtime_journal_support,
     message_origin,
     patch_response_runner_module,
+    process_and_respond_for_test,
     replace_delivery_gateway_deps,
     request_envelope,
     runtime_paths_for,
@@ -134,22 +135,16 @@ if TYPE_CHECKING:
 
 async def _in_span(
     bot: AgentBot,
-    respond: Callable[..., Awaitable[_ResponseGenerationOutcome]],
     request: ResponseRequest,
     *,
+    streaming: bool = False,
     placeholder_event_id: str | None = None,
-    **kwargs: object,
+    **options: object,
 ) -> _ResponseGenerationOutcome:
-    """Run one response call in the request's reply span, as the locked turn runs it, with its prepared runtime.
-
-    ``kwargs`` names the delivery options a test sets; the others are those of a reply nobody watches.
-    """
+    """Deliver ``request`` in its reply span, as the locked turn does, through ``process_and_respond_for_test``."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     async with response_span(runner, request, placeholder_event_id=placeholder_event_id):
-        options: dict[str, object] = {"run_id": None, "on_delivery_started": None, "attempt_run_id_collector": None}
-        if "runtime" not in kwargs:
-            options["runtime"] = await runner.prepare_response_runtime(request)
-        return await respond(request, **(options | kwargs))
+        return await process_and_respond_for_test(runner, request, streaming=streaming, **options)
 
 
 @pytest.fixture
@@ -307,7 +302,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             generation = await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -368,7 +362,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Check for updates",
@@ -424,7 +417,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             generation = await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -489,7 +481,6 @@ class TestAgentBot(AgentBotTestBase):
             ):
                 generation = await _in_span(
                     bot,
-                    bot._response_runner._process_and_respond_streaming,
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -503,6 +494,7 @@ class TestAgentBot(AgentBotTestBase):
                             user_id="@user:localhost",
                         ),
                     ),
+                    streaming=True,
                 )
 
         assert generation.delivery.event_id == "$response"
@@ -557,7 +549,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Continue",
@@ -619,7 +610,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Continue",
@@ -677,7 +667,6 @@ class TestAgentBot(AgentBotTestBase):
             ):
                 generation = await _in_span(
                     bot,
-                    bot._response_runner._process_and_respond_streaming,
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Hello",
@@ -691,6 +680,7 @@ class TestAgentBot(AgentBotTestBase):
                             user_id="@user:localhost",
                         ),
                     ),
+                    streaming=True,
                 )
 
         assert generation.delivery.event_id == "$response"
@@ -734,7 +724,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _in_span(
                 bot,
-                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Hello",
@@ -748,6 +737,7 @@ class TestAgentBot(AgentBotTestBase):
                         user_id="@user:localhost",
                     ),
                 ),
+                streaming=True,
             )
 
         persist_interrupted.assert_awaited_once()
@@ -778,7 +768,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -851,7 +840,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _in_span(
                 bot,
-                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -867,6 +855,7 @@ class TestAgentBot(AgentBotTestBase):
                         attachment_ids=tuple(attachment_ids),
                     ),
                 ),
+                streaming=True,
             )
 
         sent_extra_content = mock_send_streaming_response.await_args.kwargs["extra_content"]
@@ -950,7 +939,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _in_span(
                 bot,
-                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Hello",
@@ -964,6 +952,7 @@ class TestAgentBot(AgentBotTestBase):
                         user_id="@user:localhost",
                     ),
                 ),
+                streaming=True,
             )
 
         sent_extra_content = mock_send_streaming_response.await_args.kwargs["extra_content"]
@@ -1022,7 +1011,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _in_span(
                 bot,
-                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Cancel me",
@@ -1036,6 +1024,7 @@ class TestAgentBot(AgentBotTestBase):
                         user_id="@user:localhost",
                     ),
                 ),
+                streaming=True,
             )
 
         # The extra_content dict (mutable reference) was populated during iteration
@@ -1085,7 +1074,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             generation = await _in_span(
                 bot,
-                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please continue",
@@ -1099,6 +1087,7 @@ class TestAgentBot(AgentBotTestBase):
                         user_id="@user:localhost",
                     ),
                 ),
+                streaming=True,
             )
 
         assert _visible_response_event_id(generation.delivery) == "$terminal"
@@ -1148,7 +1137,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             generation = await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -1194,7 +1182,6 @@ class TestAgentBot(AgentBotTestBase):
             ):
                 await _in_span(
                     bot,
-                    bot._response_runner._process_and_respond,
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please continue",
@@ -1269,7 +1256,6 @@ class TestAgentBot(AgentBotTestBase):
             ):
                 generation = await _in_span(
                     bot,
-                    bot._response_runner._process_and_respond_streaming,
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -1279,6 +1265,7 @@ class TestAgentBot(AgentBotTestBase):
                         response_envelope=_hook_envelope(body="Please reply in thread", source_event_id="$event456"),
                         correlation_id="corr-stream",
                     ),
+                    streaming=True,
                 )
 
         assert generation.delivery.event_id == "$response"
@@ -1322,7 +1309,6 @@ class TestAgentBot(AgentBotTestBase):
                 ):
                     await _in_span(
                         bot,
-                        bot._response_runner._process_and_respond_streaming,
                         _response_request(
                             room_id="!test:localhost",
                             prompt="Please continue",
@@ -1336,6 +1322,7 @@ class TestAgentBot(AgentBotTestBase):
                                 user_id="@user:localhost",
                             ),
                         ),
+                        streaming=True,
                     )
 
             assert mock_stream.call_args.args[0].active_event_ids == frozenset({"$active"})
@@ -1773,7 +1760,6 @@ class TestAgentBot(AgentBotTestBase):
             )
             generation = await _in_span(
                 bot,
-                bot._response_runner._process_and_respond_streaming,
                 replace(
                     _response_request(
                         room_id="!test:localhost",
@@ -1792,6 +1778,7 @@ class TestAgentBot(AgentBotTestBase):
                     # A regeneration of the answer the reply shows.
                     edit_regeneration=True,
                 ),
+                streaming=True,
             )
 
         assert generation.delivery.terminal_status == "completed"
@@ -1874,7 +1861,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             generation = await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Summarize README",
@@ -1945,7 +1931,6 @@ class TestAgentBot(AgentBotTestBase):
         ):
             generation = await _in_span(
                 bot,
-                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Check status",

@@ -49,6 +49,7 @@ from tests.conftest import (
     make_turn_context,
     message_origin,
     patch_response_runner_module,
+    process_and_respond_for_test,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -482,7 +483,8 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ),
     ):
-        generation = await bot._response_runner._process_and_respond(
+        generation = await process_and_respond_for_test(
+            bot._response_runner,
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$event",),
@@ -498,27 +500,6 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
                     user_id="@user:localhost",
                 ),
                 system_enrichment_items=system_items,
-            ),
-            run_id=None,
-            on_delivery_started=None,
-            attempt_run_id_collector=None,
-            runtime=await bot._response_runner.prepare_response_runtime(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=("$event",),
-                        logical_source_event_ids=("$event",),
-                    ),
-                    thread_history=[],
-                    prompt="Please reply",
-                    user_id="@user:localhost",
-                    response_envelope=request_envelope(
-                        room_id="!room:localhost",
-                        reply_to_event_id="$event",
-                        prompt="Please reply",
-                        user_id="@user:localhost",
-                    ),
-                    system_enrichment_items=system_items,
-                ),
             ),
         )
 
@@ -577,13 +558,7 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         ),
     ):
         async with response_span(runner, request):
-            generation = await runner._process_and_respond_streaming(
-                request,
-                run_id=None,
-                on_delivery_started=None,
-                attempt_run_id_collector=None,
-                runtime=await runner.prepare_response_runtime(request),
-            )
+            generation = await process_and_respond_for_test(runner, request, streaming=True)
 
     assert generation.delivery.event_id == "$response"
     assert generation.delivery.response_text == "stream chunk"

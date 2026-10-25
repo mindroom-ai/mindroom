@@ -38,7 +38,6 @@ from mindroom.api import main as api_main
 from mindroom.approval.manager import (
     _ApprovalStartupSweep,
     get_approval_store,
-    initialize_approval_store,
 )
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
@@ -110,6 +109,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     TEST_PASSWORD,
     bind_mock_config_event_journal,
+    initialize_approval_store_for_test,
     make_matrix_client_mock,
     runtime_paths_for,
 )
@@ -5074,19 +5074,7 @@ class TestMultiAgentOrchestrator:
         router_cards = MagicMock()
         orchestrator.config = config
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(approval_store=router_cards)}
-        store = initialize_approval_store(
-            runtime_paths,
-            cards=old_cards,
-            prepare_event=None,
-            send_delivery=None,
-            resolve_delivery=None,
-            resolve_action_delivery=None,
-            transport_sender=None,
-            sending_device=None,
-            continuation_ready=None,
-            recovery=None,
-            responder_principal=None,
-        )
+        store = initialize_approval_store_for_test(runtime_paths, cards=old_cards)
 
         try:
             with (

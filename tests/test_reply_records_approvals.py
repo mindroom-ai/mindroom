@@ -12,7 +12,6 @@ import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.approval.manager import initialize_approval_store
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
@@ -33,7 +32,11 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAtt
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_store import TurnStore
-from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.conftest import (
+    initialize_approval_store_for_test,
+    patch_response_runner_module,
+    unwrap_extracted_collaborator,
+)
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_reply_records_turns import (
     _admit_edit,
@@ -86,7 +89,7 @@ async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterato
     async def send_card(_delivery: MatrixDelivery) -> str:
         return "$approval-card"
 
-    initialize_approval_store(
+    initialize_approval_store_for_test(
         bot.runtime_paths,
         prepare_event=prepare_event,
         send_delivery=send_card,
@@ -94,10 +97,6 @@ async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterato
         cards=bot._journal_store.principal("router@shared"),
         transport_sender=lambda: "@router:localhost",
         sending_device=lambda: "DEVICE",
-        resolve_action_delivery=None,
-        continuation_ready=None,
-        recovery=None,
-        responder_principal=None,
     )
     try:
         with patch(
