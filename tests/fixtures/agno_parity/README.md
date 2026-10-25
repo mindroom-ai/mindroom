@@ -15,7 +15,7 @@ Nothing reaches a provider: replies come from each golden's canned response or a
 The storage, run, history, and codec goldens and `knowledge/rows.json` hold data Agno wrote, so they are read-only inputs and never change.
 
 The command keeps the authored parts of each golden as written and rewrites only what it derives from them.
-The authored parts are each provider golden's `input` and `response_raw`, the cases of `tools/arguments.json` (their `function` and `raw_arguments`), the cases of `knowledge/embedders.json` (their `embedder` and each call's `agno_method`, `purpose`, and `texts`), the `input`, `format`, and searches of `knowledge/search.json` (each one's `agent`, `query`, and whether it answers with documents or with text), the requests of `events/openai_compat.json`, and which runs `events/ai_run.json` holds.
+The authored parts are each provider golden's `input` and `response_raw`, the cases of `tools/arguments.json` (their `function` and `raw_arguments`), the cases of `knowledge/embedders.json` (their `embedder` and each call's `agno_method`, `purpose`, and `texts`), the `input`, `format`, and searches of `knowledge/search.json` (each one's `agent`, `query`, `embedding_fails` where its query embedding fails, and whether it answers with documents or with text), the requests of `events/openai_compat.json`, and which runs `events/ai_run.json` holds.
 The prompt goldens have no authored part: their scenarios are code in `tests/agno_parity/prompt_scenarios.py`.
 To rebase a branch whose goldens conflict, merge the authored parts of each conflicting golden by hand, in the current encoding, take either side for everything else, then rerun the command at the rebased head and review its diff.
 Taking one side whole would silently drop the other side's authored edits, because the command regenerates from whatever authored parts it finds.
@@ -314,7 +314,7 @@ Normalization:
 
 ### `knowledge/search.json`
 
-Each search sends one query through the `search_knowledge_base` tool for an agent of `input.config`, over the bases of `rows.json`'s `input` as an owned refresh writes them: `librarian` searches one base, `researcher` two, and `archivist` an empty one; the last search fails its query embedding.
+Each search sends one query through the `search_knowledge_base` tool for an agent of `input.config`, over the bases of `rows.json`'s `input` as an owned refresh writes them: `librarian` searches one base, `researcher` two, and `archivist` an empty one; the search marked `"embedding_fails": true` runs with its query embedding failing.
 A search records `documents`, the tool's JSON result parsed, or `text` for `No documents found` and the error text.
 The tool lays its result out with `indent=2` and `ensure_ascii=False`, each document's keys as `name`, `meta_data`, `content`.
 `content_hash` in each document's `meta_data` becomes `<sha256>`.

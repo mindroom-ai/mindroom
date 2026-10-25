@@ -717,6 +717,7 @@
     },
     {
       "agent": "librarian",
+      "embedding_fails": true,
       "query": "hotel nightly cap",
       "text": "Error searching knowledge base: EmbedderRequestError"
     }

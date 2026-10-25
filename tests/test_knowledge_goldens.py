@@ -24,6 +24,7 @@ from mindroom.knowledge.search import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import tool_definition
+from tests.agno_parity import knowledge_goldens
 from tests.agno_parity.golden_files import render, sorted_keys
 from tests.agno_parity.knowledge_goldens import (
     EMBEDDERS_PATH,
@@ -123,6 +124,25 @@ async def test_search_tool_results_match_agnos(tmp_path: Path, parity_embedder: 
     failed query embedding reports the error type.
     """
     assert await regenerated_search(tmp_path, parity_embedder) == SEARCH_GOLDENS
+
+
+@pytest.mark.asyncio
+async def test_the_failing_search_still_fails_after_its_error_text_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parity_embedder: ParityEmbedder,
+) -> None:
+    """Which search's embedding fails is authored, so a reworded error regenerates as the new error, not a search."""
+    reworded = deepcopy(SEARCH_GOLDENS)
+    [failing] = [search for search in reworded["searches"] if search.get("embedding_fails")]
+    failing["text"] = "Knowledge search failed: EmbedderRequestError"
+    golden = tmp_path / "search.json"
+    golden.write_text(render(reworded), encoding="utf-8")
+    monkeypatch.setattr(knowledge_goldens, "SEARCH_PATH", golden)
+
+    regenerated = await regenerated_search(tmp_path / "root", parity_embedder)
+
+    assert regenerated == SEARCH_GOLDENS
 
 
 def test_a_distance_differing_only_in_chromas_last_bits_regenerates_as_recorded() -> None:

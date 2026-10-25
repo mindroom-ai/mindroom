@@ -319,15 +319,16 @@ async def regenerated_search(root: Path, embedder: ParityEmbedder) -> dict[str, 
     """Return the search golden the owned search tool regenerates over the golden bases refreshed under ``root``.
 
     Each search is the tool call of its agent: the documents it found, or the text it answered with, as its golden
-    records. A search whose golden answer is an error runs with its query embedding failing. Distances that differ
-    from the golden's only by Chroma's arithmetic keep the golden's value, so every machine regenerates the same file.
+    records. A search the golden marks ``embedding_fails`` runs with its query embedding failing. Distances that
+    differ from the golden's only by Chroma's arithmetic keep the golden's value, so every machine regenerates the
+    same file.
     """
     golden = load(SEARCH_PATH)
     config, runtime_paths = golden_config(root)
     await refresh_golden_bases(config, runtime_paths)
     searches: list[dict[str, Any]] = []
     for search in golden["searches"]:
-        embedder.failing = search.get("text", "").startswith("Error")
+        embedder.failing = search.get("embedding_fails", False)
         handle = resolve_agent_knowledge_access(search["agent"], config, runtime_paths).knowledge
         assert handle is not None
         output = await _search_tool_output(handle, search["query"])
@@ -336,6 +337,7 @@ async def regenerated_search(root: Path, embedder: ParityEmbedder) -> dict[str, 
             if "documents" in search
             else {"text": output}
         )
-        searches.append({"agent": search["agent"], "query": search["query"], **found})
+        authored = {key: search[key] for key in ("agent", "embedding_fails", "query") if key in search}
+        searches.append({**authored, **found})
     embedder.failing = False
     return sorted_keys({**golden, "searches": searches})
