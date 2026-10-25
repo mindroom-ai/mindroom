@@ -1270,32 +1270,34 @@ async def test_gemini_places_videos_before_the_prompt_and_other_media_after(tmp_
 
 
 @pytest.mark.asyncio
-async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_read(tmp_path: Path) -> None:
-    """A text file goes as plain text; a file of a type Gemini rejects goes as a note that names it, never as bytes."""
+async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A text file goes as plain text; a file of a type Gemini rejects goes as a note naming it, never read or fetched."""
+    # The local file does not exist, so reading it would fail the request.
     deck = tmp_path / "deck.pptx"
-    deck.write_bytes(b"PK\x03\x04")
     message = Message(
         role="user",
         content="Summarize",
         files=[
             File(filepath=str(deck), mime_type="application/octet-stream", filename="deck.pptx"),
             File(url="https://media.test/archive.zip", mime_type="application/zip", filename="archive.zip"),
+            File(url="http://media.test/backup.zip", mime_type="application/zip", filename="backup.zip"),
             File(content=b"key: value", mime_type="application/yaml", filename="settings.yaml"),
             File(content=b"%PDF", filename="a.pdf"),
         ],
     )
+    server = _MediaServer()
 
-    request, _ = await run_adapter(
-        GEMINI_VERTEX,
-        _request(message),
-        tmp_path,
-        gemini_sse(_gemini_chunk({"text": "ok"})),
-    )
+    await _stream_media(GEMINI_VERTEX, _request(message), tmp_path, server, monkeypatch)
 
-    assert request["body"]["contents"][0]["parts"] == [
+    assert server.requests == server.model_requests()
+    assert _user_parts(server) == [
         {"text": "Summarize"},
         {"text": "[Attachment omitted: deck.pptx (application/octet-stream) is a file type Gemini cannot read]"},
         {"text": "[Attachment omitted: archive.zip (application/zip) is a file type Gemini cannot read]"},
+        {"text": "[Attachment omitted: backup.zip (application/zip) is a file type Gemini cannot read]"},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"key: value").decode(), "mime_type": "text/plain"}},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"%PDF").decode(), "mime_type": "application/pdf"}},
     ]

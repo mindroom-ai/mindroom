@@ -75,7 +75,14 @@ _FORMAT_TO_MIME = {
 }
 # Text types outside ``text/``, which Gemini reads as plain text.
 _TEXT_FILE_MIME_TYPES = frozenset(
-    {"application/json", "application/xml", "application/yaml", "application/x-yaml", "application/x-javascript"},
+    {
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/x-javascript",
+        "application/x-python",
+    },
 )
 # The finish reason of a candidate whose tool call the model malformed.
 _MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
@@ -323,7 +330,7 @@ def _typed_file_part(file: File, mime_type: str, part: Callable[[str], dict[str,
     return _omitted_file(file, mime_type) if sent_type is None else part(sent_type)
 
 
-async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
+async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:  # noqa: PLR0911
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
         return _typed_file_part(file, _file_mime_type(file, file.filename or ""), partial(_inline, data))
@@ -331,6 +338,8 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
         # Gemini fetches a Cloud Storage file, or an HTTPS file of known type, itself; other files are downloaded.
         if url.startswith("gs://") or (url.startswith("https://") and file.mime_type):
             return _typed_file_part(file, _file_mime_type(file, url), partial(_file_uri, url))
+        if file.mime_type and _sent_file_type(file.mime_type) is None:
+            return _omitted_file(file, file.mime_type)
         data, declared = await _downloaded(url, "file", route)
         return _typed_file_part(file, _file_mime_type(file, url, declared), partial(_inline, data))
     if file.filepath is None:
