@@ -128,6 +128,7 @@ AgentToolCallEvent = AgentToolCallStep | AgentToolCallWaiting | AgentToolCallMed
 class PreparedAgentToolCatalog:
     """One turn's catalog of the agent's tools, each under the toolkit it was authored in.
 
+    ``runtime_context`` is the agent's own, under which the functions generated for its build run.
     ``run`` is the turn's run identity, whose session holds the state its calls share and receives the catalog's
     checkpoints and delegations; ``store`` is the store they write, and ``record`` is the run itself once known: the live run after its first
     tool batch is planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy,
@@ -136,7 +137,6 @@ class PreparedAgentToolCatalog:
     it closes.
     """
 
-    agent_name: str
     run: RunContext
     runtime_context: ToolRuntimeContext
     store: ConversationStore | None
