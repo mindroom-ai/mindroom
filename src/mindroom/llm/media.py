@@ -273,7 +273,7 @@ class File:
             # LEGACY_COMPAT: Unmarked base64 content of a text file that is not UTF-8.
             # Legacy format: Agno and MindRoom stored a `text/*` file whose bytes are not UTF-8 as base64 text without
             # `content_encoding`, the same shape as a UTF-8 text file's text.
-            # Last legacy release: v2026.10.541; replacement: the next release adds `content_encoding: "base64"`.
+            # Last legacy release: v2026.10.541; replacement: v2026.10.542 adds `content_encoding: "base64"`.
             # Handling: Unmarked `text/*` content reads as UTF-8 text, so such an earlier file still reads as its
             # base64 text; no rule tells it apart from a text file whose text is valid base64.
             # Coverage: tests/llm/test_codecs.py::test_a_text_file_stored_before_its_encoding_was_recorded_reads_as_before.
