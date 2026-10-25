@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from agno.tools import Toolkit
 
-from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -109,13 +109,16 @@ class ReportPublishingTools(Toolkit):
             )
         try:
             publishable = await run_blocking_until_complete(_resolve_publishable_source, context, source_type, source)
-            report = await run_blocking_until_complete(
+            store = ReportPublishingStore(context.runtime_paths.storage_root)
+            # A cancelled call never shows its link, so its requester could neither use nor revoke it.
+            report = await run_blocking_or_compensate(
                 partial(
-                    ReportPublishingStore(context.runtime_paths.storage_root).publish_report,
+                    store.publish_report,
                     source=publishable,
                     published_by=context.requester_id,
                     base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
                 ),
+                lambda published: store.revoke_public_report(published.slug, revoked_by=context.requester_id),
             )
         except (DynamicWorkflowError, ReportPublishingError) as exc:
             return self._payload("error", source_type=source_type, message=str(exc))

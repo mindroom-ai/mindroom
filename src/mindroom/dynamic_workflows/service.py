@@ -7,7 +7,7 @@ from contextlib import suppress
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
+from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.dynamic_workflows.runner import execute_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 from mindroom.dynamic_workflows.validation import (
@@ -57,8 +57,8 @@ class DynamicWorkflowService:
         A run cancelled before its final record is written ends cancelled; one cancelled while that record
         is written keeps it.
         """
-        preparing = asyncio.create_task(
-            asyncio.to_thread(
+        prepared = await run_blocking_or_compensate(
+            partial(
                 self._prepare_run,
                 workflow_id=workflow_id,
                 scope=scope,
@@ -67,14 +67,8 @@ class DynamicWorkflowService:
                 requested_by=requested_by,
                 base_url=base_url,
             ),
+            self._cancel_admitted_run,
         )
-        try:
-            prepared = await wait_for_future_until_complete(preparing)
-        except asyncio.CancelledError:
-            # Preparation has finished by now, so a run it started and admitted ends cancelled.
-            if preparing.exception() is None and not isinstance(started := preparing.result(), DynamicWorkflowRun):
-                await self._fail(started[0], _RUN_CANCELLED)
-            raise
         if isinstance(prepared, DynamicWorkflowRun):
             return prepared
 
@@ -114,6 +108,11 @@ class DynamicWorkflowService:
         except Exception as exc:  # Persist preparation failures only after the run exists.
             return self._store.fail_workflow_run(run, error=failure_text(exc))
         return run, spec
+
+    def _cancel_admitted_run(self, prepared: tuple[DynamicWorkflowRun, dict[str, object]] | DynamicWorkflowRun) -> None:
+        """End a run its preparation admitted as cancelled; a run the preparation rejected keeps its rejection."""
+        if not isinstance(prepared, DynamicWorkflowRun):
+            self._store.fail_workflow_run(prepared[0], error=_RUN_CANCELLED)
 
     async def _execute_and_persist(
         self,
