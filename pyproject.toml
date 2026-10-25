@@ -298,7 +298,8 @@ lumalabs = [
 ]
 matrix_api = []
 matrix_calls = [
-  "livekit-agents[openai]>=1.8.1",
+  # 1.8.9 runs on OpenAI SDK 3 and pins the livekit 1.1.21 audio mixer the call tests cover.
+  "livekit-agents[openai]>=1.8.9",
 ]
 matrix-e2ee = []
 matrix_message = []

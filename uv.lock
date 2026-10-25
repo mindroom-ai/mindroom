@@ -4798,7 +4798,7 @@ requires-dist = [
     { name = "json5", specifier = ">=0.13" },
     { name = "jsonschema", specifier = ">=4.26" },
     { name = "linkup-sdk", marker = "extra == 'linkup'", specifier = ">=0.2.8" },
-    { name = "livekit-agents", extras = ["openai"], marker = "extra == 'matrix-calls'", specifier = ">=1.8.1" },
+    { name = "livekit-agents", extras = ["openai"], marker = "extra == 'matrix-calls'", specifier = ">=1.8.9" },
     { name = "lumaai", marker = "extra == 'lumalabs'" },
     { name = "lxml-html-clean", marker = "extra == 'newspaper'" },
     { name = "markdown-it-py", specifier = ">=4" },
