@@ -879,7 +879,6 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
 ) -> None:
     """From the queue limit until the writer catches up, records skip the file; a note then says how many."""
     monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
-    monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 2)
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
     log_file = current_log_file()
     assert log_file is not None
@@ -887,7 +886,8 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
     logger = get_logger("tests.logging")
 
     def log_during_stall(first_index: int) -> None:
-        """Log six records: one stalls in the write, two fill the queue, and three are dropped."""
+        """Log seven records: one stalls in the write, two fill the queue, and four are dropped."""
+        monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 2)
         log_stream.writable.clear()
         log_stream.stalled.clear()
         try:
@@ -895,6 +895,9 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
             assert log_stream.stalled.wait(SETTLE_TIMEOUT_SECONDS)
             for index in range(first_index + 1, first_index + 6):
                 logger.info("logged_during_stall", index=index)
+            # Room below the cap does not resume the file until the writer has caught up.
+            monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 10)
+            logger.info("logged_during_stall", index=first_index + 6)
         finally:
             log_stream.writable.set()
 
@@ -904,11 +907,11 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
     with bound_log_context(room_id="!room:example.org"):
         logger.info("logged_after_stall")
     _wait_for_log_lines(log_file, 6)
-    log_during_stall(6)
+    log_during_stall(7)
     logging.shutdown()
 
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
-    note = ("Log file dropped records while its writes were stalled", None, 3)
+    note = ("Log file dropped records while its writes were stalled", None, 4)
     assert [(record["event"], record.get("index"), record.get("dropped_records")) for record in records] == [
         ("Logging initialized", None, None),
         ("logged_during_stall", 0, None),
@@ -916,9 +919,9 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
         ("logged_during_stall", 2, None),
         note,
         ("logged_after_stall", None, None),
-        ("logged_during_stall", 6, None),
         ("logged_during_stall", 7, None),
         ("logged_during_stall", 8, None),
+        ("logged_during_stall", 9, None),
         note,
     ]
     assert records[5]["room_id"] == "!room:example.org"
@@ -929,7 +932,6 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
 
 def test_log_file_keeps_its_records_after_another_logging_config(tmp_path: Path) -> None:
     """A later `dictConfig`, like the one uvicorn runs for the API server, leaves the file receiving records to exit."""
-    _runtime_paths(tmp_path)
     child = """
 import logging.config
 import sys

@@ -220,7 +220,8 @@ class _QueuedFileHandler(logging.handlers.QueueHandler):
     """
 
     def __init__(self, filename: str, mode: str, encoding: str) -> None:
-        super().__init__(queue.Queue())
+        # Unlike `queue.Queue`, `SimpleQueue` is reentrant, so a finalizer that logs during a put cannot deadlock it.
+        super().__init__(queue.SimpleQueue())
         self._file = logging.FileHandler(filename, mode=mode, encoding=encoding)
         self._dropped_records = 0
         # A later `dictConfig`, such as uvicorn's, drops this handler from the list `logging.shutdown` closes at exit.
@@ -228,15 +229,16 @@ class _QueuedFileHandler(logging.handlers.QueueHandler):
 
     def enqueue(self, record: logging.LogRecord) -> None:
         """Queue the formatted record, or count it as dropped from the cap until the writer has caught up."""
-        queued_records = cast("queue.Queue[logging.LogRecord]", self.queue).qsize()
+        queued_records = cast("queue.SimpleQueue[logging.LogRecord]", self.queue).qsize()
         if queued_records >= _MAX_QUEUED_LOG_FILE_RECORDS or (self._dropped_records and queued_records):
             self._dropped_records += 1
             return
         if self.listener is None:
             # Any `dictConfig` closes every handler, even one it leaves on the root logger, and a closed `FileHandler`
             # reopens on its next record; this writer starts again the same way.
-            self.listener = logging.handlers.QueueListener(self.queue, self._file)
-            self.listener.start()
+            listener = logging.handlers.QueueListener(self.queue, self._file)
+            listener.start()
+            self.listener = listener
         self._queue_dropped_records_note()
         self.queue.put_nowait(record)
 
