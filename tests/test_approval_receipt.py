@@ -21,7 +21,6 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -247,14 +246,13 @@ def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None
         Message(role="tool", content="tool result"),
     ]
 
-    projected = messages_with_approval_receipt(messages, "trusted approval receipt", after_response_id=False)
+    projected = messages_with_approval_receipt(messages, "trusted approval receipt")
 
     assert [(message.role, message.content) for message in projected] == [
         ("system", "base rules\n\ntrusted approval receipt"),
         ("assistant", "calling tool"),
         ("tool", "tool result"),
     ]
-    assert projected[0].provider_data == {"mindroom_approval_receipt": True}
     assert projected[0] is not messages[0]
     assert messages[0].content == "base rules"
     assert messages[0].provider_data is None
@@ -262,11 +260,7 @@ def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None
 
 def test_a_request_without_a_prompt_message_gets_the_receipt_as_its_own_system_message() -> None:
     """A run with no system message still delivers the receipt, first, without storing it."""
-    projected = messages_with_approval_receipt(
-        [Message(role="user", content="Do the task")],
-        "Approved.",
-        after_response_id=False,
-    )
+    projected = messages_with_approval_receipt([Message(role="user", content="Do the task")], "Approved.")
 
     assert [(message.role, message.content) for message in projected] == [
         ("system", "Approved."),
@@ -275,29 +269,10 @@ def test_a_request_without_a_prompt_message_gets_the_receipt_as_its_own_system_m
     assert projected[0].add_to_agent_memory is False
 
 
-def test_a_stored_response_chain_keeps_the_receipt_provider_visible() -> None:
-    """Routes that continue stored responses see only what follows the chain, so the receipt goes after it."""
-    messages = [
-        Message(role="system", content="base rules"),
-        Message(role="assistant", content="calling tool", provider_data={"response_id": "resp_previous"}),
-        Message(role="tool", content="published", tool_call_id="call-1"),
-    ]
-
-    projected = messages_with_approval_receipt(messages, "trusted approval receipt", after_response_id=True)
-
-    assert [(message.role, message.content) for message in projected] == [
-        ("system", "base rules"),
-        ("assistant", "calling tool"),
-        ("system", "trusted approval receipt"),
-        ("tool", "published"),
-    ]
-
-
 @pytest.mark.asyncio
 async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only() -> None:
     """The run the receipt names reads it in its first request only; another run and every stored run never do."""
     model = ScriptedModel([calls(tool_call("echo", "call-1", text="x")), answer("first"), answer("second")])
-    hook = approval_receipt_hook(Capabilities())
 
     with approval_receipt_context(RECEIPT_CALLS, run_id="run-1"):
         _, first = await collect(
@@ -305,7 +280,7 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
                 spec(model, toolkit(echo)),
                 [Message(role="user", content="Go")],
                 ctx=context(),
-                hooks=LoopHooks(before_request=(hook,)),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
                 persist=None,
                 request_template=EMPTY_REQUEST,
             ),
@@ -315,7 +290,7 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
                 spec(model),
                 [Message(role="user", content="Again")],
                 ctx=context(run_id="run-2"),
-                hooks=LoopHooks(before_request=(hook,)),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
                 persist=None,
                 request_template=EMPTY_REQUEST,
             ),
@@ -409,7 +384,7 @@ async def test_a_chat_resume_sends_the_call_under_the_id_its_receipt_names(
                 denied={},
                 external_results={},
                 context=lambda run_id: context(run_id=run_id),
-                hooks=LoopHooks(before_request=(approval_receipt_hook(built.provider.capabilities),)),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
                 persist=None,
                 request_template=EMPTY_REQUEST,
             ),
@@ -675,7 +650,7 @@ async def test_a_background_job_an_approval_continuation_starts_never_reads_its_
                 spec(model),
                 [Message(role="user", content="Go")],
                 ctx=context(run_id="job-run"),
-                hooks=LoopHooks(before_request=(approval_receipt_hook(Capabilities()),)),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
                 persist=None,
                 request_template=EMPTY_REQUEST,
             ),
@@ -704,7 +679,6 @@ async def test_a_background_job_an_approval_continuation_starts_never_reads_its_
 @pytest.mark.asyncio
 async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> None:
     """Outside an approval continuation, the hook is a no-op."""
-    hook = approval_receipt_hook(Capabilities())
     model = ScriptedModel([answer("ok")])
 
     _, record = await collect(
@@ -712,7 +686,7 @@ async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> No
             spec(model),
             [Message(role="user", content="Go")],
             ctx=context(),
-            hooks=LoopHooks(before_request=(hook,)),
+            hooks=LoopHooks(before_request=(approval_receipt_hook,)),
             persist=None,
             request_template=EMPTY_REQUEST,
         ),
@@ -720,7 +694,7 @@ async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> No
 
     assert record.content == "ok"
     assert model.requests[0].messages[0].content == "You are Code."
-    assert isinstance(await hook(_state_stub()), SendRequest)
+    assert isinstance(await approval_receipt_hook(_state_stub()), SendRequest)
 
 
 def _state_stub() -> object:

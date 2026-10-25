@@ -22,7 +22,6 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities
 from mindroom.llm.runs import RunStatus
 from mindroom.mid_turn import QueuedMessage
 from tests.agent_loop.helpers import collect, context, gated, spec
@@ -53,7 +52,7 @@ def _tool_calls() -> list[dict[str, Any]]:
 def _hooks() -> LoopHooks:
     """Return the notice and receipt hooks an agent run and its resume install."""
     return LoopHooks(
-        before_request=(approval_receipt_hook(Capabilities()),),
+        before_request=(approval_receipt_hook,),
         after_tool_batch=(queued_notice_after_tool_batch(_NOTICE),),
         on_resume_entry=(queued_notice_on_resume_entry(_NOTICE),),
     )
