@@ -320,6 +320,11 @@ def personal_agent_roster_path(runtime_paths: RuntimePaths) -> Path:
     return tracking_dir(runtime_paths) / "personal_agents.json"
 
 
+def personal_agent_roster_lock_path(runtime_paths: RuntimePaths) -> Path:
+    """Return the lock file that serializes roster updates and the config writes checked against them."""
+    return tracking_dir(runtime_paths) / "personal_agents.lock"
+
+
 def read_personal_agent_roster(runtime_paths: RuntimePaths) -> list[PersonalAgentRosterEntry]:
     """Read every roster entry, or an empty list before the first onboarding."""
     path = personal_agent_roster_path(runtime_paths)

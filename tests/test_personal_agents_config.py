@@ -18,12 +18,13 @@ from mindroom.config.personal_agents import (
     expand_personal_agents,
     personal_agent_data,
     personal_agent_display_name,
+    personal_agent_roster_lock_path,
     personal_agent_roster_path,
     personal_agent_username,
     read_personal_agent_roster,
 )
 from mindroom.constants import tracking_dir
-from mindroom.personal_agents import _append_personal_agent_roster_entry, _personal_agent_roster_lock_path
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from tests.conftest import test_runtime_paths
 
@@ -199,7 +200,7 @@ def test_roster_round_trip(tmp_path: Path) -> None:
     _append_personal_agent_roster_entry(paths, _entry())
     assert read_personal_agent_roster(paths) == [_entry()]
     assert personal_agent_roster_path(paths) == tracking_dir(paths) / "personal_agents.json"
-    assert _personal_agent_roster_lock_path(paths) == tracking_dir(paths) / "personal_agents.lock"
+    assert personal_agent_roster_lock_path(paths) == tracking_dir(paths) / "personal_agents.lock"
 
 
 def test_roster_append_keeps_earlier_entries(tmp_path: Path) -> None:

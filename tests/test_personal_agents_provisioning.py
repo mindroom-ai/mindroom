@@ -12,8 +12,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.config.personal_agents import read_personal_agent_roster
+from mindroom.config.personal_agents import personal_agent_roster_lock_path, read_personal_agent_roster
 from mindroom.constants import resolve_runtime_paths
+from mindroom.file_locks import file_lock_is_held
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -279,9 +280,9 @@ async def test_remote_user_always_gets_the_hashed_name(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("section", ["agents", "teams"])
+@pytest.mark.parametrize("section", ["agents", "teams", "personal_agents"])
 async def test_provision_treats_saved_but_unloaded_names_as_taken(tmp_path: Path, section: str) -> None:
-    """An agent or team saved to the config file but not reloaded yet keeps its name from a new user's agent."""
+    """An agent, team, or template saved to the config file but not reloaded yet keeps its name from a new user's agent."""
     paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(deepcopy(BASE), paths)
     paths.config_path.write_text(f"{section}:\n  mind_alice_smith:\n    display_name: Saved\n", encoding="utf-8")
@@ -331,6 +332,47 @@ async def test_interrupted_provisioning_resumes_with_its_own_account(tmp_path: P
     assert entry.agent_name == _hashed("alice", user_id)
     assert not entry.pending
     assert _hashed("alice", user_id) in Config.validate_with_runtime(deepcopy(BASE), paths).agents
+
+
+@pytest.mark.asyncio
+async def test_failed_registration_without_an_account_retries_under_the_current_template(tmp_path: Path) -> None:
+    """A registration that failed before saving an account picks its names again, so a fixed pattern reaches it."""
+    paths = test_runtime_paths(tmp_path)
+    data: dict[str, Any] = deepcopy(BASE)
+    data["personal_agents"]["mind"]["matrix_username"] = "{username}.outside"
+    with (
+        patch("mindroom.personal_agents.create_agent_user", new=AsyncMock(side_effect=RuntimeError("M_EXCLUSIVE"))),
+        pytest.raises(RuntimeError, match="M_EXCLUSIVE"),
+    ):
+        await _provision(Config.validate_with_runtime(data, paths), paths)
+
+    data["personal_agents"]["mind"]["matrix_username"] = "{username}.mind"
+    create_user = _create_agent_user()
+    with patch("mindroom.personal_agents.create_agent_user", new=create_user):
+        assert await _provision(Config.validate_with_runtime(data, paths), paths) == "mind_alice_smith"
+
+    assert create_user.await_args.kwargs == {"username": "alice_smith.mind"}
+    assert [(entry.matrix_username, entry.pending) for entry in read_personal_agent_roster(paths)] == [
+        ("alice_smith.mind", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_registration_runs_outside_the_roster_lock(tmp_path: Path) -> None:
+    """The roster lock is free while the account registers, so config saves never wait on the homeserver."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(deepcopy(BASE), paths)
+    registered = _create_agent_user().side_effect
+    lock_held: list[bool] = []
+
+    def register(*args: Any, **kwargs: Any) -> AgentMatrixUser:  # noqa: ANN401
+        lock_held.append(file_lock_is_held(personal_agent_roster_lock_path(paths)))
+        return registered(*args, **kwargs)
+
+    with patch("mindroom.personal_agents.create_agent_user", new=AsyncMock(side_effect=register)):
+        await _provision(config, paths)
+
+    assert lock_held == [False]
 
 
 @pytest.mark.asyncio
