@@ -54,7 +54,6 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -74,7 +73,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.delegation.state import DelegationChild, SubagentPersona
-    from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
+    from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor
     from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
@@ -212,16 +211,7 @@ class DynamicWorkflowTools(Toolkit):
     def _register_functions(self) -> None:
         register_toolkit_functions(
             self,
-            sync_entrypoints={
-                "create_workflow": self.create_workflow,
-                "validate_workflow": self.validate_workflow,
-                "update_workflow": self.update_workflow,
-                "run_workflow": self.run_workflow,
-                "get_workflow_run": self.get_workflow_run,
-                "list_workflows": self.list_workflows,
-                "list_workflow_revisions": self.list_workflow_revisions,
-            },
-            async_entrypoints={
+            entrypoints={
                 "create_workflow": self.acreate_workflow,
                 "validate_workflow": self.avalidate_workflow,
                 "update_workflow": self.aupdate_workflow,
@@ -347,36 +337,6 @@ class DynamicWorkflowTools(Toolkit):
             active_revision=summary.active_revision,
             name=summary.name,
         )
-
-    def run_workflow(
-        self,
-        workflow_id: str,
-        input: dict[str, Any],  # noqa: A002
-        scope: str = "agent",
-    ) -> str:
-        """Run a Dynamic Workflow and persist step outputs plus report artifacts."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
-        state = _WorkflowRun(f"{workflow_id}:{uuid4().hex}")
-        try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            service = DynamicWorkflowService(
-                store,
-                participant_executor=_participant_executor(context, state),
-                spec_validator=lambda spec: state.requests.update(_validate_workflow_policy_for_context(context, spec)),
-            )
-            run = service.run_workflow(
-                workflow_id=workflow_id,
-                scope=scope,
-                owner_id=owner_id,
-                input_data=input,
-                requested_by=context.requester_id,
-                base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
-            )
-        except DynamicWorkflowError as exc:
-            return self._payload("error", workflow_id=workflow_id, message=str(exc))
-        return self._run_payload(run, step_count=len(run.steps))
 
     def get_workflow_run(
         self,
@@ -512,20 +472,6 @@ class DynamicWorkflowTools(Toolkit):
     async def alist_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
         """List immutable revisions for one Dynamic Workflow."""
         return self.list_workflow_revisions(workflow_id, scope=scope)
-
-
-def _participant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> ParticipantExecutor:
-    def execute(
-        *,
-        participant: dict[str, object],
-        prompt: str,
-        input_data: dict[str, object],
-        step_outputs: dict[str, object],
-    ) -> ParticipantOutput:
-        del input_data, step_outputs
-        return asyncio.run(closing_model_connections(_aexecute_participant(context, participant, prompt, state)))
-
-    return execute
 
 
 def _aparticipant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> AsyncParticipantExecutor:

@@ -616,7 +616,8 @@ def test_report_publishing_store_rejects_static_site_asset_traversal(tmp_path: P
         store.report_asset_path(store.get_public_report(report.slug), "../index.html")
 
 
-def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:
     """Report Publishing should expose Dynamic Workflow reports through a source reference."""
     dynamic_workflow_tool = DynamicWorkflowTools()
     report_tool = ReportPublishingTools()
@@ -625,7 +626,7 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
     with tool_runtime_context(context):
         _tool_payload(dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
         run = _tool_payload(
-            dynamic_workflow_tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}),
+            await dynamic_workflow_tool.arun_workflow("competitor-research-report", {"topic": "Agno factories"}),
         )
         missing_confirmation = _tool_payload(
             report_tool.publish_report(
@@ -783,7 +784,8 @@ def test_report_publishing_tool_rejects_arbitrary_sources(tmp_path: Path) -> Non
     assert "artifact_path" in extra_field["message"]
 
 
-def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_path: Path) -> None:
     """Only completed Dynamic Workflow runs should be exposed as public report links."""
     report_tool = ReportPublishingTools()
     context = _make_context(tmp_path)
@@ -807,7 +809,7 @@ def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_path: P
             created_by=context.agent_name or "general",
             reason="initial design",
         )
-        run = DynamicWorkflowService(store).run_workflow(
+        run = await DynamicWorkflowService(store).arun_workflow(
             workflow_id="competitor-research-report",
             scope="agent",
             owner_id=owner_id,
@@ -827,7 +829,8 @@ def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_path: P
     assert "Only completed" in rejected["message"]
 
 
-def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: Path) -> None:
     """Public report revocation should stay limited to the source requester or publisher."""
     dynamic_workflow_tool = DynamicWorkflowTools()
     report_tool = ReportPublishingTools()
@@ -837,7 +840,7 @@ def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: 
     with tool_runtime_context(alice_context):
         _tool_payload(dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
         run = _tool_payload(
-            dynamic_workflow_tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}),
+            await dynamic_workflow_tool.arun_workflow("competitor-research-report", {"topic": "Agno factories"}),
         )
         published = _tool_payload(
             report_tool.publish_report(

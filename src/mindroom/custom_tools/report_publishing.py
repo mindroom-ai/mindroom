@@ -70,11 +70,7 @@ class ReportPublishingTools(Toolkit):
     def _register_functions(self) -> None:
         register_toolkit_functions(
             self,
-            sync_entrypoints={
-                "publish_report": self.publish_report,
-                "revoke_public_report": self.revoke_public_report,
-            },
-            async_entrypoints={
+            entrypoints={
                 "publish_report": self.apublish_report,
                 "revoke_public_report": self.arevoke_public_report,
             },
