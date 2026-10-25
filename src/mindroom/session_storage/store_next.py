@@ -932,9 +932,9 @@ def store_fold(connection: sqlite3.Connection, names: TableNames, fold: FoldWrit
     """Store what fold summary ``summary_id`` took out of its running run, in the caller's write transaction.
 
     The run takes the next ``seq``, so it sorts after the summary; one without a row gets a cancelled one with its live
-    scalars and metadata, which a crash leaves as a run that does not replay. The folded messages and the named member
-    runs are flagged with the summary, a stored message keeping its data, so none replays again. The caller creates
-    the session row (``ensure_session_row``) before it inserts the summary row.
+    scalars and metadata, which a crash leaves as a run that does not replay. The folded messages and the running run's
+    named member runs are flagged with the summary, a stored message keeping its data, so none replays again. The
+    caller creates the session row (``ensure_session_row``) before it inserts the summary row.
     """
     session_id, record, now = fold.session.session_id, fold.record, int(time())
     runs, seq = quote_identifier(names.log_runs), next_seq(connection, names)
@@ -952,9 +952,9 @@ def store_fold(connection: sqlite3.Connection, names: TableNames, fold: FoldWrit
         ],
     )
     connection.execute(
-        f"UPDATE {runs} SET folded_by = ? WHERE session_id = ? AND folded_by IS NULL "  # noqa: S608
+        f"UPDATE {runs} SET folded_by = ? WHERE session_id = ? AND parent_run_id = ? AND folded_by IS NULL "  # noqa: S608
         "AND run_id IN (SELECT value FROM json_each(?))",
-        (summary_id, session_id, json.dumps(sorted(fold.member_run_ids))),
+        (summary_id, session_id, record.run_id, json.dumps(sorted(fold.member_run_ids))),
     )
 
 
