@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from openai import AuthenticationError
+from openai import UnprocessableEntityError
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 from watchfiles import Change
@@ -5112,10 +5112,10 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
     assert checkpoint.status == "failed"
 
 
-def _embedder_auth_error() -> AuthenticationError:
+def _embedder_rejection_error() -> UnprocessableEntityError:
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
-    response = httpx.Response(401, request=request, json={"error": {"message": "Incorrect API key provided"}})
-    return AuthenticationError("Error code: 401", response=response, body=None)
+    response = httpx.Response(422, request=request, json={"error": {"message": "Input could not be embedded"}})
+    return UnprocessableEntityError("Error code: 422", response=response, body=None)
 
 
 @pytest.mark.asyncio
@@ -5123,29 +5123,35 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The persisted refresh summary carries the first classified per-file indexing error."""
+    """The persisted refresh summary carries the first classified per-file indexing error past a later success.
+
+    The rejection is per-file on purpose: a rejected credential stops every file not yet started, so "good.md"
+    would never get its turn.
+    """
+    # One file at a time, in name order, so "good.md" succeeds after the rejection is recorded.
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "aaa-broken.md").write_text("cannot embed", encoding="utf-8")
     (docs_path / "good.md").write_text("indexed text", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
-    class _AuthFailingEmbedder(_FakeEmbedder):
+    class _RejectingEmbedder(_FakeEmbedder):
         def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
             if "cannot embed" in texts:
-                raise _embedder_auth_error()
+                raise _embedder_rejection_error()
             return super().embed(texts, purpose=purpose)
 
     monkeypatch.setattr(
         "mindroom.knowledge.manager.create_configured_embedder",
-        lambda *_a, **_k: _AuthFailingEmbedder(),
+        lambda *_a, **_k: _RejectingEmbedder(),
     )
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
     assert await manager.reindex_all() == RefreshOutcome(
         indexed_count=1,
         published=False,
-        error="Indexed 1 of 2 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
+        error="Indexed 1 of 2 managed knowledge files (first error: embedder request failed (HTTP 422))",
     )
 
 
