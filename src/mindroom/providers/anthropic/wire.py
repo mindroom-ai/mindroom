@@ -429,14 +429,19 @@ def _assistant_blocks(message: Message) -> list[Any]:
 
 def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
     """Return the ``tool_result`` block of one result; a failed call is marked ``is_error``, as the API documents."""
-    payload: str | list[Any]
+    payload: str | list[Any] = result.content
+    # LEGACY_COMPAT: Tool results stored as a list of content blocks.
+    # Legacy format: a stored ``tool`` message whose ``content`` is a list, which only the Agno runtime's result
+    # writer produced.
+    # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
+    # content.
+    # Handling: each block is sent as stored, and any other item as a text block.
+    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks
     if isinstance(result.content, list):
         payload = [
             block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
             for item in result.content
         ]
-    else:
-        payload = str(result.content)
     block: dict[str, Any] = {"type": "tool_result", "tool_use_id": result.call_id, "content": payload}
     if result.is_error:
         block["is_error"] = True
