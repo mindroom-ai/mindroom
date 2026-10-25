@@ -16,6 +16,7 @@ from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameters
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from tests.agno_parity import tool_argument_probes as probes
+from tests.agno_parity.golden_files import render
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
@@ -42,6 +43,16 @@ def assert_same_json(actual: object, golden: object) -> None:
 def assert_no_function_instructions(toolkit: Toolkit) -> None:
     """No function sets instructions of its own, so the toolkit's are all the prompt and the guidance carry."""
     assert all(function.instructions is None for function in toolkit.get_async_functions().values())
+
+
+@pytest.mark.parametrize(
+    ("path", "golden"),
+    [(support.SCHEMAS_PATH, SCHEMAS), (support.ALL_ENABLED_SCHEMAS_PATH, ALL_ENABLED_SCHEMAS)],
+    ids=["schemas", "schemas_all_enabled"],
+)
+def test_the_schema_goldens_are_written_as_the_regeneration_writes_them(path: Path, golden: dict[str, Any]) -> None:
+    """Each file lists its tools in sorted order, each entry as built, so regenerating unchanged tools rewrites nothing."""
+    assert render({name: golden[name] for name in sorted(golden)}) == path.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
