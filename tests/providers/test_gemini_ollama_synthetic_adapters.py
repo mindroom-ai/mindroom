@@ -56,6 +56,19 @@ GEMINI_VERTEX = {
     "id": "gemini-3.1-pro-preview",
     "extra_kwargs": {"vertexai": True, "project_id": "test-project", "location": "us-central1"},
 }
+# Vertex AI turned on in the SDK client's own arguments instead of ``extra_kwargs.vertexai``.
+GEMINI_VERTEX_CLIENT_PARAMS = {
+    "provider": "gemini",
+    "id": "gemini-3.1-pro-preview",
+    "extra_kwargs": {
+        "client_params": {
+            "vertexai": True,
+            "project": "test-project",
+            "location": "us-central1",
+            "credentials": Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+        },
+    },
+}
 OLLAMA = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
 WEATHER = ToolSpec(
     name="get_weather",
@@ -340,7 +353,11 @@ async def test_gemini_default_sampling_models_omit_sampling_controls(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("config", "json_output"), [(GEMINI, True), (GEMINI_VERTEX, False)])
+@pytest.mark.parametrize(
+    ("config", "json_output"),
+    [(GEMINI, True), (GEMINI_VERTEX, False), (GEMINI_VERTEX_CLIENT_PARAMS, False)],
+    ids=["gemini", "vertexai", "client-params-vertexai"],
+)
 async def test_gemini_decision_requests_keep_schemas_but_disable_function_calling(
     config: dict[str, Any],
     json_output: bool,
@@ -1188,6 +1205,23 @@ async def test_gemini_leaves_out_empty_local_attachments(tmp_path: Path, monkeyp
 
     assert server.requests == server.model_requests()
     assert _user_parts(server) == [{"text": "Look"}]
+
+
+@pytest.mark.asyncio
+async def test_gemini_vertex_client_from_client_params_inlines_local_media(tmp_path: Path) -> None:
+    """A model that turns Vertex AI on in ``client_params`` inlines local audio, since Vertex AI has no Files API."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Hi", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+
+    request, _ = await run_adapter(
+        GEMINI_VERTEX_CLIENT_PARAMS,
+        _request(message),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    assert request["body"]["contents"][0]["parts"][1]["inlineData"]["mime_type"] == "audio/ogg"
 
 
 @pytest.mark.asyncio

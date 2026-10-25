@@ -86,7 +86,10 @@ def build_adapter(
     if config["provider"] == "ollama":
         extra_kwargs["client_params"] = {"transport": transport}
         return build_ollama_provider(ModelConfig(**config), runtime_paths_for(root))
-    extra_kwargs["client_params"] = {"http_options": {"httpx_async_client": httpx.AsyncClient(transport=transport)}}
+    extra_kwargs["client_params"] = {
+        **extra_kwargs.get("client_params", {}),
+        "http_options": {"httpx_async_client": httpx.AsyncClient(transport=transport)},
+    }
     if extra_kwargs.get("vertexai"):
         extra_kwargs["credentials"] = Credentials(token="parity-google-token")  # noqa: S106 - synthetic credential
     return build_gemini_provider(ModelConfig(**config), runtime_paths_for(root))

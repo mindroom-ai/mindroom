@@ -88,7 +88,8 @@ class GeminiProvider:
         # Client construction reads credentials from disk; its failures are configuration errors, not transient.
         client = self._sdk_client()
         provider = self.identity.provider_name
-        upload = None if self.vertexai else partial(uploaded_file_uri, client, provider=provider)
+        # The client, which ``client_params`` can switch to Vertex AI, names the route; Vertex AI has no Files API.
+        upload = None if client.vertexai else partial(uploaded_file_uri, client, provider=provider)
         try:
             contents, system_instruction = await format_contents(request.messages, MediaRoute(provider, upload))
             config = self._request_config(request, system_instruction)
@@ -200,7 +201,7 @@ class GeminiProvider:
         if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
             msg = "Participation decisions cannot safely apply Gemini body overrides"
             raise ValueError(msg)
-        return without_tool_selection(config, vertexai=self.vertexai) if config else config
+        return without_tool_selection(config, vertexai=self._sdk_client().vertexai) if config else config
 
     def _sdk_client(self) -> Client:
         if self._client is None:
