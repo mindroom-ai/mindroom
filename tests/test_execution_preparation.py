@@ -346,7 +346,6 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         config=_config(),
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -400,7 +399,6 @@ async def test_interactive_selection_keeps_context_after_question(
         config=_config(),
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -523,7 +521,6 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         config=_config(),
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -566,7 +563,6 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
         config=_config(),
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -605,7 +601,6 @@ async def test_scheduled_history_limit_ignores_events_after_current() -> None:
         config=_config(),
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -638,7 +633,6 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
         config=_config(),
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -698,7 +692,6 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
         config=_config(),
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -833,6 +826,62 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replays_persisted_history", [True, False])
+async def test_bound_team_execution_context_estimates_the_messages_as_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replays_persisted_history: bool,
+) -> None:
+    """A team turn's history is sized by the messages the leader receives, as an agent turn's is."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    leader_system_message = Message(role="system", content="You lead the team.")
+    monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", AsyncMock(return_value=MagicMock()))
+    static_prompt_tokens: list[object] = []
+
+    def finalize_history_preparation(**kwargs: object) -> PreparedHistoryState:
+        static_prompt_tokens.append(kwargs["static_prompt_tokens"])
+        return PreparedHistoryState(replays_persisted_history=replays_persisted_history, native_history=None)
+
+    monkeypatch.setattr(execution_preparation, "finalize_history_preparation", finalize_history_preparation)
+    team_id = "@mindroom_team:localhost"
+
+    prepared = await _prepare_bound_team_execution_context(
+        make_turn_context(
+            "test_agent",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            reply_to_event_id="$current",
+            active_event_ids=frozenset(),
+        ),
+        scope_context=None,
+        member_names=["test_agent"],
+        leader_system_message=leader_system_message,
+        leader_tools=(),
+        model=ScriptedModel([]),
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="Earlier question", event_id="$older"),
+            make_visible_message(sender=team_id, body="Earlier team answer", event_id="$answer"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        runtime_paths=runtime_paths,
+        config=config,
+        team_name=None,
+        history_settings=config.resolve_entity(None).history_settings,
+        active_model_name=None,
+        active_context_window=None,
+        response_sender_id=team_id,
+        current_sender_id="@alice:localhost",
+    )
+
+    assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
+    estimator = build_static_token_estimator(leader_system_message, (), frozenset())
+    # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
+    sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
+    assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))
+
+
+@pytest.mark.asyncio
 async def test_prepare_agent_execution_context_names_real_author_of_forged_relay_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -957,7 +1006,6 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
         config=_config(),
         max_message_length=200,
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -990,7 +1038,6 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
         config=config,
         static_token_budget=budget,
         estimate_static_tokens_fn=estimate,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     kept = [message.content for message in messages[1:-1]]
@@ -1014,7 +1061,6 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
         config=config,
         static_token_budget=1_000,
         estimate_static_tokens_fn=estimate,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
     assert len(untrimmed) == len(history) + 1
     assert untrimmed[0].content == render_msg_tag(sender="@alice:localhost", body="message 1", event_id="$m1")
@@ -1037,7 +1083,6 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
             response_sender_id="@mindroom_code:localhost",
             config=_config(),
             estimate_static_tokens_fn=estimate_text_tokens,
-            render_messages_text_fn=render_prepared_messages_text,
         ).in_request_order(),
     )
     messages = _build_thread_history_messages_for_test(
@@ -1047,7 +1092,6 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
         config=_config(),
         static_token_budget=estimate(full_text),
         estimate_static_tokens_fn=estimate,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [message.content for message in messages[:-1]] == [
@@ -1071,7 +1115,6 @@ def test_fallback_thread_history_marks_history_dropped_entirely() -> None:
         config=config,
         static_token_budget=30,
         estimate_static_tokens_fn=estimate,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [message.content for message in messages] == [
@@ -1091,7 +1134,6 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
         member_display_names={"@alice:localhost": "Banana Man"},
         config=_config(),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -1235,7 +1277,6 @@ def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_p
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert len(messages) == 3
@@ -1286,7 +1327,6 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1335,7 +1375,6 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1365,7 +1404,6 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1403,7 +1441,6 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1439,7 +1476,6 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1490,7 +1526,6 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1530,7 +1565,6 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1562,7 +1596,6 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1584,7 +1617,6 @@ def test_fallback_thread_history_drops_marker_only_messages_from_context() -> No
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert len(messages) == 1
@@ -1605,7 +1637,6 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1634,7 +1665,6 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1936,7 +1966,6 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
         estimate_static_tokens_fn=estimate_text_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [

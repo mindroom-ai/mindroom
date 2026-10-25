@@ -330,7 +330,7 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
 
 
 async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
-    """Call the entrypoint with the framework's and the model's arguments; drain a generator it returns."""
+    """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns."""
     entrypoint = function.entrypoint
     # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
     # rewrites them, so values for injected names are dropped here as well.
@@ -344,21 +344,27 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
         result = await result
     if isinstance(result, AsyncIterator):
         return await _drain_async(result)
+    if isinstance(result, Iterator):
+        # An async tool returned a synchronous iterator, which may block between items.
+        return await run_sync_tool_entrypoint(partial(_drain_sync, result))
     return result
 
 
 def _invoke_and_drain_sync(entrypoint: Callable[..., Any], kwargs: dict[str, Any]) -> object:
     """Run a synchronous entrypoint and, when it returns an iterator, consume it on the same worker thread."""
     result = entrypoint(**kwargs)
-    if not isinstance(result, Iterator):
-        return result
+    return _drain_sync(result) if isinstance(result, Iterator) else result
+
+
+def _drain_sync(stream: Iterator[object]) -> object:
     collector = StreamCollector()
     try:
-        for item in result:
+        for item in stream:
             collector.add(item)
     finally:
-        if inspect.isgenerator(result):
-            result.close()
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
     return collector.value()
 
 
