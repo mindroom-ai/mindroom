@@ -903,6 +903,26 @@ async def test_usage_telemetry_logs_a_compacted_claude_request_s_final_iteration
 
 
 @pytest.mark.asyncio
+async def test_usage_telemetry_logs_no_context_for_a_request_that_reported_no_input(tmp_path: Path) -> None:
+    """A request whose usage counted no input logs its billed counters and no context size."""
+    usage = MessageMetrics(tokens=TokenCounts(output_tokens=7))
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+    log = _request_log(tmp_path, enabled=False)
+
+    with capture_logs() as logs:
+        await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), _request())
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    fields = ("output_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
+    assert {field: usage_log[field] for field in fields} == {
+        "output_tokens": 7,
+        "context_input_tokens": None,
+        "uncached_input_tokens": None,
+        "cache_read_ratio": 0.0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_a_request_without_usage_is_reported_and_writes_no_response_record(tmp_path: Path) -> None:
     served = Message(role="assistant", content="ok", provider_data={"model_extra": {"provider": "OpenInference"}})
     inner = _ScriptedProvider([[TurnCompleted(message=served, stop_reason="end")]])
