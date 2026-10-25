@@ -4672,8 +4672,9 @@ class ResponseRunner:
             source_envelope=request.response_envelope,
         )
         execution_identity = tool_dispatch.execution_identity
+        configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
         allow_direct_private_agents = (
-            self.deps.agent_name not in self.deps.runtime.config.teams
+            configured_team_name is None
             and execution_identity.channel == "matrix"
             and bool(execution_identity.requester_id)
         )
@@ -4777,7 +4778,7 @@ class ResponseRunner:
                 hook_source=request.response_envelope.hook_source,
                 origin=request.response_envelope.origin,
             )
-            if self.deps.agent_name in self.deps.runtime.config.teams
+            if configured_team_name is not None
             else None
         )
 
@@ -4817,9 +4818,7 @@ class ResponseRunner:
                             response_sender_id=self.deps.matrix_full_id,
                             run_metadata_collector=team_run_metadata_content,
                             compaction_lifecycle=compaction_lifecycle,
-                            configured_team_name=self.deps.agent_name
-                            if self.deps.agent_name in self.deps.runtime.config.teams
-                            else None,
+                            configured_team_name=configured_team_name,
                             reason_prefix=team_request.reason_prefix,
                             pipeline_timing=request.pipeline_timing,
                             turn_recorder=team_turn_recorder,
@@ -4911,9 +4910,7 @@ class ResponseRunner:
                                     response_sender_id=self.deps.matrix_full_id,
                                     run_metadata_collector=team_run_metadata_content,
                                     compaction_lifecycle=compaction_lifecycle,
-                                    configured_team_name=self.deps.agent_name
-                                    if self.deps.agent_name in self.deps.runtime.config.teams
-                                    else None,
+                                    configured_team_name=configured_team_name,
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
                                     turn_recorder=team_turn_recorder,

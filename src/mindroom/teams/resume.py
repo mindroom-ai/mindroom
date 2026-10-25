@@ -375,7 +375,7 @@ async def continue_paused_team_run(
         msg = "The paused team approval names no members"
         raise RuntimeError(msg)
     # None for an ad hoc team, which compacts and stores as no configured entity.
-    team_name = configured_team_name if configured_team_name in config.teams else None
+    team_name = config.configured_team_name(configured_team_name)
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
