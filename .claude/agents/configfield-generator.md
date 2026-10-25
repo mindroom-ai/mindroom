@@ -16,7 +16,7 @@ When invoked:
 2. Read the current tool-module pattern in `src/mindroom/tools/github.py`, the declarations in `src/mindroom/tool_system/declarations.py`, registration in `src/mindroom/tool_system/registration.py`, and the registered-tool contract in `tests/test_tool_config_sync.py` before generating ConfigFields
 3. **Fetch agno documentation**:
    - Fetch `https://docs.agno.com/llms.txt` to find the tool's Agno documentation page
-   - Fetch that page (.md file) for parameter descriptions only; never link it from the tool
+   - Fetch that page (.md file) for parameter descriptions and to choose the category, status, and setup type; never link it from the tool
    - Find or add the tool's section in the matching `docs/tools/*.md` page, a ``## [`<tool_name>`]`` heading, and set `docs_url` to that section's anchor on MindRoom's docs, such as `https://docs.mindroom.chat/tools/web-search/#tavily`
 4. Analyze the specified agno tool class parameters from source code
 5. Merge documentation descriptions with source code analysis
