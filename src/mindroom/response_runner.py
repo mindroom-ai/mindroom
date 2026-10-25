@@ -2521,11 +2521,10 @@ class ResponseRunner:
             agent_name = list(continuation.team_member_names)
         else:
             return None
-        execution_identity = continuation.execution_identity
         return self._memory_persistence(
             agent_name=agent_name,
             session_id=continuation.session_id,
-            execution_identity=execution_identity,
+            execution_identity=continuation.execution_identity,
             prompt=(
                 continuation.memory_prompt if continuation.memory_prompt is not None else continuation.request_body
             ),
@@ -2581,7 +2580,6 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
     ) -> Callable[[str, str], Awaitable[None]] | None:
         """Return the normal run-to-Matrix event linkage for a resumed response."""
-        execution_identity = continuation.execution_identity
         history_scope = continuation.history_scope
         if history_scope is None:
             if continuation.entity_kind == "team":
@@ -2590,7 +2588,7 @@ class ResponseRunner:
         return self._build_persist_response_event_id_effect(
             session_id=continuation.session_id,
             scope=history_scope,
-            execution_identity=execution_identity,
+            execution_identity=continuation.execution_identity,
         )
 
     async def _continue_entity_call(

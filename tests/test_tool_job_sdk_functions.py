@@ -1,4 +1,4 @@
-"""The knowledge and skill functions MindRoom builds for each run keep their native schemas and run inline."""
+"""The knowledge and skill functions beside the assembled toolkits keep their native schemas and run inline."""
 
 from __future__ import annotations
 
