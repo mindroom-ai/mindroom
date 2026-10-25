@@ -1,0 +1,71 @@
+"""The one golden regeneration command reproduces the goldens it owns, through each family's support functions.
+
+The parity tests compare each golden with what its family's support functions compute; these tests cover what the
+command adds: writing a file, routing every provider family to its own adapter, and each family's file layout.
+Rebuilding every registered tool takes too long for the suite, so the tool schemas are left to the parity tests.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+
+from tests.agno_parity import regenerate_goldens
+from tests.agno_parity.golden_files import render, write
+from tests.providers.golden_support import FIXTURE_ROOT, golden_id, hide_provider_environment
+from tests.tool_system.agno_parity_support import ARGUMENTS_PATH
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+
+def test_writing_a_golden_reports_whether_its_text_changed(tmp_path: Path) -> None:
+    """A golden is written as rendered, an unchanged one is left alone, and its key order is part of its text."""
+    path = tmp_path / "golden.json"
+
+    assert write(path, {"b": 1, "a": [1]})
+    assert path.read_text(encoding="utf-8") == render({"b": 1, "a": [1]}) == '{\n  "b": 1,\n  "a": [\n    1\n  ]\n}\n'
+    assert not write(path, {"b": 1, "a": [1]})
+    assert write(path, {"a": [1], "b": 1})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(FIXTURE_ROOT.glob("*/plain_turn.json")), ids=golden_id)
+async def test_every_provider_family_regenerates_through_its_own_adapter(
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each family's plain turn regenerates byte for byte, so the command replays it on that family's adapter."""
+    hide_provider_environment(monkeypatch)
+
+    assert render(await regenerate_goldens.regenerated_provider_golden(path)) == path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_scenario_regenerates_under_its_own_temporary_root() -> None:
+    """A scenario that names its temporary root regenerates byte for byte, with the root normalized away."""
+    path = regenerate_goldens.prompt_scenarios.golden_path("agent_anthropic")
+    assert "<TMP>" in path.read_text(encoding="utf-8")
+
+    assert render(await regenerate_goldens.regenerated_prompt_golden("agent_anthropic")) == path.read_text(
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_argument_golden_regenerates_with_sorted_keys() -> None:
+    """Every argument case runs again and the file keeps its sorted layout."""
+    assert render(await regenerate_goldens.argument_golden()) == ARGUMENTS_PATH.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "family",
+    [regenerate_goldens.knowledge_goldens, regenerate_goldens.event_goldens],
+    ids=["knowledge", "events"],
+)
+def test_the_knowledge_and_event_goldens_regenerate_byte_for_byte(family: Callable[[], dict[Path, object]]) -> None:
+    """Each file the family writes holds exactly what it regenerates."""
+    for path, golden in family().items():
+        assert render(golden) == path.read_text(encoding="utf-8"), path

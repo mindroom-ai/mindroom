@@ -58,6 +58,10 @@ if TYPE_CHECKING:
     from tests.providers.golden_support import Replay
 
 
+# Each family's regenerated goldens, keyed by the file each one is written to.
+type Goldens = dict[Path, object]
+
+
 def _refuse_network(*_args: object, **_kwargs: object) -> None:
     msg = "Golden regeneration refuses network connections"
     raise OSError(msg)
@@ -87,37 +91,39 @@ async def _replay_provider_golden(golden: dict[str, Any], root: Path) -> Replay:
     return await replay(Golden(family, golden["scenario"], golden), root)
 
 
-async def _regenerated_provider_golden(path: Path) -> dict[str, Any]:
+async def regenerated_provider_golden(path: Path) -> dict[str, Any]:
+    """Replay the provider golden at ``path`` through its family's owned adapter and return the golden it regenerates.
+
+    The caller hides the provider environment, as ``hide_provider_environment`` does.
+    """
     golden = golden_support.load_golden(path)
     with tempfile.TemporaryDirectory(prefix="provider-golden-") as root:
         return golden_support.regenerated_golden(golden, await _replay_provider_golden(golden, Path(root)))
 
 
-def provider_goldens() -> list[Path]:
-    """Replay every provider golden through its owned adapter and rewrite its request and parsed reply."""
+def provider_goldens() -> Goldens:
+    """Replay every provider golden through its owned adapter, for its request and parsed reply."""
     families = (*CLAUDE_FAMILIES, *OPENAI_FAMILIES, *GEMINI_OLLAMA_FAMILIES)
     stored = {path.name for path in golden_support.FIXTURE_ROOT.iterdir() if path.is_dir()}
     assert stored == set(families), f"provider golden families without a replay: {sorted(stored - set(families))}"
     with pytest.MonkeyPatch.context() as monkeypatch:
         golden_support.hide_provider_environment(monkeypatch)
-        paths = golden_support.golden_paths(families)
-        return [path for path in paths if write(path, asyncio.run(_regenerated_provider_golden(path)))]
+        return {path: asyncio.run(regenerated_provider_golden(path)) for path in golden_support.golden_paths(families)}
 
 
-async def _regenerated_prompt_golden(name: str) -> dict[str, Any]:
+async def regenerated_prompt_golden(name: str) -> dict[str, Any]:
+    """Run the prompt scenario ``name`` against the recording provider and return the golden it regenerates."""
     with tempfile.TemporaryDirectory(prefix="prompt-golden-") as root:
         recorded = await prompt_scenarios.record_scenario(name, Path(root))
         return prompt_scenarios.regenerated_golden(name, recorded, Path(root))
 
 
-def prompt_goldens() -> list[Path]:
-    """Run every prompt scenario against the recording provider and rewrite its golden."""
-    names = sorted(prompt_scenarios.SCENARIOS)
-    return [
-        prompt_scenarios.golden_path(name)
-        for name in names
-        if write(prompt_scenarios.golden_path(name), asyncio.run(_regenerated_prompt_golden(name)))
-    ]
+def prompt_goldens() -> Goldens:
+    """Run every prompt scenario against the recording provider."""
+    return {
+        prompt_scenarios.golden_path(name): asyncio.run(regenerated_prompt_golden(name))
+        for name in sorted(prompt_scenarios.SCENARIOS)
+    }
 
 
 def _tool_schemas(root: Path) -> tuple[dict[str, object], dict[str, object]]:
@@ -143,35 +149,33 @@ def _tool_schemas(root: Path) -> tuple[dict[str, object], dict[str, object]]:
     return schemas, all_enabled
 
 
-async def _argument_outcomes() -> dict[str, dict[str, object]]:
-    """Run every case of the committed argument golden again."""
+async def argument_golden() -> dict[str, dict[str, object]]:
+    """Run every case of the committed argument golden again and return the golden, its keys sorted."""
     cases = json.loads(support.ARGUMENTS_PATH.read_text(encoding="utf-8"))
     functions = support.probe_functions()
-    return {case_id: await support.argument_outcome(case, functions) for case_id, case in cases.items()}
+    return sorted_keys({case_id: await support.argument_outcome(case, functions) for case_id, case in cases.items()})
 
 
-def tool_goldens() -> list[Path]:
-    """Rewrite the three tool goldens: schemas keep the key order providers receive, arguments are sorted."""
+def tool_goldens() -> Goldens:
+    """Build the three tool goldens: schemas keep the key order providers receive, arguments are sorted."""
     with tempfile.TemporaryDirectory(prefix="tool-golden-") as root:
         schemas, all_enabled = _tool_schemas(Path(root).resolve())
-    goldens = {
+    return {
         support.SCHEMAS_PATH: schemas,
         support.ALL_ENABLED_SCHEMAS_PATH: all_enabled,
-        support.ARGUMENTS_PATH: sorted_keys(asyncio.run(_argument_outcomes())),
+        support.ARGUMENTS_PATH: asyncio.run(argument_golden()),
     }
-    return [path for path, golden in goldens.items() if write(path, golden)]
 
 
-def knowledge_goldens() -> list[Path]:
-    """Rewrite the embedder and search goldens; ``rows.json`` holds the rows Agno wrote and is never rewritten."""
+def knowledge_goldens() -> Goldens:
+    """Run every embedder case and search again; ``rows.json`` holds the rows Agno wrote and is never rewritten."""
     embedders: dict[str, object] = {}
     for name, case in knowledge.load(knowledge.EMBEDDERS_PATH).items():
         with tempfile.TemporaryDirectory(prefix="knowledge-golden-") as root, pytest.MonkeyPatch.context() as patcher:
             embedders[name] = knowledge.embedder_case(case, Path(root), patcher)
     with tempfile.TemporaryDirectory(prefix="knowledge-golden-") as root, pytest.MonkeyPatch.context() as patcher:
         search = asyncio.run(knowledge.regenerated_search(Path(root), knowledge.install_parity_embedder(patcher)))
-    goldens = {knowledge.EMBEDDERS_PATH: embedders, knowledge.SEARCH_PATH: search}
-    return [path for path, golden in goldens.items() if write(path, golden)]
+    return {knowledge.EMBEDDERS_PATH: embedders, knowledge.SEARCH_PATH: search}
 
 
 async def _published_run_metadata(run_id: str) -> dict[str, Any]:
@@ -179,18 +183,18 @@ async def _published_run_metadata(run_id: str) -> dict[str, Any]:
         return await ai_run.published_metadata(run_id, Path(root), patcher)
 
 
-def event_goldens() -> list[Path]:
-    """Rewrite the OpenAI-compatible API golden and the ``io.mindroom.ai_run`` metadata golden."""
+def event_goldens() -> Goldens:
+    """Send the OpenAI-compatible API requests again and publish every golden run's ``io.mindroom.ai_run`` metadata."""
     with tempfile.TemporaryDirectory(prefix="event-golden-") as root:
         compat = openai_compat_golden.regenerated_golden(Path(root))
     published = {run_id: asyncio.run(_published_run_metadata(run_id)) for run_id in ai_run.GOLDEN_RUN_METADATA}
-    goldens = {openai_compat_golden.GOLDEN: compat, ai_run.GOLDEN: ai_run.regenerated_golden(published)}
-    return [path for path, golden in goldens.items() if write(path, golden)]
+    return {openai_compat_golden.GOLDEN: compat, ai_run.GOLDEN: ai_run.regenerated_golden(published)}
 
 
 def regenerate() -> list[Path]:
     """Rewrite every regenerable golden family and return the files whose text changed."""
-    return [*provider_goldens(), *prompt_goldens(), *tool_goldens(), *knowledge_goldens(), *event_goldens()]
+    families = (provider_goldens, prompt_goldens, tool_goldens, knowledge_goldens, event_goldens)
+    return [path for family in families for path, golden in family().items() if write(path, golden)]
 
 
 def main() -> None:
