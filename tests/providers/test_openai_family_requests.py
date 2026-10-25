@@ -27,7 +27,6 @@ from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import chat_request_kwargs, parse_chat_completion
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
-from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
     parse_response,
@@ -327,20 +326,6 @@ def test_legacy_responses_replay_rebuilds_calls_without_reasoning(
     ]
     assert replay[-1] == {"role": "user", "content": "Continue."}
     assert [message.to_dict() for message in messages] == original
-
-
-def test_the_legacy_span_repair_keeps_only_the_calls_without_their_item_ids() -> None:
-    """A tool turn keeps its function calls minus their provider item ids; a text turn keeps its message item."""
-    message = Message(role="assistant", tool_calls=[_call("first")])
-    span = [
-        {"type": "function_call", "id": "fc_first", "call_id": "call_first", "name": "lookup", "arguments": "{}"},
-        {"type": "reasoning", "id": "rs_tail"},
-    ]
-
-    assert repair_legacy_responses_span(message, span) == [
-        {"type": "function_call", "call_id": "call_first", "name": "lookup", "arguments": "{}"},
-    ]
-    assert repair_legacy_responses_span(Message(role="assistant", content="Hi"), span) == span[:1]
 
 
 @pytest.mark.parametrize("retain_call", [False, True])

@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.native_compaction import checkpoint_items
-from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -54,12 +53,13 @@ def formatted_input_with_provider_items(
             prepared_input[anchor : anchor + size],
         )
         if replacement is None:
-            search_items = data.get(TOOL_SEARCH_ITEMS_KEY) or []
             span = prepared_input[anchor : anchor + size]
+            # A span goes as formatted only after the continued response or when no message records one, and only a
+            # Responses reply, which always records its response ID, records search items.
             replacement = (
-                _reconstructed_response_input(message, search_items, span)
+                _reconstructed_response_input(message, data.get(TOOL_SEARCH_ITEMS_KEY) or [], span)
                 if replay_reasoning
-                else [*search_items, *span]
+                else span
             )
         prepared_input[anchor : anchor + size] = replacement
         cursor = anchor + len(replacement)
@@ -73,11 +73,9 @@ def _reconstructed_response_input(
 ) -> list[dict[str, Any]]:
     """Build valid input from canonical content when original output cannot be reused.
 
-    The span goes without the reasoning that produced it, so its hosted search items go without their item IDs: the
-    provider rejects a search item ID sent without the reasoning item that preceded it, whether stored or not.
+    The span goes without the reasoning that produced it, so no item keeps its provider item ID: the provider rejects
+    a function call's or a hosted search item's ID sent without the reasoning item that preceded it, stored or not.
     """
-    search_input = [{key: value for key, value in item.items() if key != "id"} for item in search_items]
-    repaired_span = repair_legacy_responses_span(message, formatted_span)
     content = message.content
     if isinstance(content, list):
         content = [
@@ -88,11 +86,13 @@ def _reconstructed_response_input(
             else part
             for part in content
         ]
-    if not message.tool_calls:
-        return [*search_input, {**repaired_span[0], "content": content if content is not None else ""}]
-    if content:
-        repaired_span.insert(0, {"role": "assistant", "content": content})
-    return [*search_input, *repaired_span]
+    if message.tool_calls:
+        # The formatter's span is the turn's function calls; their text goes ahead of them.
+        span = [{"role": "assistant", "content": content}, *formatted_span] if content else list(formatted_span)
+    else:
+        # The formatter's span is the turn's message item, then any recorded reasoning, which stays out.
+        span = [{**formatted_span[0], "content": content if content is not None else ""}]
+    return [{key: value for key, value in item.items() if key != "id"} for item in (*search_items, *span)]
 
 
 def _canonical_response_output(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]] | None:
