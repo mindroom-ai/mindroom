@@ -6,8 +6,9 @@ skills toolkit, and the knowledge reader module may import Agno; ``logging_confi
 loggers, which vendor toolkits log through. Every other module must take Agno's tool types from
 ``mindroom.tool_system.agno_toolkits``.
 
-The ratchets below cap the modules that still take an Agno type through that re-export and the test modules that
-import Agno: a module may drop off its list, and none may join it. Remove a module from its list once it stops.
+The ratchets below list the modules that still take an Agno type through that re-export and the test modules that
+import Agno. Each list must match the code exactly, so a module that stops leaves its list in the same change, and no
+module may join one.
 """
 
 from __future__ import annotations
@@ -38,7 +39,6 @@ REEXPORT_AGNO_TYPE_IMPORTERS = frozenset(
         "media_delivery.py",
         "script_runs/broker.py",
         "script_runs/policy.py",
-        "teams/delegate_tools.py",
         "tool_jobs/authorization.py",
         "tool_jobs/execution.py",
         "tool_jobs/execution_authority.py",
@@ -61,7 +61,7 @@ REEXPORT_AGNO_TYPE_IMPORTERS = frozenset(
 TESTS_ROOT = Path(__file__).resolve().parent
 # How many test modules import Agno at all, and which import its runtime types, until the tests move to MindRoom's
 # seams (#3120).
-MAX_TEST_AGNO_IMPORTERS = 119
+TEST_AGNO_IMPORTER_COUNT = 119
 AGNO_RUNTIME_MODULES = ("agno.agent", "agno.run", "agno.models", "agno.team", "agno.session")
 TEST_AGNO_RUNTIME_IMPORTERS = frozenset(
     {
@@ -191,15 +191,18 @@ def warm() -> None:
     assert reexported_agno_names(source) == {"AgnoImage", "Toolkit"}
 
 
-def test_no_new_module_takes_an_agno_type_through_the_reexport() -> None:
-    """A module may stop taking Agno's tool types through the re-export, and no other module may start."""
-    joined = reexport_agno_type_importers() - REEXPORT_AGNO_TYPE_IMPORTERS
+def test_the_modules_that_take_an_agno_type_through_the_reexport_are_exactly_the_listed_ones() -> None:
+    """No module may start taking Agno's tool types through the re-export, and one that stops leaves the list."""
+    importers = reexport_agno_type_importers()
 
-    assert not joined, f"Modules that newly take an Agno type through {REEXPORT}: {sorted(joined)}"
+    joined = sorted(importers - REEXPORT_AGNO_TYPE_IMPORTERS)
+    assert not joined, f"Modules that newly take an Agno type through {REEXPORT}: {joined}"
+    left = sorted(REEXPORT_AGNO_TYPE_IMPORTERS - importers)
+    assert not left, f"Delete these modules from REEXPORT_AGNO_TYPE_IMPORTERS, since they no longer import Agno: {left}"
 
 
-def test_no_new_test_module_imports_agno_or_its_runtime_types() -> None:
-    """Tests may drop their Agno imports, and no new test module may import Agno's agent, run, model, or team types."""
+def test_the_test_modules_that_import_agno_are_exactly_the_counted_and_listed_ones() -> None:
+    """No new test module may import Agno or its runtime types, and one that stops lowers the cap or leaves the list."""
     imports = agno_test_imports()
     runtime_importers = {
         module
@@ -209,6 +212,15 @@ def test_no_new_test_module_imports_agno_or_its_runtime_types() -> None:
         )
     }
 
-    assert len(imports) <= MAX_TEST_AGNO_IMPORTERS, f"{len(imports)} test modules import Agno"
-    joined = runtime_importers - TEST_AGNO_RUNTIME_IMPORTERS
-    assert not joined, f"Test modules that newly import Agno runtime types: {sorted(joined)}"
+    assert len(imports) <= TEST_AGNO_IMPORTER_COUNT, (
+        f"{len(imports)} test modules import Agno, more than the {TEST_AGNO_IMPORTER_COUNT} allowed"
+    )
+    assert len(imports) == TEST_AGNO_IMPORTER_COUNT, (
+        f"Lower TEST_AGNO_IMPORTER_COUNT to {len(imports)}, since fewer test modules import Agno"
+    )
+    joined = sorted(runtime_importers - TEST_AGNO_RUNTIME_IMPORTERS)
+    assert not joined, f"Test modules that newly import Agno runtime types: {joined}"
+    left = sorted(TEST_AGNO_RUNTIME_IMPORTERS - runtime_importers)
+    assert not left, (
+        f"Delete these modules from TEST_AGNO_RUNTIME_IMPORTERS, since they no longer import Agno's runtime types: {left}"
+    )
