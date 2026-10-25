@@ -9,11 +9,12 @@ Rebuilding every registered tool takes too long for this module, so the tool sch
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.agno_parity import regenerate_goldens
+from tests.agno_parity import prompt_scenarios, regenerate_goldens
 from tests.agno_parity.golden_files import render, write
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
@@ -27,7 +28,6 @@ from tests.tool_system.agno_parity_support import ARGUMENTS_PATH
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 def test_writing_a_golden_reports_whether_its_text_changed(tmp_path: Path) -> None:
@@ -61,6 +61,24 @@ async def test_a_prompt_scenario_regenerates_under_its_own_temporary_root() -> N
     assert render(await regenerate_goldens.regenerated_prompt_golden("agent_anthropic")) == path.read_text(
         encoding="utf-8",
     )
+
+
+def test_a_temporary_root_reached_through_a_symlink_normalizes_to_one_placeholder(tmp_path: Path) -> None:
+    """A root whose real path contains its own path, as macOS's ``/var`` and ``/private/var`` do, becomes ``<TMP>``.
+
+    Each root is normalized from both its path and its real path; twenty roots with different names make an order
+    that depends on string hashing show up.
+    """
+    for index in range(20):
+        root = tmp_path / f"root-{index}"
+        real = Path(f"{tmp_path / 'private'}{root}")
+        real.mkdir(parents=True)
+        root.symlink_to(real)
+        assert str(root) in str(root.resolve())
+
+        normalized = prompt_scenarios.normalize({"real": f"{root.resolve()}/a", "linked": f"{root}/b"}, root)
+
+        assert normalized == {"real": "<TMP>/a", "linked": "<TMP>/b"}
 
 
 @pytest.mark.asyncio

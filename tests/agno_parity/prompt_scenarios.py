@@ -327,7 +327,8 @@ def normalize(value: object, root: Path) -> object:
     """
 
     def stable(text: str) -> str:
-        for path in {str(root.resolve()), str(root)}:
+        # The longer path first: a root's real path can contain its own path, as macOS's ``/private/var`` does.
+        for path in sorted({str(root.resolve()), str(root)}, key=len, reverse=True):
             text = text.replace(path, "<TMP>")
         return _DELEGATION_RECORD_DATE.sub("<DATE>", _DATE_PATTERN.sub("<DATE>", text))
 
