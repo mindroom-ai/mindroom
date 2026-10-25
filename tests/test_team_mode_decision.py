@@ -18,6 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.llm.errors import ProviderError
+from mindroom.matrix.identity import MatrixID
 from mindroom.teams.formation import (
     TeamOutcome,
     TeamResolution,
@@ -304,6 +305,21 @@ class TestShouldFormTeam:
 
         assert result.outcome is TeamOutcome.TEAM
         assert _agent_names(result.eligible_members, mock_config) == ["email", "phone", "research"]
+        assert result.mode == TeamMode.COLLABORATE
+
+    def test_a_thread_team_collaborates_when_its_message_tags_only_entities_that_cannot_join(self, mock_config):
+        """Tags that name no teamable agent leave the thread's team, which collaborates as any thread team does."""
+        ids = entity_ids(mock_config, runtime_paths_for(mock_config))
+        result = decide_team_formation_for_test(
+            tagged_agents=[MatrixID.parse("@mindroom_unknown:localhost"), MatrixID.parse("@alice:localhost")],
+            agents_in_thread=[ids["research"], ids["analyst"]],
+            all_mentioned_in_thread=[],
+            room=_matrix_room(mock_config),
+            config=mock_config,
+        )
+
+        assert result.outcome is TeamOutcome.TEAM
+        assert _agent_names(result.eligible_members, mock_config) == ["research", "analyst"]
         assert result.mode == TeamMode.COLLABORATE
 
 
