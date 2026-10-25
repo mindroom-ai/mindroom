@@ -24,7 +24,7 @@ from mindroom.tool_system.invocation import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from mindroom.agent_loop.spec import AgentSpec, RunContext
+    from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.provider import ToolSpec
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
@@ -85,11 +85,6 @@ def toolkit_instructions(toolkits: Iterable[AdaptedToolkit]) -> tuple[str, ...]:
             key = (toolkit.name, toolkit.instructions, frozenset(function.name for function in toolkit.functions))
             instructions.setdefault(key, toolkit.instructions)
     return tuple(instructions.values())
-
-
-def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
-    """Return the tools a run of ``spec`` offers: the functions its build resolved."""
-    return PreparedTools(functions=spec.functions)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -264,7 +259,6 @@ __all__ = [
     "media_follow_up",
     "offered_toolkits",
     "plan_tool_batch",
-    "prepare_run_tools",
     "sorted_specs",
     "tool_result_message",
     "toolkit_instructions",

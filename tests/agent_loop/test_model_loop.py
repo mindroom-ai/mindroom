@@ -23,7 +23,7 @@ from mindroom.agent_loop.model_loop import (
     SendRequest,
     run_model_loop,
 )
-from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
+from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, PreparedTools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
@@ -68,7 +68,7 @@ async def _run(
         async for event in run_model_loop(
             agent.model,
             messages,
-            prepare_run_tools(agent),
+            PreparedTools(functions=agent.functions),
             record=record,
             run=context(),
             hooks=hooks,
@@ -148,7 +148,7 @@ async def test_request_settings_come_from_the_template_and_tools_from_the_spec()
         template.deferred_tools,
     )
     assert [tool.name for tool in request.tools] == ["add", "echo"]
-    assert request.tools[0].parameters == prepare_run_tools(spec(model, toolkit(add))).functions["add"].parameters
+    assert request.tools[0].parameters == spec(model, toolkit(add)).functions["add"].parameters
 
 
 async def test_a_stream_that_never_completes_raises_a_provider_error() -> None:

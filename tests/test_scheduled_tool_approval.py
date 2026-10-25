@@ -16,7 +16,7 @@ import pytest
 from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.tools import offered_toolkits, prepare_run_tools
+from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalManager
@@ -2040,7 +2040,7 @@ async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Con
         tool_runtime_context(_turn_context(config)),
     ):
         return await run_tool_call(
-            prepare_run_tools(build.spec).functions["run_scheduled_call"],
+            build.spec.functions["run_scheduled_call"],
             {"task_id": _TASK},
             ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
             middleware=agent_tool_middleware(build),
@@ -2068,7 +2068,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
 
     build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
 
-    functions = prepare_run_tools(build.spec).functions
+    functions = build.spec.functions
     assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
     names = [middleware.__name__ for middleware in build.tool_policy]
     assert names.count("bind_live_functions") == int(offered is not None)
@@ -2088,7 +2088,7 @@ async def test_an_agent_build_runs_a_stored_call_through_its_own_function_and_po
     config = _code_config()
     config.agents[_AGENT].tools = [_TOOLKIT]
     build = _agent_build(config, monkeypatch)
-    assert prepare_run_tools(build.spec).functions["post_slack_message"].requires_confirmation is True
+    assert build.spec.functions["post_slack_message"].requires_confirmation is True
     try:
         await _armed(manager)
 
@@ -2129,7 +2129,7 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
         _responders(config, "general"),
     ):
         await run_tool_call(
-            prepare_run_tools(build.spec).functions["schedule_tool_call"],
+            build.spec.functions["schedule_tool_call"],
             {
                 "tool_name": "post_slack_message",
                 "arguments_json": canonical_arguments(_ARGUMENTS),
@@ -2192,7 +2192,7 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
         # The model's own call of the name runs the first configured toolkit's function.
         with tool_runtime_context(_turn_context(config)):
             await run_tool_call(
-                prepare_run_tools(build.spec).functions["post_slack_message"],
+                build.spec.functions["post_slack_message"],
                 _OTHER_ARGUMENTS,
                 ToolCallContext(run_id="run", session_id="session", call_id="call-2", user_id=None),
                 middleware=agent_tool_middleware(build),
@@ -2572,7 +2572,7 @@ async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
         config.agents[_AGENT].memory_backend = "file"
     with registered_toolkit(_TOOLKIT, toolkit_class):
         build = _agent_build(config, monkeypatch)
-        parameters = prepare_run_tools(build.spec).functions["post_slack_message"].parameters
+        parameters = build.spec.functions["post_slack_message"].parameters
         assert ("mindroom_output_path" in parameters["properties"]) is workspace
         try:
             await _armed(manager)

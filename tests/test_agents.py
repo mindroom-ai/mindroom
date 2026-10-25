@@ -24,7 +24,6 @@ import mindroom.workspaces as workspaces_module
 from mindroom import agents as agents_module
 from mindroom import path_confinement, prompts
 from mindroom.agent_loop.build import AgentBuild, prompt_for_turn
-from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import (
     _apply_preload_cap,
     _load_context_files,
@@ -183,7 +182,7 @@ def _role(build: AgentBuild) -> str:
 
 def _offered(build: AgentBuild) -> dict[str, ToolFunction]:
     """Return the functions a run of ``build`` offers the model, by name."""
-    return dict(prepare_run_tools(build.spec).functions)
+    return dict(build.spec.functions)
 
 
 def _toolkit_named(name: str, *_args: object, **_kwargs: object) -> Toolkit:

@@ -11,7 +11,7 @@ from agno.tools.function import Function
 
 from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.tools import prepare_run_tools, toolkit_instructions
+from mindroom.agent_loop.tools import PreparedTools, toolkit_instructions
 from mindroom.agents import (
     _context_hidden_toolkits,
     create_agent,
@@ -1745,7 +1745,7 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
         agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
         return build_static_token_estimator(
             prompt_for_turn(agent),
-            prepare_run_tools(agent.spec).specs(),
+            PreparedTools(functions=agent.spec.functions).specs(),
             agent.request_template.deferred_tools.names,
         ).non_prompt_tokens()
 

@@ -15,11 +15,11 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import (
     MEDIA_FOLLOW_UP_TEXT,
+    PreparedTools,
     dispatch_tool_calls,
     media_follow_up,
     offered_toolkits,
     plan_tool_batch,
-    prepare_run_tools,
     toolkit_instructions,
 )
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
@@ -32,18 +32,22 @@ if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
-# --- offered_toolkits and prepare_run_tools --------------------------------------------------------------------------
+# --- offered_toolkits and PreparedTools ------------------------------------------------------------------------------
 
 
 def test_prepared_tools_keep_offer_order() -> None:
-    prepared = prepare_run_tools(spec(ScriptedModel([]), toolkit(add, name="math"), toolkit(echo, name="text")))
+    prepared = PreparedTools(
+        functions=spec(ScriptedModel([]), toolkit(add, name="math"), toolkit(echo, name="text")).functions,
+    )
 
     assert list(prepared.functions) == ["add", "echo"]
     assert [tool.name for tool in prepared.specs()] == ["add", "echo"]
 
 
 def test_prepared_tools_sort_definitions_by_name_for_prompt_cache_stability() -> None:
-    prepared = prepare_run_tools(spec(ScriptedModel([]), toolkit(echo, name="text"), toolkit(add, name="math")))
+    prepared = PreparedTools(
+        functions=spec(ScriptedModel([]), toolkit(echo, name="text"), toolkit(add, name="math")).functions,
+    )
 
     assert list(prepared.functions) == ["echo", "add"]
     assert [tool.name for tool in prepared.specs()] == ["add", "echo"]
@@ -76,7 +80,7 @@ def test_offered_toolkits_keep_the_first_of_a_repeated_name_and_log_each_drop_on
     assert [toolkit.name for toolkit in offered] == ["first", "loud", "shadowed"]
     assert offered[0] == first
     assert (offered[1].functions, offered[2].functions) == ((), ())
-    assert prepare_run_tools(spec(ScriptedModel([]), *offered)).functions["echo"].description == "Return the text."
+    assert spec(ScriptedModel([]), *offered).functions["echo"].description == "Return the text."
     assert [(entry["toolkit"], entry["tool_name"]) for entry in logs if entry["event"] == "duplicate_tool_name"] == [
         ("loud", "echo"),
         ("shadowed", "echo"),
@@ -105,11 +109,11 @@ def test_toolkit_instructions_keep_only_prompt_instructions_once_per_toolkit() -
 
 
 def _functions() -> dict[str, object]:
-    return dict(prepare_run_tools(spec(ScriptedModel([]), toolkit(add, echo), gated(boom))).functions)
+    return dict(spec(ScriptedModel([]), toolkit(add, echo), gated(boom)).functions)
 
 
 def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> None:
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(add))).functions
+    functions = spec(ScriptedModel([]), toolkit(add)).functions
     messages: list[Message] = []
 
     batch = plan_tool_batch(
@@ -139,7 +143,7 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
 
 
 def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(add, echo))).functions
+    functions = spec(ScriptedModel([]), toolkit(add, echo)).functions
 
     batch = plan_tool_batch(
         [tool_call("add", "c1", a=1, b=2), tool_call("echo", "c2", text="x"), tool_call("add", "c3", a=3, b=4)],
@@ -167,7 +171,7 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
 
 
 def test_empty_list_arguments_plan_as_no_arguments() -> None:
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(echo))).functions
+    functions = spec(ScriptedModel([]), toolkit(echo)).functions
 
     batch = plan_tool_batch(
         [raw_tool_call("echo", "c1", "[]")],
@@ -182,7 +186,7 @@ def test_empty_list_arguments_plan_as_no_arguments() -> None:
 
 
 def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(add), gated(echo), external(boom))).functions
+    functions = spec(ScriptedModel([]), toolkit(add), gated(echo), external(boom)).functions
 
     batch = plan_tool_batch(
         [tool_call("add", "c1", a=1, b=2), tool_call("echo", "c2", text="x"), tool_call("boom", "c3", reason="r")],
@@ -229,7 +233,7 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
         await asyncio.wait_for(started[other].wait(), timeout=5)
         return f"{who} met {other}"
 
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(meet))).functions
+    functions = spec(ScriptedModel([]), toolkit(meet)).functions
     batch = plan_tool_batch(
         [tool_call("meet", "c1", who="one"), tool_call("meet", "c2", who="two")],
         functions,
@@ -277,7 +281,7 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
         """Cancel this call."""
         raise asyncio.CancelledError
 
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(_linger(release, finished), give_up))).functions
+    functions = spec(ScriptedModel([]), toolkit(_linger(release, finished), give_up)).functions
     batch = plan_tool_batch(
         [tool_call("linger", "c1"), tool_call("give_up", "c2")],
         functions,
@@ -301,7 +305,7 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
     release = asyncio.Event()
     finished: list[str] = []
 
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(_linger(release, finished)))).functions
+    functions = spec(ScriptedModel([]), toolkit(_linger(release, finished))).functions
     batch = plan_tool_batch([tool_call("linger", "c1")], functions, [], calls_so_far=0, max_tool_calls_per_turn=None)
     dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context(), middleware=()))
     for _ in range(5):
@@ -315,7 +319,7 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results() -> None:
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(add, boom))).functions
+    functions = spec(ScriptedModel([]), toolkit(add, boom)).functions
     batch = plan_tool_batch(
         [
             raw_tool_call("add", "c1", '{"a": "3", "b": 4}'),
@@ -346,7 +350,7 @@ async def test_dispatch_skips_paused_calls_and_passes_the_call_id_through_middle
         seen.append((call.context.call_id, call.function.name))
         return await call_next(call.arguments)
 
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(echo), gated(add))).functions
+    functions = spec(ScriptedModel([]), toolkit(echo), gated(add)).functions
     batch = plan_tool_batch(
         [tool_call("add", "c1", a=1, b=2), tool_call("echo", "c2", text="hi")],
         functions,
@@ -373,7 +377,7 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
         """
         return ToolResult(content=f"picture {label}", images=[AgnoImage(content=b"png", format="png")])
 
-    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(picture, echo))).functions
+    functions = spec(ScriptedModel([]), toolkit(picture, echo)).functions
     batch = plan_tool_batch(
         [
             tool_call("picture", "c1", label="a"),

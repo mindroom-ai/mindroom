@@ -12,7 +12,6 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents
 from mindroom.agent_cli.minimal_agent import MinimalTurn, minimal_turn
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
-from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -102,7 +101,7 @@ def _knowledge() -> AgentKnowledge:
 
 def _function_names(build: AgentBuild) -> list[str]:
     """Return the functions a run of ``build`` offers the model."""
-    return sorted(prepare_run_tools(build.spec).functions)
+    return sorted(build.spec.functions)
 
 
 def _system_prompt(build: AgentBuild) -> str:
@@ -742,7 +741,7 @@ async def test_persona_delegate_tool_keeps_its_cap_without_runtime_context(tmp_p
     """An authored child's delegate tool enforces its own tools even without a Matrix tool context."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"], delegate_to=["helper"])
     build = _child(runtime, ["delegate", "file"])
-    run_subagent = prepare_run_tools(build.spec).functions["run_subagent"].entrypoint
+    run_subagent = build.spec.functions["run_subagent"].entrypoint
 
     unauthored = await run_subagent(task="Plain copy.")
     widened = await run_subagent(task="Add.", system_prompt="Q", tools=["calculator"])

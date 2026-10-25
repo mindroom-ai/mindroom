@@ -21,7 +21,7 @@ from mindroom.agent_loop.build import (
     tool_owners_by_agent,
 )
 from mindroom.agent_loop.prompt import CLAUDE_TOOLS_NOTE, render_system_message
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
@@ -115,7 +115,7 @@ def _owners(build: AgentBuild) -> dict[str, str]:
 
 
 def _offered(build: AgentBuild) -> dict[str, ToolFunction]:
-    return dict(prepare_run_tools(build.spec).functions)
+    return dict(build.spec.functions)
 
 
 def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) -> None:
@@ -351,7 +351,7 @@ def test_a_shadowed_function_is_reported_once_per_build_however_often_its_runs_r
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
         build = _build(config, runtime_paths, persist_runtime_state=False)
         for _run in range(3):
-            prepare_run_tools(build.spec).specs()
+            PreparedTools(functions=build.spec.functions).specs()
 
     calculator, wikipedia = build.spec.toolkits[:2]
     assert ([f.name for f in calculator.functions], wikipedia.functions) == (["ping"], ())
