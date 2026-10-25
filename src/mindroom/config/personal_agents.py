@@ -232,15 +232,16 @@ def _probe_agents(
     templates: dict[str, dict[str, Any]],
     owners: Mapping[str, set[str]],
 ) -> dict[str, dict[str, Any]]:
-    """Generate one probe agent for each template without agents and each override user without an agent."""
+    """Probe each template that has no owner without an override, and each override user without an agent."""
     probes: list[tuple[str, str]] = []
     for key, template in templates.items():
         owned = owners.get(key, set())
-        if not owned:
-            probes.append((key, _PROBE_USER_ID))
         overrides = template.get("users")
-        if isinstance(overrides, dict):
-            probes.extend((key, user_id) for user_id in overrides if isinstance(user_id, str) and user_id not in owned)
+        override_users = [user for user in overrides if isinstance(user, str)] if isinstance(overrides, dict) else []
+        # Overrides on every owner can mask a broken default that the next plain user would get.
+        if owned <= set(override_users):
+            probes.append((key, _PROBE_USER_ID))
+        probes.extend((key, user_id) for user_id in override_users if user_id not in owned)
 
     agents: dict[str, dict[str, Any]] = {}
     for index, (key, user_id) in enumerate(probes):
@@ -322,7 +323,11 @@ def read_personal_agent_roster(runtime_paths: RuntimePaths) -> list[PersonalAgen
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return []
-    return _PersonalAgentRosterFile.model_validate(json.loads(text)).entries
+    try:
+        return _PersonalAgentRosterFile.model_validate(json.loads(text)).entries
+    except ValueError as exc:  # JSON and pydantic errors are both ValueErrors.
+        msg = f"Personal agent roster {path} is invalid: {exc}"
+        raise ValueError(msg) from exc
 
 
 def append_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: PersonalAgentRosterEntry) -> None:

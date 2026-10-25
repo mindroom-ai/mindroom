@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -326,3 +327,25 @@ def test_runner_snapshot_includes_generated_agents(tmp_path: Path) -> None:
     assert snapshot is not None
     assert snapshot["agents"]["mind_alice_smith"]["display_name"] == "Alice's Mind"
     assert "personal_agents" not in snapshot
+
+
+def test_override_on_every_owner_does_not_hide_a_broken_template(tmp_path: Path) -> None:
+    """A template default that every existing owner overrides still fails before the next plain user commits it."""
+    data = deepcopy(BASE)
+    data["personal_agents"]["mind"]["agent"]["knowledge_bases"] = ["missing"]
+    data["personal_agents"]["mind"]["users"] = {"@Alice.Smith:example.org": {"knowledge_bases": []}}
+    with pytest.raises(ConfigRuntimeValidationError, match="personal_agents would generate an invalid agent"):
+        _runtime_config(tmp_path, data, roster=(_entry(),))
+
+
+@pytest.mark.parametrize("content", ['{"entries": [', '{"entries": [{"template": "mind"}]}'])
+def test_invalid_roster_error_names_the_file(tmp_path: Path, content: str) -> None:
+    """A corrupt or hand-edited roster fails with an error that names the roster file."""
+    paths = test_runtime_paths(tmp_path)
+    path = _personal_agent_roster_path(paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError, match=f"Personal agent roster {re.escape(str(path))} is invalid: "):
+        read_personal_agent_roster(paths)
+    with pytest.raises(ConfigRuntimeValidationError, match=r"Personal agent roster .* is invalid"):
+        Config.validate_with_runtime(deepcopy(BASE), paths)
