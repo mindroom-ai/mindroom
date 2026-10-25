@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from mindroom.agent_loop.tools import media_follow_up
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.conversation_text import utterances
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
+from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
@@ -150,10 +152,20 @@ def test_runtime_prompts_and_stopped_summaries_are_nobodys_words(
         ),
         # A turn without stored history keeps its own compaction summary among its messages.
         pytest.param(compaction_summary_message("Deployment started.", run_local=True), id="run-local-summary"),
+        # A tool result's media reach the model on a user message the loop adds after the tool batch.
+        pytest.param(
+            Message.from_dict(
+                media_follow_up([Message(role="tool", content="Rendered.", images=[Image(content=b"png")])]).to_dict(),
+            ),
+            id="tool-media-follow-up",
+        ),
     ],
 )
 def test_user_messages_mindroom_stores_in_a_turn_are_nobodys_words(stored: Message) -> None:
-    """A pause notice or a run's own compaction summary, stored as a user message mid-turn, is not the requester's."""
+    """A user message MindRoom stores mid-turn is not the requester's.
+
+    Such are a pause notice, a run's own compaction summary, and the follow-up that carries a tool result's media.
+    """
     run = _run(
         Message(role="user", content="Deploy it."),
         Message(role="assistant", content="Deploying."),

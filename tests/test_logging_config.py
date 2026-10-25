@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.config
 import os
 import subprocess
 import sys
+import threading
+import time
 import warnings
 from typing import TYPE_CHECKING, NoReturn
 
@@ -18,6 +21,7 @@ from agno.utils import log as agno_log
 from chromadb.api.client import Client
 from chromadb.config import Settings
 
+from mindroom import logging_config
 from mindroom.constants import RuntimePaths
 from mindroom.knowledge.read_process import read_chroma_async
 from mindroom.knowledge.read_protocol import ReadRequest
@@ -31,9 +35,12 @@ from mindroom.logging_config import (
     subprocess_logging_env,
 )
 from mindroom.message_target import MessageTarget
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
+    from typing import TextIO
 
     from mindroom.knowledge.read_protocol import ReadResult
 
@@ -431,6 +438,7 @@ def test_log_colors_follow_output_and_no_color_without_coloring_files(
         get_logger("tests.logging").exception("exception_event")
 
     console = capsys.readouterr().err
+    logging.shutdown()
     saved = next((runtime_paths.storage_root / "logs").glob("mindroom_*.log")).read_text()
     for output in (console, saved):
         assert "structured_event" in output
@@ -775,3 +783,222 @@ def test_subprocess_logging_appends_to_the_parent_log_file(
     events = [json.loads(line)["event"] for line in log_file.read_text().splitlines()]
     assert "parent_event" in events
     assert events[-1] == "child_event"
+
+
+class _StallingLogStream:
+    """A log file stream whose writes wait while `writable` is clear, like a network file system that stalls."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+        self.writable = threading.Event()
+        self.writable.set()
+        self.stalled = threading.Event()
+
+    def write(self, text: str) -> int:
+        if not self.writable.is_set():
+            self.stalled.set()
+            self.writable.wait()
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def close(self) -> None:
+        self._stream.close()
+
+
+@pytest.fixture
+def stalling_log_files(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[_StallingLogStream]]:
+    """Open log files behind streams the test can stall, and free any stall the test leaves behind."""
+    streams: list[_StallingLogStream] = []
+    open_file = logging.FileHandler._open
+
+    def open_stalling(handler: logging.FileHandler) -> _StallingLogStream:
+        stream = _StallingLogStream(open_file(handler))
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(logging.FileHandler, "_open", open_stalling)
+    yield streams
+    for stream in streams:
+        stream.writable.set()
+
+
+def _wait_for_log_lines(log_file: Path, count: int) -> None:
+    deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
+    while len(log_file.read_text().splitlines()) < count:
+        assert time.monotonic() < deadline, f"log file never reached {count} lines"
+        time.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_stalled_log_file_write_leaves_the_event_loop_and_stderr_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stalling_log_files: list[_StallingLogStream],
+) -> None:
+    """A log file write that hangs neither blocks the event loop nor delays stderr, and the file catches up in order."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    log_file = current_log_file()
+    assert log_file is not None
+    [log_stream] = stalling_log_files
+    log_stream.writable.clear()
+    # A write on the logging thread would hold the loop until this timer frees it.
+    unstall = threading.Timer(10, log_stream.writable.set)
+    unstall.start()
+    try:
+        started = time.monotonic()
+        for index in range(3):
+            get_logger("tests.logging").info("logged_during_stall", index=index)
+            await asyncio.sleep(0)
+        loop_lag = time.monotonic() - started
+        assert loop_lag < 1
+        assert log_stream.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+        assert not log_stream.writable.is_set()
+        console = capsys.readouterr().err
+    finally:
+        unstall.cancel()
+        log_stream.writable.set()
+    logging.shutdown()
+
+    records = [json.loads(line) for line in console.splitlines()]
+    assert [(record["event"], record.get("index")) for record in records] == [
+        ("Logging initialized", None),
+        ("logged_during_stall", 0),
+        ("logged_during_stall", 1),
+        ("logged_during_stall", 2),
+    ]
+    assert log_file.read_text() == console
+
+
+def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stalling_log_files: list[_StallingLogStream],
+) -> None:
+    """From the queue limit until the writer catches up, records skip the file; a note then says how many."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    log_file = current_log_file()
+    assert log_file is not None
+    [log_stream] = stalling_log_files
+    logger = get_logger("tests.logging")
+
+    def log_during_stall(first_index: int) -> None:
+        """Log seven records: one stalls in the write, two fill the queue, and four are dropped."""
+        monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 2)
+        log_stream.writable.clear()
+        log_stream.stalled.clear()
+        try:
+            logger.info("logged_during_stall", index=first_index)
+            assert log_stream.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+            for index in range(first_index + 1, first_index + 6):
+                logger.info("logged_during_stall", index=index)
+            # Room below the cap does not resume the file until the writer has caught up.
+            monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 10)
+            logger.info("logged_during_stall", index=first_index + 6)
+        finally:
+            log_stream.writable.set()
+
+    _wait_for_log_lines(log_file, 1)
+    log_during_stall(0)
+    _wait_for_log_lines(log_file, 4)
+    with bound_log_context(room_id="!room:example.org"):
+        logger.info("logged_after_stall")
+    _wait_for_log_lines(log_file, 6)
+    log_during_stall(7)
+    logging.shutdown()
+
+    records = [json.loads(line) for line in log_file.read_text().splitlines()]
+    note = ("Log file dropped records while its writes were stalled", None, 4)
+    assert [(record["event"], record.get("index"), record.get("dropped_records")) for record in records] == [
+        ("Logging initialized", None, None),
+        ("logged_during_stall", 0, None),
+        ("logged_during_stall", 1, None),
+        ("logged_during_stall", 2, None),
+        note,
+        ("logged_after_stall", None, None),
+        ("logged_during_stall", 7, None),
+        ("logged_during_stall", 8, None),
+        ("logged_during_stall", 9, None),
+        note,
+    ]
+    assert records[5]["room_id"] == "!room:example.org"
+    assert {(record["logger"], record["level"], "room_id" in record) for record in (records[4], records[9])} == {
+        ("mindroom.logging_config", "warning", False),
+    }
+
+
+def test_log_file_keeps_its_records_after_another_logging_config(tmp_path: Path) -> None:
+    """A later `dictConfig`, like the one uvicorn runs for the API server, leaves the file receiving records to exit."""
+    child = """
+import logging.config
+import sys
+from pathlib import Path
+
+from mindroom.constants import RuntimePaths
+from mindroom.logging_config import get_logger, setup_logging
+
+root = Path(sys.argv[1])
+setup_logging(
+    runtime_paths=RuntimePaths(
+        config_path=root / "config.yaml",
+        config_dir=root,
+        env_path=root / ".env",
+        storage_root=root / "mindroom_data",
+    ),
+)
+logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+for index in range(1000):
+    get_logger("tests.child").info("logged_after_another_config", index=index)
+"""
+
+    subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path)],
+        env={**os.environ, "MINDROOM_LOG_FORMAT": "json"},
+        capture_output=True,
+        check=True,
+        timeout=60,
+    )
+
+    [log_file] = (tmp_path / "mindroom_data" / "logs").glob("mindroom_*.log")
+    records = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert [record["event"] for record in records] == ["Logging initialized"] + ["logged_after_another_config"] * 1000
+    assert [record["index"] for record in records[1:]] == list(range(1000))
+
+
+def test_log_file_writer_survives_a_failed_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A reopen that fails once, as a stalled network file system can, loses that record but not later ones."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    log_file = current_log_file()
+    assert log_file is not None
+    # Closes the log file, which the writer reopens for the next record.
+    logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+    open_file = logging.FileHandler._open
+    failed_opens: list[str] = []
+
+    def open_failing_once(handler: logging.FileHandler) -> TextIO:
+        if not failed_opens:
+            failed_opens.append(handler.baseFilename)
+            msg = "Stale file handle"
+            raise OSError(msg)
+        return open_file(handler)
+
+    monkeypatch.setattr(logging.FileHandler, "_open", open_failing_once)
+    logger = get_logger("tests.logging")
+    logger.info("lost_to_failed_reopen")
+    logger.info("logged_after_failed_reopen")
+    for handler in logging.getLogger().handlers:
+        handler.close()
+
+    assert failed_opens == [str(log_file)]
+    assert "Stale file handle" in capsys.readouterr().err
+    events = [json.loads(line)["event"] for line in log_file.read_text().splitlines()]
+    assert events == ["Logging initialized", "logged_after_failed_reopen"]

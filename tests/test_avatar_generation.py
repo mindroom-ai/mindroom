@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
+import httpx2
 import nio
 import pytest
 from openai import AsyncOpenAI
@@ -328,12 +328,12 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
     """An OpenAI key alone must produce an avatar through both real SDK endpoints."""
     requests: list[tuple[str, dict[str, object]]] = []
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(request.content)
         requests.append((request.url.path, payload))
         assert request.headers["authorization"] == "Bearer test-openai-key"
         if request.url.path == "/v1/responses":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "id": "resp_avatar",
@@ -353,7 +353,7 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
                 },
             )
         assert request.url.path == "/v1/images/generations"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "created": 1,
@@ -364,7 +364,7 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
     client = AsyncOpenAI(
         api_key="test-openai-key",
         base_url="https://api.example.com/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond)),
     )
 
     def make_client(*, api_key: str) -> AsyncOpenAI:

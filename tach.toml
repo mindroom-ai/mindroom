@@ -7902,6 +7902,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.conversation_text"
 depends_on = [
+    "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
@@ -8820,6 +8821,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.worker_routing",
 ]
 

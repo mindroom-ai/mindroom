@@ -339,24 +339,6 @@ def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
     totals.append(ModelMetrics.from_dict(entry.to_dict()))
 
 
-@dataclass(slots=True, kw_only=True)
-class ToolCallMetrics:
-    """Wall-clock timing of one tool call."""
-
-    start_time: float | None = None
-    end_time: float | None = None
-    duration: float | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape."""
-        return _compact(asdict(self))
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> ToolCallMetrics:
-        """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**_known_fields(cls, data))
-
-
 __all__ = [
     "TOKEN_FIELDS",
     "MessageMetrics",
@@ -364,6 +346,5 @@ __all__ = [
     "RunMetrics",
     "SessionMetrics",
     "TokenCounts",
-    "ToolCallMetrics",
     "add_usage",
 ]

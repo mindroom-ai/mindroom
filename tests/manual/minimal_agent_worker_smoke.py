@@ -523,6 +523,10 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             failures.append(exc)
         results["cleanup"] = cleanup_containers(client, prefix, audit)
         try:
+            # uvicorn's `dictConfig` took the root handlers off the list `logging.shutdown` closes; closing the
+            # log file handler writes its queued records before the file is read.
+            for handler in logging.getLogger().handlers:
+                handler.close()
             logging.shutdown()
         except Exception as exc:
             failures.append(exc)

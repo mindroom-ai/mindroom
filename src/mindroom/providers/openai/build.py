@@ -61,7 +61,7 @@ from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    import httpx
+    import httpx2
     from openai import AsyncOpenAI
 
     from mindroom.config.models import ModelConfig
@@ -193,7 +193,7 @@ class ProviderRuntime:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
     codex_default_instructions: str
-    http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
+    http_client: httpx2.AsyncClient = MODEL_HTTP_CLIENT
 
 
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
@@ -260,7 +260,7 @@ def _client_options(
 def _sdk_client_kwargs(
     configured: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> dict[str, Any]:
     """Return SDK client keywords: the configured values that are set, with ``client_params`` merged over them.
 
@@ -292,7 +292,7 @@ def _openai_client(
     api_key: str,
     options: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> AsyncOpenAI:
     from openai import AsyncOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
@@ -377,26 +377,24 @@ def _chat_client_factory(
         def azure_client() -> AsyncOpenAI:
             from openai import AsyncAzureOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
-            key = api_key or process_env.get(api_key_env)
+            # The SDK refuses a key beside an Entra ID token, so a model signing in with one never reads the variable.
+            key = api_key or (None if alternative_auth else process_env.get(api_key_env))
             if not (key or alternative_auth):
                 msg = (
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     f"{api_key_env} environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
                 raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
-            # TODO(simplify): Azure accepts `timeout` and `max_retries` but leaves them out of its client. Build it from
-            # the shared client options, as the other routes do. Operators who set either would notice.
             azure: dict[str, Any] = {
+                **options,
+                # Azure has no default endpoint, and the SDK rejects an empty base URL beside azure_endpoint.
+                "base_url": base_url or None,
                 "api_key": key,
                 "api_version": settings.api_version or "2024-10-21",
-                "organization": settings.organization,
                 "azure_endpoint": settings.azure_endpoint or process_env.get(AZURE_OPENAI_ENV_BY_KEY["endpoint"]),
                 "azure_deployment": settings.azure_deployment or process_env.get(AZURE_OPENAI_ENV_BY_KEY["deployment"]),
-                "base_url": base_url or None,
                 "azure_ad_token": settings.azure_ad_token,
                 "azure_ad_token_provider": settings.azure_ad_token_provider,
-                "default_headers": settings.default_headers,
-                "default_query": settings.default_query,
             }
             return AsyncAzureOpenAI(**_sdk_client_kwargs(azure, settings, http_client))
 

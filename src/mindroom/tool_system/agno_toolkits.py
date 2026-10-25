@@ -133,14 +133,16 @@ class FunctionScopedInstructions(Protocol):
         ...
 
 
-def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None) -> AdaptedToolkit:
+def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None, registered: str | None = None) -> AdaptedToolkit:
     """Adapt the functions of ``toolkit`` in Agno's async-run order, one per name; they share one ``actor_state``.
 
     ``key`` is the authored toolkit an agent is offered the functions from, which each one carries as its
     ``toolkit``; None for a toolkit generated for the agent, and for a caller that names the toolkit beside each
-    function, as the MCP gateway's search does. A function's prompt instructions are handed over as
-    ``function_instructions``, and a function that sets any other field MindRoom refuses is adapted without it and
-    named in ``refused``, so whoever offers the toolkit refuses it only for a function it still offers.
+    function, as the MCP gateway's search does. ``registered`` is the registered tool they come from, which each
+    one carries as its ``registered_toolkit``; it is ``key`` unless an implied or preset tool brings the toolkit in.
+    A function's prompt instructions are handed over as ``function_instructions``, and a function that sets any
+    other field MindRoom refuses is adapted without it and named in ``refused``, so whoever offers the toolkit
+    refuses it only for a function it still offers.
     """
     functions = toolkit.get_async_functions().values()
     actor_state: dict[str, Any] = {}
@@ -150,7 +152,9 @@ def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None) -> AdaptedToolkit
         offered = _without_instructions(function)
         if (refusal := _refusal(offered)) is not None:
             refused[function.name] = refusal
-        adapted.append(replace(_adapt(offered), toolkit=key, actor_state=actor_state))
+        adapted.append(
+            replace(_adapt(offered), toolkit=key, registered_toolkit=registered or key, actor_state=actor_state),
+        )
     instructions, guidance = _prompt_and_guidance(toolkit, toolkit.instructions)
     return AdaptedToolkit(
         name=toolkit.name,

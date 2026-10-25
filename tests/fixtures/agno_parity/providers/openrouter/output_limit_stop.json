@@ -47,6 +47,7 @@
   },
   "request": {
     "body": {
+      "model": "z-ai/glm-5.3",
       "messages": [
         {
           "role": "system",
@@ -56,8 +57,7 @@
           "role": "user",
           "content": "What should I pack for Paris tomorrow?"
         }
-      ],
-      "model": "z-ai/glm-5.3"
+      ]
     },
     "headers": {
       "accept": "application/json",

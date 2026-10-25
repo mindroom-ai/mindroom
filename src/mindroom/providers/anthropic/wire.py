@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from anthropic.types import RedactedThinkingBlock, TextBlock, ThinkingBlock, ToolUseBlock, Usage
 from anthropic.types.beta import (
     BetaMessage,
@@ -239,18 +239,18 @@ def _url_document_stays_remote(file: File) -> bool:
     return file.url is not None and file.mime_type in {None, "application/pdf"}
 
 
-async def _fetched(url: str, http_client: httpx.AsyncClient) -> tuple[bytes, str | None] | None:
+async def _fetched(url: str, http_client: httpx2.AsyncClient) -> tuple[bytes, str | None] | None:
     """Return the bytes and media type behind ``url``, or None with a warning when it cannot be read."""
     try:
         response = await http_client.get(url)
         response.raise_for_status()
-    except (httpx.HTTPError, httpx.InvalidURL) as error:
+    except (httpx2.HTTPError, httpx2.InvalidURL) as error:
         logger.warning("claude_url_media_dropped", url=url, error=str(error))
         return None
     return response.content, canonical_mime_type(response.headers.get("content-type"))
 
 
-async def _inlined_images(images: Sequence[Image] | None, http_client: httpx.AsyncClient) -> list[Image]:
+async def _inlined_images(images: Sequence[Image] | None, http_client: httpx2.AsyncClient) -> list[Image]:
     """Return the images with every URL-backed one fetched into ``content``, minus those that failed."""
     inlined: list[Image] = []
     for image in images or ():
@@ -274,7 +274,7 @@ async def _inlined_images(images: Sequence[Image] | None, http_client: httpx.Asy
     return inlined
 
 
-async def _inlined_files(files: Sequence[File] | None, http_client: httpx.AsyncClient) -> list[File]:
+async def _inlined_files(files: Sequence[File] | None, http_client: httpx2.AsyncClient) -> list[File]:
     """Return the documents with every URL Claude would not read itself fetched into ``content``."""
     inlined: list[File] = []
     for file in files or ():
@@ -287,7 +287,7 @@ async def _inlined_files(files: Sequence[File] | None, http_client: httpx.AsyncC
     return inlined
 
 
-async def inline_url_media(messages: Sequence[Message], http_client: httpx.AsyncClient) -> list[Message]:
+async def inline_url_media(messages: Sequence[Message], http_client: httpx2.AsyncClient) -> list[Message]:
     """Fetch URL-backed images and URL documents Claude would not read itself, so they are sent inline.
 
     A URL that cannot be read drops its media with a warning instead of failing the request, because the

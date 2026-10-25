@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 import pytest
 from google.oauth2.credentials import Credentials
 
@@ -25,6 +26,7 @@ from tests.providers.golden_support import (
     Replay,
     encoded_response,
     hide_provider_environment,
+    httpx2_transport,
     replay_through_pipeline,
 )
 
@@ -33,7 +35,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
-    from tests.providers.golden_support import Wire
+    from tests.providers.golden_support import SentRequest, Wire
 
 FAMILIES = ("anthropic", "vertexai_claude", "bedrock_claude")
 
@@ -46,7 +48,7 @@ def isolated_provider_environment() -> Iterator[None]:
         yield
 
 
-def provider_for(model_config: dict[str, Any], root: Path, http_client: httpx.AsyncClient) -> ClaudeProvider:
+def provider_for(model_config: dict[str, Any], root: Path, http_client: httpx2.AsyncClient) -> ClaudeProvider:
     """Build the adapter of one authored model config exactly as the loader would, over the given HTTP client.
 
     ``vertexai_claude`` gets the static Google credential object JSON cannot carry, as the capture did.
@@ -68,14 +70,14 @@ def provider_for(model_config: dict[str, Any], root: Path, http_client: httpx.As
 
 async def run_golden(fixture: dict[str, Any], root: Path) -> Replay:
     """Send one golden's request through the pipeline around the owned adapter and return what it produced."""
-    recorded: list[httpx.Request] = []
+    recorded: list[SentRequest] = []
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: SentRequest) -> httpx.Response:
         recorded.append(request)
         return encoded_response(fixture["response_raw"])
 
     with isolated_provider_environment():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        async with httpx2.AsyncClient(transport=httpx2_transport(respond)) as http_client:
             provider = provider_for(fixture["input"]["model_config"], root, http_client)
             return await replay_through_pipeline(provider, fixture["input"], recorded)
 

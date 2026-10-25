@@ -763,11 +763,11 @@ def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) -> None:
     assert "write_file" not in functions
 
 
-def test_persona_loads_named_member_of_deferred_preset(tmp_path: Path) -> None:
-    """A deferred preset member that a persona names is present from the child's first request."""
-    runtime = _runtime(tmp_path, tools=[{"openclaw_compat": {"defer": True}}])
-    build = _child(runtime, ["shell"])
-    assert "run_shell_command" in _function_names(build)
+def test_persona_loads_named_member_of_a_deferred_tool(tmp_path: Path) -> None:
+    """A toolkit a deferred tool brings in, which a persona names, is present from the child's first request."""
+    runtime = _runtime(tmp_path, tools=[{"matrix_message": {"defer": True}}])
+    build = _child(runtime, ["attachments"])
+    assert "list_attachments" in _function_names(build)
 
 
 def test_persona_may_name_the_matrix_room_runtime_tool(tmp_path: Path) -> None:

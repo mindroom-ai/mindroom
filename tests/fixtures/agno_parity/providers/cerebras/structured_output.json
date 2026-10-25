@@ -66,6 +66,7 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
       "messages": [
         {
           "role": "system",
@@ -76,7 +77,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-oss-120b",
       "response_format": {
         "type": "json_schema",
         "json_schema": {
