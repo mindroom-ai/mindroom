@@ -454,7 +454,7 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
 They use Chroma, whose `chromadb` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[chromadb]`.
 For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
-Files-mode bases need no vector database.
+Files-mode bases build no vector index, but refreshing them still loads the `chromadb` extra.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 ## Search Limits
