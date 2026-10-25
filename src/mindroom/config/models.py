@@ -737,7 +737,7 @@ class ModelConfig(BaseModel):
     )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="Additional provider-specific parameters passed directly to the model; may include api_key",
+        description="Additional provider-specific parameters the model's provider accepts; config load rejects any other key; may include api_key",
         json_schema_extra=dashboard_hint(secret=True),
     )
     context_window: int | None = Field(
