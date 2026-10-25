@@ -2011,6 +2011,9 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
+Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, so a private CA installed there is trusted.
+To trust a private CA without installing it, set `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment.
+
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
 Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
@@ -20775,6 +20778,11 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to OpenAI SDK 3
+
+OpenAI-compatible and Claude model requests now verify certificates against the operating system's trust store instead of certifi's bundle, as described in [Model Configuration](https://docs.mindroom.chat/configuration/models/#configuration-examples).
+On a host without system CA certificates, install them (for example the `ca-certificates` package) or set `SSL_CERT_FILE` before upgrading; the published images already include them.
 
 ## Upgrading to durable reply records
 

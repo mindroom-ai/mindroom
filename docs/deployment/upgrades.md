@@ -8,6 +8,11 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to OpenAI SDK 3
+
+OpenAI-compatible and Claude model requests now verify certificates against the operating system's trust store instead of certifi's bundle, as described in [Model Configuration](../configuration/models.md#configuration-examples).
+On a host without system CA certificates, install them (for example the `ca-certificates` package) or set `SSL_CERT_FILE` before upgrading; the published images already include them.
+
 ## Upgrading to durable reply records
 
 Upgrade while no agent is replying.
