@@ -126,6 +126,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "context_management": [
         {
           "type": "compaction",
@@ -163,10 +165,8 @@
           "content": "Anything else?"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
-      "store": false,
-      "stream": true
+      "store": false
     },
     "headers": {
       "accept": "application/json",

@@ -358,8 +358,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         lambda self: (
             self._bot()
             and self.model.reply is not None
-            # The regenerator regenerates only an answer with an event.
-            and self.model.reply.event_id is not None
+            # The regenerator regenerates only an answer that may show, counting a create not acknowledged yet.
+            and (self.model.reply.event_id is not None or self.model.reply.possibly_shown is not None)
             and "$source" not in self.model.deleted
         ),
     )

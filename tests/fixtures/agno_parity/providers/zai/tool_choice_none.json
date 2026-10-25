@@ -100,6 +100,7 @@
   },
   "request": {
     "body": {
+      "model": "glm-5.3",
       "messages": [
         {
           "role": "system",
@@ -110,7 +111,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "glm-5.3",
       "tool_choice": "none",
       "tools": [
         {

@@ -105,6 +105,8 @@
   },
   "request": {
     "body": {
+      "model": "anthropic/claude-sonnet-5.5",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -137,8 +139,6 @@
           ]
         }
       ],
-      "model": "anthropic/claude-sonnet-5.5",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

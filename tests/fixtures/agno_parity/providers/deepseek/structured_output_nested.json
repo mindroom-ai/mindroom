@@ -223,6 +223,7 @@
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
       "messages": [
         {
           "role": "system",
@@ -233,7 +234,6 @@
           "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
-      "model": "deepseek-flash",
       "response_format": {
         "type": "json_object"
       },

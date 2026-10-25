@@ -1,6 +1,6 @@
 """Every provider family's bare adapter over a mock wire, with the wire shapes and replies its tests share.
 
-Each family is built from a real model config over an httpx mock transport, as the loader builds it, so a test that
+Each family is built from a real model config over a mock transport, as the loader builds it, so a test that
 drives a family exercises the production adapter. ``test_provider_families.py`` wraps them in the production
 pipeline for the behavior every family must share, and ``tests/test_agent_mode_history.py`` drives them bare.
 """
@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-
-import httpx
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -23,6 +21,8 @@ from tests.providers.openai_family_support import provider_runtime
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import httpx
 
     from mindroom.llm.provider import ModelProvider
 
@@ -191,7 +191,7 @@ def _openai_family_adapter(config: dict[str, Any], root: Path, wire: Wire) -> Mo
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime = provider_runtime(
         resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
-        http_client=httpx.AsyncClient(transport=wire.transport),
+        http_client=wire.client,
     )
     return build_provider(ModelConfig(**config), runtime)
 
@@ -212,7 +212,7 @@ class Family:
     def adapter(self, root: Path, wire: Wire) -> ModelProvider:
         """Build the family's bare adapter under ``root``, answering through ``wire``."""
         if self.config["provider"] == "anthropic":
-            return provider_for(self.config, root, httpx.AsyncClient(transport=wire.transport))
+            return provider_for(self.config, root, wire.client)
         if self.config["provider"] in {"google", "ollama"}:
             return build_adapter(self.config, root, wire.respond)
         return _openai_family_adapter(self.config, root, wire)

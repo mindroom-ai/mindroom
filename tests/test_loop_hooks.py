@@ -9,7 +9,7 @@ from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.config.main import Config
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
-from mindroom.llm.provider import Capabilities, DeferredTools, ModelRequest
+from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
 from mindroom.participation import ParticipationGate
@@ -47,7 +47,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
         runtime_paths,
     )
-    model = ScriptedModel([], capabilities=Capabilities(claude_family=True))
+    model = ScriptedModel([])
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
     build = AgentBuild(
         spec=AgentSpec(id="general", name="General", model=model, system_message=None, toolkits=()),

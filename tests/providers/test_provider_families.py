@@ -1,8 +1,8 @@
 """Behavior every provider family must share: tool definitions, the composed pipeline, stream activity, finality.
 
 Each family's bare adapter is built from a real model config over an httpx mock transport (the synthetic model
-needs none) and wrapped in the production pipeline (``wrap_provider``: the malformed-call guidance retry, portable
-tool search, media fallback, retry with the idle limit, the safeguard refusal, request logging), so what these tests
+needs none) and wrapped in the production pipeline (``wrap_provider``: portable tool search, media fallback, the
+malformed-call guidance retry, retry with the idle limit, the safeguard refusal, request logging), so what these tests
 prove is what the registry runs. The OpenAI family's idle-limit and server-tool cases live in
 ``test_openai_family_wire.py``; the Claude tool tri-state in its behavior tests.
 """

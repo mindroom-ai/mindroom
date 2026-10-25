@@ -4,6 +4,12 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to OpenAI SDK 3
+
+OpenAI-compatible and Claude model requests, and the other OpenAI SDK requests [Model Configuration](https://docs.mindroom.chat/configuration/models/#configuration-examples) lists, now verify certificates against the operating system's trust store instead of certifi's bundle.
+The published images include system CA certificates.
+On a host without them, install them (for example the `ca-certificates` package) before upgrading, or point `SSL_CERT_FILE` at a complete CA bundle, such as certifi's `cacert.pem` with any private CA appended.
+
 ## Upgrading to durable reply records
 
 Upgrade while no agent is replying.

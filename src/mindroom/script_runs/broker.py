@@ -43,6 +43,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import (
     BackgroundToolApprovalDenied,
     SyncToolCompletionTracker,
@@ -193,7 +194,7 @@ class _PreparedExecution:
 
 @dataclass(frozen=True, slots=True)
 class _ToolFailure:
-    """A tool call that raised; ``message`` is the exception's ``failure_text``."""
+    """A tool call that raised, or that the tool-call policy declined; ``message`` is why, as the model would read it."""
 
     message: str
 
@@ -656,9 +657,11 @@ class ScriptToolBroker:
                     call_id=call.call_id,
                 )
                 try:
-                    return await run_tool_call(function, arguments, call_context, middleware=(policy,))
+                    result = await run_tool_call(function, arguments, call_context, middleware=(policy,))
                 except Exception as error:
                     return _ToolFailure(failure_text(error))
+                # The policy answers a call a plugin hook declined with a failed outcome, which fails the call too.
+                return _ToolFailure(result.content) if isinstance(result, ToolOutcome) and result.is_error else result
 
         try:
             return await run_with_tool_execution_identity(

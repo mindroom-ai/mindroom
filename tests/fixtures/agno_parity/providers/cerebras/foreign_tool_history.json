@@ -159,6 +159,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -196,8 +198,6 @@
           "content": "And for the evening?"
         }
       ],
-      "model": "gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

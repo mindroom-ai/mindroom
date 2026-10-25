@@ -55,6 +55,8 @@
   },
   "request": {
     "body": {
+      "model": "k3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -77,8 +79,6 @@
           ]
         }
       ],
-      "model": "k3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       }

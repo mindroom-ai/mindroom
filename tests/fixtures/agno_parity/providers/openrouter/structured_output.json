@@ -70,6 +70,7 @@
   },
   "request": {
     "body": {
+      "model": "z-ai/glm-5.3",
       "messages": [
         {
           "role": "system",
@@ -80,7 +81,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "z-ai/glm-5.3",
       "response_format": {
         "type": "json_schema",
         "json_schema": {

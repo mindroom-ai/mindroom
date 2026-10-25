@@ -113,11 +113,7 @@ class _ApprovalCase:
                 should_use_streaming=AsyncMock(return_value=False),
                 ai_response=model,
             ),
-            patch.object(
-                self.bot,
-                "_user_stop_reconciler",
-                UserStopReconciler(UserStopReconcilerDeps(self.store, self.gateway)),
-            ),
+            patch.object(self.bot, "_delivery_gateway", self.gateway),
         ):
             outcome = await self.controller.handle_text_event(self.room, event)
             await finish_edit_regenerations(self.bot)

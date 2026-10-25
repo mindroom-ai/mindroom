@@ -14,6 +14,7 @@ export const API_ENDPOINTS = {
     schema: `${API_BASE_URL}/api/config/schema`,
     save: `${API_BASE_URL}/api/config/save`,
     agents: `${API_BASE_URL}/api/config/agents`,
+    personalAgents: `${API_BASE_URL}/api/config/personal-agents`,
     teams: `${API_BASE_URL}/api/config/teams`,
     models: `${API_BASE_URL}/api/config/models`,
     roomModels: `${API_BASE_URL}/api/config/room-models`,

@@ -68,6 +68,7 @@
   },
   "request": {
     "body": {
+      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
       "messages": [
         {
           "role": "system",
@@ -78,7 +79,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
       "response_format": {
         "type": "json_schema",
         "json_schema": {

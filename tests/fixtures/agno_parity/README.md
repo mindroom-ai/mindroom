@@ -67,7 +67,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 
 - Files are pretty-printed with sorted keys, except `request.body`, which keeps the key order the SDK sent; capture runs from that same key-sorted input, so a key order the body takes from the input is the sorted one.
 - The parity tests compare each request body's serialized text, so a reordered key fails parity, because chat templates and prompt caches see key order.
-- `cerebras` bodies list `messages` before `model`, as the OpenAI SDK that now sends them does, where the Cerebras SDK the capture used put `model` first.
+- OpenAI-family bodies, Cerebras's included, start with `model` and `stream`, reordered by hand: OpenAI SDK 3 sends those keys first, where the SDKs of the capture placed them among the other keys.
 - Request headers are dropped when they carry credentials (`authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, AWS `x-amz-*` signing headers) or SDK, platform, and transport details (`x-stainless-*`, `amz-sdk-*`, `user-agent`, `x-goog-api-client`, `host`, `content-length`, `accept-encoding`, `connection`); every other header, such as `anthropic-beta`, `anthropic-version`, `chatgpt-account-id`, and the Codex session headers, is kept.
 - The wall-clock `duration` and `time_to_first_token` are dropped from `parsed.metrics`.
 - uuid4 values Agno generates for tool calls sent without ids (every Ollama call, and the Gemini `tool_definitions` reply) become `<uuid4>`; a follow-up golden replays such a call with the id `parity-generated-call-<n>`.

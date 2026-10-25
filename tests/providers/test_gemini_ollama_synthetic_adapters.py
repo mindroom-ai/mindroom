@@ -56,6 +56,19 @@ GEMINI_VERTEX = {
     "id": "gemini-3.1-pro-preview",
     "extra_kwargs": {"vertexai": True, "project_id": "test-project", "location": "us-central1"},
 }
+# Vertex AI turned on in the SDK client's own arguments instead of ``extra_kwargs.vertexai``.
+GEMINI_VERTEX_CLIENT_PARAMS = {
+    "provider": "gemini",
+    "id": "gemini-3.1-pro-preview",
+    "extra_kwargs": {
+        "client_params": {
+            "vertexai": True,
+            "project": "test-project",
+            "location": "us-central1",
+            "credentials": Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+        },
+    },
+}
 OLLAMA = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
 WEATHER = ToolSpec(
     name="get_weather",
@@ -340,7 +353,11 @@ async def test_gemini_default_sampling_models_omit_sampling_controls(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("config", "json_output"), [(GEMINI, True), (GEMINI_VERTEX, False)])
+@pytest.mark.parametrize(
+    ("config", "json_output"),
+    [(GEMINI, True), (GEMINI_VERTEX, False), (GEMINI_VERTEX_CLIENT_PARAMS, False)],
+    ids=["gemini", "vertexai", "client-params-vertexai"],
+)
 async def test_gemini_decision_requests_keep_schemas_but_disable_function_calling(
     config: dict[str, Any],
     json_output: bool,
@@ -1191,6 +1208,23 @@ async def test_gemini_leaves_out_empty_local_attachments(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_gemini_vertex_client_from_client_params_inlines_local_media(tmp_path: Path) -> None:
+    """A model that turns Vertex AI on in ``client_params`` inlines local audio, since Vertex AI has no Files API."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Hi", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+
+    request, _ = await run_adapter(
+        GEMINI_VERTEX_CLIENT_PARAMS,
+        _request(message),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    assert request["body"]["contents"][0]["parts"][1]["inlineData"]["mime_type"] == "audio/ogg"
+
+
+@pytest.mark.asyncio
 async def test_gemini_local_audio_of_unknown_type_is_sent_as_mp3(tmp_path: Path) -> None:
     """Audio without a declared type whose suffix names no known format gets Agno's default type."""
     audio_path = tmp_path / "memo.m4a"
@@ -1524,10 +1558,7 @@ async def test_ollama_api_key_variable_supplies_a_missing_key(tmp_path: Path, mo
 
 @pytest.mark.asyncio
 async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> None:
-    """Options, keep_alive, format, and request_params pass through; a temperature override changes no option.
-
-    Agno's Ollama model had no temperature field, so its options were always the authored ones.
-    """
+    """Options, keep_alive, format, and request_params pass through; a temperature override joins the options."""
     config = _config(
         OLLAMA,
         options={"num_ctx": 8192},
@@ -1544,7 +1575,7 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
     )
 
     body = request["body"]
-    assert body["options"] == {"num_ctx": 8192}
+    assert body["options"] == {"num_ctx": 8192, "temperature": 0.1}
     assert body["keep_alive"] == "5m"
     assert body["format"] == "json"
     assert body["think"] is False
