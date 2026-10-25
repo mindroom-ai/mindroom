@@ -211,14 +211,12 @@
           },
           "call_id": "tsc_parity",
           "execution": "server",
-          "id": "ts_parity",
           "status": "completed",
           "type": "tool_search_call"
         },
         {
           "call_id": "tsc_parity",
           "execution": "server",
-          "id": "tso_parity",
           "status": "completed",
           "tools": [
             {

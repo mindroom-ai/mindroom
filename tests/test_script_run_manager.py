@@ -41,7 +41,7 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path, worke
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     import os
@@ -618,7 +618,7 @@ async def test_shutdown_fence_drains_admitted_launch_and_rejects_racing_launch(
         monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
 
     admitted_launch = asyncio.create_task(manager.run(_context(tmp_path, mode=mode), source="print('ok')\n"))
-    await asyncio.wait_for(launch_entered.wait(), timeout=1)
+    await asyncio.wait_for(launch_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     fence = asyncio.create_task(manager.begin_shutdown())
     await asyncio.sleep(0)
 
@@ -1324,7 +1324,7 @@ async def test_post_spawn_task_cancellation_signals_local_process_before_propaga
         if spawned and not blocked_read:
             blocked_read = True
             read_entered.set()
-            assert release_read.wait(timeout=5)
+            assert release_read.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_get_run(run_id)
 
     def kill_local(
@@ -1349,7 +1349,7 @@ async def test_post_spawn_task_cancellation_signals_local_process_before_propaga
     monkeypatch.setattr(manager.store, "get_run", block_first_post_spawn_read)
 
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(read_entered.wait, 5)
+    assert await asyncio.to_thread(read_entered.wait, SETTLE_TIMEOUT_SECONDS)
     launch.cancel()
     release_read.set()
 
@@ -1450,11 +1450,11 @@ async def test_worker_launch_stops_when_cancelled_before_worker_allocation(
     def create_then_pause(run: ScriptRunRecord) -> None:
         original_create(run)
         created.set()
-        assert release_create.wait(timeout=5)
+        assert release_create.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(manager.store, "create_run", create_then_pause)
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(created.wait, 5)
+    assert await asyncio.to_thread(created.wait, SETTLE_TIMEOUT_SECONDS)
     [starting] = manager.store.list_runs(include_finished=False)
 
     cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
@@ -1486,12 +1486,12 @@ async def test_cancel_waits_for_blocked_worker_allocation_then_retires_returned_
 
     def blocked_ensure_worker(*args: object, **kwargs: object) -> WorkerHandle:
         allocation_started.set()
-        assert release_allocation.wait(timeout=5)
+        assert release_allocation.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_ensure_worker(*args, **kwargs)
 
     monkeypatch.setattr(backend, "ensure_worker", blocked_ensure_worker)
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(allocation_started.wait, 5)
+    assert await asyncio.to_thread(allocation_started.wait, SETTLE_TIMEOUT_SECONDS)
     [starting] = manager.store.list_runs(include_finished=False)
     cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
     await asyncio.sleep(0)
@@ -1521,13 +1521,13 @@ async def test_status_and_maintenance_wait_for_worker_allocation_before_reconcil
 
     def blocked_ensure_worker(*args: object, **kwargs: object) -> WorkerHandle:
         allocation_started.set()
-        assert release_allocation.wait(timeout=5)
+        assert release_allocation.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_ensure_worker(*args, **kwargs)
 
     monkeypatch.setattr(backend, "ensure_worker", blocked_ensure_worker)
     client.next_status = WorkerScriptStatus(state="running")
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(allocation_started.wait, 5)
+    assert await asyncio.to_thread(allocation_started.wait, SETTLE_TIMEOUT_SECONDS)
     [starting] = manager.store.list_runs(include_finished=False)
     status = asyncio.create_task(manager.status(context, run_id=starting.run_id))
     maintenance = asyncio.create_task(manager.reconcile_durable(run_id=starting.run_id))
@@ -1585,7 +1585,7 @@ async def test_local_cancel_waits_for_snapshot_write_and_removes_capability(
 
     def blocked_write_snapshot(*args: object, **kwargs: object) -> tuple[Path, Path]:
         write_started.set()
-        assert release_write.wait(timeout=5)
+        assert release_write.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_write_snapshot(*args, **kwargs)
 
     async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
@@ -1605,7 +1605,7 @@ async def test_local_cancel_waits_for_snapshot_write_and_removes_capability(
         lambda *_args, **_kwargs: "Status: FINISHED (exit code -15)",
     )
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(write_started.wait, 5)
+    assert await asyncio.to_thread(write_started.wait, SETTLE_TIMEOUT_SECONDS)
     [starting] = manager.store.list_runs(include_finished=False)
     assert starting.snapshot_locator is not None
     cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
@@ -1636,19 +1636,19 @@ async def test_task_cancellation_during_durable_reservation_finishes_as_interrup
 
     def blocked_create(run: ScriptRunRecord) -> None:
         create_entered.set()
-        assert release_create.wait(timeout=5)
+        assert release_create.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         original_create(run)
         create_finished.set()
 
     monkeypatch.setattr(manager.store, "create_run", blocked_create)
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(create_entered.wait, 5)
+    assert await asyncio.to_thread(create_entered.wait, SETTLE_TIMEOUT_SECONDS)
 
     launch.cancel()
     await asyncio.sleep(0)
     cancellation_retained_ownership = not launch.done()
     release_create.set()
-    assert await asyncio.to_thread(create_finished.wait, 5)
+    assert await asyncio.to_thread(create_finished.wait, SETTLE_TIMEOUT_SECONDS)
 
     with pytest.raises(asyncio.CancelledError):
         await launch
@@ -1678,24 +1678,24 @@ async def test_repeated_cancellation_cannot_abandon_durable_reservation_finaliza
 
     def blocked_create(run: ScriptRunRecord) -> None:
         create_entered.set()
-        assert release_create.wait(timeout=5)
+        assert release_create.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         original_create(run)
         create_finished.set()
 
     def blocked_finalization_get(run_id: str) -> ScriptRunRecord:
         finalization_entered.set()
-        assert release_finalization.wait(timeout=5)
+        assert release_finalization.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_get(run_id)
 
     monkeypatch.setattr(manager.store, "create_run", blocked_create)
     monkeypatch.setattr(manager.store, "get_run", blocked_finalization_get)
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(create_entered.wait, 5)
+    assert await asyncio.to_thread(create_entered.wait, SETTLE_TIMEOUT_SECONDS)
 
     launch.cancel()
     release_create.set()
-    assert await asyncio.to_thread(create_finished.wait, 5)
-    assert await asyncio.to_thread(finalization_entered.wait, 5)
+    assert await asyncio.to_thread(create_finished.wait, SETTLE_TIMEOUT_SECONDS)
+    assert await asyncio.to_thread(finalization_entered.wait, SETTLE_TIMEOUT_SECONDS)
     launch.cancel()
     await asyncio.sleep(0)
     repeated_cancellation_retained_ownership = not launch.done()
@@ -1727,11 +1727,11 @@ async def test_preallocation_cancel_releases_capacity(
     def create_then_pause(run: ScriptRunRecord) -> None:
         original_create(run)
         created.set()
-        assert release_create.wait(timeout=5)
+        assert release_create.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(manager.store, "create_run", create_then_pause)
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n", limits=limits))
-    assert await asyncio.to_thread(created.wait, 5)
+    assert await asyncio.to_thread(created.wait, SETTLE_TIMEOUT_SECONDS)
     [starting] = manager.store.list_runs(include_finished=False)
 
     cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
@@ -1786,12 +1786,12 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
         )
         if state is ScriptRunState.STARTING and worker_id is not None:
             worker_assigned.set()
-            assert release_assignment.wait(timeout=5)
+            assert release_assignment.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return result
 
     monkeypatch.setattr(manager.store, "transition_run", transition_then_pause)
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(worker_assigned.wait, 5)
+    assert await asyncio.to_thread(worker_assigned.wait, SETTLE_TIMEOUT_SECONDS)
     [starting] = manager.store.list_runs(include_finished=False)
     manager.request_revocation(starting.run_id, reason=interruption_reason)
     release_assignment.set()
@@ -2381,7 +2381,7 @@ async def test_slow_worker_launch_does_not_block_an_independent_reservation(tmp_
             source="print('ok')\n",
         ),
     )
-    await asyncio.wait_for(client.second_launch_entered.wait(), timeout=5)
+    await asyncio.wait_for(client.second_launch_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     try:
         assert len(client.requested_handles) == 2
@@ -2596,7 +2596,7 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
         nonlocal workspace_resolutions
         workspace_resolutions += 1
         loop.call_soon_threadsafe(loop_processed_workspace_callback.set)
-        if not loop_processed_workspace_callback.wait(timeout=1):
+        if not loop_processed_workspace_callback.wait(timeout=SETTLE_TIMEOUT_SECONDS):
             msg = "workspace resolution blocked the event loop"
             raise AssertionError(msg)
         return workspace

@@ -1650,6 +1650,7 @@ depends_on = [
     "mindroom.config.reload_status",
     "mindroom.constants",
     "mindroom.event_journal.opening",
+    "mindroom.file_locks",
     "mindroom.logging_config",
     "mindroom.response_activity",
     "mindroom.tool_jobs.settings",
