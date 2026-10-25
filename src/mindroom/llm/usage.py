@@ -119,14 +119,11 @@ class _Counts:
 def _add_counts(target: _Counts, source: _Counts) -> None:
     """Add the token counters and any cost of ``source`` into ``target`` in place."""
     target.tokens = target.tokens + source.tokens
-    if source.cost is not None:
-        target.cost = (target.cost or 0) + source.cost
+    target.cost = _sum_optional(target.cost, source.cost)
 
 
 def _sum_optional(left: float | None, right: float | None) -> float | None:
-    # TODO(simplify): costs sum two ways: ``__add__`` by this rule and ``_add_counts`` with a 0.0 total read as unset,
-    # so sums differ in int or float type and a zero's sign. Sum every cost one way.
-    # Stored data would notice only in those edge cases.
+    """Add two amounts a usage report may leave unset, such as costs and durations; None when neither is set."""
     if left is None:
         return right
     if right is None:
