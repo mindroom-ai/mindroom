@@ -3608,7 +3608,7 @@ def _record_doctor_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, 
     return requests
 
 
-def _vertex_ok(_request: httpx.Request) -> httpx.Response:
+def _vertex_ok(_request: httpx2.Request) -> httpx.Response:
     message = {
         "id": "msg_1",
         "type": "message",
@@ -4195,10 +4195,10 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
         _ambient_google_credentials(monkeypatch)
 
-        def respond(request: httpx.Request) -> httpx.Response:
+        def respond(request: httpx2.Request) -> httpx.Response:
             if failure == "offline":
                 message = "unreachable"
-                raise httpx.ConnectError(message, request=request)
+                raise httpx2.ConnectError(message, request=request)
             error = {"type": "error", "error": {"type": "permission_error", "message": "denied"}}
             return httpx.Response(403, json=error)
 

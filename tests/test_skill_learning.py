@@ -72,7 +72,7 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.providers.golden_support import httpx2_transport
+from tests.providers.golden_support import SentRequest, httpx2_transport
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -1803,7 +1803,7 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(
     # The response calls a skill tool, then answers; the review answers at once.
     replies = [wire.replies[0], wire.replies[1], wire.replies[1]]
 
-    def respond(request: httpx.Request | httpx2.Request) -> httpx.Response:
+    def respond(request: SentRequest) -> httpx.Response:
         requests.append(json.loads(request.content))
         return httpx.Response(200, json=replies.pop(0))
 

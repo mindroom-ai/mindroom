@@ -131,7 +131,10 @@ class PacedBytes(httpx.AsyncByteStream):
 
 
 def _httpx2_error(error: httpx.TransportError) -> httpx2.TransportError:
-    """Return the httpx2 error of the same name, the one an httpx2 transport raises for this failure."""
+    """Return the httpx2 error of the same name, the one an httpx2 transport raises for this failure.
+
+    Raise it ``from None``: the SDKs see only httpx2 errors, so classification must not find the httpx one too.
+    """
     return getattr(httpx2, type(error).__name__)(str(error))
 
 
@@ -147,7 +150,7 @@ class _Httpx2Body(httpx2.AsyncByteStream):
             async for chunk in self._body:
                 yield chunk
         except httpx.TransportError as error:
-            raise _httpx2_error(error) from error
+            raise _httpx2_error(error) from None
 
 
 def httpx2_transport(handler: Callable[[httpx2.Request], httpx.Response | httpx2.Response]) -> httpx2.MockTransport:
@@ -161,7 +164,7 @@ def httpx2_transport(handler: Callable[[httpx2.Request], httpx.Response | httpx2
         try:
             reply = handler(request)
         except httpx.TransportError as error:
-            raise _httpx2_error(error) from error
+            raise _httpx2_error(error) from None
         if isinstance(reply, httpx2.Response):
             return reply
         headers = reply.headers.multi_items()

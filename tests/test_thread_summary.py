@@ -71,7 +71,7 @@ from mindroom.thread_tags import (
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, serve_conversation_reader
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.providers.golden_support import httpx2_transport
+from tests.providers.golden_support import SentRequest, httpx2_transport
 from tests.test_thread_export_projected_history import PRINCIPAL as _PROJECTION_PRINCIPAL
 from tests.test_thread_export_projected_history import ROOM as _PROJECTION_ROOM
 from tests.test_thread_export_projected_history import ROOT as _PROJECTION_ROOT
@@ -2682,7 +2682,7 @@ class _SummaryWire:
         self.transport = httpx.MockTransport(self._respond)
         self.client = httpx2.AsyncClient(transport=httpx2_transport(self._respond))
 
-    def _respond(self, request: httpx.Request | httpx2.Request) -> httpx.Response:
+    def _respond(self, request: SentRequest) -> httpx.Response:
         self.bodies.append(json.loads(request.content))
         error = {"type": "invalid_request_error", "message": "bad", "code": 400, "status": "INVALID_ARGUMENT"}
         return httpx.Response(400, json={"type": "error", "error": error})

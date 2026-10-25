@@ -40,6 +40,7 @@ from urllib.parse import unquote, urlsplit
 import httpcore
 import httpcore2
 import httpx
+import httpx2
 import nio
 import pytest
 import pytest_asyncio
@@ -3062,6 +3063,12 @@ def _refuse_connection(request: httpx.Request) -> NoReturn:
     raise httpx.ConnectError(message, request=request)
 
 
+def _refuse_model_connection(request: httpx2.Request) -> NoReturn:
+    """Refuse a model SDK's request as its httpx2 transport refuses an unreachable host."""
+    message = "network disabled in tests"
+    raise httpx2.ConnectError(message, request=request)
+
+
 @pytest.fixture(autouse=True)
 def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep bot startup and room creation from fetching stock avatars over the network.
@@ -3085,7 +3092,7 @@ def _offline_sync_client(embedder: OpenAIEmbedder) -> OpenAI:
     if embedder.client is None:
         # Without retries, because the SDK would back off for seconds before reporting the refusal.
         embedder.client = _PRODUCTION_EMBEDDER_CLIENT(embedder).with_options(
-            http_client=httpx.Client(transport=httpx.MockTransport(_refuse_connection)),
+            http_client=httpx2.Client(transport=httpx2.MockTransport(_refuse_model_connection)),
             max_retries=0,
         )
     return embedder.client
@@ -3094,7 +3101,7 @@ def _offline_sync_client(embedder: OpenAIEmbedder) -> OpenAI:
 def _offline_async_client(embedder: OpenAIEmbedder) -> AsyncOpenAI:
     if embedder.async_client is None:
         embedder.async_client = _PRODUCTION_EMBEDDER_ACLIENT(embedder).with_options(
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(_refuse_connection)),
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(_refuse_model_connection)),
             max_retries=0,
         )
     return embedder.async_client

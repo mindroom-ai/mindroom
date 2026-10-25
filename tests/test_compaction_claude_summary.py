@@ -156,9 +156,9 @@ async def test_summary_uses_an_authored_provider_timeout_shorter_than_the_deadli
 async def test_a_summary_whose_transport_times_out_fails_as_a_timeout(route: str, tmp_path: Path) -> None:
     """The SDK's timeout error keeps the transport timeout's code, so compaction reports a timeout."""
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx.Response:
         msg = "The read operation timed out"
-        raise httpx.ReadTimeout(msg, request=request)
+        raise httpx2.ReadTimeout(msg, request=request)
 
     with pytest.raises(ProviderUnavailable) as raised:
         await _summarize(_model(route, tmp_path, respond))

@@ -12,6 +12,7 @@ import boto3.session
 import google.auth
 import google.auth.exceptions
 import httpx
+import httpx2
 import pytest
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
@@ -473,9 +474,9 @@ async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
 async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: Path) -> None:
     """A connection that never reaches the provider is retryable."""
 
-    def fail(request: httpx.Request) -> httpx.Response:
+    def fail(request: httpx2.Request) -> httpx.Response:
         msg = "connection refused"
-        raise httpx.ConnectError(msg, request=request)
+        raise httpx2.ConnectError(msg, request=request)
 
     provider = route_provider("anthropic", tmp_path, Wire(fail))
     with pytest.raises(ProviderUnavailable) as raised:
@@ -1310,13 +1311,13 @@ async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) 
 async def test_unreadable_url_media_is_dropped_and_the_request_still_runs(tmp_path: Path) -> None:
     """An expired or unreachable URL drops its media with a warning; the rest of the message is still sent."""
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx.Response:
         if request.url.host != "media.example":
             return sse_reply([{"type": "text", "text": "Ok."}])
         if request.url.path == "/gone":
             return httpx.Response(404)
         msg = "connection refused"
-        raise httpx.ConnectError(msg, request=request)
+        raise httpx2.ConnectError(msg, request=request)
 
     wire = Wire(respond)
     provider = route_provider("anthropic", tmp_path, wire)
