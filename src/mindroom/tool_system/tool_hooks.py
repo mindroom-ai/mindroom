@@ -72,15 +72,6 @@ _DECLINED_RESULT_TEMPLATE = (
 _ToolHookResult = Any
 
 
-def _declined_text(tool_name: str, reason: str) -> str:
-    """Return the text of a call declined before it ran.
-
-    The after-call hooks receive it as the result of a call a plugin hook declined and of a background script call
-    whose approval was denied; a call a plugin hook declined also answers with it, as a failed call.
-    """
-    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
-
-
 @dataclass(frozen=True, slots=True)
 class BackgroundToolApprovalDenied:
     """Typed background result that the broker publishes as a terminal denial."""
@@ -439,7 +430,7 @@ async def _run_before_hooks(
     )
     if not before_context.declined:
         return None
-    return _declined_text(tool_name, before_context.decline_reason)
+    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=before_context.decline_reason)
 
 
 @dataclass(slots=True)
@@ -620,7 +611,7 @@ async def _execute_bridge(  # noqa: C901
         decision = await approval_gate(origin, tool_name, deepcopy(args))
         if not decision.approved:
             reason = denial_note_for(decision.reason)
-            declined_result = _declined_text(tool_name, reason)
+            declined_result = _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
             duration_ms = timing.mark_result_ready()
             await finish("blocked_approval", duration_ms=duration_ms, result=declined_result, blocked=True)
             return BackgroundToolApprovalDenied(reason=reason)
