@@ -693,16 +693,14 @@ def _write_run(
 ) -> _Saved:
     """Write one run from its stored dict by ``ConversationStore.save_run``'s rules; an interrupted one is not final."""
     run_id, parent_run_id, now = data["run_id"], data.get("parent_run_id"), int(time())
-    ids = (session_id, run_id, parent_run_id)
-    removed = f"SELECT 1 FROM {quote_identifier(names.log_removed)} WHERE session_id = ? AND run_id IN (?, ?)"  # noqa: S608
-    if connection.execute(removed, ids).fetchone():
+    if is_removed(connection, names, session_id, run_id, parent_run_id):
         return _Saved(run_id, "removed", data.get("created_at") or now, now)
     rows = {
         row[0]: _StoredRow(*row[1:])
         for row in connection.execute(
             f"SELECT run_id, parent_run_id, status, seq, created_at FROM {quote_identifier(names.log_runs)} "  # noqa: S608
             "WHERE session_id = ? AND run_id IN (?, ?)",
-            ids,
+            (session_id, run_id, parent_run_id),
         )
     }
     stored, team_run = rows.get(run_id), rows.get(parent_run_id)
@@ -724,6 +722,18 @@ def _write_run(
     _adopt_requester(connection, names, session_id, data.get("user_id"))
     [written] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
     return _Saved(run_id, "written", created_at, now, moved, written)
+
+
+def is_removed(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    run_id: str,
+    parent_run_id: str | None,
+) -> bool:
+    """Return whether a cut removed run ``run_id``, or its team run ``parent_run_id``, from session ``session_id``."""
+    removed = f"SELECT 1 FROM {quote_identifier(names.log_removed)} WHERE session_id = ? AND run_id IN (?, ?)"  # noqa: S608
+    return connection.execute(removed, (session_id, run_id, parent_run_id)).fetchone() is not None
 
 
 def _upsert_run(
@@ -948,43 +958,40 @@ def summary_event_sets(run_metadata: Sequence[object]) -> tuple[set[str], set[st
     return seen.union(*map(source_event_ids, run_metadata)), seen
 
 
-@dataclass(frozen=True, slots=True)
-class FoldWrite:
-    """What a mid-turn fold stores: its conversation, live running record, folded messages, and ended member runs."""
-
-    session: ConversationSession
-    record: AnyRunRecord
-    messages: Sequence[Message]
-    member_run_ids: Collection[str]
-
-
-def store_fold(connection: sqlite3.Connection, names: TableNames, fold: FoldWrite, summary_id: int) -> None:
-    """Store what fold summary ``summary_id`` took out of its running run, in the caller's write transaction.
+def store_fold(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    run: AnyRunRecord,
+    messages: Sequence[Message],
+    member_run_ids: Collection[str],
+    summary_id: int,
+) -> None:
+    """Store what fold summary ``summary_id`` took out of ``run``, the live running record, in the caller's transaction.
 
     The run takes the next ``seq``, so it sorts after the summary; one without a row gets a cancelled one with its live
-    scalars and metadata, which a crash leaves as a run that does not replay. The folded messages and the running run's
-    named member runs are flagged with the summary, a stored message keeping its data, so none replays again. The
-    caller creates the session row (``ensure_session_row``) before it inserts the summary row.
+    scalars and metadata, which a crash leaves as a run that does not replay. The folded ``messages`` and the run's
+    member runs ``member_run_ids`` names are flagged with the summary, a stored message keeping its data, so none
+    replays again. The caller creates the session row (``ensure_session_row``) before it inserts the summary row.
     """
-    session_id, record, now = fold.session.session_id, fold.record, int(time())
-    runs, seq = quote_identifier(names.log_runs), next_seq(connection, names)
+    runs, now, seq = quote_identifier(names.log_runs), int(time()), next_seq(connection, names)
     move = f"UPDATE {runs} SET seq = ? WHERE session_id = ? AND run_id = ?"  # noqa: S608
-    if not connection.execute(move, (seq, session_id, record.run_id)).rowcount:
-        data = {**record.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
-        created_at, kind = record.created_at or now, run_type(record)
+    if not connection.execute(move, (seq, session_id, run.run_id)).rowcount:
+        data = {**run.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
+        created_at, kind = run.created_at or now, run_type(run)
         _upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
     connection.executemany(
         f"INSERT INTO {quote_identifier(names.log_messages)} (run_id, message_id, ord, folded_by, data) "  # noqa: S608
         "VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, message_id) DO UPDATE SET folded_by = COALESCE(folded_by, excluded.folded_by)",
         [
-            (record.run_id, message.id, position, summary_id, json.dumps(message.to_dict()))
-            for position, message in enumerate(fold.messages)
+            (run.run_id, message.id, position, summary_id, json.dumps(message.to_dict()))
+            for position, message in enumerate(messages)
         ],
     )
     connection.execute(
         f"UPDATE {runs} SET folded_by = ? WHERE session_id = ? AND parent_run_id = ? AND folded_by IS NULL "  # noqa: S608
         "AND run_id IN (SELECT value FROM json_each(?))",
-        (summary_id, session_id, record.run_id, json.dumps(sorted(fold.member_run_ids))),
+        (summary_id, session_id, run.run_id, json.dumps(sorted(member_run_ids))),
     )
 
 
@@ -1081,12 +1088,12 @@ def _counted_value(value: object) -> int:
 __all__ = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
-    "FoldWrite",
     "SaveOutcome",
     "connect_conversation_database",
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",
+    "is_removed",
     "migrate_database",
     "next_seq",
     "persist_to",

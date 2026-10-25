@@ -23,10 +23,10 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES
 from mindroom.session_storage.store_next import (
-    FoldWrite,
     decoded_mapping,
     delete_runs_in_transaction,
     ensure_session_row,
+    is_removed,
     seen_event_ids,
     source_event_ids,
     store_fold,
@@ -84,11 +84,7 @@ class CoveredRun:
 
 @dataclass(frozen=True, slots=True)
 class Fold:
-    """What a mid-turn fold took out of its running run; its provenance is the run's live metadata at the fold.
-
-    ``run`` is the live running record, ``messages`` the exchanges the fold summarized, and ``member_run_ids`` the
-    member runs of a team run that ended before the fold.
-    """
+    """What a mid-turn fold took: the live running record, the exchanges it summarized, and its ended member runs."""
 
     run: AnyRunRecord
     messages: tuple[Message, ...]
@@ -152,29 +148,25 @@ def append_summary(
         # A row never sorts behind the latest one: that would return what it folded to replay.
         if (latest[-1].id if latest else None) != based_on or any(run.seq <= through for run in covered):
             return None
-        if fold is not None and _is_removed(connection, tables, session_id, fold.run):
+        stored = connection.execute(
+            f"SELECT run_id, seq, status, metadata FROM {tables.runs} "  # noqa: S608
+            "WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?))",
+            (session_id, json.dumps([run.run_id for run in covered])),
+        ).fetchall()
+        current = {run_id: (seq, status) for run_id, seq, status, _ in stored}
+        if any(current.get(run.run_id) != (run.seq, run.status) for run in covered):
             return None
-        stored = {
-            run_id: (seq, status, decoded_mapping(metadata))
-            for run_id, seq, status, metadata in connection.execute(
-                f"SELECT run_id, seq, status, metadata FROM {tables.runs} "  # noqa: S608
-                "WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?))",
-                (session_id, json.dumps([run.run_id for run in covered])),
-            )
-        }
-        if any(stored.get(run.run_id, (None, None, None))[:2] != (run.seq, run.status) for run in covered):
-            return None
-        run_metadata = [metadata for _seq, _status, metadata in stored.values()]
+        run_metadata = [decoded_mapping(metadata) for *_, metadata in stored]
         provenance: tuple[str | None, ...] = (None, None, None)
-        write = None
         if fold is not None:
+            if is_removed(connection, tables.names, session_id, fold.run.run_id, fold.run.parent_run_id):
+                return None
             live = fold.run.metadata
             # The running run's events count even when it later ends paused, cancelled, or failed.
             run_metadata.append(live)
             provenance = (fold.run.run_id, _encoded(source_event_ids(live)), _encoded(seen_event_ids(live)))
-            write = FoldWrite(_scope_session(session_id, scope_key), fold.run, fold.messages, fold.member_run_ids)
             # The summary row references the session row, which a first turn's fold may be the first to need.
-            ensure_session_row(connection, tables.names, write.session)
+            ensure_session_row(connection, tables.names, _scope_session(session_id, scope_key))
         event_ids, seen = summary_event_sets(run_metadata)
         (row_id,) = connection.execute(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, through, summary, event_ids, seen_event_ids, "  # noqa: S608
@@ -192,8 +184,8 @@ def append_summary(
                 *provenance,
             ),
         ).fetchone()
-        if write is not None:
-            store_fold(connection, tables.names, write, row_id)
+        if fold is not None:
+            store_fold(connection, tables.names, session_id, fold.run, fold.messages, fold.member_run_ids, row_id)
     return row_id
 
 
@@ -392,12 +384,6 @@ def _record_removed(connection: sqlite3.Connection, tables: _Tables, session_id:
         f"INSERT OR IGNORE INTO {tables.removed} (run_id, session_id) SELECT value, ? FROM json_each(?)",  # noqa: S608
         (session_id, json.dumps(sorted(run_ids))),
     )
-
-
-def _is_removed(connection: sqlite3.Connection, tables: _Tables, session_id: str, run: AnyRunRecord) -> bool:
-    """Return whether a cut removed ``run`` or its team run from session ``session_id``."""
-    removed = f"SELECT 1 FROM {tables.removed} WHERE session_id = ? AND run_id IN (?, ?)"  # noqa: S608
-    return connection.execute(removed, (session_id, run.run_id, run.parent_run_id)).fetchone() is not None
 
 
 def _holds(answered: Collection[str], seen: Collection[str], event_id: str, match: Literal["answered", "any"]) -> bool:

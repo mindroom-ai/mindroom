@@ -1120,12 +1120,12 @@ from = ["mindroom.session_storage.store_next"]
 expose = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
-    "FoldWrite",
     "SaveOutcome",
     "connect_conversation_database",
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",
+    "is_removed",
     "migrate_database",
     "next_seq",
     "persist_to",

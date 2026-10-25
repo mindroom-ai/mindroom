@@ -21,7 +21,6 @@ from mindroom.session_storage import store_next as store_module
 from mindroom.session_storage.schema import TableNames, log_schema_sql
 from mindroom.session_storage.store_next import (
     ConversationStore,
-    FoldWrite,
     persist_to,
     runs_without,
     store_fold,
@@ -247,7 +246,6 @@ def _fold(
     messages: list[Message],
     *,
     member_run_ids: tuple[str, ...] = (),
-    session: ConversationSession | None = None,
 ) -> int:
     """Append a fold summary row and store the fold beside it, in one transaction, as a fold's append does."""
     with store.transaction(write=True) as connection:
@@ -257,12 +255,7 @@ def _fold(
             (record.run_id,),
         ).lastrowid
         assert summary_id is not None
-        store_fold(
-            connection,
-            store.names,
-            FoldWrite(session=session or _session(), record=record, messages=messages, member_run_ids=member_run_ids),
-            summary_id,
-        )
+        store_fold(connection, store.names, "s1", record, messages, member_run_ids, summary_id)
     return summary_id
 
 
@@ -1099,9 +1092,9 @@ def test_a_fold_flags_the_member_runs_it_names_that_have_rows(store: Conversatio
     """Members that ended before the fold go with it; another member, and one an earlier fold took, keep theirs."""
     team = _team()
     _save(store, _member("m0", "t0"), _member("m1", "t0"), _member("m2", "t0"), session=team)
-    first = _fold(store, _team_run("t0", RunStatus.running), [], member_run_ids=("m2",), session=team)
+    first = _fold(store, _team_run("t0", RunStatus.running), [], member_run_ids=("m2",))
 
-    second = _fold(store, _team_run("t0", RunStatus.running), [], member_run_ids=("m0", "m2", "unstored"), session=team)
+    second = _fold(store, _team_run("t0", RunStatus.running), [], member_run_ids=("m0", "m2", "unstored"))
 
     assert dict(_query(store, "SELECT run_id, folded_by FROM code_sessions_log_runs WHERE parent_run_id = 't0'")) == {
         "m0": second,
