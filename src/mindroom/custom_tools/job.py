@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from agno.tools import Toolkit
 
-from mindroom.tool_jobs.consumption import JOB_FAILED_TEXT, consume_tool_job
+from mindroom.tool_jobs.consumption import consume_tool_job, job_failure_text
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
@@ -53,8 +53,7 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
     """Return a claimed outcome as this call's own result, raising its failure for the call to report."""
     value, payload = await consume_tool_job(runtime, job, claim)
     if job.status == "failed":
-        text = value.content if isinstance(value, ToolValue) else value
-        raise RuntimeError(str(payload.error or text or JOB_FAILED_TEXT))
+        raise RuntimeError(job_failure_text(value, payload))
     return value
 
 
@@ -81,7 +80,7 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> str
         if isinstance(value, ToolValue):
             collected.append(value)
             value = value.content
-        detail = payload.error or value or ""
+        detail = job_failure_text(value, payload) if job.status == "failed" else value or ""
         sections.append(f"{describe_job(job)} {job.status}:\n{detail}".rstrip())
     if not sections:
         return "No ended background jobs."

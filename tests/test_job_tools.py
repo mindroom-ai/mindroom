@@ -657,6 +657,27 @@ async def test_collect_returns_every_ended_job_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_collect_reads_a_job_saved_failed_without_error_text_as_failed(tmp_path: Path) -> None:
+    """Collect reports a failed job that older releases saved without error text as a failure that says so."""
+    # Both shapes releases through v2026.10.501 saved: the runtime's empty result alone, and the executor's payload.
+    call_failure = encode_result_payload(ToolResultPayload(value=None, error=""))
+    response, runtime, _tools, _owner, _rest = await _collect_in_a_run(
+        tmp_path,
+        {
+            "runtime_failure": BackgroundOutcome("failed", ""),
+            "call_failure": BackgroundOutcome("failed", "", result_payload=call_failure),
+        },
+    )
+    try:
+        assert set(str(response.tools[0].result).split("\n\n")) == {
+            "`runtime_failure` (tool_runtime_failure) failed:\nBackground tool job failed.",
+            "`call_failure` (tool_call_failure) failed:\nBackground tool job failed.",
+        }
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_collect_reports_the_others_when_one_result_cannot_be_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
