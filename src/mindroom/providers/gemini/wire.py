@@ -27,7 +27,7 @@ from google.genai.types import (
 )
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
+from mindroom.llm.media import IMAGE_HEADER_BYTES, canonical_mime_type, image_mime_type
 from mindroom.llm.messages import tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
@@ -73,6 +73,10 @@ _FORMAT_TO_MIME = {
     "webm": "video/webm",
     "pdf": "application/pdf",
 }
+# Text types outside ``text/``, which Gemini reads as plain text.
+_TEXT_FILE_MIME_TYPES = frozenset(
+    {"application/json", "application/xml", "application/yaml", "application/x-yaml", "application/x-javascript"},
+)
 # The finish reason of a candidate whose tool call the model malformed.
 _MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
 _FILTERED_FINISH_REASONS = frozenset(
@@ -134,6 +138,10 @@ async def format_contents(
             contents[-1]["parts"].extend(parts)
         elif parts:
             contents.append({"role": role, "parts": parts})
+    for content in contents:
+        # Gemini 4 rejects a last user turn that ends with anything but its function responses, as a request ending
+        # with a model turn, so the text and media that follow tool results go before them.
+        content["parts"].sort(key=lambda part: "function_response" in part)
     return contents, system_instruction
 
 
@@ -292,22 +300,45 @@ def _file_mime_type(file: File, name: str, declared: str | None = None) -> str:
     return file.mime_type or declared or mimetypes.guess_type(name)[0] or "application/pdf"
 
 
+def _sent_file_type(mime_type: str) -> str | None:
+    """Return the type a file of ``mime_type`` is sent as: plain text for any text type, None for a type Gemini rejects.
+
+    Gemini reads PDFs, text, images, audio, and video; it rejects other types, such as ``application/octet-stream``.
+    """
+    canonical = canonical_mime_type(mime_type) or ""
+    if canonical.startswith("text/") or canonical in _TEXT_FILE_MIME_TYPES:
+        return "text/plain"
+    if canonical == "application/pdf" or canonical.startswith(("image/", "audio/", "video/")):
+        return canonical
+    return None
+
+
+def _omitted_file(file: File, mime_type: str) -> dict[str, Any]:
+    return {"text": f"[Attachment omitted: {file.filename or 'file'} ({mime_type}) is a file type Gemini cannot read]"}
+
+
+def _typed_file_part(file: File, mime_type: str, part: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+    """Return ``part`` built for the type the file is sent as, or the note naming a file Gemini cannot read."""
+    sent_type = _sent_file_type(mime_type)
+    return _omitted_file(file, mime_type) if sent_type is None else part(sent_type)
+
+
 async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        return _inline(data, _file_mime_type(file, file.filename or ""))
+        return _typed_file_part(file, _file_mime_type(file, file.filename or ""), partial(_inline, data))
     if (url := file.url) is not None:
         # Gemini fetches a Cloud Storage file, or an HTTPS file of known type, itself; other files are downloaded.
-        if url.startswith("gs://"):
-            return _file_uri(url, _file_mime_type(file, url))
-        if url.startswith("https://") and file.mime_type:
-            return _file_uri(url, file.mime_type)
+        if url.startswith("gs://") or (url.startswith("https://") and file.mime_type):
+            return _typed_file_part(file, _file_mime_type(file, url), partial(_file_uri, url))
         data, declared = await _downloaded(url, "file", route)
-        return _inline(data, _file_mime_type(file, url, declared))
+        return _typed_file_part(file, _file_mime_type(file, url, declared), partial(_inline, data))
     if file.filepath is None:
         return None
     mime_type = _file_mime_type(file, file.filepath)
-    return await _local_part(file.filepath, "file", route, lambda _: mime_type)
+    if (sent_type := _sent_file_type(mime_type)) is None:
+        return _omitted_file(file, mime_type)
+    return await _local_part(file.filepath, "file", route, lambda _: sent_type)
 
 
 # ---------------------------------------------------------------------------
