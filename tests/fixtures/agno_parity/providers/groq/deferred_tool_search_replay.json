@@ -63,8 +63,8 @@
       "id": "openai/gpt-oss-120b",
       "provider": "groq"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [

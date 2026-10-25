@@ -16,8 +16,7 @@
       "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
       "provider": "llama_cpp"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "$defs": {
           "CronSchedule": {
@@ -193,9 +192,9 @@
         "title": "ScheduledWorkflow",
         "type": "object"
       },
-      "model": "mindroom.scheduling.tasks:ScheduledWorkflow",
-      "type": "pydantic"
+      "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
+    "portable_replay": null,
     "stream": false,
     "tool_choice": null,
     "tools": []

@@ -21,8 +21,8 @@
       "id": "gpt-6-astra",
       "provider": "azure"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": []

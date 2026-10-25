@@ -40,7 +40,7 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | `input.messages` | The request's messages, oldest first, each as `Message.to_dict()` without the storage-only `id`, `created_at`, `from_history`, and `stop_after_tool_call`, which no adapter reads. |
 | `input.tools` | The request's `ToolSpec` definitions, every field present and null where the tool sets none; the capture's `Function.to_dict()` dicts left out unset approval flags, which Agno read as false. |
 | `input.tool_choice` | `null` or `"none"`; the owned loop never forces a call. |
-| `input.response_format` | `null`, `{"type": "dict", "value": ...}`, or `{"type": "pydantic", "model": "module:Class", "json_schema": ...}`; it is the value Agno's agent resolves for the model's structured-output support, and replay fails when the class's JSON schema no longer equals `json_schema`. |
+| `input.output_schema` | `null`, or the request's output schema as `{"model": "module:Class", "json_schema": ...}`; the route renders it as its structured-output support asks, and replay fails when the class's JSON schema no longer equals `json_schema`. |
 | `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
 | `input.portable_replay` | `null`, or the `configure_portable_replay` setting for Responses models. |
 | `input.stream` | `true` for `aresponse_stream`, `false` for `aresponse`. |
@@ -60,7 +60,6 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 - Files are pretty-printed with sorted keys, except `request.body`, which keeps the key order the SDK sent; capture runs from that same key-sorted input, so a key order the body takes from the input is the sorted one.
 - The parity tests compare each request body's serialized text, so a reordered key fails parity, because chat templates and prompt caches see key order.
 - `cerebras` bodies list `messages` before `model`, as the OpenAI SDK that now sends them does, where the Cerebras SDK the capture used put `model` first.
-- Agno closed the Cerebras structured-output schema in place, so the capture recorded the closed schema as its input; `cerebras/structured_output` and `cerebras/structured_output_nested` hold the schema Agno received.
 - Request headers are dropped when they carry credentials (`authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, AWS `x-amz-*` signing headers) or SDK, platform, and transport details (`x-stainless-*`, `amz-sdk-*`, `user-agent`, `x-goog-api-client`, `host`, `content-length`, `accept-encoding`, `connection`); every other header, such as `anthropic-beta`, `anthropic-version`, `chatgpt-account-id`, and the Codex session headers, is kept.
 - The wall-clock `duration` and `time_to_first_token` are dropped from `parsed.metrics`.
 - uuid4 values Agno generates for tool calls sent without ids (every Ollama call, and the Gemini `tool_definitions` reply) become `<uuid4>`; a follow-up golden replays such a call with the id `parity-generated-call-<n>`.

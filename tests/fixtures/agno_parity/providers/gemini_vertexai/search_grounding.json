@@ -22,8 +22,8 @@
       "id": "gemini-3.1-pro-preview",
       "provider": "google"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [

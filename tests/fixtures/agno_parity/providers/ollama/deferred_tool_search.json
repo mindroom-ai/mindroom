@@ -23,8 +23,8 @@
       "id": "qwen3.8:27b",
       "provider": "ollama"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [

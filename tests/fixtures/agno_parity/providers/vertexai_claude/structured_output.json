@@ -20,13 +20,31 @@
       "id": "claude-sonnet-5-5",
       "provider": "vertexai_claude"
     },
-    "portable_replay": null,
-    "response_format": {
-      "type": "dict",
-      "value": {
-        "type": "json_object"
-      }
+    "output_schema": {
+      "json_schema": {
+        "description": "Structured output for routing decisions.",
+        "properties": {
+          "entity_name": {
+            "description": "The name of the agent or team that should respond",
+            "title": "Entity Name",
+            "type": "string"
+          },
+          "reasoning": {
+            "description": "Brief explanation of why this agent or team was chosen",
+            "title": "Reasoning",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_name",
+          "reasoning"
+        ],
+        "title": "_RoutingSuggestion",
+        "type": "object"
+      },
+      "model": "mindroom.routing:_RoutingSuggestion"
     },
+    "portable_replay": null,
     "stream": false,
     "tool_choice": null,
     "tools": []

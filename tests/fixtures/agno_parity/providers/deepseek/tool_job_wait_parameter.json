@@ -17,8 +17,8 @@
       "id": "deepseek-flash",
       "provider": "deepseek"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tool_jobs": {

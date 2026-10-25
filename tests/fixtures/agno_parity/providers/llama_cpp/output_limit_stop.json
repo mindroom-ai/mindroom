@@ -16,8 +16,8 @@
       "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
       "provider": "llama_cpp"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": false,
     "tool_choice": null,
     "tools": []

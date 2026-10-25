@@ -124,8 +124,8 @@
       "id": "claude-sonnet-5-5",
       "provider": "vertexai_claude"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [

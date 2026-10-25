@@ -16,8 +16,7 @@
       "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
       "provider": "llama_cpp"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "description": "Structured output for routing decisions.",
         "properties": {
@@ -39,9 +38,9 @@
         "title": "_RoutingSuggestion",
         "type": "object"
       },
-      "model": "mindroom.routing:_RoutingSuggestion",
-      "type": "pydantic"
+      "model": "mindroom.routing:_RoutingSuggestion"
     },
+    "portable_replay": null,
     "stream": false,
     "tool_choice": null,
     "tools": []

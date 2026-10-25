@@ -18,8 +18,7 @@
       "id": "gpt-6-astra",
       "provider": "openai"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "$defs": {
           "CronSchedule": {
@@ -195,9 +194,9 @@
         "title": "ScheduledWorkflow",
         "type": "object"
       },
-      "model": "mindroom.scheduling.tasks:ScheduledWorkflow",
-      "type": "pydantic"
+      "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
+    "portable_replay": null,
     "stream": false,
     "tool_choice": null,
     "tools": []

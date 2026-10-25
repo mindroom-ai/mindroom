@@ -17,8 +17,7 @@
       "id": "gemini-3.8-flash",
       "provider": "google"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "description": "Structured output for routing decisions.",
         "properties": {
@@ -40,9 +39,9 @@
         "title": "_RoutingSuggestion",
         "type": "object"
       },
-      "model": "mindroom.routing:_RoutingSuggestion",
-      "type": "pydantic"
+      "model": "mindroom.routing:_RoutingSuggestion"
     },
+    "portable_replay": null,
     "stream": false,
     "tool_choice": null,
     "tools": []

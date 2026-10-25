@@ -17,9 +17,9 @@
       "id": "gemini-3.8-flash",
       "provider": "google"
     },
+    "output_schema": null,
     "portable_replay": null,
     "provider_tools_disabled": true,
-    "response_format": null,
     "stream": false,
     "tool_choice": "none",
     "tools": [

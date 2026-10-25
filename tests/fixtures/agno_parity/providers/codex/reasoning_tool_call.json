@@ -20,8 +20,8 @@
       "id": "gpt-6.1-sol",
       "provider": "codex"
     },
+    "output_schema": null,
     "portable_replay": true,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [

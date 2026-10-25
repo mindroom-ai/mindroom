@@ -21,13 +21,185 @@
       "id": "anthropic.claude-sonnet-5-5",
       "provider": "bedrock_claude"
     },
-    "portable_replay": null,
-    "response_format": {
-      "type": "dict",
-      "value": {
-        "type": "json_object"
-      }
+    "output_schema": {
+      "json_schema": {
+        "$defs": {
+          "CronSchedule": {
+            "description": "Standard cron-like schedule definition.",
+            "properties": {
+              "minute": {
+                "default": "*",
+                "description": "0-59, *, */5, or comma-separated",
+                "title": "Minute",
+                "type": "string"
+              },
+              "hour": {
+                "default": "*",
+                "description": "0-23, *, */2, or comma-separated",
+                "title": "Hour",
+                "type": "string"
+              },
+              "day": {
+                "default": "*",
+                "description": "1-31, *, or comma-separated",
+                "title": "Day",
+                "type": "string"
+              },
+              "month": {
+                "default": "*",
+                "description": "1-12, *, or comma-separated",
+                "title": "Month",
+                "type": "string"
+              },
+              "weekday": {
+                "default": "*",
+                "description": "0-6 (0=Sunday), *, or comma-separated",
+                "title": "Weekday",
+                "type": "string"
+              }
+            },
+            "title": "CronSchedule",
+            "type": "object"
+          }
+        },
+        "description": "Structured representation of a scheduled task or workflow.",
+        "properties": {
+          "schedule_type": {
+            "enum": [
+              "once",
+              "cron"
+            ],
+            "title": "Schedule Type",
+            "type": "string"
+          },
+          "is_conditional": {
+            "default": false,
+            "title": "Is Conditional",
+            "type": "boolean"
+          },
+          "execute_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execute At"
+          },
+          "cron_schedule": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CronSchedule"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "history_limit": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
+            "title": "History Limit"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Configured model alias for this scheduled run only",
+            "title": "Model"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created By"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Thread Id"
+          },
+          "room_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Room Id"
+          },
+          "new_thread": {
+            "default": false,
+            "title": "New Thread",
+            "type": "boolean"
+          },
+          "silent": {
+            "default": false,
+            "title": "Silent",
+            "type": "boolean"
+          },
+          "pre_approved_call": {
+            "default": false,
+            "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+            "title": "Pre Approved Call",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schedule_type",
+          "message",
+          "description"
+        ],
+        "title": "ScheduledWorkflow",
+        "type": "object"
+      },
+      "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
+    "portable_replay": null,
     "stream": false,
     "tool_choice": null,
     "tools": []

@@ -93,8 +93,8 @@
       "history_generation": "",
       "threshold": 60000
     },
+    "output_schema": null,
     "portable_replay": true,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": []

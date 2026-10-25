@@ -42,8 +42,8 @@
       "id": "k3",
       "provider": "kimi"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": []
