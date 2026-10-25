@@ -1411,7 +1411,7 @@ async def test_a_team_request_logs_the_messages_its_leader_was_sent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A team request's logged full prompt is the text of the leader's messages as sent, as an agent request's is."""
+    """A team request's logged full prompt is the text of the leader's messages as sent."""
     logged: list[object] = []
 
     async def log_full_prompt() -> None:
