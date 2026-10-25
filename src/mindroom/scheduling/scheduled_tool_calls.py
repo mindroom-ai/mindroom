@@ -218,10 +218,13 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
     except Exception as error:
         await record_scheduled_call_outcome(task_id, "failed")
         return f"❌ Scheduled call `{task_id}` failed: {failure_text(error)}"
+    if isinstance(result, ToolOutcome) and result.is_error:
+        # The policy answers a call a plugin hook declined with a failed outcome: the call never ran. This runner's
+        # caller, and the after-call hooks around it, receive the decline's text as the runner's own result.
+        await record_scheduled_call_outcome(task_id, "failed")
+        return result.content
     await record_scheduled_call_outcome(task_id, "completed")
-    # The policy answers a call a plugin hook declined with a failed outcome; this runner's caller, and the after-call
-    # hooks around it, receive its text as the runner's own result.
-    return result.content if isinstance(result, ToolOutcome) and result.is_error else result
+    return result
 
 
 def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition

@@ -1997,7 +1997,10 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """The runner's own caller and its after-call hooks receive the decline's text, never the policy's failed outcome."""
+    """The runner's own caller and its after-call hooks receive the decline's text, never the policy's failed outcome.
+
+    The call never ran, so it is journaled failed, as a call that raised is.
+    """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
@@ -2028,6 +2031,7 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
         assert result == declined
         assert runs == []
         assert observed == [("post_slack_message", declined, True), ("run_scheduled_call", declined, False)]
+        assert await _binding_column(journal, "outcome") == "failed"
     finally:
         await manager.shutdown()
 
