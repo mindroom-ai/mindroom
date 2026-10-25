@@ -1568,18 +1568,22 @@ async def test_a_realtime_tool_whose_toolkit_fails_to_connect_answers_with_its_f
     assert connect is not None
     attempts: list[str] = []
 
-    async def failing_once() -> Callable[[], Awaitable[None]] | None:
+    async def failing_twice() -> Callable[[], Awaitable[None]] | None:
         attempts.append("connect")
         if len(attempts) == 1:
             msg = "server unreachable"
             raise ConnectionError(msg)
+        if len(attempts) == 2:
+            raise TimeoutError
         return await connect()
 
-    build = replace(build, spec=replace(build.spec, toolkits=(replace(toolkit, connect=failing_once),)))
+    build = replace(build, spec=replace(build.spec, toolkits=(replace(toolkit, connect=failing_twice),)))
     tooling = await _call_tools_over(build, tmp_path, monkeypatch)
     [tool] = tooling.tools
 
     assert await tool({"value": "a"}) == "Tool lookup failed: server unreachable"
+    # An exception without text still tells the voice model what failed.
+    assert await tool({"value": "a"}) == "Tool lookup failed: TimeoutError"
     assert await tool({"value": "b"}) == "found b"
     assert log == ["server connect"]
     assert tooling.close is not None

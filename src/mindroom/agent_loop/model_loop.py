@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_loop.tools import (
     PlannedCall,
     dispatch_tool_calls,
+    failed_answer,
     media_follow_up,
     plan_tool_batch,
     tool_result_message,
@@ -338,26 +339,20 @@ async def _answer_resumed(
         elif requirement.confirmation is False:
             execution.is_error = True
             execution.requires_confirmation = False
-            results.append(_rejection_message(requirement))
+            results.append(
+                failed_answer(
+                    execution.tool_call_id,
+                    execution.tool_name,
+                    requirement.denial_note,
+                    tool_args=execution.tool_args,
+                    stop_after_tool_call=execution.stop_after_call,
+                ),
+            )
         if requirement.external_execution_result is not None:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
     progress.stopped = await _answer_batch(state.messages, results, hooks.on_resume_entry)
     progress.paused = _waits_for_decision(state.record)
-
-
-def _rejection_message(requirement: RunRequirement) -> Message:
-    """Return the tool message that answers a denied call with its denial note."""
-    execution = requirement.tool_execution
-    return Message(
-        role="tool",
-        content=requirement.denial_note,
-        tool_call_id=execution.tool_call_id,
-        tool_name=execution.tool_name,
-        tool_args=execution.tool_args,
-        tool_call_error=True,
-        stop_after_tool_call=execution.stop_after_call,
-    )
 
 
 def _waits_for_decision(record: AnyRunRecord) -> bool:

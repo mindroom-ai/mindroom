@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.failure_text import failure_text
 from mindroom.tool_system.agno_toolkits import (
     StreamCollector,
     framework_arguments,
@@ -295,14 +296,14 @@ async def execute_tool_call(
 ) -> ToolOutcome:
     """Run one tool call as ``run_tool_call`` does and return what the model should read.
 
-    Any exception other than cancellation becomes a failed outcome whose content is the exception's text. The run
+    Any exception other than cancellation becomes a failed outcome whose content is its ``failure_text``. The run
     stops after the call when the function always stops it, or when this call returned an outcome that does, as
     minimal mode's Bash does after a control tool it ran.
     """
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
-        return ToolOutcome(content=str(error), stop_after_call=function.stop_after_call, is_error=True)
+        return ToolOutcome(content=failure_text(error), stop_after_call=function.stop_after_call, is_error=True)
     return ToolOutcome(
         content=value.content,
         images=value.images,

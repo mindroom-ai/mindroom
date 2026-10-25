@@ -242,6 +242,32 @@ async def test_a_provider_error_stores_an_error_record_with_the_error_text_and_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("store unavailable"), "store unavailable"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_failed_run_records_why_it_failed(error: Exception, text: str) -> None:
+    """A run that raises records the exception's text as its error and content, or its type name when it has none."""
+    records: list[RunRecord] = []
+
+    async def keep(record: RunRecord) -> None:
+        records.append(record)
+
+    async def fail() -> None:
+        raise error
+
+    model = ScriptedModel([[Await(fail)]])
+
+    with pytest.raises(type(error)):
+        async for _ in run_agent(spec(model), _prompt(), ctx=context(), persist=keep, request_template=EMPTY_REQUEST):
+            pass
+
+    [record] = records
+    assert (record.status, record.content, record.error) == (RunStatus.error, text, text)
+
+
+@pytest.mark.asyncio
 async def test_an_error_after_text_keeps_the_text_as_content() -> None:
     store = _Store()
 

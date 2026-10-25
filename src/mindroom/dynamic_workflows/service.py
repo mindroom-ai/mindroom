@@ -17,6 +17,7 @@ from mindroom.dynamic_workflows.validation import (
     validate_workflow_spec,
     workflow_runtime_seconds,
 )
+from mindroom.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -130,7 +131,7 @@ class DynamicWorkflowService:
                 self._spec_validator(spec)
             validate_workflow_input(spec, input_data)
         except Exception as exc:  # Persist preparation failures only after the run exists.
-            return self._store.fail_workflow_run(run, error=str(exc))
+            return self._store.fail_workflow_run(run, error=failure_text(exc))
         return run, spec
 
     def _execute_and_persist(
@@ -147,7 +148,7 @@ class DynamicWorkflowService:
                     participant_executor=self._participant_executor,
                 )
         except Exception as exc:  # Persist runtime failures from participant code.
-            return self._store.fail_workflow_run(run, error=str(exc))
+            return self._store.fail_workflow_run(run, error=failure_text(exc))
         return self._complete_or_fail(run, execution)
 
     async def _aexecute_and_persist(
@@ -177,14 +178,14 @@ class DynamicWorkflowService:
             self._store.fail_workflow_run(run, error="Workflow run was cancelled.")
             raise
         except Exception as exc:
-            return self._store.fail_workflow_run(run, error=str(exc))
+            return self._store.fail_workflow_run(run, error=failure_text(exc))
         return self._complete_or_fail(run, execution)
 
     def _complete_or_fail(self, run: DynamicWorkflowRun, execution: object) -> DynamicWorkflowRun:
         try:
             return self._store.complete_workflow_run(run, execution)
         except Exception as exc:
-            return self._store.fail_workflow_run(run, error=str(exc))
+            return self._store.fail_workflow_run(run, error=failure_text(exc))
 
 
 @contextmanager

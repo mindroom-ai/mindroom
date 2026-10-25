@@ -452,6 +452,33 @@ async def test_tool_results_lead_the_user_turn_after_their_calls(tmp_path: Path,
     assert [message.role for message in messages[:6]] == ["user", "assistant", "tool", "user", "tool", "assistant"]
 
 
+@pytest.mark.asyncio
+async def test_a_tool_result_stored_as_a_list_keeps_its_blocks(tmp_path: Path) -> None:
+    """A result the Agno-era runtime stored as a list sends its typed blocks as they are and any other item as text."""
+    wire = Wire(json_reply([{"type": "text", "text": "Done."}]))
+    call = {"id": "call_list", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+    messages = [
+        Message(role="user", content="Look it up."),
+        Message(role="assistant", tool_calls=[call]),
+        Message(
+            role="tool",
+            tool_call_id="call_list",
+            tool_name="lookup",
+            content=[{"type": "text", "text": "first"}, "second"],
+        ),
+    ]
+
+    body = await _sent(route_provider("anthropic", tmp_path, wire), wire, messages)
+
+    assert _user_blocks(body, 1) == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "call_list",
+            "content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}],
+        },
+    ]
+
+
 # --- Tool definitions and foreign history --------------------------------------------------------------------
 
 

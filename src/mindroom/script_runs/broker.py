@@ -16,6 +16,7 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.script_runs.models import (
     ScriptCallRecord,
     ScriptCallState,
@@ -192,7 +193,7 @@ class _PreparedExecution:
 
 @dataclass(frozen=True, slots=True)
 class _ToolFailure:
-    """A tool call that raised; ``message`` is the exception's text."""
+    """A tool call that raised; ``message`` is the exception's ``failure_text``."""
 
     message: str
 
@@ -539,7 +540,7 @@ class ScriptToolBroker:
                     if isinstance(result, BackgroundToolApprovalDenied)
                     else {
                         "kind": "tool_failure",
-                        "message": sanitize_failure_text(result.message or "Tool execution failed."),
+                        "message": sanitize_failure_text(result.message),
                         "retryable": False,
                     }
                 )
@@ -559,7 +560,11 @@ class ScriptToolBroker:
             return await self._publish_async(
                 call,
                 state=ScriptCallState.FAILED,
-                error={"kind": "call_rejected", "message": sanitize_failure_text(str(exc)), "retryable": False},
+                error={
+                    "kind": "call_rejected",
+                    "message": sanitize_failure_text(failure_text(exc)),
+                    "retryable": False,
+                },
             )
         except BaseException as exc:
             state = ScriptCallState.INDETERMINATE if execution_started else ScriptCallState.FAILED
@@ -567,7 +572,7 @@ class ScriptToolBroker:
             error = (
                 _INDETERMINATE_ERROR
                 if execution_started
-                else {"kind": kind, "message": sanitize_failure_text(str(exc)), "retryable": True}
+                else {"kind": kind, "message": sanitize_failure_text(failure_text(exc)), "retryable": True}
             )
             return await self._publish_async(call, state=state, error=error)
 
@@ -653,7 +658,7 @@ class ScriptToolBroker:
                 try:
                     return await run_tool_call(function, arguments, call_context, middleware=(policy,))
                 except Exception as error:
-                    return _ToolFailure(str(error))
+                    return _ToolFailure(failure_text(error))
 
         try:
             return await run_with_tool_execution_identity(

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.agent_loop.tools import failed_answer
 from mindroom.llm.errors import ModelOutputLimitError
-from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import AnswerToolCalls
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import Capabilities, StopReason
 
 logger = get_logger(__name__)
@@ -47,13 +48,7 @@ def output_limit_policy() -> AnswerToolCalls:
             raise ModelOutputLimitError(msg)
         logger.warning("tool_calls_cut_off_by_output_limit", cut_off_responses=cut_off_responses)
         return [
-            Message(
-                role="tool",
-                tool_call_id=call.get("id"),
-                tool_name=(call.get("function") or {}).get("name"),
-                content=CUT_OFF_TOOL_CALL_RESULT,
-                tool_call_error=True,
-            )
+            failed_answer(call.get("id"), (call.get("function") or {}).get("name"), CUT_OFF_TOOL_CALL_RESULT)
             for call in message.tool_calls or []
         ]
 

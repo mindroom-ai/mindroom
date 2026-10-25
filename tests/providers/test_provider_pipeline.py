@@ -805,6 +805,32 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_request_log_keeps_the_fields_a_wire_sends(tmp_path: Path) -> None:
+    """A tool result's name and failure flag, and replayed reasoning, are in the record, since wires send them."""
+    inner = _ScriptedProvider([[_turn()]])
+    request = ModelRequest(
+        messages=[
+            _user(),
+            Message(role="assistant", content="", reasoning_content="Check the city first."),
+            Message(
+                role="tool",
+                tool_call_id="call_1",
+                tool_name="get_weather",
+                content="No city",
+                tool_call_error=True,
+            ),
+        ],
+    )
+
+    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assistant, tool = record["messages"][1:]
+    assert assistant["reasoning_content"] == "Check the city first."
+    assert (tool["tool_name"], tool["tool_call_error"]) == ("get_weather", True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("deferred", "expected"),
     [(frozenset({"lookup_order", "archive_order"}), ["archive_order", "lookup_order"]), (frozenset(), [])],

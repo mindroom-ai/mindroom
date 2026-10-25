@@ -35,13 +35,8 @@ __all__ = ["RequestLog", "logged_stream"]
 
 logger = get_logger(__name__)
 
-# Message fields the request record leaves out.
-# TODO(simplify): the record leaves out `reasoning_content`, which the DeepSeek wire sends back and the Claude wire
-# replays as a signed thinking block, so their records omit part of the request. Keep it in the record. Operators
-# reading the request log would notice.
-_NON_API_MESSAGE_FIELDS = frozenset(
-    {"id", "reasoning_content", "tool_name", "tool_args", "tool_call_error", "stop_after_tool_call", "from_history"},
-)
+# Message fields the request record leaves out: none of them reaches any wire.
+_NON_API_MESSAGE_FIELDS = frozenset({"id", "tool_args", "stop_after_tool_call", "from_history"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

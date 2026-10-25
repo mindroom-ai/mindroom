@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Protocol
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
 from mindroom.agent_loop.tools import offered_functions, prepare_run_tools
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -381,9 +382,9 @@ async def _store_interrupted[R: AnyRunRecord](
     """End a cancelled (``error`` None) or failed run and store it before its ending propagates.
 
     Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
-    run records why in ``error``, redacted, which is what its caller reports; its stored content is the error's text
-    only when its model said nothing, kept as main stores it. The store finishes even if the waiter is cancelled
-    again, so a record the caller writes for the same run afterwards is never overwritten by this one.
+    run records its ``failure_text`` in ``error``, redacted, which is what its caller reports; its stored content is
+    that text only when its model said nothing, kept as main stores it. The store finishes even if the waiter is
+    cancelled again, so a record the caller writes for the same run afterwards is never overwritten by this one.
     """
     if error is None:
         _end(record, messages, started, RunStatus.cancelled)
@@ -395,9 +396,10 @@ async def _store_interrupted[R: AnyRunRecord](
                 tool.external_execution_required = False
     else:
         _end(record, messages, started, RunStatus.error)
-        record.error = redact_sensitive_text(str(error))
+        reason = failure_text(error)
+        record.error = redact_sensitive_text(reason)
         if not record.content:
-            record.content = str(error)
+            record.content = reason
     # TODO(simplify): a failed or cancelled approval resume stores its record over the paused run's row, as main does,
     # so that approval can no longer be resumed. Keep the paused row when a resume ends this way.
     # Users and stored data would notice: the approval could be retried. (#3075)

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.error_handling import is_model_safeguard_refusal
+from mindroom.failure_text import failure_text
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
 from mindroom.history.storage import (
@@ -817,7 +818,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 "Compaction summary chunk failed",
                 **attempt_fields,
                 duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
-                error=str(exc) or type(exc).__name__,
+                error=failure_text(exc),
             )
             if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
                 fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)

@@ -3483,6 +3483,31 @@ def test_mcp_manager_wraps_exception_group_with_inner_message(tmp_path: Path) ->
     assert "transport handshake failed" in str(wrapped)
 
 
+@pytest.mark.parametrize(
+    ("exc", "kind", "text"),
+    [
+        (TimeoutError(), MCPTimeoutError, "MCP operation timed out: TimeoutError"),
+        (ConnectionResetError(), MCPConnectionError, "MCP operation failed: ConnectionResetError"),
+        (
+            ExceptionGroup("unhandled errors in a TaskGroup", [ConnectionResetError()]),
+            MCPConnectionError,
+            "MCP operation failed: unhandled errors in a TaskGroup: ConnectionResetError",
+        ),
+    ],
+    ids=["timeout", "connection", "group"],
+)
+def test_mcp_manager_names_a_failure_without_text_by_its_type(
+    tmp_path: Path,
+    exc: Exception,
+    kind: type[Exception],
+    text: str,
+) -> None:
+    """A runtime failure without text reads as its exception's type name, never as a sentence ending in a colon."""
+    wrapped = MCPServerManager(_runtime_paths(tmp_path))._wrap_runtime_exception("demo", exc)
+
+    assert (type(wrapped), str(wrapped)) == (kind, text)
+
+
 @pytest.mark.asyncio
 async def test_mcp_manager_reconnect_notifies_when_catalog_changes(
     monkeypatch: pytest.MonkeyPatch,
