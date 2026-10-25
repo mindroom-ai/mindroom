@@ -21,6 +21,7 @@ from mindroom.tool_system.skills import (
     _configured_skill_file,
     build_skills_toolkit,
 )
+from mindroom.tool_system.tool_access import tool_definition
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
@@ -76,24 +77,9 @@ def _write_golden_workspace(tmp_path: Path, golden: dict[str, Any]) -> None:
         _write_file(_workspace(tmp_path) / relative_path, text)
 
 
-def _wire_tool(function: ToolFunction) -> dict[str, Any]:
-    """Return the request tool entry the prompt goldens record: Agno's ``Function.to_dict()`` in a function wrapper."""
-    spec = function.definition()
-    fields = {
-        "name": spec.name,
-        "description": spec.description,
-        "parameters": dict(spec.parameters),
-        "strict": spec.strict,
-        "requires_confirmation": spec.requires_confirmation,
-        "external_execution": spec.external_execution,
-        "approval_type": spec.approval_type,
-    }
-    return {"type": "function", "function": {key: value for key, value in fields.items() if value is not None}}
-
-
 def _golden_skill_tools(golden: dict[str, Any]) -> list[dict[str, Any]]:
     tools = golden["requests"][0]["tools"]
-    return [tool for tool in tools if tool["function"]["name"] in SKILL_FUNCTION_NAMES]
+    return [tool for tool in tools if tool["name"] in SKILL_FUNCTION_NAMES]
 
 
 @pytest.mark.parametrize(
@@ -102,13 +88,13 @@ def _golden_skill_tools(golden: dict[str, Any]) -> list[dict[str, Any]]:
     ids=["plain", "output-files"],
 )
 def test_skill_functions_equal_the_prompt_goldens(tmp_path: Path, scenario: str, output_files: bool) -> None:
-    """The adapted skill functions are the request tools Agno sent, with and without output-file wrapping."""
+    """The adapted skill functions are the golden's request tools, with and without output-file wrapping."""
     golden = _golden(scenario)
     _write_golden_workspace(tmp_path, golden)
 
     functions = adapt_toolkit(_build(tmp_path, output_files=output_files)).functions
 
-    assert [_wire_tool(function) for function in functions] == _golden_skill_tools(golden)
+    assert [tool_definition(function.definition()) for function in functions] == _golden_skill_tools(golden)
 
 
 def test_the_prompt_block_equals_the_prompt_golden(tmp_path: Path) -> None:

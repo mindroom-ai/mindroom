@@ -83,32 +83,21 @@
       ],
       "tools": [
         {
-          "type": "function",
-          "function": {
-            "name": "compact_context",
-            "description": "Request compaction before the next reply.",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+          "name": "compact_context",
+          "description": "Request compaction before the next reply.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "invite_router",
-            "description": "Invite router to current Matrix room.",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            },
-            "requires_confirmation": false,
-            "external_execution": false,
-            "approval_type": "mindroom_matrix_room_runtime"
+          "name": "invite_router",
+          "description": "Invite router to current Matrix room.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
           }
         }
       ],
@@ -174,32 +163,21 @@
       ],
       "tools": [
         {
-          "type": "function",
-          "function": {
-            "name": "compact_context",
-            "description": "Request compaction before the next reply.",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+          "name": "compact_context",
+          "description": "Request compaction before the next reply.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "invite_router",
-            "description": "Invite router to current Matrix room.",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            },
-            "requires_confirmation": false,
-            "external_execution": false,
-            "approval_type": "mindroom_matrix_room_runtime"
+          "name": "invite_router",
+          "description": "Invite router to current Matrix room.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
           }
         }
       ],
@@ -238,32 +216,21 @@
       ],
       "tools": [
         {
-          "type": "function",
-          "function": {
-            "name": "compact_context",
-            "description": "Request compaction before the next reply.",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+          "name": "compact_context",
+          "description": "Request compaction before the next reply.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "invite_router",
-            "description": "Invite router to current Matrix room.",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            },
-            "requires_confirmation": false,
-            "external_execution": false,
-            "approval_type": "mindroom_matrix_room_runtime"
+          "name": "invite_router",
+          "description": "Invite router to current Matrix room.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
           }
         }
       ],

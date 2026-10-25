@@ -33,9 +33,7 @@ async def test_the_production_team_turn_sends_every_golden_request(name: str, tm
     assert all(isinstance(message, Message) for call in run.calls for message in call.messages)
     # The leader's prompt is built once per turn and sent with both of its requests.
     leader_requests = [
-        call
-        for call in run.calls
-        if any(tool["function"]["name"].startswith("delegate_task_to_") for tool in call.tools or ())
+        call for call in run.calls if any(tool.name.startswith("delegate_task_to_") for tool in call.tools)
     ]
     assert len(leader_requests) == 2
     assert len({request.messages[0].content for request in leader_requests}) == 1

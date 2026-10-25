@@ -134,7 +134,7 @@ Each file has these keys:
 
 The recorder replaces the provider call, so it sees every request hook MindRoom wraps around that call, such as portable tool search, but not the provider's own wire conversion, which the `providers/` goldens pin.
 Messages are `Message.to_dict()` without the volatile `id`, `created_at`, and `metrics` keys, plus `"add_to_agent_memory": false` on transient context messages that are never stored.
-`tools` holds the formatted tool definitions in the order the request loop passed them to the provider call.
+`tools` holds each tool's model-visible definition, its `name`, `description`, and `parameters` as `tool_definition` (`tool_system/tool_access.py`) gives them, in the order the request loop passed them to the provider call; how each route formats them, approval flags included, is the provider goldens' to pin.
 `deferred_tool_names` lists, sorted, the tools Claude's wire hook sends with `defer_loading`; below the recorder, that hook also adds the server-side tool search entry and moves the deferred tools after the others, so on that path `tools` is not the wire order.
 It is empty when no tool is natively deferred, including on models whose deferred tools use portable tool search, which appears in `tools` itself.
 A pydantic `response_format` is recorded as `{"pydantic_model": <class name>, "json_schema": <model_json_schema()>}`; a dict format is recorded as passed.

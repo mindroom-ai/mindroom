@@ -69,659 +69,562 @@
       ],
       "tools": [
         {
-          "type": "function",
-          "function": {
-            "name": "add",
-            "description": "Add two numbers and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number"
-                },
-                "b": {
-                  "type": "number"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "add",
+          "description": "Add two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number"
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "cancel_schedule",
-            "description": "Cancel a scheduled task.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "task_id": {
-                  "type": "string"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "cancel_schedule",
+          "description": "Cancel a scheduled task.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "type": "string"
               },
-              "required": [
-                "task_id"
-              ]
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "task_id"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "divide",
-            "description": "Divide first number by second and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number"
-                },
-                "b": {
-                  "type": "number"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "divide",
+          "description": "Divide first number by second and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number"
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "edit_schedule",
-            "description": "Edit an existing scheduled task by replacing its timing and content.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "task_id": {
-                  "type": "string"
-                },
-                "request": {
-                  "type": "string"
-                },
-                "history_limit": {
-                  "anyOf": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "silent": {
-                  "anyOf": [
-                    {
-                      "type": "boolean"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "model": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "edit_schedule",
+          "description": "Edit an existing scheduled task by replacing its timing and content.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "type": "string"
               },
-              "required": [
-                "task_id",
-                "request"
-              ]
+              "request": {
+                "type": "string"
+              },
+              "history_limit": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "silent": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "task_id",
+              "request"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "exponentiate",
-            "description": "Raise first number to the power of the second number and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number"
-                },
-                "b": {
-                  "type": "number"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "exponentiate",
+          "description": "Raise first number to the power of the second number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number"
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "factorial",
-            "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "integer"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "factorial",
+          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer"
               },
-              "required": [
-                "n"
-              ]
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "invite_router",
-            "description": "Invite router to current Matrix room.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
-              },
-              "required": []
+          "name": "invite_router",
+          "description": "Invite router to current Matrix room.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false,
-            "approval_type": "mindroom_matrix_room_runtime"
+            "required": []
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "is_prime",
-            "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "integer"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "is_prime",
+          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer"
               },
-              "required": [
-                "n"
-              ]
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "list_schedules",
-            "description": "List all pending scheduled tasks in the current room/thread.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
-              },
-              "required": []
+          "name": "list_schedules",
+          "description": "List all pending scheduled tasks in the current room/thread.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": []
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "multiply",
-            "description": "Multiply two numbers and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number"
-                },
-                "b": {
-                  "type": "number"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "multiply",
+          "description": "Multiply two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number"
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "run_scheduled_call",
-            "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "task_id": {
-                  "type": "string"
-                },
-                "arguments_json": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "run_scheduled_call",
+          "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "type": "string"
               },
-              "required": [
-                "task_id"
-              ]
+              "arguments_json": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "task_id"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "run_shell_command",
-            "description": "Runs a shell command and returns the output or error.\nThe last ``tail`` lines of stdout are returned; on non-zero exit, useful\nstdout is preserved together with stderr. A command still running after\n``timeout`` seconds is stopped with the processes it started, and its\noutput so far is returned. Without ``timeout``, a call that runs as part\nof a background job has no time limit, even while you wait for it; that\nincludes every call that accepts ``background_after`` and, with background\njobs on, a subagent's calls for its delegated task, whether or not its\ncaller waits for it. Any other command stops after 120 seconds. Set\n``timeout`` on a command that might not end on its own, such as a\nwatcher or a test run that can hang. Start a server or anything\nelse meant to keep running with ``nohup cmd > out.log 2>&1 &``, which\nkeeps running after the command ends; in the foreground it would keep the\ncall running until its job is cancelled.\n\nWith ``mindroom_output_path``, capture the complete supported output\nwithin the redirect byte limit instead of applying ``tail``; a stopped\ncommand saves no file.\n\nCommand strings use non-login Bash with the prepared execution environment.\nUse explicit ``[\"bash\", \"-lc\", command]`` only when login startup is needed.\n\nThe command runs in your agent workspace as its working directory (echoed as a `[cwd: ...]` first line in the result). Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` to the workspace, while local execution maps it to the host home.\n\nWorking method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead of printing everything, but compute results over the full input. Match filters against the extracted field value, not the whole line, and check them on a few sample records. When combining the lines or words of several text files, do not concatenate them raw: a file may lack its final newline, which merges its last word or record with the next file's first, so process each file separately or add a separator, and test with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When only one value must change, replace just that span and keep every other byte, including comments and spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run available tests, and recheck suspicious results such as a zero count.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "args": {
-                  "anyOf": [
-                    {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    },
-                    {
+          "name": "run_shell_command",
+          "description": "Runs a shell command and returns the output or error.\nThe last ``tail`` lines of stdout are returned; on non-zero exit, useful\nstdout is preserved together with stderr. A command still running after\n``timeout`` seconds is stopped with the processes it started, and its\noutput so far is returned. Without ``timeout``, a call that runs as part\nof a background job has no time limit, even while you wait for it; that\nincludes every call that accepts ``background_after`` and, with background\njobs on, a subagent's calls for its delegated task, whether or not its\ncaller waits for it. Any other command stops after 120 seconds. Set\n``timeout`` on a command that might not end on its own, such as a\nwatcher or a test run that can hang. Start a server or anything\nelse meant to keep running with ``nohup cmd > out.log 2>&1 &``, which\nkeeps running after the command ends; in the foreground it would keep the\ncall running until its job is cancelled.\n\nWith ``mindroom_output_path``, capture the complete supported output\nwithin the redirect byte limit instead of applying ``tail``; a stopped\ncommand saves no file.\n\nCommand strings use non-login Bash with the prepared execution environment.\nUse explicit ``[\"bash\", \"-lc\", command]`` only when login startup is needed.\n\nThe command runs in your agent workspace as its working directory (echoed as a `[cwd: ...]` first line in the result). Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` to the workspace, while local execution maps it to the host home.\n\nWorking method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead of printing everything, but compute results over the full input. Match filters against the extracted field value, not the whole line, and check them on a few sample records. When combining the lines or words of several text files, do not concatenate them raw: a file may lack its final newline, which merges its last word or record with the next file's first, so process each file separately or add a separator, and test with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When only one value must change, replace just that span and keep every other byte, including comments and spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run available tests, and recheck suspicious results such as a zero count.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "args": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
                       "type": "string"
                     }
-                  ],
-                  "description": "The command to run as a shell command string or a list of argv strings."
-                },
-                "tail": {
-                  "type": "integer",
-                  "description": "The number of lines to return from the output."
-                },
-                "timeout": {
-                  "anyOf": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Seconds after which the command is stopped; null uses the default limit."
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "description": "The command to run as a shell command string or a list of argv strings."
               },
-              "required": [
-                "args"
-              ],
-              "additionalProperties": false
+              "tail": {
+                "type": "integer",
+                "description": "The number of lines to return from the output."
+              },
+              "timeout": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Seconds after which the command is stopped; null uses the default limit."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "args"
+            ],
+            "additionalProperties": false
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "schedule",
-            "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "request": {
-                  "type": "string"
-                },
-                "new_thread": {
-                  "type": "boolean"
-                },
-                "history_limit": {
-                  "anyOf": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "silent": {
-                  "anyOf": [
-                    {
-                      "type": "boolean"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "model": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "schedule",
+          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "request": {
+                "type": "string"
               },
-              "required": [
-                "request",
-                "new_thread"
-              ]
+              "new_thread": {
+                "type": "boolean"
+              },
+              "history_limit": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "silent": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "request",
+              "new_thread"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "schedule_tool_call",
-            "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "tool_name": {
-                  "type": "string"
-                },
-                "arguments_json": {
-                  "type": "string"
-                },
-                "execute_at": {
-                  "type": "string"
-                },
-                "description": {
-                  "type": "string"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "schedule_tool_call",
+          "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "tool_name": {
+                "type": "string"
               },
-              "required": [
-                "tool_name",
-                "arguments_json",
-                "execute_at",
-                "description"
-              ]
+              "arguments_json": {
+                "type": "string"
+              },
+              "execute_at": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "tool_name",
+              "arguments_json",
+              "execute_at",
+              "description"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "square_root",
-            "description": "Calculate the square root of a number and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "number"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "square_root",
+          "description": "Calculate the square root of a number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "number"
               },
-              "required": [
-                "n"
-              ]
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "subtract",
-            "description": "Subtract second number from first and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number"
-                },
-                "b": {
-                  "type": "number"
-                },
-                "mindroom_output_path": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "default": null,
-                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-                }
+          "name": "subtract",
+          "description": "Subtract second number from first and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number"
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
             },
-            "strict": false,
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         }
       ],

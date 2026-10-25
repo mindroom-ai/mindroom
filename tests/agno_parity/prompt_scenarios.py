@@ -55,7 +55,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry
 from mindroom.providers.assistant_turn import stamp_model
-from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
@@ -74,6 +73,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.skills import agent_workspace_skills_root
+from mindroom.tool_system.tool_access import tool_definition
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from mindroom.topic_generator import generate_room_topic_ai
 from mindroom.voice.handler import _process_transcription
@@ -105,6 +105,7 @@ if TYPE_CHECKING:
         StreamEvent,
         StructuredOutput,
         ToolChoice,
+        ToolSpec,
     )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -167,7 +168,7 @@ class ModelCall:
     model_index: int
     stream: bool
     messages: list[OwnedMessage]
-    tools: list[dict[str, Any]] | None
+    tools: list[ToolSpec]
     tool_choice: ToolChoice | None
     # The goldens hold the format Agno's agent resolved for the route (``agno_response_format``).
     response_format: dict[str, Any] | type[BaseModel] | None
@@ -205,8 +206,7 @@ class Recorder:
             model_index=index,
             stream=request.stream,
             messages=deepcopy(list(request.messages)),
-            # The goldens hold Agno's formatted tools; the owned definition formats the same way, None omitted.
-            tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
+            tools=list(request.tools),
             tool_choice=request.tool_choice,
             response_format=agno_response_format(request.output_schema, adapter.capabilities.structured_output),
             deferred_tool_names=sorted(request.deferred_tools.names),
@@ -337,7 +337,7 @@ def call_dict(call: ModelCall) -> dict[str, Any]:
         "model": {"id": call.model_id, "provider": call.model_provider},
         "stream": call.stream,
         "messages": [message_dict(message) for message in call.messages],
-        "tools": call.tools,
+        "tools": [tool_definition(tool) for tool in call.tools],
         "tool_choice": call.tool_choice,
         "response_format": response_format_dict(call.response_format),
         "deferred_tool_names": call.deferred_tool_names,
@@ -621,7 +621,7 @@ def _minimal_shell_turn(root: Path) -> AgentTurn:
 
 
 def _tool_names(call: ModelCall) -> set[str]:
-    return {tool["function"]["name"] for tool in call.tools or [] if "function" in tool}
+    return {tool.name for tool in call.tools}
 
 
 def _tool_call(call_id: str, name: str, arguments: dict[str, object]) -> dict[str, object]:

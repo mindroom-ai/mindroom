@@ -72,43 +72,40 @@
       ],
       "tools": [
         {
-          "type": "function",
-          "function": {
-            "name": "bash",
-            "description": "Run a Bash command and return its output.\nStart servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later\ncommands.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "command": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "The Bash command to run."
-                },
-                "timeout": {
-                  "anyOf": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Seconds after which the command and every process it started are stopped, returning the output\nso far; null stops it after 120 seconds, or never when it runs as part of a background job."
-                },
-                "tail": {
-                  "type": "integer",
-                  "description": "The number of output lines to return."
-                }
+          "name": "bash",
+          "description": "Run a Bash command and return its output.\nStart servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later\ncommands.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The Bash command to run."
               },
-              "required": [],
-              "additionalProperties": false
-            }
+              "timeout": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Seconds after which the command and every process it started are stopped, returning the output\nso far; null stops it after 120 seconds, or never when it runs as part of a background job."
+              },
+              "tail": {
+                "type": "integer",
+                "description": "The number of output lines to return."
+              }
+            },
+            "required": [],
+            "additionalProperties": false
           }
         }
       ],

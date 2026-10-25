@@ -21,8 +21,8 @@ from mindroom.knowledge.search import (
     _format_search_hits,
     _knowledge_search_tool_description,
 )
-from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.tool_access import tool_definition
 from tests.agno_parity.golden_files import render, sorted_keys
 from tests.agno_parity.knowledge_goldens import (
     EMBEDDERS_PATH,
@@ -140,16 +140,16 @@ def test_search_function_definition_is_the_golden_tool(memory_search_available: 
     )
     knowledge = AgentKnowledge(sources=(source,))
 
-    definition = function_definition(
+    definition = tool_definition(
         adapt_function(knowledge.search_function(memory_search_available=memory_search_available)).definition(),
     )
 
     prompt_golden = json.loads((GOLDEN_DIR.parent / "prompts" / "agent_openai_chat.json").read_text(encoding="utf-8"))
     [golden_tool] = [
-        tool["function"]
+        tool
         for request in prompt_golden["requests"]
         for tool in request["tools"]
-        if tool["function"]["name"] == KNOWLEDGE_SEARCH_TOOL_NAME
+        if tool["name"] == KNOWLEDGE_SEARCH_TOOL_NAME
     ][:1]
     expected_description = _knowledge_search_tool_description(
         (source.description,),

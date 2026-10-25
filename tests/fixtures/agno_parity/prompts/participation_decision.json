@@ -78,211 +78,165 @@
       ],
       "tools": [
         {
-          "type": "function",
-          "function": {
-            "name": "add",
-            "description": "Add two numbers and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) First number."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Second number."
-                }
+          "name": "add",
+          "description": "Add two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "divide",
-            "description": "Divide first number by second and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) Numerator."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Denominator."
-                }
+          "name": "divide",
+          "description": "Divide first number by second and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Numerator."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Denominator."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "exponentiate",
-            "description": "Raise first number to the power of the second number and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) Base."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Exponent."
-                }
+          "name": "exponentiate",
+          "description": "Raise first number to the power of the second number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Base."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Exponent."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "factorial",
-            "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "integer",
-                  "description": "(int) Number to calculate the factorial of, at most 1558."
-                }
-              },
-              "required": [
-                "n"
-              ]
+          "name": "factorial",
+          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "invite_router",
-            "description": "Invite router to current Matrix room.",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            },
-            "requires_confirmation": false,
-            "external_execution": false,
-            "approval_type": "mindroom_matrix_room_runtime"
+          "name": "invite_router",
+          "description": "Invite router to current Matrix room.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "is_prime",
-            "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "integer",
-                  "description": "(int) Number to check if prime, at most 10**12."
-                }
-              },
-              "required": [
-                "n"
-              ]
+          "name": "is_prime",
+          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "multiply",
-            "description": "Multiply two numbers and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) First number."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Second number."
-                }
+          "name": "multiply",
+          "description": "Multiply two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "square_root",
-            "description": "Calculate the square root of a number and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "number",
-                  "description": "(float) Number to calculate the square root of."
-                }
-              },
-              "required": [
-                "n"
-              ]
+          "name": "square_root",
+          "description": "Calculate the square root of a number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "subtract",
-            "description": "Subtract second number from first and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) First number."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Second number."
-                }
+          "name": "subtract",
+          "description": "Subtract second number from first and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         }
       ],
@@ -318,211 +272,165 @@
       ],
       "tools": [
         {
-          "type": "function",
-          "function": {
-            "name": "add",
-            "description": "Add two numbers and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) First number."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Second number."
-                }
+          "name": "add",
+          "description": "Add two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "divide",
-            "description": "Divide first number by second and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) Numerator."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Denominator."
-                }
+          "name": "divide",
+          "description": "Divide first number by second and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Numerator."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Denominator."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "exponentiate",
-            "description": "Raise first number to the power of the second number and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) Base."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Exponent."
-                }
+          "name": "exponentiate",
+          "description": "Raise first number to the power of the second number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Base."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Exponent."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "factorial",
-            "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "integer",
-                  "description": "(int) Number to calculate the factorial of, at most 1558."
-                }
-              },
-              "required": [
-                "n"
-              ]
+          "name": "factorial",
+          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "invite_router",
-            "description": "Invite router to current Matrix room.",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            },
-            "requires_confirmation": false,
-            "external_execution": false,
-            "approval_type": "mindroom_matrix_room_runtime"
+          "name": "invite_router",
+          "description": "Invite router to current Matrix room.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "is_prime",
-            "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "integer",
-                  "description": "(int) Number to check if prime, at most 10**12."
-                }
-              },
-              "required": [
-                "n"
-              ]
+          "name": "is_prime",
+          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "multiply",
-            "description": "Multiply two numbers and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) First number."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Second number."
-                }
+          "name": "multiply",
+          "description": "Multiply two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "square_root",
-            "description": "Calculate the square root of a number and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "n": {
-                  "type": "number",
-                  "description": "(float) Number to calculate the square root of."
-                }
-              },
-              "required": [
-                "n"
-              ]
+          "name": "square_root",
+          "description": "Calculate the square root of a number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "n"
+            ]
           }
         },
         {
-          "type": "function",
-          "function": {
-            "name": "subtract",
-            "description": "Subtract second number from first and return the result.",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "a": {
-                  "type": "number",
-                  "description": "(float) First number."
-                },
-                "b": {
-                  "type": "number",
-                  "description": "(float) Second number."
-                }
+          "name": "subtract",
+          "description": "Subtract second number from first and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
               },
-              "required": [
-                "a",
-                "b"
-              ]
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              }
             },
-            "requires_confirmation": false,
-            "external_execution": false
+            "required": [
+              "a",
+              "b"
+            ]
           }
         }
       ],
