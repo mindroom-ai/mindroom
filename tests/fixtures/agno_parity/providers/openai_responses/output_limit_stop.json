@@ -18,8 +18,8 @@
       "id": "gpt-6-astra",
       "provider": "openai"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": false,
     "tool_choice": null,
     "tools": []
@@ -27,7 +27,6 @@
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and",
-      "from_history": false,
       "provider_data": {
         "incomplete_reason": "max_output_tokens",
         "mindroom_model": {
@@ -35,18 +34,18 @@
           "provider": "OpenAI Responses"
         },
         "mindroom_response_stored": true,
+        "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
         "response_id": "resp_parity",
         "response_status": "incomplete"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 8,
       "total_tokens": 50
     },
-    "stop_reason": "incomplete"
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {

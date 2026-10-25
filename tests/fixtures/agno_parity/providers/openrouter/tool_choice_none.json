@@ -17,13 +17,14 @@
       "id": "z-ai/glm-5.3",
       "provider": "openrouter"
     },
+    "output_schema": null,
     "portable_replay": null,
     "provider_tools_disabled": true,
-    "response_format": null,
     "stream": false,
     "tool_choice": "none",
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -47,9 +48,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -69,14 +72,14 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
       "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
-      "from_history": false,
       "provider_data": {
         "finish_reason": "stop",
         "id": "chatcmpl-parity",
@@ -86,8 +89,7 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "cost": 0.00021,
@@ -95,7 +97,7 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": "stop"
+    "stop_reason": "end"
   },
   "request": {
     "body": {

@@ -26,6 +26,11 @@ from mindroom.config.main import (
     iter_config_validation_messages,
     validate_loaded_config_source,
 )
+from mindroom.config.personal_agents import (
+    expand_personal_agents,
+    personal_agent_roster_lock_path,
+    read_personal_agent_roster,
+)
 from mindroom.config.yaml_includes import (
     load_yaml_config_source_with_digests,
     partial_source_files,
@@ -33,6 +38,7 @@ from mindroom.config.yaml_includes import (
     source_files_fingerprint,
 )
 from mindroom.event_journal.opening import pending_event_journal_restart
+from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
@@ -371,28 +377,36 @@ def _save_config_to_file(
 ) -> str:
     """Save config to YAML file with deterministic ordering."""
     _raise_when_composed_from_includes(runtime_paths, committed_uses_includes)
-    config_path = runtime_paths.config_path
-    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     source = yaml.dump(
         config,
         default_flow_style=False,
         sort_keys=True,
         allow_unicode=True,
     )
-    tmp_path.write_text(source, encoding="utf-8")
-    constants.safe_replace(tmp_path, config_path)
+    _save_raw_config_source_to_file(source, runtime_paths, config)
     return _source_fingerprint(source)
 
 
 def _save_raw_config_source_to_file(
     source: str,
     runtime_paths: constants.RuntimePaths,
+    authored_payload: dict[str, Any],
 ) -> None:
-    """Save raw config source text to the active config path."""
+    """Save raw config source text to the active config path unless a personal agent took one of its names first.
+
+    Provisioning reads the saved config and reserves a name under the roster
+    lock, so checking and writing under it keeps a save validated before a
+    reservation from committing a name that collides with it.
+    """
     config_path = runtime_paths.config_path
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
-    tmp_path.write_text(source, encoding="utf-8")
-    constants.safe_replace(tmp_path, config_path)
+    with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
+        try:
+            expand_personal_agents(authored_payload, read_personal_agent_roster(runtime_paths))
+        except ValueError as exc:
+            raise ConfigRuntimeValidationError(str(exc)) from exc
+        tmp_path.write_text(source, encoding="utf-8")
+        constants.safe_replace(tmp_path, config_path)
 
 
 def persist_runtime_validated_config(
@@ -710,7 +724,7 @@ def _build_and_commit_raw_replacement(
             current = current_state.snapshot
             if current.revision != snapshot.revision or current.runtime_paths != snapshot.runtime_paths:
                 raise _stale_snapshot_error()  # noqa: TRY301 - HTTPException passes through unchanged.
-            _save_raw_config_source_to_file(source, runtime_paths=snapshot.runtime_paths)
+            _save_raw_config_source_to_file(source, snapshot.runtime_paths, validated_payload)
             current_state.snapshot = _published_snapshot(
                 current,
                 config_data=validated_payload,

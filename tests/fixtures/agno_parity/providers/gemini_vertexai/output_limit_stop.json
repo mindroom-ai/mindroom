@@ -21,8 +21,8 @@
       "id": "gemini-3.8-flash",
       "provider": "google"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": false,
     "tool_choice": null,
     "tools": []
@@ -30,22 +30,20 @@
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gemini-3.8-flash",
           "provider": "Google"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 8,
       "total_tokens": 50
     },
-    "stop_reason": null
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {

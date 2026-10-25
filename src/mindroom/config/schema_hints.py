@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 _MASKED_URL_USERINFO = re.compile(r"://[^/?#\s]*\*\*\*@")
 
 # The dashboard's configSchema.ts mirrors these kinds and the hint key.
-type _ReferenceKind = Literal["model", "agent", "room", "tool"]
+type _ReferenceKind = Literal["model", "agent", "personal_room_agent", "room", "tool"]
 _HINT_KEY = "x-mindroom"
 
 

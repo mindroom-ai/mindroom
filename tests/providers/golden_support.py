@@ -1,10 +1,12 @@
 """What every family's provider-golden harness shares: loading, the owned request, the pipeline, normalization.
 
 A golden (``tests/fixtures/agno_parity/providers/<family>/<scenario>.json``, format in the README beside them)
-pins one request as the Agno-backed provider layer sent it and the assistant message it parsed. Each family
+pins one request the owned adapter sends and the assistant message it parses, first captured from the Agno-backed
+provider layer and now regenerated from the owned one (``tests.agno_parity.regenerate_goldens``). Each family
 builds its own adapter from the golden's model config and answers its HTTP traffic with the canned reply; this
 module turns the golden input into the owned ``ModelRequest``, runs it through the production pipeline stages
-(portable tool search, media fallback, retry, request log), and normalizes what came out the way C1 recorded it.
+(portable tool search, media fallback, retry, request log), and records what came out as the goldens hold it: the
+wire request, and the reply as a provider-neutral turn (``regenerated_golden``).
 """
 
 from __future__ import annotations
@@ -31,16 +33,15 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.tool_policy import without_provider_tools
-from mindroom.routing import _RoutingSuggestion
-from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.tool_jobs.execution import project_definitions
+from tests.agno_parity.golden_files import STORAGE_ONLY_MESSAGE_KEYS, sorted_keys, turn_message
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
     import pytest
 
-    from mindroom.llm.provider import ModelProvider, NativeHistoryRoute, StopReason, StreamEvent
+    from mindroom.llm.provider import ModelProvider, NativeHistoryRoute, StreamEvent
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
 
@@ -84,13 +85,7 @@ _UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 GENERATED_ID = "<uuid4>"
 # A request as an httpx or an httpx2 client sent it; both packages give it the same fields.
 type SentRequest = httpx.Request | httpx2.Request
-_VOLATILE_MESSAGE_KEYS = ("id", "created_at")
 _TIMING_METRIC_KEYS = ("duration", "time_to_first_token")
-_STOP_KEYS = ("stop_reason", "finish_reason", "response_status")
-# The classes the JSON-schema structured-output goldens name, which record no module.
-_GOLDEN_SCHEMAS: dict[str, type[BaseModel]] = {
-    schema.__name__: schema for schema in (_RoutingSuggestion, ScheduledWorkflow)
-}
 # Every golden input key the harness turns into the owned request; a new key fails loudly instead of silently.
 _HANDLED_INPUT_KEYS = frozenset(
     {
@@ -98,9 +93,9 @@ _HANDLED_INPUT_KEYS = frozenset(
         "messages",
         "model_config",
         "native_compaction",
+        "output_schema",
         "portable_replay",
         "provider_tools_disabled",
-        "response_format",
         "stream",
         "tool_choice",
         "tool_jobs",
@@ -289,7 +284,6 @@ class Replay:
     request: dict[str, Any]
     parsed: dict[str, Any]
     events: list[StreamEvent]
-    stop_reason: StopReason | None
 
 
 def golden_paths(families: Sequence[str]) -> list[Path]:
@@ -305,14 +299,6 @@ def golden_id(path: Path) -> str:
 def load_golden(path: Path) -> dict[str, Any]:
     """Read one golden file."""
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def ordered_json(value: object) -> str:
-    """Return ``value`` as JSON text in its own key order, so comparing two of them compares key order too.
-
-    A golden's request body keeps the key order the SDK sent, which chat templates and prompt caches see.
-    """
-    return json.dumps(value, ensure_ascii=False, indent=2)
 
 
 def _json_roundtrip(value: object) -> Any:  # noqa: ANN401 - arbitrary JSON
@@ -345,49 +331,33 @@ def normalized_request(request: SentRequest) -> dict[str, Any]:
     }
 
 
-def normalized_parsed(message: Message) -> dict[str, Any]:
-    """Return the assistant message dict, its usage, and the stored stop reason, as C1 recorded them."""
-    message_dict = message.to_dict()
-    for key in _VOLATILE_MESSAGE_KEYS:
-        message_dict.pop(key, None)
-    metrics = message_dict.pop("metrics", {})
+def parsed_turn(completed: TurnCompleted) -> dict[str, Any]:
+    """Return a finished turn as the goldens record it: its message as a turn, its usage, and its stop reason."""
+    message = turn_message(completed.message)
+    metrics = message.pop("metrics", {})
     for key in _TIMING_METRIC_KEYS:
         metrics.pop(key, None)
-    provider_data = message.provider_data or {}
-    parsed = {
-        "message": message_dict,
-        "metrics": metrics,
-        "stop_reason": next((provider_data[key] for key in _STOP_KEYS if provider_data.get(key) is not None), None),
-    }
+    parsed = {"message": message, "metrics": metrics, "stop_reason": completed.stop_reason}
     return scrub_generated_ids(_json_roundtrip(parsed))
 
 
-def expected_parsed(golden: dict[str, Any]) -> dict[str, Any]:
-    """Return a golden's parsed reply as the owned message type stores it.
+def regenerated_golden(golden: dict[str, Any], replay: Replay) -> dict[str, Any]:
+    """Return the golden that ``replay`` of ``golden`` regenerates.
 
-    Agno's ``Message.citations`` was a view ``Message.to_dict()`` never stored, and the owned message has no such
-    field (``mindroom.llm.messages``), so the key is left out of the comparison. Claude's raw citations still
-    compare inside ``provider_data.content_blocks``; Gemini's grounding sources lived only in that view and in
-    the run's ``citations``, which nothing reads and the owned run records drop (``mindroom.llm.runs``).
+    The scenario, input, and canned reply stay as authored; the request is the one the owned adapter sent and the
+    reply the one it parsed. Every key is in sorted order except the request body's, which keeps the order the SDK
+    sent, because chat templates and prompt caches see it.
     """
-    parsed = deepcopy(golden["parsed"])
-    parsed["message"].pop("citations", None)
-    return parsed
-
-
-def expected_body(golden: dict[str, Any], sent: dict[str, Any]) -> dict[str, Any]:
-    """Return a golden's request body in the key order to compare ``sent`` with.
-
-    A golden whose input is a dict response format sent that dict in the capture input's sorted key order (the
-    fixture README), which no caller builds: the adapter renders the format from the schema, ``type`` first and the
-    properties in field order, as Agno's agent did. Its order is taken from ``sent`` when the value is equal.
-    """
-    body = deepcopy(golden["request"]["body"])
-    encoded = golden["input"]["response_format"]
-    dict_format = encoded is not None and encoded["type"] == "dict" and "response_format" in body
-    if dict_format and body["response_format"] == sent.get("response_format"):
-        body["response_format"] = sent["response_format"]
-    return body
+    request = sorted_keys({key: value for key, value in replay.request.items() if key != "body"})
+    request["body"] = replay.request["body"]
+    return {
+        "family": golden["family"],
+        "input": golden["input"],
+        "parsed": replay.parsed,
+        "request": dict(sorted(request.items())),
+        "response_raw": golden["response_raw"],
+        "scenario": golden["scenario"],
+    }
 
 
 def comparable_metrics(metrics: Any) -> dict[str, Any]:  # noqa: ANN401 - MessageMetrics
@@ -398,49 +368,17 @@ def comparable_metrics(metrics: Any) -> dict[str, Any]:  # noqa: ANN401 - Messag
     return values
 
 
-class _AnyOutput(BaseModel):
-    """An output schema for a JSON-mode golden: Agno's agent named none, and JSON-mode routes send none."""
-
-
 def output_schema_from_golden(encoded: dict[str, Any] | None) -> type[BaseModel] | None:
-    """Return the output schema whose response format the golden recorded, as Agno's agent resolved it for the route.
-
-    A route with native structured output got the pydantic class, Cerebras a ``json_schema`` format naming the
-    class, and a JSON-mode route ``{"type": "json_object"}``, which names none.
-    """
+    """Return the output schema a golden's request asks for, which must still have the JSON schema it recorded."""
     if encoded is None:
         return None
-    if encoded["type"] == "pydantic":
-        module_name, _, class_name = encoded["model"].partition(":")
-        schema = getattr(import_module(module_name), class_name)
-        recorded = encoded["json_schema"]
-    elif encoded["value"] == {"type": "json_object"}:
-        return _AnyOutput
-    else:
-        recorded = encoded["value"]["json_schema"]["schema"]
-        schema = _GOLDEN_SCHEMAS[encoded["value"]["json_schema"]["name"]]
+    module_name, _, class_name = encoded["model"].partition(":")
+    schema = getattr(import_module(module_name), class_name)
     assert issubclass(schema, BaseModel)
-    if schema.model_json_schema() != recorded:
+    if schema.model_json_schema() != encoded["json_schema"]:
         msg = f"{schema.__name__} no longer matches the schema recorded in the golden"
         raise AssertionError(msg)
     return schema
-
-
-def tool_spec_from_dict(tool: dict[str, Any]) -> ToolSpec:
-    """Return the definition of one ``Function.to_dict()`` dict.
-
-    The capture rebuilt each tool with Agno's ``Function.from_dict``, which defaulted the approval flags to False,
-    so a golden tool without them stands for False; every other omitted field stays None.
-    """
-    return ToolSpec(
-        name=tool["name"],
-        description=tool.get("description"),
-        parameters=tool.get("parameters") or {},
-        strict=tool.get("strict"),
-        requires_confirmation=tool.get("requires_confirmation", False),
-        external_execution=tool.get("external_execution", False),
-        approval_type=tool.get("approval_type"),
-    )
 
 
 def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | None = None) -> ModelRequest:
@@ -453,7 +391,7 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
     """
     unhandled = set(case_input) - _HANDLED_INPUT_KEYS
     assert not unhandled, f"the harness does not know how to send golden input {sorted(unhandled)}"
-    tools = [tool_spec_from_dict(tool) for tool in case_input["tools"]]
+    tools = [ToolSpec(**tool) for tool in case_input["tools"]]
     if (tool_jobs := case_input.get("tool_jobs")) is not None:
         tools = list(project_definitions(tools, frozenset(tool_jobs["managed"])))
     if case_input.get("provider_tools_disabled"):
@@ -470,11 +408,13 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
     deferred = case_input["deferred_tool_search"]
     tool_choice = case_input["tool_choice"]
     assert tool_choice in (None, "none"), "the owned loop sends tool_choice only as None or 'none'"
+    stored = [sorted(set(message) & STORAGE_ONLY_MESSAGE_KEYS) for message in case_input["messages"]]
+    assert not any(stored), f"golden input messages are turns, without the storage-only keys {stored}"
     return ModelRequest(
         messages=[Message.from_dict(deepcopy(message)) for message in case_input["messages"]],
         tools=tools,
         tool_choice=tool_choice,
-        output_schema=output_schema_from_golden(case_input["response_format"]),
+        output_schema=output_schema_from_golden(case_input["output_schema"]),
         stream=case_input["stream"],
         deferred_tools=DeferredTools()
         if deferred is None
@@ -533,16 +473,4 @@ async def replay_through_pipeline(
     await recorded[0].aread()
     completed = events[-1]
     assert isinstance(completed, TurnCompleted), f"the stream ended with {completed!r}"
-    return Replay(
-        request=normalized_request(recorded[0]),
-        parsed=normalized_parsed(completed.message),
-        events=events,
-        stop_reason=completed.stop_reason,
-    )
-
-
-def expected_stop_reason(golden: dict[str, Any]) -> StopReason:
-    """Return the normalized stop reason a golden's reply ends with: cut off by the limit, a tool call, or done."""
-    if golden["scenario"].startswith("output_limit_stop"):
-        return "output_limit"
-    return "tool_use" if golden["parsed"]["message"].get("tool_calls") else "end"
+    return Replay(request=normalized_request(recorded[0]), parsed=parsed_turn(completed), events=events)

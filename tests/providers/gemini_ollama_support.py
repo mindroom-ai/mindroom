@@ -52,6 +52,11 @@ class Golden:
         """The pytest id."""
         return f"{self.family}/{self.scenario}"
 
+    @property
+    def path(self) -> Path:
+        """The golden's file."""
+        return FIXTURE_ROOT / self.family / f"{self.scenario}.json"
+
 
 def goldens() -> list[Golden]:
     """Return every golden of the Gemini, Gemini on Vertex AI, and Ollama routes."""

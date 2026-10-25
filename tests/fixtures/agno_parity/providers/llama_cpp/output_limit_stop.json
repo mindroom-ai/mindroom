@@ -16,8 +16,8 @@
       "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
       "provider": "llama_cpp"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": false,
     "tool_choice": null,
     "tools": []
@@ -25,7 +25,6 @@
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and",
-      "from_history": false,
       "provider_data": {
         "finish_reason": "length",
         "id": "chatcmpl-parity",
@@ -35,15 +34,14 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 8,
       "total_tokens": 50
     },
-    "stop_reason": "length"
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {

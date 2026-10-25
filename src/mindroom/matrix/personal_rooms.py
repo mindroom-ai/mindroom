@@ -41,7 +41,12 @@ from mindroom.matrix.personal_room_store import (
 from mindroom.matrix.room_power import privileged_creators, user_power_level
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix_identifiers import managed_room_alias_localpart
-from mindroom.requester_identity import is_human_requester_id, is_managed_entity_id, runtime_matrix_domain
+from mindroom.requester_identity import (
+    is_human_requester_id,
+    is_managed_entity_id,
+    resolve_human_requester_alias,
+    runtime_matrix_domain,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -101,8 +106,14 @@ class PersonalRoomService:
     _guest_removal_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     def _settings(self) -> PersonalRoomsConfig | None:
-        settings = self.runtime.config.personal_rooms
-        return settings if settings is not None and settings.agent == self.agent_name else None
+        """Return the settings this agent serves, directly or as one user's agent from the named template."""
+        config = self.runtime.config
+        settings = config.personal_rooms
+        if settings is None:
+            return None
+        instance = config.personal_agent_instance(self.agent_name)
+        served = self.agent_name if instance is None else instance.template
+        return settings if settings.agent == served else None
 
     def _client(self) -> nio.AsyncClient:
         client = self.runtime.client
@@ -124,10 +135,16 @@ class PersonalRoomService:
         )
 
     def _current_settings(self, user_id: str, source_room_id: str) -> PersonalRoomsConfig | None:
-        """Read current onboarding and access policy at an authority boundary."""
+        """Read current onboarding and access policy at an authority boundary; a user's own agent serves only them."""
         settings = self._settings()
+        config = self.runtime.config
+        instance = config.personal_agent_instance(self.agent_name)
         if (
             settings is None
+            or (
+                instance is not None
+                and resolve_human_requester_alias(user_id, config, self.runtime_paths) != instance.user_id
+            )
             or source_room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
             or not self._allowed(user_id, source_room_id)
         ):

@@ -839,14 +839,13 @@ _MESSAGE_ITEM = {
 
 @pytest.mark.asyncio
 async def test_a_non_streamed_response_keeps_its_reasoning_summary(tmp_path: Path) -> None:
-    """A helper call on the Responses route reads the reasoning summary; a stored response needs no reasoning copy."""
+    """A helper call on the Responses route reads the reasoning summary."""
     built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(_response(output=[_REASONING_ITEM, _MESSAGE_ITEM])))
 
     turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
 
     assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
     assert turn.message.provider_data["response_id"] == "resp_1"
-    assert "reasoning_output" not in turn.message.provider_data
 
 
 @pytest.mark.asyncio
@@ -1743,11 +1742,7 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
         runtime,
     ).capabilities
 
-    assert (gpt6.native_tool_search, gpt6.native_compaction, gpt6.continues_stored_responses) == (
-        True,
-        True,
-        True,
-    )
+    assert (gpt6.native_tool_search, gpt6.native_compaction) == (True, True)
     assert (gpt5.native_tool_search, gpt5.native_compaction) == (False, False)
     assert stored.native_compaction is False
     assert (proxied.native_tool_search, proxied.native_compaction) == (False, False)

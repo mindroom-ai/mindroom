@@ -19,12 +19,13 @@
       "id": "gpt-6.1-sol",
       "provider": "codex"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -48,7 +49,8 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
         "approval_type": "mindroom_policy",
@@ -67,9 +69,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": true
+        "requires_confirmation": true,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Run a task with another agent and return its answer.",
         "external_execution": true,
         "name": "run_subagent",
@@ -90,13 +94,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6.1-sol",
@@ -108,7 +112,6 @@
         "response_id": "resp_parity"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "call_id": "call_parity_invoice",
@@ -126,7 +129,7 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {
