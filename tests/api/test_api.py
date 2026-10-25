@@ -3418,7 +3418,7 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
                 "config": {"model": "nomic-embed-text", "host": "http://localhost:11434"},
             },
         },
-        "models": {"default": {"provider": "test", "id": "test-model-2"}},
+        "models": {"default": {"provider": "openai", "id": "test-model-2"}},
         "agents": {
             "new_agent": {
                 "display_name": "New Agent",
@@ -3451,7 +3451,7 @@ def test_save_config_writes_keys_in_alphabetical_order(test_client: TestClient, 
     agent = {"display_name": "Agent", "role": "Role", "tools": [], "instructions": [], "rooms": []}
     new_config = {
         "router": {"model": "default"},
-        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {"zeta": agent, "alpha": agent},
     }
 
@@ -3470,7 +3470,7 @@ def test_save_config_persists_unassigned_configured_rooms(
 ) -> None:
     """Dashboard-created rooms should survive save even before responders are assigned."""
     new_config = {
-        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {
             "assistant": {
                 "display_name": "Assistant",

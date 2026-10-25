@@ -28,6 +28,7 @@ from mindroom.credentials.manager import validate_service_name
 from mindroom.credentials.policy import credential_service_policy
 from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
+from mindroom.providers.names import PROVIDER_ROUTES, provider_route
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 
@@ -776,6 +777,15 @@ class ModelConfig(BaseModel):
         default=None,
         description="Provider prices in USD per million tokens, used to measure spend against budgets",
     )
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        """Reject a provider no route serves, so a misspelling fails config load instead of the model's first build."""
+        if provider_route(value) not in PROVIDER_ROUTES:
+            msg = f"Unknown provider '{value}': use one of {', '.join(sorted(PROVIDER_ROUTES))}"
+            raise ValueError(msg)
+        return value
 
     @field_validator("display_name")
     @classmethod

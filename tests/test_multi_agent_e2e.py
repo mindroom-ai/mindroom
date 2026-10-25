@@ -62,7 +62,7 @@ def _make_config(storage_path: Path) -> Config:
                     "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
                 },
                 teams={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         ),
         _runtime_paths(storage_path),

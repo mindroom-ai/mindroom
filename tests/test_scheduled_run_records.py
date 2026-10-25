@@ -31,7 +31,7 @@ def _config(*, agents: dict[str, AgentConfig], teams: dict[str, TeamConfig] | No
     return Config(
         agents=agents,
         teams=teams or {},
-        models={"default": ModelConfig(provider="test", id="test-model")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
 

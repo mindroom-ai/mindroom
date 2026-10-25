@@ -3412,6 +3412,7 @@ depends_on = [
     "mindroom.credentials.manager",
     "mindroom.matrix.identity",
     "mindroom.model_defaults",
+    "mindroom.providers.names",
     "mindroom.tool_system.worker_routing",
     "mindroom.config.schema_hints",
 ]

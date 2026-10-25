@@ -2175,7 +2175,7 @@ def _durable_response_bot(tmp_path: Path) -> AgentBot:
             },
             models={
                 "default": ModelConfig(
-                    provider="test",
+                    provider="openai",
                     id="test-model",
                 ),
             },
@@ -3335,7 +3335,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         orchestrator.config = old_config
 
@@ -3376,7 +3376,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
                     "rooms": ["lobby", "personal"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         write_config_yaml(new_config, orchestrator.config_path)
 
@@ -3424,7 +3424,7 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
     def agent_config(role: str) -> dict[str, object]:
         return {"display_name": role, "role": role, "model": "default", "rooms": ["lobby"]}
 
-    models = {"default": {"provider": "test", "id": "test-model"}}
+    models = {"default": {"provider": "openai", "id": "test-model"}}
     old_config = Config(agents={"general": agent_config("Old"), "coach": agent_config("Old")}, models=models)
     new_config = Config(agents={"general": agent_config("New"), "coach": agent_config("New")}, models=models)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))

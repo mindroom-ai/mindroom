@@ -262,8 +262,8 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         prompts={"INTERACTIVE_QUESTION_PROMPT": "UNSUPPORTED_INTERACTIVE_MARKER"},
         models={
-            "default": ModelConfig(provider="test", id="default-model"),
-            "alternate": ModelConfig(provider="test", id="alternate-model"),
+            "default": ModelConfig(provider="openai", id="default-model"),
+            "alternate": ModelConfig(provider="openai", id="alternate-model"),
         },
     )
     paths = _runtime_paths(tmp_path)

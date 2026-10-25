@@ -2652,7 +2652,7 @@ class TestAgentBot(AgentBotTestBase):
                             rooms=["!test:localhost"],
                         ),
                     },
-                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    models={"default": ModelConfig(provider="openai", id="test-model")},
                 ),
             ),
             tmp_path,
