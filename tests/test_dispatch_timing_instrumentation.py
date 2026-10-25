@@ -25,6 +25,7 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system import tool_hooks as tool_hooks_module
+from mindroom.tool_system.tool_function import ToolOutcome
 from tests.agent_tool_helpers import tool_policy
 
 if TYPE_CHECKING:
@@ -55,6 +56,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
             call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
+                tool_call_id="call-2",
             ).call,
         )
         yield ToolCompleted(
@@ -98,7 +100,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 "phase": "tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
-                "tool_call_id": None,
+                "tool_call_id": "call-2",
                 "show_tool_calls": True,
             },
         ),
@@ -318,7 +320,9 @@ async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch
         result = await bridge("read_file", next_func, {"path": "secret.txt"})
 
     assert next_func.await_count == 0
-    assert after_seen == [(True, result, 5.0)]
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert after_seen == [(True, result.content, 5.0)]
     bridge_finish = next(
         event_data
         for event_name, event_data in timing_events

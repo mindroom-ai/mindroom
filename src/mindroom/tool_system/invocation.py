@@ -10,7 +10,8 @@ itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
 ``current_tool_call()`` names the call being run to the middleware and the entrypoint below it, so a tool that needs
 its own call id reads it there instead of taking it as a parameter.
-``run_tool_call`` is the same execution for runners outside the loop that need the tool's own return value.
+``run_tool_call`` is the same execution for runners outside the loop that need the tool's own return value, and
+``client_tool_result`` reads that value for a runner that hands it to a client.
 """
 
 from __future__ import annotations
@@ -24,10 +25,17 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, tool_value
+from mindroom.failure_text import failure_text
+from mindroom.tool_system.agno_toolkits import (
+    StreamCollector,
+    framework_arguments,
+    model_arguments,
+    read_tool_value,
+    tool_value,
+)
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
 if TYPE_CHECKING:
@@ -87,14 +95,6 @@ class ToolCall:
     function: ToolFunction
     arguments: dict[str, Any]
     context: ToolCallContext
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ToolOutcome(ToolValue):
-    """What one tool call produced: the text the model reads (the error text on failure) and the tool's media."""
-
-    stop_after_call: bool = False
-    is_error: bool = False
 
 
 type ToolNext = Callable[[dict[str, Any]], Awaitable[object]]
@@ -249,8 +249,8 @@ async def run_tool_call(
 ) -> object:
     """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it returned.
 
-    Runners outside the model loop that hand the tool's own value onward (background scripts, the MCP gateway,
-    scheduled calls) use this; an exception the call raises propagates.
+    Runners outside the model loop that need the tool's own value use this; one that hands the value to a client reads
+    it through ``client_tool_result``. An exception the call raises propagates.
     Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
     running from its stored arguments is as clean as a freshly parsed one.
     """
@@ -263,6 +263,22 @@ async def run_tool_call(
         _CURRENT_CALL.reset(token)
 
 
+def client_tool_result(result: object) -> object:
+    """Return what a runner outside the model loop hands its client for a tool's own return value.
+
+    A ``ToolResult`` or ``ToolValue`` gives its text. When the tool produced media, the text goes under ``content``
+    beside ``attachments``, one reference per medium with its kind, its MIME type, and its URL when it has one, so
+    the media's bytes never reach the client. Any other value passes unchanged, for the runner to encode as JSON.
+    """
+    value = read_tool_value(result)
+    if value is None:
+        return result
+    attachments = [media_reference(kind, item) for kind, item in value.media()]
+    if not attachments:
+        return value.content
+    return {"content": value.content, "attachments": attachments}
+
+
 async def execute_tool_call(
     function: ToolFunction,
     arguments: Mapping[str, Any] | None,
@@ -272,14 +288,15 @@ async def execute_tool_call(
 ) -> ToolOutcome:
     """Run one tool call as ``run_tool_call`` does and return what the model should read.
 
-    Any exception other than cancellation becomes a failed outcome whose content is the exception's text. The run
-    stops after the call when the function always stops it, or when this call returned an outcome that does, as
-    minimal mode's Bash does after a control tool it ran.
+    Any exception other than cancellation becomes a failed outcome whose content is its ``failure_text``, and the call
+    fails too when it returned a failed outcome, as the tool-call policy answers a call a plugin hook declined and
+    minimal mode's Bash answers when its shell call failed. The run stops after the call when the function always
+    stops it, or when this call returned an outcome that does, as minimal mode's Bash does after a control tool it ran.
     """
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
-        return ToolOutcome(content=str(error), stop_after_call=function.stop_after_call, is_error=True)
+        return ToolOutcome(content=failure_text(error), stop_after_call=function.stop_after_call, is_error=True)
     return ToolOutcome(
         content=value.content,
         images=value.images,
@@ -287,6 +304,7 @@ async def execute_tool_call(
         videos=value.videos,
         files=value.files,
         stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
+        is_error=isinstance(value, ToolOutcome) and value.is_error,
     )
 
 
@@ -356,7 +374,7 @@ __all__ = [
     "ToolCallContext",
     "ToolMiddleware",
     "ToolNext",
-    "ToolOutcome",
+    "client_tool_result",
     "current_tool_call",
     "execute_tool_call",
     "parse_tool_arguments",

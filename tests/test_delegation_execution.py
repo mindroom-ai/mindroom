@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agents import _hide_unresumable_approval_functions, apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -39,7 +38,6 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore, persist_to
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.storage import quote_identifier
@@ -326,6 +324,100 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
 
 
 @pytest.mark.asyncio
+async def test_a_blocking_pause_shows_the_delegation_answered_before_it_as_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that pauses on its second child's approval shows its first delegation done, and the rest waiting."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    leader = ScriptedModel(
+        [
+            calls(
+                tool_call("run_subagent", "delegate-0", agent_name="code", task="Summarize"),
+                tool_call("run_subagent", "delegate-1", agent_name="code", task="Write report"),
+            ),
+        ],
+    )
+    code = ScriptedModel([answer("summary"), calls(tool_call("write_report", "same-call"))])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+
+    assert isinstance(paused, PausedAttempt)
+    assert report.written == []
+    [card] = paused.tools
+    assert [(entry.tool_call_id, entry.type) for entry in paused.tool_trace] == [
+        ("delegate-0", "tool_call_completed"),
+        ("delegate-1", "tool_call_started"),
+        (card.tool_call_id, "tool_call_started"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_call_gated_two_delegations_down_keeps_the_toolkit_of_the_agent_that_made_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader's card for a grandchild's gated call names the grandchild's toolkit, so the approved call runs."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    config.agents["code"].delegate_to = ["writer"]
+    config.agents["writer"] = AgentConfig(display_name="Writer", tools=["report"])
+    with_responder_access(config, "writer", users=[REQUESTER])
+    entity_ids(config, paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-1", agent_name="writer", task="Write it")), answer("code result")],
+    )
+    writer = ScriptedModel([calls(tool_call("write_report", "write-call")), answer("writer result")])
+    ScriptedAgents({"leader": leader, "code": code, "writer": writer}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        assert paused.toolkit_owners == {("writer", "write_report"): "report"}
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        call_id = str(state.pending_tools[0]["tool_call_id"])
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            _saved_approval_calls(state),
+            agent_name="leader",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={call_id: True},
+            denial_reasons={call_id: None},
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text.endswith("parent result")
+    assert report.written == ["written"]
+
+
+@pytest.mark.asyncio
 async def test_a_completed_sibling_keeps_its_result_when_the_policy_changes_before_the_next_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -582,8 +674,8 @@ def test_detached_delegate_retains_inline_execution() -> None:
         return f"{agent_name}: {task}"
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
-    assert _hide_unresumable_approval_functions(toolkit, Config(), registered_tool_name="delegate") is toolkit
-    assert not toolkit.async_functions["run_subagent"].external_execution
+    functions = gated_functions(toolkit, Config(), registered_tool_name="delegate", resumable=False)
+    assert not functions["run_subagent"].external_execution
 
 
 @pytest.mark.asyncio
@@ -1010,17 +1102,9 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
     config = _config(paths, child_tools=())
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=_leader_identity())
 
-    adapted = apply_tool_approval_capability(
-        adapt_toolkit(toolkit),
-        toolkit,
-        config,
-        registered_tool_name="delegate",
-        approvals_as_jobs=False,
-    )
-
     flags = {
         function.name: (function.external_execution, function.external_execution_silent)
-        for function in adapted.functions
+        for function in gated_functions(toolkit, config, registered_tool_name="delegate").values()
     }
     assert flags == {"run_subagent": (True, True), "continue_subagent": (True, True)}
 

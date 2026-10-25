@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
@@ -199,7 +200,7 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
     ):
         timed_out = any(isinstance(cause, _TRANSPORT_TIMEOUTS) for cause in chain)
         code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
-        return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code=code)
+        return ProviderUnavailable(failure_text(error), provider=provider, code=code)
     if any(isinstance(cause, google_auth.RefreshError) for cause in chain):
         return AuthenticationFailed(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
     for cause in chain:

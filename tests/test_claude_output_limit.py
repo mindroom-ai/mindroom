@@ -308,8 +308,10 @@ def test_each_run_gets_its_own_cut_off_retries() -> None:
     first, second = output_limit_policy(), output_limit_policy()
     for _ in range(2):
         [result] = first(_cut_off_call(), "output_limit") or []
-        assert (result.tool_call_id, result.content, result.tool_call_error) == (
+        assert (result.role, result.tool_call_id, result.tool_name, result.content, result.tool_call_error) == (
+            "tool",
             "toolu_cut",
+            "save_file",
             CUT_OFF_TOOL_CALL_RESULT,
             True,
         )

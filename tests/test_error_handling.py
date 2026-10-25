@@ -354,6 +354,16 @@ def test_generic_error() -> None:
     assert "Error: Something went wrong" in message
 
 
+def test_an_error_without_text_is_reported_by_its_type_name() -> None:
+    """An exception without text, such as one an operation raises bare, names its type instead of nothing."""
+    assert get_user_friendly_error_message(ConnectionResetError(), "bot") == "[bot] ⚠️ Error: ConnectionResetError"
+
+
+def test_a_bare_timeout_reads_as_a_timeout() -> None:
+    """A timeout raised without text is recognized by its type name, as one with text is by its words."""
+    assert get_user_friendly_error_message(TimeoutError(), "bot") == "[bot] ⏰ Request timed out. Please try again."
+
+
 def test_extract_provider_from_error() -> None:
     """Test provider extraction from exception module."""
     openai_err = OpenAIAuthError(message="test", response=_MOCK_RESPONSE, body=None)

@@ -19,8 +19,9 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
-from mindroom.agent_loop.tools import offered_functions, prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -207,9 +208,8 @@ def resume_request_template(template: ModelRequest) -> ModelRequest:
 
 def check_approved_tools_offered(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> None:
     """Refuse a resume with an approved call whose tool the spec no longer offers."""
-    offered = {function.name for _toolkit, function in offered_functions(spec)}
     for call in approved:
-        if call.tool_name not in offered:
+        if call.tool_name not in spec.functions:
             msg = f"Approved tool {call.tool_name!r} is no longer offered to agent {spec.id!r}"
             raise ValueError(msg)
 
@@ -239,8 +239,7 @@ def resumed_record[R: AnyRunRecord](paused: R) -> R:
     by_call = {
         requirement.tool_execution.tool_call_id: requirement.tool_execution
         for requirement in record.requirements
-        if requirement.tool_execution.tool_call_id is not None
-        and (requirement.member_agent_id is None or requirement.member_run_id == paused.run_id)
+        if requirement.member_agent_id is None or requirement.member_run_id == paused.run_id
     }
     record.tools = [by_call.get(tool.tool_call_id) or tool for tool in record.tools or []]
     return record
@@ -257,11 +256,7 @@ def decide_requirements(
 
     Anything but exact coverage of the waiting calls is refused before any decision is recorded.
     """
-    requirements = {
-        requirement.tool_execution.tool_call_id: requirement
-        for requirement in record.requirements or ()
-        if requirement.tool_execution.tool_call_id is not None
-    }
+    requirements = {requirement.tool_execution.tool_call_id: requirement for requirement in record.requirements or ()}
     waiting = [*(record.tools or ()), *(requirement.tool_execution for requirement in record.requirements or ())]
     confirmations = {tool.tool_call_id for tool in waiting if tool.requires_confirmation}
     externals = {tool.tool_call_id for tool in waiting if tool.external_execution_required}
@@ -317,7 +312,7 @@ async def drive_run[R: AnyRunRecord](
 ) -> AsyncIterator[RunEvent]:
     """Run ``entry`` and then the loop over ``messages``, ending the record exactly once however the run ends.
 
-    ``spec`` supplies the model, the tools (``prepare_run_tools``), and the tool-call limit; ``record`` is the agent
+    ``spec`` supplies the model, the tools (its ``functions``), and the tool-call limit; ``record`` is the agent
     or team run the loop fills; ``entry`` is work the run does before the loop (a team resume's paused members), and
     ``resumed`` holds a resume's decided requirements, which the loop answers before its first request. A run that
     ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
@@ -335,7 +330,7 @@ async def drive_run[R: AnyRunRecord](
         loop = run_model_loop(
             spec.model,
             messages,
-            prepare_run_tools(spec),
+            PreparedTools(functions=spec.functions),
             record=record,
             run=ctx,
             hooks=hooks,
@@ -381,9 +376,9 @@ async def _store_interrupted[R: AnyRunRecord](
     """End a cancelled (``error`` None) or failed run and store it before its ending propagates.
 
     Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
-    run records why in ``error``, redacted, which is what its caller reports; its stored content is the error's text
-    only when its model said nothing, kept as main stores it. The store finishes even if the waiter is cancelled
-    again, so a record the caller writes for the same run afterwards is never overwritten by this one.
+    run records its ``failure_text`` in ``error``, redacted, which is what its caller reports; its stored content is
+    that text only when its model said nothing, kept as main stores it. The store finishes even if the waiter is
+    cancelled again, so a record the caller writes for the same run afterwards is never overwritten by this one.
     """
     if error is None:
         _end(record, messages, started, RunStatus.cancelled)
@@ -395,9 +390,10 @@ async def _store_interrupted[R: AnyRunRecord](
                 tool.external_execution_required = False
     else:
         _end(record, messages, started, RunStatus.error)
-        record.error = redact_sensitive_text(str(error))
+        reason = failure_text(error)
+        record.error = redact_sensitive_text(reason)
         if not record.content:
-            record.content = str(error)
+            record.content = reason
     # TODO(simplify): a failed or cancelled approval resume stores its record over the paused run's row, as main does,
     # so that approval can no longer be resumed. Keep the paused row when a resume ends this way.
     # Users and stored data would notice: the approval could be retried. (#3075)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom import ai_runtime
@@ -21,7 +22,7 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import member_delegation_card, pending_call_slot
+from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
@@ -122,7 +123,7 @@ def _route_decisions(
     alone, and a call id two members share is refused rather than guessed at; a delegation's result names its member
     and call, which the resume checks against the calls the team waits for.
     """
-    waiting: dict[str | None, list[RunRequirement]] = {}
+    waiting: dict[str, list[RunRequirement]] = {}
     for requirement in persisted.requirements or ():
         if not requirement.is_resolved():
             waiting.setdefault(requirement.tool_execution.tool_call_id, []).append(requirement)
@@ -188,7 +189,10 @@ class TeamResume:
         for requirement in paused.requirements or ():
             key = (requirement.member_agent_id, requirement.tool_execution.tool_call_id)
             if requirement.member_run_id is not None and key in decided:
-                add_approval_receipt_reader(requirement.member_run_id)
+                add_approval_receipt_reader(
+                    requirement.member_run_id,
+                    partial(member_call_id, requirement.member_agent_id),
+                )
         session = self.storage.session
         # The leader's resume request: its stored system message, the summary and history ``plan`` replays, the rest.
         history, summary = replayed_history(session, self.storage.scope, self.built.history_settings, self.plan)
@@ -274,7 +278,7 @@ def drive_team_delegations(
     return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
-def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str | None]:
+def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str]:
     """Return the slot that shows the call ``requirement`` waits on and the call's id there, by ``pending_call_slot``."""
     member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
     if member_id is None:
@@ -430,7 +434,7 @@ async def continue_paused_team_run(
             configured_team_name=team_name,
         )
         toolkit_owners = tool_owners_by_agent(*members.builds)
-        native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
+        native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)
         presentation = TeamStreamPresentation.restore(
             config_names=member_names,
             show_tool_calls=show_tool_calls,

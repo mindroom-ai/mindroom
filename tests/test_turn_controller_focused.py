@@ -3208,7 +3208,7 @@ async def test_first_message_after_joining_waits_for_the_router_to_apply_the_joi
     )
     assert isinstance(join, nio.RoomMemberEvent)
     router_id = _entity_user_id(config, ROUTER_AGENT_NAME)
-    memberships.apply_member_event(config, runtime_paths_for(config), room.room_id, join, control_user_id=router_id)
+    memberships.apply_member_event(config, room.room_id, join, control_user_id=router_id)
 
     assert await validator.precheck_event(room, event) == _SENDER
 

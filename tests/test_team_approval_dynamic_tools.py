@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall
 from mindroom.event_journal.approval_continuations import ApprovalDecision
@@ -230,7 +231,7 @@ async def _exercise_team_member_assembly(
         monkeypatch.setattr("mindroom.teams.resume.required_approval_tool_names", required_resolver)
 
     def inspect_members(*, members: ResolvedExactTeamMembers, **_kwargs: object) -> None:
-        functions = {build.spec.id: set(build.tool_owners) for build in members.builds}
+        functions = {build.spec.id: {name for _agent, name in tool_owners_by_agent(build)} for build in members.builds}
         assert set(functions) == {"alpha", "beta"}
         assert "add" in functions["alpha"]
         assert "add" not in functions["beta"]

@@ -33,6 +33,7 @@ from mindroom.approval.tool_approval import (
     withdraw_scheduled_call_approval,
 )
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import record_system_usage
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -1399,7 +1400,7 @@ async def _parse_workflow_schedule(
     except Exception as e:
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
         return _WorkflowParseError(
-            error=f"Error parsing schedule: {e!s}",
+            error=f"Error parsing schedule: {failure_text(e)}",
             suggestion="Try a simpler format like 'Daily at 9am, check my email'",
         )
 
@@ -1559,7 +1560,9 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         with bound_log_context(**current_target.log_context):
             logger.exception("cron_task_failed", task_id=task_id)
             if workflow.room_id:
-                error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+                error_message = (
+                    f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
+                )
                 await scheduling_executor.send_scheduled_failure_notice(
                     client,
                     workflow,
@@ -1696,7 +1699,9 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             if approval_state == "armed":
                 await _withdraw_unsent_scheduled_call(task_id)
             if workflow.room_id:
-                error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+                error_message = (
+                    f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
+                )
                 await scheduling_executor.send_scheduled_failure_notice(
                     client,
                     workflow,

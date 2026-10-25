@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 from agno.tools import Toolkit
 
-from mindroom import ai_runtime, loop_hooks, response_runner, response_turn
+from mindroom import agents, ai_runtime, loop_hooks, response_runner, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store, initialize_approval_store
 from mindroom.approval.receipt import build_approval_receipt
@@ -32,10 +32,10 @@ from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
-from mindroom.hooks import EnrichmentItem, MessageEnvelope
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -44,14 +44,19 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
+from mindroom.teams.members import _as_member
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
+from tests.approval_continuation_helpers import carries_approval_receipt, receipt_call_ids, request_call_ids
 from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
@@ -80,6 +85,7 @@ from tests.team_turn_helpers import (
     rendered,
     squad_turn,
 )
+from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -87,8 +93,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import TeamBot
-    from mindroom.event_journal import MatrixDelivery
+    from mindroom.event_journal import ApprovalCall, MatrixDelivery
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 
@@ -532,6 +539,78 @@ async def test_a_member_s_calls_run_through_the_member_s_tool_call_policy(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("as_job", [False, True], ids=["inline", "tool-job"])
+async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    as_job: bool,
+) -> None:
+    """A plugin's tool hook on a member's call sees the member's tool runtime context and the turn's Matrix bindings.
+
+    The hook runs inside the member's tool-call policy, inline or in the managed job a call becomes, so the whole
+    policy runs as the member, as the tool itself does.
+    """
+    seen: list[tuple[str, str | None, bool]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(context: ToolBeforeCallContext) -> None:
+        runtime = get_tool_runtime_context()
+        seen.append(
+            (
+                context.agent_name,
+                runtime.agent_name if runtime is not None else None,
+                context.room_state_querier is not None,
+            ),
+        )
+
+    monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: [_plugin("member-policy", [before])])
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Touch it"), answer("Touched.", usage(50, 5))],
+        writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Done.")],
+    )
+    if not as_job:
+        await team.stream()
+    else:
+        team.config.background_tool_jobs.enabled = True
+        pin_background_tool_jobs(team.config, team.runtime_paths)
+        runtime = await tool_job_runtime(team.runtime_paths.storage_root)
+        register_background_runtime(team.runtime_paths, runtime)
+        try:
+            async with execution_resources():
+                await team.stream()
+        finally:
+            await runtime.shutdown()
+        [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+        assert (job.tool_name, job.status, job.owner.agent_name) == ("touch", "completed", "writer")
+
+    assert ProbeToolkit.calls == ["a"]
+    assert seen == [("writer", "writer", True)]
+
+
+@pytest.mark.asyncio
+async def test_the_member_step_runs_a_call_as_it_is_outside_a_matrix_turn() -> None:
+    """Without a tool runtime context, as in an OpenAI-compatible API turn, a member's call runs without one."""
+    seen: list[ToolRuntimeContext | None] = []
+
+    async def probe() -> str:
+        seen.append(get_tool_runtime_context())
+        return "ran"
+
+    function = ToolFunction(name="probe", description=None, parameters={"type": "object"}, entrypoint=probe)
+
+    result = await run_tool_call(
+        function,
+        {},
+        ToolCallContext(run_id="run-1", session_id=SESSION_ID, user_id=None),
+        middleware=(_as_member("writer", "writer-model"),),
+    )
+
+    assert (result, seen) == ("ran", [None])
+
+
+@pytest.mark.asyncio
 async def test_a_member_s_call_that_runs_as_a_tool_job_keeps_the_member_s_claude_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -773,6 +852,48 @@ async def test_a_resume_runs_each_member_on_the_model_its_pause_pinned(
     assert team.models["writer-model"].requests == []
 
 
+class _LeaderRoute:
+    """A native-history route that replays its own checkpoints whatever the request asks for."""
+
+    replay = NativeCompactionReplay(route="leader-route", threshold=None)
+
+    def native_compaction_settings(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str,
+        allow_authored: bool,
+    ) -> NativeCompactionReplay:
+        del threshold, history_generation, allow_authored
+        return self.replay
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_restores_the_leader_s_native_history_from_the_leader_s_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed leader requests carry the native history the leader's route restores, not a member's."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel(
+        [answer("The checker touched it.", usage(50, 5))],
+        native_history_route=_LeaderRoute(),
+    )
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    [leader_request] = team.models["default"].requests
+    assert leader_request.native_compaction == _LeaderRoute.replay
+    [member_request] = team.models["checker-model"].requests
+    assert member_request.native_compaction is None
+
+
 @pytest.mark.asyncio
 async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader_and_stores_it_in_neither(
     tmp_path: Path,
@@ -790,11 +911,10 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
     team.models["writer-model"] = ScriptedModel([answer("Polished.")])
     call = member_approval("call-touch", "dangerous")
-    receipt = build_approval_receipt(
-        (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),),
-    )
+    decided = (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),)
+    receipt = build_approval_receipt(decided)
 
-    with approval_receipt_context(receipt, run_id=raised.paused.run_id):
+    with approval_receipt_context(decided, run_id=raised.paused.run_id):
         await team.resume(raised.paused, approved=True, approvals=(call,))
 
     def receipt_roles(model: str) -> list[list[str]]:
@@ -843,11 +963,10 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
     )
     team.models["helper-model"] = ScriptedModel([answer("Helper found it.")])
     call = member_approval("call-touch", "dangerous")
-    receipt = build_approval_receipt(
-        (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),),
-    )
+    decided = (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),)
+    receipt = build_approval_receipt(decided)
 
-    with approval_receipt_context(receipt, run_id=paused.run_id):
+    with approval_receipt_context(decided, run_id=paused.run_id):
         result = await team.resume(paused, approved=True, approvals=(call,))
 
     def carries(model: str) -> list[bool]:
@@ -858,6 +977,50 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
     assert carries("default") == [True, False]
     assert carries("writer-model") == [False, False]
     assert carries("helper-model") == [False]
+
+
+@pytest.mark.asyncio
+async def test_each_approval_of_a_chained_team_approval_reaches_the_runs_it_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The checker reads each approval's receipt on its resume, and the leader reads the second approval's.
+
+    The checker's first approved call leads only to a second gated call, and the leader's first request comes after
+    the second approval. What a receipt covers is the response runner's to compose, so each approval here binds a
+    receipt of its own call alone.
+    """
+    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("Both touches were approved.")])
+    team.models["checker-model"] = ScriptedModel(
+        [calls(tool_call("touch", "call-touch-2", label="again")), answer("Touched twice.")],
+    )
+    approvals = (member_approval("call-touch", "dangerous"), member_approval("call-touch-2", "again"))
+    receipts = tuple(
+        build_approval_receipt((replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),))
+        for call in approvals
+    )
+
+    async def approve(attempt: PausedAttempt, call: ApprovalCall) -> CompletedApprovalRun | PausedAttempt:
+        decided = (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),)
+        with approval_receipt_context(decided, run_id=attempt.run_id):
+            return await team.resume(attempt, approved=True, approvals=(call,))
+
+    repaused = await approve(paused, approvals[0])
+    assert isinstance(repaused, PausedAttempt)
+    result = await approve(repaused, approvals[1])
+
+    def receipts_read(model: str) -> list[list[str]]:
+        """Return, per request ``model`` received, the receipts it carries."""
+        return [
+            [receipt for receipt in receipts if any(receipt in str(message.content) for message in request.messages)]
+            for request in team.models[model].requests
+        ]
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous", "again"]
+    assert receipts_read("checker-model") == [[receipts[0]], [receipts[1]]]
+    assert receipts_read("default") == [[receipts[1]]]
 
 
 @pytest.mark.asyncio
@@ -1837,15 +2000,16 @@ async def test_a_member_s_delegation_card_adds_no_marker_and_the_approved_reply_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("approval_rule", "helper", "helper_flags"),
+    ("approval_rule", "helper", "helper_flags", "caller"),
     [
         pytest.param(
             "touch",
             [calls(tool_call("touch", "call-helper", label="deep"), metrics=usage(5, 1)), answer("Dug deep.")],
             [False, True],
+            "helper-model",
             id="child-call",
         ),
-        pytest.param("run_subagent", [answer("Dug.")], [False], id="delegation-card"),
+        pytest.param("run_subagent", [answer("Dug.")], [False], "writer-model", id="delegation-card"),
     ],
 )
 async def test_a_member_continued_with_the_result_of_a_delegation_an_approval_decided_reads_the_receipt_once(
@@ -1854,12 +2018,15 @@ async def test_a_member_continued_with_the_result_of_a_delegation_an_approval_de
     approval_rule: str,
     helper: list[list[ScriptStep]],
     helper_flags: list[bool],
+    caller: str,
 ) -> None:
     """The member whose delegation the approval answers reads its receipt once, as the leader the card belongs to does.
 
     The approval decides the helper's call the writer's delegation waits on, or the card of the writer's delegation
     itself; the writer then continues with the helper's answer. A helper the approved card starts runs fresh and
-    never reads the receipt.
+    never reads the receipt. The run that made the decided call reads it under the id that run gave it, though its
+    card names it ``<delegation-id>:call-helper`` or ``writer:call-sub``; every other reader holds no such call and
+    reads the card's id.
     """
     team = squad_turn(
         tmp_path,
@@ -1874,21 +2041,76 @@ async def test_a_member_continued_with_the_result_of_a_delegation_an_approval_de
     paused = raised.value.paused
     _, _, state = _delegation_state(team)
     approvals = _saved_approval_calls(state)
-    receipt = build_approval_receipt(
-        tuple(replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True) for call in approvals),
+    decided = tuple(
+        replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True) for call in approvals
     )
 
-    with approval_receipt_context(receipt, run_id=paused.run_id):
+    with approval_receipt_context(decided, run_id=paused.run_id):
         result = await team.resume(paused, approved=True, approvals=approvals)
 
     def carries(model: str) -> list[bool]:
-        return [any(receipt in str(m.content) for m in r.messages) for r in team.models[model].requests]
+        return [carries_approval_receipt(request) for request in team.models[model].requests]
 
     assert isinstance(result, CompletedApprovalRun)
     # Each model's fresh request, then its first request after the approval.
     assert carries("helper-model") == helper_flags
     assert carries("writer-model") == [False, True]
     assert carries("default") == [False, True]
+    [card_id] = [call.tool_call_id for call in approvals]
+    own_id = card_id.rpartition(":")[2]
+    for model in dict.fromkeys((caller, "writer-model", "default")):
+        [resumed] = [request for request in team.models[model].requests if carries_approval_receipt(request)]
+        assert receipt_call_ids(resumed) == [own_id if model == caller else card_id], model
+        assert (own_id in request_call_ids(resumed)) is (model == caller), model
+
+
+@pytest.mark.asyncio
+async def test_a_member_reads_its_earlier_delegation_card_under_its_own_call_id_after_a_chained_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer's second receipt records its delegation card from the first approval under the writer's own id.
+
+    The first approval decides the card of the writer's ``run_subagent`` (``writer:call-sub``); the writer then makes a
+    gated call of its own, which the second approval decides. The second receipt records both calls, as the response
+    runner composes it, and the writer reads both under the ids its own request holds.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[
+            _delegate_to_helper("Dig"),
+            calls(tool_call("touch", "call-touch", label="after"), metrics=usage(10, 1)),
+            answer("Writer: done."),
+        ],
+        helper=[answer("Dug.")],
+        approval_rules=[
+            ApprovalRuleConfig(match="run_subagent", action="require_approval"),
+            ApprovalRuleConfig(match="touch", action="require_approval"),
+        ],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    _, _, state = _delegation_state(team)
+    [card] = _saved_approval_calls(state)
+    touch = replace(member_approval("call-touch", "after"), invoking_agent="writer")
+    card_decided, touch_decided = (
+        replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True) for call in (card, touch)
+    )
+
+    with approval_receipt_context((card_decided,), run_id=raised.value.paused.run_id):
+        repaused = await team.resume(raised.value.paused, approved=True, approvals=(card,))
+    assert isinstance(repaused, PausedAttempt)
+    with approval_receipt_context((card_decided, touch_decided), run_id=repaused.run_id):
+        result = await team.resume(repaused, approved=True, approvals=(touch,))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert card.tool_call_id == "writer:call-sub"
+    first, second = [request for request in team.models["writer-model"].requests if carries_approval_receipt(request)]
+    assert receipt_call_ids(first) == ["call-sub"]
+    assert receipt_call_ids(second) == ["call-sub", "call-touch"]
+    assert request_call_ids(second) == ["call-sub", "call-touch"]
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,7 @@ from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
@@ -52,22 +52,17 @@ def standard_cli_eligible(
     )
 
 
-def wrap_native_shell_window(
-    toolkits: Sequence[AdaptedToolkit],
-    owners: Mapping[str, str],
-) -> tuple[AdaptedToolkit, ...] | None:
+def wrap_native_shell_window(toolkits: Sequence[AdaptedToolkit]) -> tuple[AdaptedToolkit, ...] | None:
     """Return ``toolkits`` with the native `run_shell_command` running inside its own CLI window; None without one.
 
-    ``owners`` maps each configured function to its authored toolkit; only the shell tool's own command is windowed.
+    ``toolkits`` are a run's, which offer each function name once; only the shell tool's own command is windowed.
     """
-    if owners.get("run_shell_command") != "shell":
-        return None
     for index, toolkit in enumerate(toolkits):
         for position, function in enumerate(toolkit.functions):
             if function.name != "run_shell_command":
                 continue
             # An approved command resumes in a later run without this response's CLI, like a minimal subagent's.
-            if function.requires_confirmation:
+            if function.toolkit != "shell" or function.requires_confirmation:
                 return None
             functions = list(toolkit.functions)
             functions[position] = replace(function, entrypoint=_windowed(function.entrypoint))
@@ -115,7 +110,7 @@ async def bind_standard_cli(
         return
     catalog = tool_catalog(build, run=run, runtime=runtime, storage=storage)
     try:
-        await catalog.prepare(build.spec.toolkits, build.tool_owners, include=_cli_callable)
+        await catalog.prepare(build.spec.toolkits, include=_cli_callable)
         bind_response_owner(
             catalog,
             runtime=runtime,

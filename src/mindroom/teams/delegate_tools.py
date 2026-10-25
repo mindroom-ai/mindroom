@@ -2,9 +2,9 @@
 """The leader's delegation tools and what they tell the leader about a member's run.
 
 A coordinate team offers ``delegate_task_to_member(member_id, task)``, a collaborate team
-``delegate_task_to_members(task)``. Both are authored as Agno functions so Agno derives their schemas, and both
-close over the team run they serve: a member's paused requirements are copied onto that run, naming the member,
-which pauses the leader's loop after the batch.
+``delegate_task_to_members(task)``. ``DELEGATION_TOOLS`` declares each one's definition once, and each run binds it
+to the team run it serves: a member's paused requirements are copied onto that run, naming the member, which pauses
+the leader's loop after the batch.
 """
 
 from __future__ import annotations
@@ -14,14 +14,16 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from pydantic import validate_call
+
+from mindroom.llm.provider import ToolSpec
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.agno_toolkits import Function, adapt_function
-from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import Callable, Coroutine, Mapping, Sequence
 
     from mindroom.llm.runs import RunRecord, RunRequirement, TeamRunRecord, ToolExecution
     from mindroom.teams.spec import TeamMember
@@ -34,6 +36,58 @@ NO_MEMBER_RESPONSE = "No response from the member agent."
 # Runs one member on the leader's task and returns its terminal record, whatever its status.
 type MemberRunner = Callable[[TeamMember, str], Coroutine[Any, Any, RunRecord]]
 
+# The delegation tool each mode offers, as the leader's model reads it; each parameter's description opens with its type.
+DELEGATION_TOOLS: Mapping[TeamMode, ToolSpec] = {
+    TeamMode.COORDINATE: ToolSpec(
+        name="delegate_task_to_member",
+        description="Use this function to delegate a task to the selected team member.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "member_id": {
+                    "type": "string",
+                    "description": "(str) The ID of the member to delegate the task to, exactly as it appears in"
+                    " <team_members>.",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "(str) A clear and concise description of the task the member should achieve,"
+                    " including what a good result looks like.",
+                },
+            },
+            "required": ["member_id", "task"],
+            "additionalProperties": False,
+        },
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    ),
+    TeamMode.COLLABORATE: ToolSpec(
+        name="delegate_task_to_members",
+        description=(
+            "Use this function to send one task to every member agent and return their responses.\n"
+            "One call reaches all members; do not call it once per member."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "(str) A clear and concise description of the task to send to member agents,"
+                    " including what a good result looks like.",
+                },
+            },
+            "required": ["task"],
+            "additionalProperties": False,
+        },
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    ),
+}
+
 
 def delegate_functions(
     members: Sequence[TeamMember],
@@ -45,21 +99,14 @@ def delegate_functions(
 ) -> AdaptedToolkit:
     """Return the delegation tool for ``mode`` as a toolkit bound to the team run ``record``.
 
-    ``stream`` says whether the leader's requests stream, which selects the rules of a member's result.
+    ``stream`` says whether the leader's requests stream, which selects the rules of a member's result. The
+    arguments are checked against the entrypoint's signature before it runs, so a call with a missing or mistyped
+    argument fails with the validation error the model reads.
     """
     by_id = {member.spec.id: member for member in members}
 
     async def delegate_task_to_member(member_id: str, task: str) -> str:
-        """Use this function to delegate a task to the selected team member.
-
-        Args:
-            member_id (str): The ID of the member to delegate the task to, exactly as it appears in <team_members>.
-            task (str): A clear and concise description of the task the member should achieve, including what a good result looks like.
-
-        Returns:
-            str: The result of the delegated task.
-
-        """
+        """Run the member ``member_id`` on ``task`` and return what the leader reads of its run."""
         member = by_id.get(member_id)
         if member is None:
             return TEAM_MEMBER_NOT_FOUND_TEMPLATE.format(member_id=member_id, roster=render_members_roster(members))
@@ -70,22 +117,19 @@ def delegate_functions(
         return member_result_text(child, stream=stream)
 
     async def delegate_task_to_members(task: str) -> str:
-        """Use this function to send one task to every member agent and return their responses.
-        One call reaches all members; do not call it once per member.
-
-        Args:
-            task (str): A clear and concise description of the task to send to member agents, including what a good result looks like.
-
-        Returns:
-            str: The result of the delegated task.
-
-        """  # noqa: D205 - the two-line summary is the tool description the model reads.
+        """Run every member on ``task`` at once and return what the leader reads of their runs."""
         async with asyncio.TaskGroup() as group:
             runs = [group.create_task(run_member(member, task)) for member in members]
         return collaborate_result_text(members, [run.result() for run in runs], record, stream=stream)
 
     entrypoint = delegate_task_to_members if mode is TeamMode.COLLABORATE else delegate_task_to_member
-    function = adapt_function(Function.from_callable(entrypoint, name=entrypoint.__name__))
+    definition = DELEGATION_TOOLS[mode]
+    function = ToolFunction(
+        name=definition.name,
+        description=definition.description,
+        parameters=definition.parameters,
+        entrypoint=validate_call(entrypoint),
+    )
     return AdaptedToolkit(name="team_delegation", functions=(function,), instructions=None)
 
 
@@ -204,6 +248,7 @@ def member_requirement(requirement: RunRequirement, member: TeamMember, run_id: 
 
 __all__ = [
     "COLLABORATE_MEMBER_PAUSED_RESULT",
+    "DELEGATION_TOOLS",
     "MEMBER_PAUSED_RESULT",
     "NO_MEMBER_RESPONSE",
     "MemberRunner",

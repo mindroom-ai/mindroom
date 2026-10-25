@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import ollama
 import pytest
 from openai import AuthenticationError
 
@@ -14,6 +15,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
+from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.ollama_embedder import OllamaEmbedder
 from mindroom.memory import MemorySearchOutcome, search_agent_memories
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -483,6 +486,54 @@ class TestMemoryTools:
         assert "memory.embedder.config.api_key" in result
         assert "'embedding-production' credential service" in result
         assert "EMBEDDER_API_KEY" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [401, 403])
+    async def test_credential_advice_for_an_ollama_rejection_names_the_key_ollama_sends(
+        self,
+        storage_path: Path,
+        config: Config,
+        status_code: int,
+    ) -> None:
+        """An Ollama embedder sends only OLLAMA_API_KEY, so its advice names no setting that embedder ignores."""
+        runtime_paths = runtime_paths_for(config)
+        config = Config.model_validate(
+            {
+                **config.model_dump(),
+                "memory": {
+                    **config.memory.model_dump(),
+                    "embedder": {"provider": "ollama", "config": {"model": "nomic-embed-text"}},
+                },
+            },
+        )
+        transport = httpx.MockTransport(lambda _request: httpx.Response(status_code, json={"error": "unauthorized"}))
+        embedder = OllamaEmbedder(
+            model="nomic-embed-text",
+            host="http://ollama.local:11434",
+            client=ollama.Client(host="http://ollama.local:11434", transport=transport),
+        )
+        with pytest.raises(EmbedderRequestError) as rejection:
+            embedder.embed(["anything"], purpose="query")
+        tools = MemoryTools(
+            agent_name="test_agent",
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        outcome = MemorySearchOutcome(results=[], degraded_reason=str(rejection.value))
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        assert result.splitlines() == [
+            f"Semantic memory search unavailable: {rejection.value}.",
+            "Repair the embedder credential: the Ollama embedder sends only the OLLAMA_API_KEY environment variable "
+            "of the MindRoom process, so set it there and restart MindRoom.",
+        ]
 
     @pytest.mark.asyncio
     async def test_search_memories_error(self, tools: MemoryTools) -> None:

@@ -2831,7 +2831,6 @@ class AgentBot:
             return
         await self._router_reply_membership_sync.apply_live_transition(
             self.config,
-            self.runtime_paths,
             room_id,
             event,
             control_user_id=self.matrix_id.full_id,

@@ -27,15 +27,15 @@ from mindroom.agent_loop.run import (
     resumed_record,
     run_agent,
 )
-from mindroom.agent_loop.spec import AgentSpec, RunContext
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools, sorted_specs
 from mindroom.history.request_messages import build_resume_request
-from mindroom.llm.events import RequestCompleted, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.teams.delegate_tools import (
+    DELEGATION_TOOLS,
     delegate_functions,
     member_requirement,
     propagate_member_pause,
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.run import ApprovedCall
+    from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, ReasoningDelta, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
@@ -64,7 +65,7 @@ class MemberEvent:
     member_id: str
     member_name: str
     run_id: str
-    event: TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
+    event: TextDelta | ReasoningDelta | ToolStarted | ToolCompleted
 
 
 type TeamRunEvent = RunEvent | MemberEvent
@@ -90,7 +91,8 @@ def run_team(
     record as its run ends. The team record ends as ``run_agent``'s does on cancellation and errors, and cancelling
     the stream cancels the members with the leader.
     """
-    identity = spec.model.identity
+    leader = spec.leader
+    identity = leader.model.identity
     record = TeamRunRecord(
         run_id=ctx.run_id,
         session_id=ctx.session_id,
@@ -99,10 +101,9 @@ def run_team(
         model_provider=identity.provider,
         metrics=RunMetrics(),
         metadata=ctx.metadata,
-        team_id=spec.id,
-        team_name=spec.name,
+        team_id=leader.id,
     )
-    messages = [spec.system_message, *run_input]
+    messages = [*([] if leader.system_message is None else [leader.system_message]), *run_input]
     return _drive_team(spec, record, messages, ctx=ctx, hooks=hooks, persist=persist, template=request_template)
 
 
@@ -145,7 +146,7 @@ def continue_team(
         denied=leader.denied,
         external_results=leader.external_results,
     )
-    check_approved_tools_offered(_base_leader_spec(spec), leader.approved)
+    check_approved_tools_offered(spec.leader, leader.approved)
     decisions.require_consumed()
 
     async def entry(members: _MemberRuns) -> None:
@@ -183,7 +184,7 @@ def team_paused_content(record: TeamRunRecord) -> str:
     The only externally executed calls are the silent delegation calls, so a pause on delegations alone has no text.
     """
     parts = [
-        f"- {r.member_display_name or 'team'}: {r.tool_execution.tool_name or 'unknown'} requires confirmation"
+        f"- {r.member_display_name or 'team'}: {r.tool_execution.tool_name} requires confirmation"
         for r in record.requirements or ()
         if r.needs_confirmation
     ]
@@ -236,9 +237,9 @@ class TeamDecisions:
     external_results: Mapping[TeamCallKey, str]
     consumed: set[TeamCallKey] = field(default_factory=set, init=False)
 
-    def take(self, member_id: str | None, call_ids: set[str | None]) -> _Decided:
+    def take(self, member_id: str | None, call_ids: set[str]) -> _Decided:
         """Return the decisions on ``member_id``'s calls among ``call_ids`` (None names the leader's own)."""
-        keys = {(member_id, call_id) for call_id in call_ids if call_id is not None}
+        keys = {(member_id, call_id) for call_id in call_ids}
         self.consumed |= keys
         return _Decided(
             approved=tuple(call for key, call in self.approved.items() if key in keys),
@@ -283,7 +284,7 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
         if member is None:
             msg = (
                 f"Paused member run {run_id!r} of team run {paused.run_id!r} belongs to "
-                f"{member_id!r}, which is not a member of team {spec.id!r}"
+                f"{member_id!r}, which is not a member of team {spec.leader.id!r}"
             )
             raise ValueError(msg)
         member_record = embedded.get(run_id)
@@ -326,7 +327,7 @@ def _answer_delegations(
     # earlier, or a member completed in an earlier chained resume, never reaches the leader. Hand the leader every
     # member's result. Models would notice (#3075).
     text = "\n".join(["Member results after human-in-the-loop resolution:", *results])
-    answered: set[str | None] = set()
+    answered: set[str] = set()
     for tool in record.tools or ():
         if any(waited_on_member(tool, member) for member in resumed):
             tool.result = text
@@ -336,40 +337,23 @@ def _answer_delegations(
             messages[index] = replace(message, content=text)
 
 
-def _base_leader_spec(spec: TeamSpec) -> AgentSpec:
-    return AgentSpec(
-        id=spec.id,
-        name=spec.name,
-        model=spec.model,
-        system_message=spec.system_message,
-        toolkits=spec.toolkits,
-        max_tool_calls_per_turn=spec.max_tool_calls_per_turn,
-    )
-
-
 def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner, *, stream: bool) -> AgentSpec:
     """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run.
 
     ``stream`` is whether the run's leader requests stream, which selects the delegation's result rules.
     """
-    base = _base_leader_spec(spec)
+    leader = spec.leader
     delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member, stream=stream)
-    return replace(base, toolkits=(*base.toolkits, delegation))
+    return replace(leader, toolkits=(*leader.toolkits, delegation))
 
 
 def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
-    """Return the tool definitions every leader request offers: the team's own tools, then the delegation tool.
+    """Return the tool definitions every leader request offers, in request order: its own tools and the delegation tool.
 
-    The definitions do not depend on a run; a run binds the delegation tool to its own record and members.
+    The delegation tool's definition is the one ``DELEGATION_TOOLS`` declares for the team's mode, whichever run binds
+    it.
     """
-
-    async def no_member_runs(member: TeamMember, task: str) -> RunRecord:
-        msg = f"the tool definitions of team {spec.id!r} run no member; {member.spec.id!r} was asked {task!r}"
-        raise RuntimeError(msg)
-
-    unbound = TeamRunRecord(run_id="", team_id=spec.id, team_name=spec.name)
-    # The result rules a run's ``stream`` selects do not change the definitions.
-    return prepare_run_tools(_leader_spec(spec, unbound, no_member_runs, stream=True)).specs()
+    return sorted_specs((*PreparedTools(functions=spec.leader.functions).specs(), DELEGATION_TOOLS[spec.mode]))
 
 
 @dataclass(frozen=True, slots=True)

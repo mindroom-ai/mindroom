@@ -15,15 +15,14 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
-from uuid import uuid4
 
-from mindroom.llm.messages import split_thinking
+from mindroom.llm.messages import split_thinking, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
-from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
+from mindroom.providers.openai.tool_ids import chat_call_id, reformat_tool_call_ids
 from mindroom.providers.tool_policy import disable_tool_selection, provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -101,10 +100,15 @@ def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
 # --- Requests -------------------------------------------------------------------------------------------------
 
 
+def _message_content(message: Message) -> str | list[Any] | None:
+    """Return the content a Chat message carries; a tool result always has one, as the API requires."""
+    return tool_result_view(message).content if message.role == "tool" else message.content
+
+
 def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str]) -> dict[str, Any]:
     values: dict[str, Any] = {
         "role": role_map.get(message.role, message.role),
-        "content": message.content,
+        "content": _message_content(message),
         "name": message.name,
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
@@ -128,7 +132,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
             if (part := chat_file_part(file)) is not None:
                 parts.insert(0, part)
         formatted["content"] = parts
-    if message.content is None:
+    if message.content is None and message.role != "tool":
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
     if wire.route == "openrouter" and reasoning_details:
@@ -139,7 +143,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
 def _groq_message(message: Message) -> dict[str, Any]:
     values = {
         "role": message.role,
-        "content": message.content,
+        "content": _message_content(message),
         "name": message.name,
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
@@ -154,11 +158,10 @@ def _groq_message(message: Message) -> dict[str, Any]:
 
 
 def _cerebras_message(message: Message) -> dict[str, Any]:
-    content = message.content if message.role == "tool" or message.content is not None else ""
+    content = _message_content(message)
     if message.role == "tool" and message.tool_call_id:
-        formatted: dict[str, Any] = {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
-        return {key: value for key, value in formatted.items() if value is not None}
-    formatted = {"role": message.role, "content": content}
+        return {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
+    formatted: dict[str, Any] = {"role": message.role, "content": "" if content is None else content}
     if message.name:
         formatted["name"] = message.name
     if message.tool_calls:
@@ -485,11 +488,16 @@ def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> N
             target[key] = value
 
 
-def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Give id-less calls (local servers) a generated id, so their results can reference them."""
+def _completed_tool_calls(calls: list[dict[str, Any]], dialect: ChatDialect) -> list[dict[str, Any]]:
+    """Store each call under the id its later requests send, so its result and approval receipt name that id.
+
+    The ``openai`` dialect's requests rewrite an id outside the Chat rule, so there a call whose server sent such an
+    id, or none, gets a new id that fits the rule. Groq and Cerebras requests send stored ids unchanged, so there a
+    call keeps its server's id and only an id-less call gets a new one.
+    """
     for call in calls:
-        if not call.get("id"):
-            call["id"] = str(uuid4())
+        if dialect == "openai" or not call.get("id"):
+            call["id"] = chat_call_id(call.get("id"))
     return calls
 
 
@@ -609,13 +617,13 @@ class ChatStream:
         calls = [self._calls[index] for index in sorted(self._calls)]
         if self.wire.dialect == "cerebras":
             calls = [call for call in calls if call.get("id") and call["function"].get("name")]
-        self.parts.tool_calls = _completed_tool_calls(calls)
+        self.parts.tool_calls = _completed_tool_calls(calls, self.wire.dialect)
         return self.parts
 
 
 def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]:  # noqa: ANN401 - SDK message model
     if wire.dialect != "cerebras":
-        return _completed_tool_calls([call.model_dump() for call in message.tool_calls or []])
+        return _completed_tool_calls([call.model_dump() for call in message.tool_calls or []], wire.dialect)
     return _completed_tool_calls(
         [
             {
@@ -625,6 +633,7 @@ def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]
             }
             for call in message.tool_calls or []
         ],
+        wire.dialect,
     )
 
 

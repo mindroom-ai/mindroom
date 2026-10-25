@@ -10,9 +10,9 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
-from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule, _WorkflowParseError
 from tests.conftest import install_model_providers
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -291,3 +291,34 @@ class TestEventDrivenScheduling:
         assert "@crypto_agent Check Bitcoin price" in call_args
         assert "@monitoring_agent Check server CPU" in call_args
         assert "@reddit_agent Check for new mentions" in call_args
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("parser unavailable"), "parser unavailable"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_parser_call_that_raises_reports_why(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_config: Config,
+    runtime_paths: RuntimePaths,
+    error: Exception,
+    text: str,
+) -> None:
+    """A parser call that raises reports the exception's text, or its type name when it has none."""
+
+    async def fail() -> None:
+        raise error
+
+    install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(fail)]])})
+
+    result = await _parse_workflow_schedule(
+        "Every morning, check the queue",
+        mock_config,
+        runtime_paths,
+        available_responders=[_mid("ops_agent")],
+    )
+
+    assert isinstance(result, _WorkflowParseError)
+    assert result.error == f"Error parsing schedule: {text}"

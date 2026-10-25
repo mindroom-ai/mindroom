@@ -156,7 +156,7 @@ async def test_only_policy_pause_offers_timed_approval(
         approval_type=approval_type,
     )
     plan = await plan_approval_calls(
-        ((tool, "call-authored", "shell", "code"),),
+        ((tool, "code"),),
         config=coordinator.config(),
         runtime_paths=coordinator.runtime_paths,
         requester_id="@human:test",
@@ -257,7 +257,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 approval_type="mindroom_policy",
             )
             plan = await plan_approval_calls(
-                ((tool, "call-" + name, "shell", "code"),),
+                ((tool, "code"),),
                 config=coordinator.config(),
                 runtime_paths=coordinator.runtime_paths,
                 requester_id="@human:test",

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
     clear_manual_compaction_request,
@@ -59,7 +60,7 @@ from mindroom.history.types import (
 )
 from mindroom.llm.messages import is_own_model_message
 from mindroom.logging_config import get_logger
-from mindroom.model_usage import response_context_tokens
+from mindroom.model_usage import message_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import session_state_snapshot
@@ -389,19 +390,22 @@ def _reported_history_tokens(
     reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
     if reported is None:
         return None
-    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=model.replay_estimator)
+    # Sized as the next request replays them: as history, whose earlier reasoning a model may render.
+    replayed = [replace(message, from_history=True) for message in messages[anchor:]]
+    newer_tokens = estimate_request_messages_tokens(replayed, replay_model=model.replay_estimator)
     return reported + newer_tokens - non_prompt_tokens
 
 
 def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
     """Return the request-context size ``model`` reported with ``message``, configured as ``model_name``, if any."""
     configured = config.models.get(model_name)
-    return response_context_tokens(
+    context = message_context_tokens(
         message,
         provider=model.identity.provider_name,
         configured_provider=configured.provider if configured is not None else None,
         model_id=model.identity.id,
     )
+    return context.tokens if context is not None else None
 
 
 # Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.
@@ -481,11 +485,11 @@ async def _run_scope_compaction_with_lifecycle(
         outcome = await compact(_progress if lifecycle is not None else None, _complete)
     except asyncio.CancelledError as error:
         if not completed_successfully:
-            await _fail("failed", str(error) or type(error).__name__)
+            await _fail("failed", failure_text(error))
         raise
     except Exception as error:
         status = "timeout" if is_summary_timeout(error) else "failed"
-        await _fail(status, str(error) or type(error).__name__)
+        await _fail(status, failure_text(error))
         logger.exception(
             "Compaction failed; continuing without compaction",
             session_id=session_id,

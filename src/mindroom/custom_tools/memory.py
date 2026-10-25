@@ -48,6 +48,12 @@ def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
 
 def _embedder_credential_advice(config: Config) -> str:
     """Describe the active credential binding without recommending a fallback that cannot win."""
+    if config.memory.embedder.provider == "ollama":
+        # MindRoom gives the Ollama embedder no key; the Ollama SDK reads OLLAMA_API_KEY from the process environment.
+        return (
+            "Repair the embedder credential: the Ollama embedder sends only the OLLAMA_API_KEY environment variable "
+            "of the MindRoom process, so set it there and restart MindRoom."
+        )
     credentials_service = config.memory.embedder.config.credentials_service
     if credentials_service is not None:
         return (

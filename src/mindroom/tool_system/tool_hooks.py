@@ -41,6 +41,7 @@ from mindroom.tool_system.runtime_context import (
     resolve_tool_runtime_hook_bindings,
 )
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -603,7 +604,8 @@ async def _execute_bridge(  # noqa: C901
         if declined_result is not None:
             duration_ms = timing.mark_result_ready()
             await finish("blocked_before_hooks", duration_ms=duration_ms, result=declined_result, blocked=True)
-            return declined_result
+            # The call answers as failed, so the model reads the decline as one.
+            return ToolOutcome(content=declined_result, is_error=True)
 
     if origin is not None and approval_gate is not None:
         decision = await approval_gate(origin, tool_name, deepcopy(args))
@@ -703,9 +705,10 @@ def build_tool_hook_middleware(
     """Return the tool-call policy as the middleware around every tool call, in the loop and outside it.
 
     The call reaches its entrypoint only through ``call_next``, so a plugin before-hook that declines it, a
-    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running. A background
-    script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a declined call then
-    returns ``BackgroundToolApprovalDenied`` without running.
+    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a declined call
+    returns a failed ``ToolOutcome`` with the decline's text. A background script's call passes its ``origin`` and the
+    ``approval_gate`` that asks its requester; a call its requester denied returns ``BackgroundToolApprovalDenied``
+    without running.
     """
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from agno.tools.function import Function
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from agno.tools import Toolkit
 
@@ -31,15 +31,12 @@ JSON_OBJECT_SCHEMA: dict[str, object] = {
 def register_toolkit_functions(
     toolkit: Toolkit,
     *,
-    sync_entrypoints: Mapping[str, Callable[..., object]],
-    async_entrypoints: Mapping[str, Callable[..., object]],
+    entrypoints: Mapping[str, Callable[..., Awaitable[object]]],
     descriptions: Mapping[str, str],
     parameters: Mapping[str, dict[str, object]],
 ) -> None:
-    """Register sync and async toolkit functions from explicit schema mappings."""
-    for function_name, entrypoint in sync_entrypoints.items():
-        toolkit.functions[function_name] = _toolkit_function(function_name, entrypoint, descriptions, parameters)
-    for function_name, entrypoint in async_entrypoints.items():
+    """Register one async toolkit function per name from explicit schema mappings."""
+    for function_name, entrypoint in entrypoints.items():
         toolkit.async_functions[function_name] = _toolkit_function(function_name, entrypoint, descriptions, parameters)
 
 

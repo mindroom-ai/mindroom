@@ -19,6 +19,7 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
     runtime_matrix_ssl_verify,
 )
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.startup_errors import PermanentStartupError
@@ -104,7 +105,7 @@ class MindRoomAsyncClient(nio.AsyncClient):
             "matrix_request_transport_failed",
             homeserver=self.homeserver,
             error_type=type(error).__name__,
-            error=str(error) or type(error).__name__,
+            error=failure_text(error),
         )
 
     def begin_process_shutdown_transport_fence(self) -> None:

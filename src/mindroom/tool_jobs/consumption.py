@@ -26,6 +26,30 @@ if TYPE_CHECKING:
 _OWNER: ContextVar[ConsumptionOwner | None] = ContextVar("tool_job_consumption", default=None)
 logger = get_logger(__name__)
 
+_JOB_FAILED_TEXT = "Background tool job failed."
+
+
+# LEGACY_COMPAT: Failed tool jobs saved without error text.
+# Legacy format: a saved job with status ``failed`` whose result is empty and whose payload, when it has one, holds an
+# empty error. The job runtime saved the text of an exception its operation raised as the job's result, and the job
+# executor saved a failed call's exception text as both the result and the payload's error; that text is empty for
+# exceptions such as ``TimeoutError`` and ``httpx.ReadTimeout``.
+# Last legacy release: v2026.10.512; replacement: unreleased, whose writers save the exception's type name when its
+# text is empty.
+# Handling: such a job reads as ``_JOB_FAILED_TEXT`` wherever its outcome is read, when the call that started it reads
+# it, when the job tool waits for it, and when the job tool collects it, so the model reads that the call failed
+# instead of an empty failure.
+# Coverage: tests/test_tool_job_execution.py::test_a_reattached_call_reads_a_job_saved_failed_without_error_text_as_failed;
+# tests/test_job_tools.py::test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed;
+# tests/test_job_tools.py::test_collect_reads_a_job_saved_failed_without_error_text_as_failed
+def job_failure_text(value: Any, payload: ToolResultPayload) -> str:  # noqa: ANN401 - A consumed job's value.
+    """Return what a reader of a consumed job reports for its failure: the payload's error, else the value's text.
+
+    ``value`` and ``payload`` are what ``consume_tool_job`` returned; each reader decides which statuses fail.
+    """
+    text = value.content if isinstance(value, ToolValue) else value
+    return str(payload.error or text or _JOB_FAILED_TEXT)
+
 
 @dataclass(frozen=True)
 class _Consumption:

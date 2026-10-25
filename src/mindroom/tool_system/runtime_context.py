@@ -56,7 +56,6 @@ if TYPE_CHECKING:
     from mindroom.response_turn import PausedAttempt
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import SchedulingRuntime
-    from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
@@ -135,7 +134,7 @@ class ToolRuntimeContext:
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
-    tool_function_filter: Callable[[Function | ToolFunction], bool] | None = None
+    tool_function_filter: Callable[[ToolFunction], bool] | None = None
     # Persona of the authored subagent running this turn; copies it authors stay within its tools, skills, and knowledge.
     persona: SubagentPersona | None = None
     membership: PrincipalStore | None = None
@@ -239,9 +238,12 @@ class ToolRuntimeContext:
         OAuth MCP sessions, scoped credentials — resolves identically.
 
         Raises:
-            ValueError: For team and router dispatches, whose contexts carry
-                the entity name and therefore have no single agent execution
-                scope for a composed toolkit to mirror.
+            ValueError: When the context names a configured team or the
+                router rather than an agent, which only a configured team's
+                leader and router dispatches do. They offer no plugin tools and
+                have no single agent execution scope for a composed toolkit to
+                mirror; a team member's calls run under the member's own
+                context.
 
         """
         if self.agent_name not in self.config.agents:

@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 import time
+from collections.abc import Iterator  # noqa: TC003 - Agno reads tool annotations at runtime.
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
 from agno.tools import Toolkit
+from agno.tools.function import ToolResult
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
@@ -933,11 +935,34 @@ async def test_script_broker_records_background_origin_and_durable_request_prove
 
 
 @pytest.mark.asyncio
-async def test_script_broker_rejects_generator_entrypoint_before_execution(
+async def test_script_call_result_is_the_text_of_a_tool_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unsupported generators must not execute before the broker rejects the call."""
+    """A tool that returns a tool result, as MCP-backed tools do, gives the script its text, not the object's repr."""
+
+    class ToolResultCalculator(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def add(self, a: int, b: int) -> ToolResult:
+            return ToolResult(content=f"sum={a + b}")
+
+    _replace_calculator_toolkit(monkeypatch, ToolResultCalculator)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(), token)
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result == "sum=3"
+
+
+@pytest.mark.asyncio
+async def test_script_broker_runs_a_streaming_tool_to_the_end_of_its_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that streams its result runs inside its toolkit's connection, and the script gets the joined text."""
     lifecycle: list[str] = []
 
     class ConnectedToolkit(Toolkit):
@@ -952,21 +977,19 @@ async def test_script_broker_rejects_generator_entrypoint_before_execution(
         def close(self) -> None:
             lifecycle.append("close")
 
-        def add(self, a: int, b: int) -> object:
-            del a, b
+        def add(self, a: int, b: int) -> Iterator[str]:
             lifecycle.append("body")
-            yield "never"
+            yield f"{a} + {b} = "
+            yield str(a + b)
 
     _replace_calculator_toolkit(monkeypatch, ConnectedToolkit)
     broker, token = _broker(tmp_path, events=[])
 
     receipt = await _call_through_gateway(broker, _request(call_id="stream-call"), token)
 
-    assert receipt.state is ScriptCallState.FAILED
-    assert isinstance(receipt.error, dict)
-    assert receipt.error["kind"] == "call_rejected"
-    assert "Generator tool entrypoints" in str(receipt.error["message"])
-    assert lifecycle == ["close"]
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result == "1 + 2 = 3"
+    assert lifecycle == ["connect", "body", "close"]
 
 
 @pytest.mark.asyncio
@@ -1034,6 +1057,82 @@ async def test_script_broker_closes_toolkit_after_connect_failure(
 
     assert receipt.state is ScriptCallState.FAILED
     assert lifecycle == ["connect", "close"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "kind", "retryable"),
+    [("connect", "runtime_failure", True), ("call", "tool_failure", False)],
+)
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("calculator broke"), "calculator broke"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_script_broker_reports_why_a_call_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    kind: str,
+    retryable: bool,
+    error: Exception,
+    text: str,
+) -> None:
+    """A call whose toolkit or tool raises fails with the exception's text, or its type name when it has none."""
+
+    class FailingToolkit(Toolkit):
+        _requires_connect = stage == "connect"
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            raise error
+
+        def close(self) -> None:
+            pass
+
+        def add(self, a: int, b: int) -> int:  # noqa: ARG002 - The script calls it with both arguments.
+            raise error
+
+    _replace_calculator_toolkit(monkeypatch, FailingToolkit)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(call_id=f"failed-{stage}"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {"kind": kind, "message": text, "retryable": retryable}
+
+
+@pytest.mark.asyncio
+async def test_script_broker_names_a_textless_rejection_by_its_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit that rejects its arguments without text fails the call with the exception's type name."""
+
+    class RejectingToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            raise ValueError
+
+        def close(self) -> None:
+            pass
+
+        def add(self, a: int, b: int) -> int:
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, RejectingToolkit)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(call_id="rejected"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {"kind": "call_rejected", "message": "ValueError", "retryable": False}
 
 
 @pytest.mark.asyncio
