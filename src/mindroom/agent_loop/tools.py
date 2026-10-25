@@ -132,11 +132,27 @@ def plan_tool_batch(
         name = function_data.get("name")
         function = functions.get(name) if isinstance(name, str) else None
         if function is None:
-            messages.append(Message(role="tool", tool_call_id=call_id, tool_name=name, content=MISSING_TOOL_ERROR_TEXT))
+            messages.append(
+                Message(
+                    role="tool",
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    content=MISSING_TOOL_ERROR_TEXT,
+                    tool_call_error=True,
+                ),
+            )
             continue
         arguments = parse_tool_arguments(function_data.get("arguments"), function)
         if isinstance(arguments, ToolArgumentError):
-            messages.append(Message(role="tool", tool_call_id=call_id, tool_name=name, content=arguments.error_text))
+            messages.append(
+                Message(
+                    role="tool",
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    content=arguments.error_text,
+                    tool_call_error=True,
+                ),
+            )
             continue
         if max_tool_calls_per_turn is not None:
             count += 1

@@ -98,10 +98,11 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
         max_tool_calls_per_turn=1,
     )
 
-    assert [(m.role, m.tool_call_id, m.tool_name) for m in messages] == [
-        ("tool", "c1", "missing"),
-        ("tool", "c2", "add"),
-        ("tool", "c3", "add"),
+    # Each answer is a failed call, which Claude and Gemini read as a failure.
+    assert [(m.role, m.tool_call_id, m.tool_name, m.tool_call_error) for m in messages] == [
+        ("tool", "c1", "missing", True),
+        ("tool", "c2", "add", True),
+        ("tool", "c3", "add", True),
     ]
     assert messages[0].content == MISSING_TOOL_ERROR_TEXT
     assert str(messages[1].content).startswith("Error while decoding function arguments: ")
