@@ -55,6 +55,7 @@ from mindroom.token_budget import (
     estimate_compaction_input_tokens,
     estimate_text_tokens,
 )
+from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.runtime_context import (
     get_detached_requester_context,
     get_tool_runtime_context,
@@ -816,7 +817,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 "Compaction summary chunk failed",
                 **attempt_fields,
                 duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
-                error=str(exc) or type(exc).__name__,
+                error=failure_text(exc),
             )
             if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
                 fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)

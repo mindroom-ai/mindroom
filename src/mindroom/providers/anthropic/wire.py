@@ -442,10 +442,10 @@ def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
             block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
             for item in result.content
         ]
-    block: dict[str, Any] = {"type": "tool_result", "tool_use_id": result.call_id, "content": payload}
+    tool_result: dict[str, Any] = {"type": "tool_result", "tool_use_id": result.call_id, "content": payload}
     if result.is_error:
-        block["is_error"] = True
-    return block
+        tool_result["is_error"] = True
+    return tool_result
 
 
 def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401

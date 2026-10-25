@@ -22,6 +22,7 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.startup_errors import PermanentStartupError
+from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping
@@ -104,7 +105,7 @@ class MindRoomAsyncClient(nio.AsyncClient):
             "matrix_request_transport_failed",
             homeserver=self.homeserver,
             error_type=type(error).__name__,
-            error=str(error) or type(error).__name__,
+            error=failure_text(error),
         )
 
     def begin_process_shutdown_transport_fence(self) -> None:

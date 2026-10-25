@@ -2666,6 +2666,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.timing",
     "mindroom.token_budget",
+    "mindroom.tool_system.failure_text",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -3960,7 +3961,7 @@ visibility = ["mindroom.response_runner", "mindroom.approval.execution"]
 
 [[modules]]
 path = "mindroom.matrix.client_session"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.constants", "mindroom.tool_system.failure_text"]
 visibility = [
     "mindroom.bot",
     "mindroom.cli.doctor",
