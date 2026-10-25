@@ -652,7 +652,11 @@ async def _serve_large_result_server(transport: MCPTransport) -> AsyncIterator[s
     """Serve one tool whose result is larger than the SDK's default 1 MiB SSE event cap."""
     import uvicorn  # noqa: PLC0415
     from mcp.server.mcpserver import MCPServer  # noqa: PLC0415
+    from sse_starlette.sse import AppStatus  # noqa: PLC0415
 
+    # sse-starlette latches a process-wide flag once it sees a uvicorn server in this process exiting, and then ends
+    # every SSE response at once; an earlier test's server shutdown in this worker can have set it.
+    AppStatus.should_exit = False
     server = MCPServer("Large result")
 
     @server.tool()
