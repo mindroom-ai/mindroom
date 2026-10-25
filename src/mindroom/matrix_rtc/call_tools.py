@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.tools import offered_functions
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
@@ -75,7 +74,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
-    from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
@@ -626,23 +624,24 @@ async def build_call_tools(
     connections = _CallConnections()
     middleware = agent_tool_middleware(build)
     tools: list[RawFunctionTool] = []
-    for toolkit, function in offered_functions(build.spec):
-        # The build applied the call's function filter to the functions it built, not to ones added beside them.
-        if _function_requires_text_chat(function, config):
-            logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
-            continue
-        tools.append(
-            _wrap_tool_function(
-                function,
-                middleware=middleware,
-                call_context=call_context,
-                context=context,
-                agent_name=agent_name,
-                authorize_operation=authorize_operation,
-                usage_owner=usage_owner,
-                connect=functools.partial(connections.connect, toolkit),
-            ),
-        )
+    for toolkit in build.spec.toolkits:
+        for function in toolkit.functions:
+            # The build applied the call's function filter to the functions it built, not to ones added beside them.
+            if _function_requires_text_chat(function, config):
+                logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
+                continue
+            tools.append(
+                _wrap_tool_function(
+                    function,
+                    middleware=middleware,
+                    call_context=call_context,
+                    context=context,
+                    agent_name=agent_name,
+                    authorize_operation=authorize_operation,
+                    usage_owner=usage_owner,
+                    connect=functools.partial(connections.connect, toolkit),
+                ),
+            )
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
     return CallAgentTooling(
         tools=tuple(tools),
@@ -885,7 +884,7 @@ def _normalize_tool_result(result: object) -> str:
     return text
 
 
-def _function_requires_text_chat(function: Function | ToolFunction, config: Config) -> bool:
+def _function_requires_text_chat(function: ToolFunction, config: Config) -> bool:
     """Return whether a function needs text-chat UI that a voice call lacks."""
     is_matrix_room_runtime_function = (
         function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
@@ -937,7 +936,7 @@ def matrix_message_available_during_call(config: Config, agent_name: str) -> boo
 
 
 def _function_available_during_call(
-    function: Function | ToolFunction,
+    function: ToolFunction,
     *,
     config: Config,
     agent_name: str,

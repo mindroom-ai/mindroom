@@ -36,9 +36,10 @@ async def _run_shell_command(command: str) -> str:
     return f"ran {command}"
 
 
-def _function(name: str, *, requires_confirmation: bool | None = None) -> ToolFunction:
+def _function(name: str, toolkit: str, *, requires_confirmation: bool | None = None) -> ToolFunction:
     return ToolFunction(
         name=name,
+        toolkit=toolkit,
         description=None,
         parameters={"type": "object", "properties": {}, "required": []},
         requires_confirmation=requires_confirmation,
@@ -46,12 +47,12 @@ def _function(name: str, *, requires_confirmation: bool | None = None) -> ToolFu
     )
 
 
-def _toolkits(*, requires_confirmation: bool | None = None) -> tuple[AdaptedToolkit, ...]:
+def _toolkits(*, requires_confirmation: bool | None = None, shell_owner: str = "shell") -> tuple[AdaptedToolkit, ...]:
     return (
-        AdaptedToolkit(name="calculator", functions=(_function("add"),), instructions=None),
+        AdaptedToolkit(name="calculator", functions=(_function("add", "calculator"),), instructions=None),
         AdaptedToolkit(
             name="shell",
-            functions=(_function("run_shell_command", requires_confirmation=requires_confirmation),),
+            functions=(_function("run_shell_command", shell_owner, requires_confirmation=requires_confirmation),),
             instructions=None,
         ),
     )
@@ -62,7 +63,7 @@ async def test_only_the_shell_command_is_windowed_and_runs_as_before_without_a_c
     """The offered shell command gets the window wrapper, which calls the command directly outside a CLI."""
     toolkits = _toolkits()
 
-    windowed = wrap_native_shell_window(toolkits, {"add": "calculator", "run_shell_command": "shell"})
+    windowed = wrap_native_shell_window(toolkits)
 
     assert windowed is not None
     assert windowed[0] == toolkits[0]
@@ -74,9 +75,9 @@ async def test_only_the_shell_command_is_windowed_and_runs_as_before_without_a_c
 
 def test_a_gated_or_foreign_shell_command_stays_unwindowed() -> None:
     """An approved command resumes without this response's CLI, and only the shell tool's own command is windowed."""
-    assert wrap_native_shell_window(_toolkits(requires_confirmation=True), {"run_shell_command": "shell"}) is None
-    assert wrap_native_shell_window(_toolkits(), {"run_shell_command": "plugin"}) is None
-    assert wrap_native_shell_window(_toolkits()[:1], {"add": "calculator"}) is None
+    assert wrap_native_shell_window(_toolkits(requires_confirmation=True)) is None
+    assert wrap_native_shell_window(_toolkits(shell_owner="plugin")) is None
+    assert wrap_native_shell_window(_toolkits()[:1]) is None
 
 
 async def _allow(_key: ToolKey, _arguments: dict[str, object]) -> None:
@@ -88,7 +89,7 @@ async def _windowed_shell(
     run_shell_command: Callable[..., Awaitable[str]],
 ) -> tuple[ToolFunction, LiveTurnTools]:
     """Return the windowed shell command and a response CLI owner whose catalog offers that command."""
-    windowed = wrap_native_shell_window((_toolkit("shell", run_shell_command),), {"run_shell_command": "shell"})
+    windowed = wrap_native_shell_window((_toolkit("shell", run_shell_command),))
     assert windowed is not None
     catalog = await _catalog(tmp_path, windowed)
     catalog.store = create_state_storage("helper", tmp_path)

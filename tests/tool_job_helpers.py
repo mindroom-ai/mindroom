@@ -282,7 +282,7 @@ def toolkit_job_tools(
     functions may become jobs.
     """
     return assembled_job_tools(
-        ((authored_name, toolkit, function) for function in adapt_toolkit(toolkit).functions),
+        ((toolkit, function) for function in adapt_toolkit(toolkit, key=authored_name).functions),
         snapshot or {},
     )
 

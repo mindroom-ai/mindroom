@@ -28,6 +28,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 from agno.tools import Toolkit
+from agno.tools.function import Function
 from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 
@@ -947,6 +948,54 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
         assert marker in (tmp_path / "runner/result.json").read_text(encoding="utf-8")
         assert marker not in str(proxy_result)
         assert proxy_result["mindroom_tool_output"]["status"] == "saved_to_file"
+    finally:
+        restore_tool_registry_snapshot(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_runner_runs_the_function_a_primary_run_offers(tmp_path: Path) -> None:
+    """A toolkit that registers a sync and an async function of one name runs its async one, as the primary offers it."""
+    tool_name = "test_runner_one_function_per_name"
+
+    class _DualToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name=tool_name, tools=[self.lookup])
+            self.async_functions["lookup"] = Function(name="lookup", entrypoint=self.alookup)
+
+        def lookup(self) -> str:
+            return "sync"
+
+        async def alookup(self) -> str:
+            return "async"
+
+    snapshot = capture_tool_registry_snapshot()
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        file_access=ToolFileAccess.NONE,
+        display_name="One Function Per Name",
+        description="Test-only toolkit registering both variants of one function.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def _dual_factory() -> type[_DualToolkit]:
+        return _DualToolkit
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    try:
+        toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+            runtime_paths=runtime_paths,
+            config=Config(agents={}, models={}),
+            tool_name=tool_name,
+            function_name="lookup",
+        )
+        [offered] = adapt_toolkit(toolkit).functions
+
+        assert await offered.entrypoint() == "async"
+        assert await sandbox_runner_module._call_entrypoint(entrypoint, [], {}) == "async"
     finally:
         restore_tool_registry_snapshot(snapshot)
 

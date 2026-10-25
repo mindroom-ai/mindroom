@@ -27,7 +27,7 @@ from mindroom.agent_loop.run import (
     resumed_record,
     run_agent,
 )
-from mindroom.agent_loop.tools import prepare_run_tools, sorted_specs
+from mindroom.agent_loop.tools import PreparedTools, sorted_specs
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
@@ -353,7 +353,7 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
     The delegation tool's definition is the one ``DELEGATION_TOOLS`` declares for the team's mode, whichever run binds
     it.
     """
-    return sorted_specs((*prepare_run_tools(spec.leader).specs(), DELEGATION_TOOLS[spec.mode]))
+    return sorted_specs((*PreparedTools(functions=spec.leader.functions).specs(), DELEGATION_TOOLS[spec.mode]))
 
 
 @dataclass(frozen=True, slots=True)

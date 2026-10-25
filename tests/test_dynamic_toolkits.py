@@ -11,8 +11,7 @@ from agno.tools.function import Function
 
 from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools, toolkit_instructions
 from mindroom.agents import (
     _context_hidden_toolkits,
     create_agent,
@@ -23,6 +22,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import update_awareness
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
+from mindroom.delegation.state import SubagentPersona
 from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
@@ -31,7 +31,7 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, offered_refusal
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     defer_toolkit,
@@ -40,7 +40,6 @@ from mindroom.tool_system.dynamic_toolkits import (
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit
-from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -1048,12 +1047,18 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
         add_instructions=True,
     )
     toolkit = Toolkit(name="deferred", tools=[function])
-    deferral = defer_toolkit("deferred", "", toolkit)
+    adapted = adapt_toolkit(toolkit)
+    deferral, deferred = defer_toolkit("deferred", "", adapted)
 
-    assert toolkit.functions["deferred_tool"].add_instructions is False
     assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
-    # Adapting refuses a function that still asks for prompt instructions.
-    adapt_toolkit(toolkit)
+    # An agent offers the deferred toolkit, whose function instructions travel with tool search, and refuses it eager.
+    assert offered_refusal(deferred) is None
+    assert offered_refusal(adapted) == (
+        "Tool function 'deferred_tool' sets instructions for Agno to add to the system prompt, which MindRoom adds only"
+        " per toolkit; set them on the toolkit instead"
+    )
+    # The built toolkit is left as it was built.
+    assert toolkit.functions["deferred_tool"].add_instructions is True
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -1084,20 +1089,9 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
         add_instructions=True,
     )
-    defer_toolkit("deferred", "", deferred_toolkit)
+    _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit))
 
-    assert active_toolkit.add_instructions is True
-    assert active_toolkit.functions["shared_tool"].add_instructions is True
-    assert deferred_toolkit.add_instructions is False
-    assert deferred_toolkit.functions["shared_tool"].add_instructions is False
-    spec = AgentSpec(
-        id="code",
-        name="code",
-        model=ScriptedModel([]),
-        system_message=None,
-        toolkits=(adapt_toolkit(active_toolkit), adapt_toolkit(deferred_toolkit)),
-    )
-    assert prepare_run_tools(spec).instructions == (active_toolkit_marker,)
+    assert toolkit_instructions((adapt_toolkit(active_toolkit), deferred)) == (active_toolkit_marker,)
 
 
 def test_native_tool_search_keeps_initial_toolkit_instructions(
@@ -1309,6 +1303,50 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
         assert f"{name}(" not in instructions
         assert f"{name}(" not in description
     assert f"- {available}(" in _build_prompt(agent)
+
+
+@pytest.mark.parametrize("narrowed_by", ["function_filter", "persona", "approval"])
+def test_chat_ui_instructions_name_only_the_functions_a_narrowed_agent_is_offered(
+    tmp_path: Path,
+    narrowed_by: str,
+) -> None:
+    """The persona list, the function filter, and approval hiding narrow the chat_ui map as include_tools does."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["chat_ui"]  # type: ignore[index]
+    if narrowed_by == "approval":
+        raw["tool_approval"] = {
+            "rules": [{"match": name, "action": "require_approval"} for name in ("open_panel", "show_computer")],
+        }
+    config = _validated_config(tmp_path, raw)
+    narrowing: dict[str, Any] = {
+        "function_filter": {"tool_function_filter": lambda function: function.name == "open_settings"},
+        "persona": {
+            "persona": SubagentPersona(
+                source_kind="inline",
+                source_name="",
+                system_prompt="You open settings.",
+                tools=("chat_ui.open_settings",),
+            ),
+        },
+        "approval": {},
+    }[narrowed_by]
+
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+        **narrowing,
+    )
+    chat_ui = _toolkit(agent, "chat_ui")
+
+    assert [function.name for function in chat_ui.functions] == ["open_settings"]
+    for text in (_build_prompt(agent), chat_ui.guidance or ""):
+        assert "- open_settings(" in text
+        assert "show_computer(" not in text
+        assert "open_panel(" not in text
 
 
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
@@ -1552,8 +1590,8 @@ class _WeatherTools(Toolkit):
 
 def _deferred(toolkit: Toolkit, description: str, domain_name: str | None = None) -> DeferredToolkit:
     """Defer ``toolkit`` and adapt it, as agent construction does, offering every function of it."""
-    deferral = defer_toolkit(domain_name or toolkit.name, description, toolkit)
-    return DeferredToolkit(deferral, adapt_toolkit(toolkit).functions)
+    deferral, deferred = defer_toolkit(domain_name or toolkit.name, description, adapt_toolkit(toolkit))
+    return DeferredToolkit(deferral, deferred.functions)
 
 
 def _search_toolkit(*deferred: DeferredToolkit) -> DynamicToolsToolkit:
@@ -1789,7 +1827,6 @@ def test_tool_search_returns_function_instructions_kept_out_of_the_prompt() -> N
     match = _tool_payload(toolkit.tool_search("ping"))["matches"][0]
 
     assert match["instructions"] == "Only ping hosts the user named."
-    assert pings.functions["ping"].add_instructions is False
 
 
 class _GithubTools(Toolkit):
@@ -1907,7 +1944,7 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
         )
         return build_static_token_estimator(
             prompt_for_turn(agent),
-            prepare_run_tools(agent.spec).specs(),
+            PreparedTools(functions=agent.spec.functions).specs(),
             agent.request_template.deferred_tools.names,
         ).non_prompt_tokens()
 

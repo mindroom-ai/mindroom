@@ -148,7 +148,7 @@ async def capture_bash_batch(
     ]
     state = LoopState(
         messages=[*history, assistant],
-        offered=PreparedTools(functions={}, instructions=()),
+        offered=PreparedTools(functions={}),
         tools=(),
         run=catalog.run,
         record=record,

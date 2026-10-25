@@ -16,7 +16,7 @@ import pytest
 from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalManager
@@ -88,7 +88,6 @@ if TYPE_CHECKING:
     from mindroom.approval.manager import ApprovalActionResult
     from mindroom.event_journal import ScheduledCallRefusal
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
-    from mindroom.tool_system.tool_function import ToolFunction
 
 _ROOM = "!room:test"
 _THREAD = "$thread"
@@ -1077,23 +1076,26 @@ class _SlackTools(Toolkit):
 
 @dataclass(frozen=True)
 class _LiveRun:
-    """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy."""
+    """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy.
 
-    toolkits: tuple[Toolkit, ...]
+    ``toolkits`` pairs each toolkit with the authored toolkit the run offers its functions from, or None for a toolkit
+    generated for the agent.
+    """
+
+    toolkits: tuple[tuple[Toolkit, str | None], ...]
     middleware: tuple[ToolMiddleware, ...] = ()
 
     async def call(self, function_name: str, /, **arguments: object) -> object:
         """Run one of the run's functions as the loop does, with the live tools bound as an agent build binds them."""
-        functions: dict[str, ToolFunction] = {}
-        for toolkit in (*self.toolkits, SchedulerTools()):
-            for function in adapt_toolkit(toolkit).functions:
-                functions.setdefault(function.name, function)
-        owners = {"schedule_tool_call": "scheduler", "run_scheduled_call": "scheduler"}
-        for toolkit in self.toolkits:
-            for name, function in toolkit.get_async_functions().items():
-                if function.owning_toolkit is not None:
-                    owners.setdefault(name, function.owning_toolkit)
-        policy = bind_live_tools(functions, owners, self.middleware)
+        adapted = [
+            adapt_toolkit(toolkit, key=name) for toolkit, name in (*self.toolkits, (SchedulerTools(), "scheduler"))
+        ]
+        functions = {
+            function.name: function
+            for toolkit in offered_toolkits(adapted, agent="helper")
+            for function in toolkit.functions
+        }
+        policy = bind_live_tools(functions, self.middleware)
         context = ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
         return await run_tool_call(functions[function_name], arguments, context, middleware=policy)
 
@@ -1123,14 +1125,13 @@ def _live_agent(
         assert runs is None, "runs records only the default toolkit's calls"
         assert outcome is _DEFAULT_OUTCOME, "outcome configures only the default toolkit"
     for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = toolkit_name
         if authored_confirmation:
             function.requires_confirmation = True
         if external_execution:
             function.external_execution = True
         if stop_after_tool_call:
             function.stop_after_tool_call = True
-    return _LiveRun((toolkit,), middleware)
+    return _LiveRun(((toolkit, toolkit_name),), middleware)
 
 
 async def _schedule_from_tool(
@@ -2054,7 +2055,7 @@ async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Con
         tool_runtime_context(_turn_context(config)),
     ):
         return await run_tool_call(
-            prepare_run_tools(build.spec).functions["run_scheduled_call"],
+            build.spec.functions["run_scheduled_call"],
             {"task_id": _TASK},
             ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
             middleware=agent_tool_middleware(build),
@@ -2090,7 +2091,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         active_model_name=None,
     )
 
-    functions = prepare_run_tools(build.spec).functions
+    functions = build.spec.functions
     assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
     names = [middleware.__name__ for middleware in build.tool_policy]
     assert names.count("bind_live_functions") == int(offered is not None)
@@ -2110,7 +2111,7 @@ async def test_an_agent_build_runs_a_stored_call_through_its_own_function_and_po
     config = _code_config()
     config.agents[_AGENT].tools = [_TOOLKIT]
     build = _agent_build(config, monkeypatch)
-    assert prepare_run_tools(build.spec).functions["post_slack_message"].requires_confirmation is True
+    assert build.spec.functions["post_slack_message"].requires_confirmation is True
     try:
         await _armed(manager)
 
@@ -2151,7 +2152,7 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
         _responders(config, "general"),
     ):
         await run_tool_call(
-            prepare_run_tools(build.spec).functions["schedule_tool_call"],
+            build.spec.functions["schedule_tool_call"],
             {
                 "tool_name": "post_slack_message",
                 "arguments_json": canonical_arguments(_ARGUMENTS),
@@ -2214,7 +2215,7 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
         # The model's own call of the name runs the first configured toolkit's function.
         with tool_runtime_context(_turn_context(config)):
             await run_tool_call(
-                prepare_run_tools(build.spec).functions["post_slack_message"],
+                build.spec.functions["post_slack_message"],
                 _OTHER_ARGUMENTS,
                 ToolCallContext(run_id="run", session_id="session", call_id="call-2", user_id=None),
                 middleware=agent_tool_middleware(build),
@@ -2601,7 +2602,7 @@ async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
         config.agents[_AGENT].memory_backend = "file"
     with registered_toolkit(_TOOLKIT, toolkit_class):
         build = _agent_build(config, monkeypatch)
-        parameters = prepare_run_tools(build.spec).functions["post_slack_message"].parameters
+        parameters = build.spec.functions["post_slack_message"].parameters
         assert ("mindroom_output_path" in parameters["properties"]) is workspace
         try:
             await _armed(manager)
@@ -2629,6 +2630,30 @@ async def test_scheduler_functions_are_never_scheduled_calls() -> None:
                     execute_at="2030-01-02T09:00:00-05:00",
                     description="Run the runner",
                 )
+
+
+@pytest.mark.asyncio
+async def test_a_function_generated_for_the_agent_is_never_a_scheduled_call() -> None:
+    """A function no configured toolkit offers, such as the knowledge search, names no toolkit a stored call could."""
+    context = _tool_context(_gated_config())
+
+    def search_knowledge_base(query: str) -> str:
+        """Search the knowledge base."""
+        return query
+
+    run = _LiveRun(((Toolkit(name="search_knowledge_base", tools=[search_knowledge_base]), None),))
+    with (
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(RuntimeError, match="not one of this agent's tools"),
+    ):
+        await run.call(
+            "schedule_tool_call",
+            tool_name="search_knowledge_base",
+            arguments_json='{"query": "handbook"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Search later",
+        )
 
 
 def test_outside_an_agent_run_no_call_can_be_stored() -> None:

@@ -56,7 +56,7 @@ async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: lis
     ]
     state = LoopState(
         messages=messages,
-        offered=PreparedTools(functions={}, instructions=()),
+        offered=PreparedTools(functions={}),
         tools=(),
         run=checkpoint.catalog.run,
         record=record,

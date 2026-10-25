@@ -16,7 +16,7 @@ import pytest
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
@@ -213,7 +213,7 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
     build = prepared.build
     estimator = build_static_token_estimator(
         prepared.spec.system_message or Message(role="system", content=""),
-        prepare_run_tools(build.spec).specs(),
+        PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
     )
     assert prepare.await_args.kwargs["resolved_inputs"].execution_plan.static_prompt_tokens == estimator.estimate(

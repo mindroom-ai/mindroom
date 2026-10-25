@@ -136,8 +136,8 @@ if TYPE_CHECKING:
         StandaloneReplaySnapshot,
         TurnRunState,
     )
-    from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -1027,7 +1027,7 @@ async def _prepare_agent_and_prompt(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     knowledge: AgentKnowledge | None,
     include_interactive_questions: bool,
-    tool_function_filter: Callable[[Function], bool] | None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
     execution_identity: ToolExecutionIdentity | None,
     compaction_lifecycle: CompactionLifecycle | None,
     delegation_depth: int,
@@ -1245,7 +1245,7 @@ async def _prepare_agent_run_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     knowledge: AgentKnowledge | None,
     include_interactive_questions: bool,
-    tool_function_filter: Callable[[Function], bool] | None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
     include_openai_compat_guidance: bool,
     execution_identity: ToolExecutionIdentity | None,
     compaction_lifecycle: CompactionLifecycle | None,
@@ -1440,7 +1440,7 @@ async def ai_response(  # noqa: C901
     knowledge: AgentKnowledge | None = None,
     on_attempt_start: Callable[[str, str], None] | None = None,
     include_interactive_questions: bool = True,
-    tool_function_filter: Callable[[Function], bool] | None = None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
@@ -1791,7 +1791,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     knowledge: AgentKnowledge | None = None,
     on_attempt_start: Callable[[str, str], None] | None = None,
     include_interactive_questions: bool = True,
-    tool_function_filter: Callable[[Function], bool] | None = None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,

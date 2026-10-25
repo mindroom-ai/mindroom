@@ -451,7 +451,7 @@ async def test_dynamic_workflow_room_agent_participant_uses_fallback(
     _budget_context_config(context.config)
     _model, loaded = _room_agent_model(monkeypatch, answer("done"))
 
-    await dynamic_workflow_module._aexecute_room_agent_participant(
+    await dynamic_workflow_module._execute_room_agent_participant(
         context,
         {"id": "writer", "kind": "room_agent", "agent": "specialist"},
         "Write a report.",
@@ -509,9 +509,9 @@ async def _run_workflow_as(workflow: _SubagentWorkflow, active_model_name: str) 
         active_model_name=active_model_name,
     )
     with tool_runtime_context(context):
-        created = json.loads(await workflow.tools.acreate_workflow(spec))
+        created = json.loads(await workflow.tools.create_workflow(spec))
         assert created["status"] == "ok", created
-        return json.loads(await workflow.tools.arun_workflow(workflow_id="review", input={}))
+        return json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
 
 
 @pytest.mark.asyncio
@@ -531,7 +531,8 @@ async def test_over_budget_caller_runs_saved_workflows_on_the_fallback(
     assert workflow.models_loaded == ["luna"]
 
 
-def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
     context = _make_context(tmp_path)
     _budget_context_config(context.config)
     context.config.models["opus"] = ModelConfig(
@@ -544,7 +545,7 @@ def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) ->
     spec["participants"][0]["model"] = "claude-opus-5"  # type: ignore[index]
 
     with tool_runtime_context(context):
-        payload = json.loads(DynamicWorkflowTools().create_workflow(spec))
+        payload = json.loads(await DynamicWorkflowTools().create_workflow(spec))
 
     assert payload["status"] == "error"
     assert "not allowed by permissions.models" in payload["message"]

@@ -102,23 +102,18 @@ class _JobCallError(Exception):
 
 
 def assembled_job_tools(
-    sources: Iterable[tuple[str, Toolkit, ToolFunction]],
+    sources: Iterable[tuple[Toolkit, ToolFunction]],
     snapshot: Mapping[str, Any],
 ) -> dict[str, JobTool]:
     """Describe each function a MindRoom-assembled toolkit offers the actor, by name.
 
-    ``sources`` holds, for each such function, its authored toolkit name, the concrete toolkit built for the actor,
-    and the function itself; the knowledge search, skill, and team delegation functions MindRoom adds beside those
-    toolkits are not among them. ``snapshot`` is the actor's execution scope and file access, empty for a team.
+    ``sources`` holds, for each such function, the concrete toolkit built for the actor and the function itself,
+    which names its authored toolkit; the knowledge search, skill, and team delegation functions MindRoom adds beside
+    those toolkits are not among them. ``snapshot`` is the actor's execution scope and file access, empty for a team.
     """
     return {
-        function.name: JobTool(
-            function=function,
-            toolkit_name=owner,
-            toolkit=toolkit,
-            authority=toolkit_authority(snapshot, toolkit),
-        )
-        for owner, toolkit, function in sources
+        function.name: JobTool(function=function, toolkit=toolkit, authority=toolkit_authority(snapshot, toolkit))
+        for toolkit, function in sources
     }
 
 

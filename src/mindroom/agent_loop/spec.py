@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING, Any
 from mindroom.tool_system.invocation import ToolCallContext
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.history.types import HistoryScope
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider
     from mindroom.session_storage.types import ConversationSession
-    from mindroom.tool_system.tool_function import AdaptedToolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -20,8 +22,10 @@ class AgentSpec:
     """One configured agent as the loop runs it.
 
     ``id`` and ``name`` are stored on every run as ``agent_id`` and ``agent_name``. ``system_message`` is the
-    rendered prompt the loop sends first, or None for an agent without one. ``max_tool_calls_per_turn`` bounds the
-    tool calls of one run, and with it the model requests.
+    rendered prompt the loop sends first, or None for an agent without one. ``toolkits`` offer each function name
+    once, as the agent's build resolved them (``offered_toolkits``), and ``functions`` holds those functions by
+    name in offer order. ``max_tool_calls_per_turn`` bounds the tool calls of one run, and with it the model
+    requests.
     """
 
     id: str
@@ -30,6 +34,18 @@ class AgentSpec:
     system_message: Message | None
     toolkits: tuple[AdaptedToolkit, ...]
     max_tool_calls_per_turn: int | None = None
+    functions: Mapping[str, ToolFunction] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Index the functions the toolkits offer by name, refusing a name two of them offer."""
+        functions: dict[str, ToolFunction] = {}
+        for toolkit in self.toolkits:
+            for function in toolkit.functions:
+                if function.name in functions:
+                    msg = f"Agent {self.id!r} is offered two functions named {function.name!r}"
+                    raise ValueError(msg)
+                functions[function.name] = function
+        object.__setattr__(self, "functions", functions)
 
 
 @dataclass(frozen=True, slots=True)

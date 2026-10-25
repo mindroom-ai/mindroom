@@ -210,7 +210,6 @@ def _build(turn_context: str | None = None) -> AgentBuild:
         request_template=ModelRequest(messages=()),
         history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         store=None,
-        tool_owners={},
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,

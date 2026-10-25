@@ -11,11 +11,10 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom import agents
 from mindroom.agent_cli.minimal_agent import MinimalTurn, minimal_turn
-from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
-from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -32,6 +31,7 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -101,7 +101,7 @@ def _knowledge() -> AgentKnowledge:
 
 def _function_names(build: AgentBuild) -> list[str]:
     """Return the functions a run of ``build`` offers the model."""
-    return sorted(prepare_run_tools(build.spec).functions)
+    return sorted(build.spec.functions)
 
 
 def _system_prompt(build: AgentBuild) -> str:
@@ -229,9 +229,8 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path, monke
 
 def test_persona_with_tools_hides_generated_functions_from_the_agent() -> None:
     """An explicit tool list hides functions with no owning toolkit, which the configured agent offers."""
-    generated = Function(name="generated")
-    owned = Function(name="read_file")
-    owned.owning_toolkit = "file"
+    generated = ToolFunction(name="generated", description=None, parameters={}, entrypoint=lambda: None)
+    owned = ToolFunction(name="read_file", toolkit="file", description=None, parameters={}, entrypoint=lambda: None)
 
     configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None)
     authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None)
@@ -267,6 +266,18 @@ def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: P
         _child(runtime, ["file.read_file", "file.save_file"])
 
 
+def test_persona_names_a_function_its_caller_offers_but_cannot_pause_for(tmp_path: Path) -> None:
+    """A named function only approval hiding removes, for a caller that cannot resume a paused run, stops nothing."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    runtime.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="save_file", action="require_approval")],
+    )
+
+    build = _child(runtime, ["file.read_file", "file.save_file"], supports_native_tool_approval=False)
+
+    assert _function_names(build) == ["read_file"]
+
+
 @pytest.mark.parametrize(
     ("tools", "missing"),
     [(["file.read_file", "file.save_file"], r"'file\.save_file'"), (["file", "calculator"], "'calculator'")],
@@ -275,8 +286,8 @@ def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: li
     """A named function or toolkit the caller's own function filter hides, such as during a call, stops construction."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"])
 
-    def caller_filter(function: Function) -> bool:
-        return function.name != "save_file" and function.owning_toolkit != "calculator"
+    def caller_filter(function: ToolFunction) -> bool:
+        return function.name != "save_file" and function.toolkit != "calculator"
 
     with pytest.raises(PersonaError, match=f"{missing} is not available to you"):
         _child(runtime, tools, tool_function_filter=caller_filter)
@@ -291,8 +302,9 @@ def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> No
     assert build.surface.mode == "minimal"
     assert build.surface.deferred == ()
     # The catalog behind Bash holds every function the build owns, whichever ones its spec offers the model.
-    assert "run_shell_command" in build.tool_owners
-    assert "read_file" not in build.tool_owners
+    owned = {name for _agent, name in tool_owners_by_agent(build)}
+    assert "run_shell_command" in owned
+    assert "read_file" not in owned
 
 
 def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
@@ -779,7 +791,7 @@ async def test_persona_delegate_tool_keeps_its_cap_without_runtime_context(tmp_p
     """An authored child's delegate tool enforces its own tools even without a Matrix tool context."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"], delegate_to=["helper"])
     build = _child(runtime, ["delegate", "file"])
-    run_subagent = prepare_run_tools(build.spec).functions["run_subagent"].entrypoint
+    run_subagent = build.spec.functions["run_subagent"].entrypoint
 
     unauthored = await run_subagent(task="Plain copy.")
     widened = await run_subagent(task="Add.", system_prompt="Q", tools=["calculator"])

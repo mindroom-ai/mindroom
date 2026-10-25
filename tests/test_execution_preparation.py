@@ -10,7 +10,7 @@ import pytest
 
 from mindroom import execution_preparation
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config, ResolvedRuntimeModel
@@ -779,7 +779,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
         resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
     )
 
-    tools = prepare_run_tools(build.spec).specs()
+    tools = PreparedTools(functions=build.spec.functions).specs()
     assert tools
     estimator = build_static_token_estimator(system_message, tools, build.request_template.deferred_tools.names)
     assert prepared.prepared_history.prepared_context_tokens == estimator.estimate(
@@ -801,7 +801,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     """Team history sized from the previous request takes off only the static estimate's system prompt and tools."""
     config, runtime_paths = _bound_agent_config(tmp_path)
     leader_system_message = Message(role="system", content="You lead the team.")
-    leader_tools = prepare_run_tools(_build(config, runtime_paths).spec).specs()
+    leader_tools = PreparedTools(functions=_build(config, runtime_paths).spec.functions).specs()
     prepare_bound_scope_history = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", prepare_bound_scope_history)
     monkeypatch.setattr(
