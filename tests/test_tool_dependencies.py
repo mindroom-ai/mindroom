@@ -664,6 +664,7 @@ elif mode == 'mem0_reader':
     mem0 = ModuleType('mem0')
     mem0.AsyncMemory = Memory
     sys.modules['mem0'] = mem0
+    memory_config.ensure_optional_deps = lambda *args, **kwargs: False
     memory_config.ensure_sentence_transformers_dependencies = lambda paths: None
     memory_config._install_chroma_similarity_scores = lambda store: None
     config = Config()

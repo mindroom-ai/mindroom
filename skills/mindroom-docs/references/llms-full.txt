@@ -3155,6 +3155,7 @@ A `file` member of a team that uses Mem0 does not see that team's memory in its 
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory.
+The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder
 
@@ -3917,6 +3918,7 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 ## Storage
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
+They use Chroma, whose `chromadb` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[chromadb]`.
 For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
 Files-mode bases need no vector database.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
