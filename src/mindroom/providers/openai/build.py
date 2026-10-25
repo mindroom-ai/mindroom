@@ -349,19 +349,20 @@ def _chat_client_factory(
         def azure_client() -> AsyncOpenAI:
             from openai import AsyncAzureOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
-            key = api_key or process_env.get(api_key_env)
+            # The SDK refuses a key beside an Entra ID token, so a model signing in with one never reads the variable.
+            key = api_key or (None if alternative_auth else process_env.get(api_key_env))
             if not (key or alternative_auth):
                 msg = (
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     f"{api_key_env} environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
                 raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
-            # TODO(simplify): Azure accepts `timeout` and `max_retries` but leaves them out of its client. Build it from
-            # the shared client options, as the other routes do. Operators who set either would notice.
             azure: dict[str, Any] = {
                 "api_key": key,
                 "api_version": settings.api_version or "2024-10-21",
                 "organization": settings.organization,
+                "timeout": settings.timeout,
+                "max_retries": settings.max_retries,
                 "azure_endpoint": settings.azure_endpoint or process_env.get(AZURE_OPENAI_ENV_BY_KEY["endpoint"]),
                 "azure_deployment": settings.azure_deployment or process_env.get(AZURE_OPENAI_ENV_BY_KEY["deployment"]),
                 "base_url": base_url or None,

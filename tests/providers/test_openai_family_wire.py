@@ -1596,6 +1596,24 @@ async def test_client_params_override_the_configured_client_options(
 
 
 @pytest.mark.asyncio
+async def test_an_azure_model_sends_with_its_configured_timeout_and_retries(tmp_path: Path) -> None:
+    """``timeout`` and ``max_retries`` set in ``extra_kwargs`` reach the Azure client, as on the other routes."""
+    model_config = {
+        "provider": "azure",
+        "id": "gpt-6-astra",
+        "api_key": "test-key",
+        "extra_kwargs": {**_AZURE_CLIENT, "timeout": 30, "max_retries": 0},
+    }
+    built = _Built(tmp_path, model_config, _json_reply({"error": {"message": "down"}}, status=500))
+
+    with pytest.raises(ProviderError):
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert len(built.requests) == 1
+    assert built.requests[0].extensions["timeout"]["read"] == 30
+
+
+@pytest.mark.asyncio
 async def test_client_params_base_url_is_the_groq_host(tmp_path: Path) -> None:
     config = {
         "provider": "groq",
