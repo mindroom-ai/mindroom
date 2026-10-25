@@ -18,12 +18,13 @@
       "id": "gpt-6-astra",
       "provider": "openai"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Plan a multi-stop trip.",
         "external_execution": false,
         "name": "plan_trip",
@@ -129,10 +130,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Create a calendar event and invite attendees.",
+        "external_execution": false,
         "name": "calendar_create_event",
         "parameters": {
           "$defs": {
@@ -263,13 +267,14 @@
           ],
           "title": "create_eventArguments",
           "type": "object"
-        }
+        },
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -279,7 +284,6 @@
         "system_fingerprint": "fp_parity"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {
@@ -296,7 +300,7 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {

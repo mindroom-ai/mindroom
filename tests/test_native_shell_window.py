@@ -14,11 +14,10 @@ from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.session import CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test
 from tests.minimal_agent_fixtures import cli_window, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _toolkit
 
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.tool_system.tool_access import ToolKey
 
 # The commands here never dial the CLI routes; they call the owner directly.
@@ -93,7 +93,7 @@ async def _windowed_shell(
     assert windowed is not None
     catalog = await _catalog(tmp_path, windowed)
     catalog.store = create_state_storage("helper", tmp_path)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=_allow,

@@ -98,6 +98,11 @@ async def _no_cleanup(_job: BackgroundJob) -> None:
     return None
 
 
+def always_owned(*_args: object, **_kwargs: object) -> bool:
+    """Own every call's execution, as a turn with background jobs on does."""
+    return True
+
+
 def tool_job_journal(storage_root: Path) -> EventJournalStore:
     """Open the event journal of one storage root, as one process does; another open is another process."""
     return EventJournalStore.open_sqlite(event_journal_sqlite_path(storage_root))
@@ -387,9 +392,9 @@ async def run_job_turn(
     """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
 
     ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
-    reply does. ``generated`` are functions the framework offers beside the actor's assembled ones, which never
-    become jobs. ``participation`` gates the reply as an agent's turn does, deciding after the job definitions
-    project.
+    reply does. ``generated`` are functions beside the actor's assembled toolkits, as MindRoom adds knowledge search,
+    skill, and team delegation functions, which never become jobs. ``participation`` gates the reply as an agent's
+    turn does, deciding after the job definitions project.
     """
     spec, hooks, session, persist = _job_turn(
         actor,
@@ -757,6 +762,8 @@ class DelegatingLeader:
             delegation_depth=self.depth,
             supports_native_tool_approval=True,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
         hooks = agent_loop_hooks(
             build,

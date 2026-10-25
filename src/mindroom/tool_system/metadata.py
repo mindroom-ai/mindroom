@@ -337,7 +337,7 @@ def validate_authored_tool_entry_overrides(
         unexpected = ", ".join(unexpected_fields)
         allowed = ", ".join(sorted(fields_by_name)) or "none"
         path = _override_path(tool_name, unexpected_fields[0], config_path_prefix=config_path_prefix)
-        msg = f"{path}: unknown authored override field(s): {unexpected}. Allowed fields: {allowed}."
+        msg = f"{path}: unknown authored override field(s): {unexpected}; remove or correct them. Allowed fields: {allowed}."
         raise ToolConfigOverrideError(msg)
 
     validated: dict[str, object] = {}
@@ -372,6 +372,7 @@ def _run_authored_override_validator(
 ) -> None:
     """Run one tool-specific authored-override validator against normalized overrides."""
     if overrides and validator == ToolAuthoredOverrideValidator.MCP:
+        # Deferred: the MCP registry loads Agno's tool layer, which the slim tool registry must not import.
         from mindroom.mcp.registry import validate_mcp_agent_overrides  # noqa: PLC0415
 
         validate_mcp_agent_overrides(tool_name, overrides)
@@ -972,9 +973,11 @@ def _compute_resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
     *,
-    tolerate_plugin_load_errors: bool = False,
+    tolerate_plugin_load_errors: bool,
 ) -> _ResolvedToolState:
     """Resolve registry and metadata for one runtime config by executing its plugins."""
+    # Deferred: the built-in tools register themselves through this module, and the MCP registry loads Agno's tool
+    # layer, so both load only once a runtime resolves its tools.
     import mindroom.tools  # noqa: F401, PLC0415
     from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 

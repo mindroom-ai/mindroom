@@ -157,9 +157,7 @@ from mindroom.tool_system.runtime_context import (
     runtime_context_from_dispatch_context,
 )
 from mindroom.tool_system.worker_routing import (
-    parse_tool_execution_identity_payload,
     run_with_tool_execution_identity,
-    serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_origin import SenderKind, TurnIntent
@@ -878,18 +876,6 @@ def _paused_answer() -> PausedAnswer:
         return PausedAnswer()
     # The resume completes these entries in place; the span's base keeps what the pause showed.
     return PausedAnswer(text=segment.text, tool_trace=deepcopy(segment.tool_trace), team_state=segment.team_state)
-
-
-def _continuation_execution_identity(continuation: ApprovalContinuation) -> ToolExecutionIdentity:
-    """Return the execution identity an approval continuation recorded when its run paused."""
-    identity = parse_tool_execution_identity_payload(
-        continuation.execution_identity,
-        error_prefix="Approval continuation execution_identity",
-    )
-    if identity is None:
-        msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
-        raise RuntimeError(msg)
-    return identity
 
 
 def _paused_presentation(handle: SpanHandle, paused: PausedAttempt, *, waiting_text: str | None) -> Presentation:
@@ -1680,7 +1666,7 @@ class ResponseRunner:
                 state=continuation_state,
                 delegation_storage_bindings=paused.delegation_storage_bindings,
                 show_tool_calls=show_tool_calls,
-                execution_identity=serialize_tool_execution_identity(execution_identity),
+                execution_identity=execution_identity,
                 runtime_model_name=paused.runtime_model_name,
                 continuation_count=paused.continuation_count,
                 team_member_names=team_member_names,
@@ -2535,11 +2521,10 @@ class ResponseRunner:
             agent_name = list(continuation.team_member_names)
         else:
             return None
-        execution_identity = _continuation_execution_identity(continuation)
         return self._memory_persistence(
             agent_name=agent_name,
             session_id=continuation.session_id,
-            execution_identity=execution_identity,
+            execution_identity=continuation.execution_identity,
             prompt=(
                 continuation.memory_prompt if continuation.memory_prompt is not None else continuation.request_body
             ),
@@ -2595,7 +2580,6 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
     ) -> Callable[[str, str], Awaitable[None]] | None:
         """Return the normal run-to-Matrix event linkage for a resumed response."""
-        execution_identity = _continuation_execution_identity(continuation)
         history_scope = continuation.history_scope
         if history_scope is None:
             if continuation.entity_kind == "team":
@@ -2604,7 +2588,7 @@ class ResponseRunner:
         return self._build_persist_response_event_id_effect(
             session_id=continuation.session_id,
             scope=history_scope,
-            execution_identity=execution_identity,
+            execution_identity=continuation.execution_identity,
         )
 
     async def _continue_entity_call(
@@ -2615,9 +2599,9 @@ class ResponseRunner:
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
         progress: ProgressPublisher | None,
-        cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
+        cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None,
     ) -> CompletedApprovalRun | PausedAttempt:
-        execution_identity = _continuation_execution_identity(continuation)
+        execution_identity = continuation.execution_identity
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             target,
             user_id=continuation.requester_id,
@@ -2831,7 +2815,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity | None,
         run_id: str | None,
         is_team: bool,
-        response_event_id: str | None = None,
+        response_event_id: str | None,
     ) -> None:
         """Persist one recorder's interrupted snapshot once, first marking a still-pending recorder interrupted."""
         if recorder.outcome == "pending":
@@ -2859,7 +2843,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity | None,
         run_id: str | None,
         is_team: bool,
-        response_event_id: str | None = None,
+        response_event_id: str | None,
     ) -> None:
         """Persist interrupted replay state without blocking the event loop."""
         offload = create_background_task(
@@ -4523,10 +4507,9 @@ class ResponseRunner:
         team_request: _TeamResponseRequest,
         *,
         resolved_target: MessageTarget,
-        early_placeholder_state: _EarlyPlaceholderState | None = None,
+        early_placeholder_state: _EarlyPlaceholderState,
     ) -> str | None:
         """Generate a team response once the per-thread lifecycle lock is held."""
-        placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         request = team_request.request
         retry_execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=resolved_target,
@@ -4587,7 +4570,7 @@ class ResponseRunner:
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
             placeholder_message=(None if _is_silent_schedule_response(request) else TEAM_PROGRESS_PLACEHOLDER),
-            early_placeholder_state=placeholder_state,
+            early_placeholder_state=early_placeholder_state,
         )
         if request is None:
             return None
@@ -4685,8 +4668,9 @@ class ResponseRunner:
             source_envelope=request.response_envelope,
         )
         execution_identity = tool_dispatch.execution_identity
+        configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
         allow_direct_private_agents = (
-            self.deps.agent_name not in self.deps.runtime.config.teams
+            configured_team_name is None
             and execution_identity.channel == "matrix"
             and bool(execution_identity.requester_id)
         )
@@ -4790,7 +4774,7 @@ class ResponseRunner:
                 hook_source=request.response_envelope.hook_source,
                 origin=request.response_envelope.origin,
             )
-            if self.deps.agent_name in self.deps.runtime.config.teams
+            if configured_team_name is not None
             else None
         )
 
@@ -4830,9 +4814,7 @@ class ResponseRunner:
                             response_sender_id=self.deps.matrix_full_id,
                             run_metadata_collector=team_run_metadata_content,
                             compaction_lifecycle=compaction_lifecycle,
-                            configured_team_name=self.deps.agent_name
-                            if self.deps.agent_name in self.deps.runtime.config.teams
-                            else None,
+                            configured_team_name=configured_team_name,
                             reason_prefix=team_request.reason_prefix,
                             pipeline_timing=request.pipeline_timing,
                             turn_recorder=team_turn_recorder,
@@ -4924,9 +4906,7 @@ class ResponseRunner:
                                     response_sender_id=self.deps.matrix_full_id,
                                     run_metadata_collector=team_run_metadata_content,
                                     compaction_lifecycle=compaction_lifecycle,
-                                    configured_team_name=self.deps.agent_name
-                                    if self.deps.agent_name in self.deps.runtime.config.teams
-                                    else None,
+                                    configured_team_name=configured_team_name,
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
                                     turn_recorder=team_turn_recorder,
@@ -5032,7 +5012,7 @@ class ResponseRunner:
                 thread_summary_entity_name=self.deps.agent_name,
             )
 
-        placeholder_state.settlement_started = True
+        early_placeholder_state.settlement_started = True
         return await self._run_and_settle_locked_response(
             request,
             target=delivery_target,
@@ -5066,10 +5046,10 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
-        existing_event_id: str | None = None,
-        user_id: str | None = None,
-        on_cancelled: Callable[[str], None] | None = None,
-        show_stop_button: bool = True,
+        existing_event_id: str | None,
+        user_id: str | None,
+        on_cancelled: Callable[[str], None],
+        show_stop_button: bool,
     ) -> None:
         """Run one response-generation attempt with cancellation support."""
         await ResponseAttemptRunner(
@@ -5388,25 +5368,18 @@ class ResponseRunner:
             )
             raise
 
-    async def _process_and_respond(  # noqa: C901, PLR0912
+    async def _process_and_respond(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
-        run_id: str | None = None,
-        response_kind: str = "ai",
-        on_delivery_started: Callable[[str | None], None] | None = None,
-        attempt_run_id_collector: list[str] | None = None,
-        runtime: _PreparedResponseRuntime | None = None,
+        run_id: str,
+        on_delivery_started: Callable[[str | None], None],
+        attempt_run_id_collector: list[str],
+        runtime: _PreparedResponseRuntime,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a response without streaming."""
-        if runtime is None:
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("response_runtime_start")
-            runtime = await self.prepare_response_runtime(request)
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
-        response_identity = self._response_identity(request, response_kind=response_kind)
+        response_identity = self._response_identity(request, response_kind="ai")
         lifecycle = self._build_lifecycle(
             identity=response_identity,
             request=request,
@@ -5420,9 +5393,6 @@ class ResponseRunner:
             scope=session_scope,
             resolved_target=runtime.resolved_target,
         )
-        # The caller's list survives raising exit paths (cancellation, stream
-        # re-raises), unlike the returned outcome.
-        attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = await self._active_response_event_ids(request.room_id)
         turn_recorder = self._build_turn_recorder(
             user_message=runtime.model_prompt,
@@ -5445,7 +5415,7 @@ class ResponseRunner:
                     runtime=runtime,
                     active_event_ids=active_event_ids,
                     turn_recorder=turn_recorder,
-                    attempt_run_id_collector=attempt_run_ids,
+                    attempt_run_id_collector=attempt_run_id_collector,
                     pipeline_timing=request.pipeline_timing,
                 )
             except Exception:
@@ -5491,8 +5461,7 @@ class ResponseRunner:
             generation.run_metadata_content,
             request.attachment_ids,
         )
-        if on_delivery_started is not None:
-            on_delivery_started(_existing_event_id(request))
+        on_delivery_started(_existing_event_id(request))
         try:
             delivery = await self.deps.delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
@@ -5520,25 +5489,18 @@ class ResponseRunner:
         self._note_final_delivery_timing(request, delivery)
         return build_outcome(delivery)
 
-    async def _process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
+    async def _process_and_respond_streaming(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
-        run_id: str | None = None,
-        response_kind: str = "ai",
-        on_delivery_started: Callable[[str | None], None] | None = None,
-        attempt_run_id_collector: list[str] | None = None,
-        runtime: _PreparedResponseRuntime | None = None,
+        run_id: str,
+        on_delivery_started: Callable[[str | None], None],
+        attempt_run_id_collector: list[str],
+        runtime: _PreparedResponseRuntime,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a streamed response."""
-        if runtime is None:
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("response_runtime_start")
-            runtime = await self.prepare_response_runtime(request)
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
-        response_identity = self._response_identity(request, response_kind=response_kind)
+        response_identity = self._response_identity(request, response_kind="ai")
         lifecycle = self._build_lifecycle(
             identity=response_identity,
             request=request,
@@ -5557,9 +5519,6 @@ class ResponseRunner:
         # live while the delivery gateway snapshots extra_content, and both
         # must survive the raising StreamingDeliveryError exit below.
         run_metadata_content: dict[str, Any] = {}
-        # The caller's list survives raising exit paths (cancellation, stream
-        # re-raises), unlike the returned outcome.
-        attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = await self._active_response_event_ids(request.room_id)
         tool_trace: list[Any] = []
         transport_outcome: StreamTransportOutcome | None = None
@@ -5591,7 +5550,7 @@ class ResponseRunner:
                         turn_recorder=turn_recorder,
                         tool_trace=tool_trace,
                         run_metadata_content=run_metadata_content,
-                        attempt_run_id_collector=attempt_run_ids,
+                        attempt_run_id_collector=attempt_run_id_collector,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=on_delivery_started,
                     )
@@ -5694,8 +5653,7 @@ class ResponseRunner:
             run_metadata_content,
             request.attachment_ids,
         )
-        if on_delivery_started is not None:
-            on_delivery_started(transport_outcome.last_physical_stream_event_id)
+        on_delivery_started(transport_outcome.last_physical_stream_event_id)
         delivery = await self._finalize_streamed_turn(
             request=request,
             delivery_target=runtime.resolved_target,
@@ -5724,22 +5682,25 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-        early_placeholder_state: _EarlyPlaceholderState | None = None,
+        early_placeholder_state: _EarlyPlaceholderState,
     ) -> str | None:
         """Own participation before any fallible locked request preparation."""
         participation = _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths)
-        placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         try:
             return await self._generate_response_with_participation_locked(
                 request,
                 resolved_target=resolved_target,
-                early_placeholder_state=placeholder_state,
+                early_placeholder_state=early_placeholder_state,
                 participation=participation,
             )
         except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
             raise
         except Exception as error:
-            if participation is None or participation.decision is not None or placeholder_state.settlement_started:
+            if (
+                participation is None
+                or participation.decision is not None
+                or early_placeholder_state.settlement_started
+            ):
                 raise
             participation.decline("preparation_failed")
             self.deps.logger.exception("Response preparation skipped before participation", error=str(error))
@@ -5833,7 +5794,6 @@ class ResponseRunner:
         participation: ParticipationGate | None,
     ) -> str | None:
         """Prepare and generate one admitted response under its participation owner."""
-        placeholder_state = early_placeholder_state
         request = replace(request, participating_agent_names=(self.deps.agent_name,))
         history_scope = self.deps.state_writer.history_scope()
         execution_identity = self.deps.tool_runtime.build_execution_identity(
@@ -5873,7 +5833,7 @@ class ResponseRunner:
             placeholder_message=None
             if _is_silent_schedule_response(request) or request.participation is not None
             else "Thinking...",
-            early_placeholder_state=placeholder_state,
+            early_placeholder_state=early_placeholder_state,
         )
         if prepared_request is None:
             return None
@@ -6007,7 +5967,7 @@ class ResponseRunner:
                 thread_summary_entity_name=self.deps.agent_name,
             )
 
-        placeholder_state.settlement_started = True
+        early_placeholder_state.settlement_started = True
         async with self._cli_approval_scope(
             runtime,
             request=request,

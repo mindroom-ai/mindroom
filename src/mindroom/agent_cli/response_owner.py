@@ -58,17 +58,19 @@ def tool_catalog(
 def bind_response_owner(
     catalog: PreparedAgentToolCatalog,
     *,
-    runtime: ToolRuntimeContext,
     lifetime: CliTurnLifetime,
     response_context: ResponseTurnContext,
-    run_id: str | None,
     context_documents: Mapping[str, str],
     output_file_policy: ToolOutputFilePolicy | None,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     failure_message: Callable[[str], str],
 ) -> LiveTurnTools:
-    """Register the response's owner and grant on its first attempt, or rebind its catalog after a rebuild."""
+    """Register the response's owner and grant on its first attempt, or rebind its catalog after a rebuild.
+
+    The owner runs as the catalog's tool runtime, for the catalog's run.
+    """
+    runtime = catalog.runtime_context
     assert runtime.orchestrator is not None
     owner = lifetime.owner
     if owner is not None:
@@ -92,7 +94,7 @@ def bind_response_owner(
         await authorize_prepared_tool_call(binding, expected_worker_target=expected_target)
 
     new_owner = LiveTurnTools(
-        cli_turn_owner(runtime, replace(response_context, run_id=run_id)),
+        cli_turn_owner(runtime, replace(response_context, run_id=catalog.run.run_id)),
         catalog=catalog,
         authorize=authorize,
         context=context_documents,

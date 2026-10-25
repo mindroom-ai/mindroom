@@ -856,18 +856,18 @@ def _classified(status_code: int | None = None, *, unreachable: bool = False) ->
 
 
 def test_embedding_failure_classification_splits_transient_from_permanent() -> None:
-    """Only retryable transport and throttling faults are classified transient, by their type and status."""
+    """An embedder failure is transient exactly when the rule model requests follow would retry it."""
     assert embedder_failure_is_transient(_classified(unreachable=True))
     assert embedder_failure_is_transient(_classified(429))
     assert embedder_failure_is_transient(_classified(408))
     assert embedder_failure_is_transient(_classified(502))
-    assert embedder_failure_is_transient(_classified(520))
+    assert embedder_failure_is_transient(_classified(409))
     assert embedder_failure_is_transient(TimeoutError())
     assert embedder_failure_is_transient(ConnectionResetError())
     assert not embedder_failure_is_transient(_classified(401))
     assert not embedder_failure_is_transient(_classified(403))
     assert not embedder_failure_is_transient(_classified(400))
-    assert not embedder_failure_is_transient(_classified(409))
+    assert not embedder_failure_is_transient(_classified(501))
     assert not embedder_failure_is_transient(_classified())
     assert not embedder_failure_is_transient(embedder_request_error(RuntimeError("out of memory"), None))
     assert not embedder_failure_is_transient(EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL))

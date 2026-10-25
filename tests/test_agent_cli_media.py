@@ -23,7 +23,6 @@ from mindroom.agent_cli.projection import project_cli_result
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolCallReceipt, ToolDescribeOperation
 from mindroom.agent_cli.session import CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
@@ -37,6 +36,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation, deserialize
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from tests.conftest import live_turn_tools_for_test
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog, _toolkit
@@ -86,7 +86,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         pass
 
     (tmp_path / "workspace").mkdir(exist_ok=True)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -290,7 +290,7 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
     async def authorize(key, arguments):
         pass
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -356,7 +356,7 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
         return await _catalog(tmp_path, [_toolkit("state", inspect_scope)])
 
     catalog = await catalog_for_window()
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,

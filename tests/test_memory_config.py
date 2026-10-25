@@ -888,7 +888,11 @@ class TestMemoryConfig:
             finish_install.set()
             installer.join(5)
         assert await creation is mock_from_config.return_value
-        mock_check_deps_installed.assert_called_once()
+        assert [call.args[0] for call in mock_check_deps_installed.call_args_list] == [
+            ["mem0ai"],
+            ["chromadb"],
+            ["sentence-transformers", "torchvision"],
+        ]
 
     @pytest.mark.asyncio
     async def test_create_memory_instance_replaces_mem0_openai_embedder_with_strict_adapter(

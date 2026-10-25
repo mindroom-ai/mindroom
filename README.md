@@ -530,5 +530,5 @@ See [AGENTS.md](https://github.com/mindroom-ai/mindroom/blob/main/AGENTS.md) for
 
 Built with:
 - [Matrix](https://matrix.org/) - The federated communication protocol
-- [Agno](https://agno.dev/) - AI agent framework
+- [Agno](https://agno.dev/) - Toolkits that agents call
 - [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio) - Python Matrix client

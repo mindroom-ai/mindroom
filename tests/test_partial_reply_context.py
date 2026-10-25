@@ -25,7 +25,6 @@ from mindroom.constants import (
     UI_ACTION_CONTENT_KEY,
 )
 from mindroom.execution_preparation import (
-    _build_unseen_context_messages,
     _classify_partial_reply,
     _get_unseen_event_ids_for_metadata,
     _get_unseen_messages_for_sender,
@@ -51,6 +50,7 @@ from mindroom.streaming import (
 )
 from tests.conftest import (
     bind_runtime_paths,
+    build_unseen_context_messages_for_test,
     delivered_matrix_event,
     push_stream_chunk,
     runtime_paths_for,
@@ -414,7 +414,7 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e3", sender="@user:localhost", body="New question"),
         ]
 
-        turn, unseen_event_ids = _build_unseen_context_messages(
+        turn, unseen_event_ids = build_unseen_context_messages_for_test(
             "Answer the new question.",
             thread_history,
             seen_event_ids={"e1"},
@@ -517,7 +517,7 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e2", sender="@user:localhost", body="Continue"),
         ]
 
-        turn, unseen_event_ids = _build_unseen_context_messages(
+        turn, unseen_event_ids = build_unseen_context_messages_for_test(
             "Continue.",
             thread_history,
             seen_event_ids=set(),

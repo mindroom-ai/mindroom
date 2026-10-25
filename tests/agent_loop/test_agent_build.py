@@ -106,7 +106,13 @@ def _build(config: Config, runtime_paths: RuntimePaths, **kwargs: Any) -> AgentB
         resolved_thread_id=None,
         session_id=None,
     )
-    return create_agent("assistant", config, runtime_paths, identity, **kwargs)
+    return create_agent(
+        "assistant",
+        config,
+        runtime_paths,
+        identity,
+        **({"knowledge": None, "active_model_name": None} | kwargs),
+    )
 
 
 def _owners(build: AgentBuild) -> dict[str, str]:

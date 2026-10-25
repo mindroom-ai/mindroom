@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
 from mindroom.reply_lifecycle import ReplyState
+from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import membership_state, outbox, reply_messages, reply_spans
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.response_sources import ResponseSources
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
     from .backend import Row, Transaction
 
@@ -193,7 +195,8 @@ class ApprovalContinuation:
     earlier_calls: tuple[ApprovalCall, ...] = ()
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     show_tool_calls: bool = True
-    execution_identity: dict[str, object] = field(default_factory=dict)
+    # The identity the paused run executed under; the resumed run and its tools execute under it again.
+    execution_identity: ToolExecutionIdentity = field(kw_only=True)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
     team_member_model_names: tuple[tuple[str, str], ...] = ()
@@ -243,7 +246,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "entity_kind": continuation.entity_kind,
         "requester_id": continuation.requester_id,
         "delegation_storage_bindings": continuation.delegation_storage_bindings,
-        "execution_identity": continuation.execution_identity,
+        "execution_identity": serialize_tool_execution_identity(continuation.execution_identity),
         "runtime_model_name": continuation.runtime_model_name,
         "team_member_names": list(continuation.team_member_names),
         "team_member_model_names": [list(item) for item in continuation.team_member_model_names],
@@ -370,7 +373,10 @@ def _from_rows(
             stored["delegation_storage_bindings"],
         ),
         show_tool_calls=_shows_tool_calls(reply.presentation),
-        execution_identity=cast("dict[str, object]", stored["execution_identity"]),
+        execution_identity=parse_tool_execution_identity_payload(
+            stored["execution_identity"],
+            error_prefix="Approval continuation execution_identity",
+        ),
         runtime_model_name=cast("str | None", stored["runtime_model_name"]),
         team_member_names=tuple(cast("list[str]", stored["team_member_names"])),
         team_member_model_names=tuple(

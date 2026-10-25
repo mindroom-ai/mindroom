@@ -112,7 +112,13 @@ def _system_prompt(build: AgentBuild) -> str:
 
 def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "P", **options: Any) -> AgentBuild:  # noqa: ANN401
     """Build the helper agent as an authored child that names ``tools``."""
-    options = {"execution_identity": None, "persist_runtime_state": False, **options}
+    options = {
+        "execution_identity": None,
+        "persist_runtime_state": False,
+        "knowledge": None,
+        "active_model_name": None,
+        **options,
+    }
     return agents.create_agent(
         "helper",
         runtime.config,
@@ -171,7 +177,15 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "SOUL.md").write_text("Configured personality")
     prompt = "Plain {not_a_var} text"
-    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
+    configured = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
+    )
     assert "Configured personality" in str(configured.prompt.role)
 
     request = await _persona_request(runtime, monkeypatch, inline_persona(prompt, None, None, None), "task")
@@ -218,8 +232,8 @@ def test_persona_with_tools_hides_generated_functions_from_the_agent() -> None:
     generated = ToolFunction(name="generated", description=None, parameters={}, entrypoint=lambda: None)
     owned = ToolFunction(name="read_file", toolkit="file", description=None, parameters={}, entrypoint=lambda: None)
 
-    configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None, frozenset())
-    authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None, frozenset())
+    configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None)
+    authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None)
 
     assert configured_filter is None
     assert authored_filter is not None
@@ -302,7 +316,14 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
         extra_kwargs={"api_key": "test-key"},
     )
 
-    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, execution_identity=None)
+    configured = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     persona = _child(runtime, ["file"])
 
     # Only the configured agent defers its toolkit; the persona's requests defer nothing.
@@ -363,6 +384,7 @@ def test_persona_with_tools_searches_the_knowledge_it_names(tmp_path: Path) -> N
         persist_runtime_state=False,
         persona=inline_persona("P", ["file"], None, ["docs"]),
         knowledge=_knowledge(),
+        active_model_name=None,
     )
 
     assert "search_knowledge_base" in _function_names(build)
@@ -380,10 +402,16 @@ def test_persona_inherits_its_callers_skills_without_the_authoring_note(tmp_path
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
     identity = build_execution_identity_from_runtime_context(runtime)
     _write_skills(runtime, "scripted")
-    options = {"persist_runtime_state": False}
-
     configured = _system_prompt(
-        agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity, **options),
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            identity,
+            persist_runtime_state=False,
+            knowledge=None,
+            active_model_name=None,
+        ),
     )
     authored = _system_prompt(_child(runtime, None, execution_identity=identity))
 
@@ -401,10 +429,16 @@ def test_only_the_configured_agent_learns_which_workspace_skills_did_not_load(tm
     broken = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / "broken"
     broken.mkdir()
     (broken / "SKILL.md").write_text("---\nname: broken\ndescription: Use when: it breaks\n---\n\nbody\n")
-    options = {"persist_runtime_state": False}
-
     configured = _system_prompt(
-        agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity, **options),
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            identity,
+            persist_runtime_state=False,
+            knowledge=None,
+            active_model_name=None,
+        ),
     )
     authored = _system_prompt(_child(runtime, None, execution_identity=identity))
 
@@ -430,6 +464,8 @@ def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str
         identity,
         persist_runtime_state=False,
         persona=inline_persona("P", None, skills, None),
+        knowledge=None,
+        active_model_name=None,
     )
     prompt = _system_prompt(build)
 
@@ -452,6 +488,8 @@ def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Pa
         identity,
         persist_runtime_state=False,
         persona=persona,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert build.prompt.skills_block is None
@@ -470,6 +508,8 @@ def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: P
         identity,
         persist_runtime_state=False,
         persona=inline_persona("P", ["file"], ["removed"], None),
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert build.prompt.skills_block is None
@@ -490,6 +530,8 @@ def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
             identity,
             persist_runtime_state=False,
             persona=inline_persona("P", ["file"], ["scripted"], None),
+            knowledge=None,
+            active_model_name=None,
         ),
     )
 
@@ -511,6 +553,8 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
         persist_runtime_state=False,
         agent_mode="minimal",
         persona=inline_persona("P", ["shell"], ["scripted"], None),
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert build.surface.mode == "minimal"
@@ -613,6 +657,8 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
             None,
             persist_runtime_state=False,
             persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None, None),
+            knowledge=None,
+            active_model_name=None,
         )
 
 
@@ -681,6 +727,8 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         None,
         persist_runtime_state=False,
         persona=None,
+        knowledge=None,
+        active_model_name=None,
     )
     minimal = agents.create_agent(
         "helper",
@@ -690,6 +738,8 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         persist_runtime_state=False,
         agent_mode="minimal",
         persona=None,
+        knowledge=None,
+        active_model_name=None,
     )
     assert standard.spec.system_message is None
     assert standard.prompt.persona is None

@@ -29,6 +29,7 @@ from mindroom.knowledge.indexing_config import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
+from mindroom.tool_system.dependencies import ensure_optional_deps
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -368,6 +369,8 @@ def _build_published_index_reader(
 ) -> ChromaReadProxy:
     from mindroom.knowledge.read_proxy import ChromaReadProxy  # noqa: PLC0415
 
+    # The read worker imports Chroma, which an upgrade may have removed since the index was built.
+    ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
     return ChromaReadProxy(
         collection_name=_state_collection_name(state),
         path=str(published_index_storage_path(key)),

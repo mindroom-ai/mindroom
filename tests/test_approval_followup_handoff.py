@@ -23,7 +23,7 @@ from mindroom.event_journal import (
 )
 from mindroom.llm.runs import ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.conftest import unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
@@ -101,16 +101,14 @@ def _ready_continuation() -> ApprovalContinuation:
             ),
         ),
         show_tool_calls=False,
-        execution_identity=serialize_tool_execution_identity(
-            ToolExecutionIdentity(
-                channel="matrix",
-                agent_name="general",
-                requester_id="@user:localhost",
-                room_id="!room:localhost",
-                thread_id="$thread",
-                resolved_thread_id="$thread",
-                session_id="session-1",
-            ),
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
         ),
     )
 

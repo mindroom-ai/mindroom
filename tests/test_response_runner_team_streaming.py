@@ -2097,6 +2097,7 @@ async def test_persist_interrupted_recorder_off_loop_swallows_persist_failure(tm
             execution_identity=None,
             run_id=None,
             is_team=True,
+            response_event_id=None,
         )
 
 
@@ -2137,6 +2138,7 @@ async def test_persist_interrupted_recorder_off_loop_propagates_cancellation(tmp
                 execution_identity=None,
                 run_id=None,
                 is_team=True,
+                response_event_id=None,
             ),
         )
         await asyncio.sleep(0.05)
