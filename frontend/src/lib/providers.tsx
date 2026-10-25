@@ -117,7 +117,6 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
   },
 };
 
-// Helper function to get provider info with fallback
 // Keyless providers the picker does not list; the backend drops a configured key for them.
 const UNLISTED_KEYLESS_PROVIDER_IDS = new Set([
   "codex",
@@ -128,6 +127,7 @@ const UNLISTED_KEYLESS_PROVIDER_IDS = new Set([
   "synthetic",
 ]);
 
+// Helper function to get provider info with fallback
 export function getProviderInfo(providerId: string): ProviderInfo {
   return (
     PROVIDERS[providerId] || {

@@ -205,9 +205,7 @@ def config_validation_issues(
     """Return the user-facing messages of one config validation exception, each with its config location."""
     if isinstance(exc, ValidationError):
         return [(tuple(error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
-    if isinstance(exc, ConfigRuntimeValidationError):
-        return [(("config",), str(exc))]
-    if isinstance(exc, ConfigIncludeError):
+    if isinstance(exc, (ConfigRuntimeValidationError, ConfigIncludeError)):
         return [(("config",), str(exc))]
     if isinstance(exc, yaml.YAMLError):
         return [(("config",), f"Could not parse configuration YAML: {exc}")]
