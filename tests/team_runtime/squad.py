@@ -177,6 +177,20 @@ def run_context(run_id: str, session_id: str, metadata: dict[str, Any] | None = 
     return RunContext(run_id=run_id, session=UnstoredSession(session_id), user_id=REQUESTER, metadata=metadata)
 
 
+def stored_as_owned(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a run row Agno stored as the owned runtime stores it: a member run holds none of the team's metadata.
+
+    Agno stored the team run's metadata on every member run; the owned runtime stores it on the team's row alone. A
+    team row's paused member runs ride along in ``member_responses`` and drop it too.
+    """
+    result = dict(row)
+    if row.get("parent_run_id") is not None:
+        result.pop("metadata", None)
+    if "member_responses" in row:
+        result["member_responses"] = [stored_as_owned(member) for member in row["member_responses"]]
+    return result
+
+
 def golden_metadata(team_row: dict[str, Any]) -> dict[str, Any]:
     """Return the run metadata the turn started with: the stored metadata minus what MindRoom added afterwards."""
     return {key: value for key, value in team_row["metadata"].items() if key != "io.mindroom.ai_run"}

@@ -8820,6 +8820,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.worker_routing",
 ]
 

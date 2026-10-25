@@ -379,7 +379,10 @@ class _MemberRuns:
     persist: Persist[AnyRunRecord]
 
     async def run(self, member: TeamMember, task: str) -> RunRecord:
-        """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input."""
+        """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input.
+
+        The member's tools read the team run's metadata, which only the team's record stores.
+        """
         ctx = self._member_context(str(uuid4()))
         stream = run_agent(
             member.spec,
