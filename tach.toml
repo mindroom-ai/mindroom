@@ -846,7 +846,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.model_usage"
-depends_on = []
+depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.ai_run_metadata",
     "mindroom.api.openai_compat",
