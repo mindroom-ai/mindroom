@@ -1657,15 +1657,35 @@ def test_listing_loads_the_rows_of_every_agent_at_once(
     assert sorted(started) == ["github", "github", "openai", "openai"]
 
 
-def track_concurrent_calls(monkeypatch: pytest.MonkeyPatch, module: object, name: str) -> list[int]:
-    """Hold each call of the async `module.name` briefly and return `[running, peak]` concurrent calls."""
+def track_concurrent_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    module: object,
+    name: str,
+    *,
+    limit: int,
+    total: int,
+) -> list[int]:
+    """Hold each call of the async `module.name` and return `[running, peak]` concurrent calls.
+
+    A call waits until `limit` calls run at once or all `total` have started, so the calls a shared limit admits
+    together overlap however long each one's earlier work takes, and then stays a moment longer so a call a too-wide
+    limit admits late still overlaps them. A limit narrower than `limit` fails after a short wait.
+    """
     real = getattr(module, name)
     counts = [0, 0]
+    started = 0
+    changed = asyncio.Condition()
 
     async def tracked(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        nonlocal started
+        started += 1
         counts[0] += 1
         counts[1] = max(counts)
         try:
+            async with changed:
+                changed.notify_all()
+                async with asyncio.timeout(5):
+                    await changed.wait_for(lambda: counts[0] >= limit or started == total)
             await asyncio.sleep(0.02)
             return await real(*args, **kwargs)
         finally:
@@ -1682,7 +1702,7 @@ async def test_overlapping_listings_share_one_limit_on_status_loads(
 ) -> None:
     """Two listings on one loop load at most `_STATUS_LOAD_LIMIT` service statuses at once between them, in order."""
     monkeypatch.setattr(egress_status, "_STATUS_LOAD_LIMIT", 3)
-    counts = track_concurrent_calls(monkeypatch, egress_credentials, "egress_service_status")
+    counts = track_concurrent_calls(monkeypatch, egress_credentials, "egress_service_status", limit=3, total=8)
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="https://portal.example.org") as client:
         responses = await asyncio.gather(

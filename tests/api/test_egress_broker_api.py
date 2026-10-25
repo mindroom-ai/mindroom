@@ -1120,7 +1120,7 @@ def test_services_load_at_most_the_status_load_limit_at_once(
 ) -> None:
     """The panel shares the personal listing's limit on service status loads running at once."""
     monkeypatch.setattr(egress_status, "_STATUS_LOAD_LIMIT", 2)
-    counts = track_concurrent_calls(monkeypatch, egress_broker_api, "egress_service_status")
+    counts = track_concurrent_calls(monkeypatch, egress_broker_api, "egress_service_status", limit=2, total=4)
     response = oauth_broker_client.get("/api/egress-broker/services")
     assert response.status_code == 200, response.text
     assert [service["name"] for service in response.json()["services"]] == ["drive", "gh", "ghost", "github"]
