@@ -76,6 +76,8 @@ def offline() -> Iterator[None]:
         patch.object(socket.socket, "connect", _refuse_network),
         patch.object(socket.socket, "connect_ex", _refuse_network),
         patch.object(socket, "getaddrinfo", _refuse_network),
+        patch.object(socket, "gethostbyname", _refuse_network),
+        patch.object(socket, "gethostbyname_ex", _refuse_network),
     ):
         monkeypatch.setenv("CLOUDSDK_CONFIG", gcloud_config)
         monkeypatch.setenv("NO_GCE_CHECK", "true")
@@ -192,14 +194,19 @@ def event_goldens() -> Goldens:
 
 
 def regenerate() -> list[Path]:
-    """Rewrite every regenerable golden family and return the files whose text changed."""
+    """Rewrite every regenerable golden family and return the files whose text changed.
+
+    Every family is regenerated before any file is written, so a family that fails leaves every golden as it was.
+    """
     families = (provider_goldens, prompt_goldens, tool_goldens, knowledge_goldens, event_goldens)
-    return [path for family in families for path, golden in family().items() if write(path, golden)]
+    goldens = [family() for family in families]
+    return [path for regenerated in goldens for path, golden in regenerated.items() if write(path, golden)]
 
 
 def main() -> None:
     """Rewrite the goldens offline and list the files that changed."""
-    # Tool construction and every request log and warn incidentally; only the list of rewritten files is the output.
+    # Tool construction and every request log and warn incidentally; quiet them so the list of rewritten files stands
+    # out. A few SDKs print directly while they import, which nothing here silences.
     structlog.configure(processors=[], logger_factory=structlog.ReturnLoggerFactory())
     logging.disable(logging.CRITICAL)
     warnings.simplefilter("ignore")

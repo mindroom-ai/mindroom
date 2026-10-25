@@ -97,6 +97,23 @@ def test_regenerating_writes_every_family_and_lists_the_files_it_changed(
     assert [path.read_text(encoding="utf-8") for path in changed] == [render({"family": name}) for name in families]
 
 
+def test_a_failing_family_leaves_every_golden_as_it_was(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A family that fails, such as the tools without every extra installed, stops the run before anything is written."""
+    written = tmp_path / "provider.json"
+    monkeypatch.setattr(regenerate_goldens, "provider_goldens", lambda: {written: {"family": "provider"}})
+
+    def missing_extra() -> dict[Path, object]:
+        msg = "an extra is missing"
+        raise SystemExit(msg)
+
+    monkeypatch.setattr(regenerate_goldens, "prompt_goldens", missing_extra)
+
+    with pytest.raises(SystemExit, match="an extra is missing"):
+        regenerate_goldens.regenerate()
+
+    assert not written.exists()
+
+
 def test_nothing_connects_while_the_goldens_regenerate() -> None:
     """Every connection and name lookup is refused, so no provider or service is reached."""
     with regenerate_goldens.offline(), socket.socket() as connection:
@@ -104,6 +121,8 @@ def test_nothing_connects_while_the_goldens_regenerate() -> None:
             connection.connect(("127.0.0.1", 9))
         with pytest.raises(OSError, match="refuses network connections"):
             socket.getaddrinfo("example.org", 443)
+        with pytest.raises(OSError, match="refuses network connections"):
+            socket.gethostbyname("example.org")
 
 
 def test_a_golden_input_message_with_a_storage_flag_is_refused() -> None:
