@@ -91,7 +91,7 @@ Every other alias is a plain name that extraction maps to the entry's name and t
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
-Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`.
+Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`, or an agent with [`knowledge_graph_edits`](#letting-the-agent-fix-its-graph) merges them.
 
 ## The `knowledge_graph` Tool
 
@@ -117,7 +117,7 @@ agents:
 ```
 
 `agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `false`) lets an agent with a graph correct it; setting it on an agent without `knowledge_graph` is a config error.
-Its lookups then show each fact's and entity's id, `graph_entity` also takes an id and lists the other entities found under the name it was given, such as a duplicate extracted under an alias, and the tool gains four functions:
+Its lookups then show each fact's and entity's id, `graph_entity` also takes an id and lists the other entities found under the name it was given, such as a duplicate extracted under an alias, as `Other entities under this name`, and the tool gains four functions:
 
 ```python
 delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing

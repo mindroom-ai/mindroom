@@ -109,6 +109,7 @@ class KnowledgeGraphTools(Toolkit):
             if entity is None:
                 return f"No entity matches {name!r}."
             facts = "\n".join(_render_fact(fact, with_id=self._edits) for fact in entity.facts) or "No facts yet."
+            label = "Other entities under this name" if entity.exact else "Other close matches"
             if self._edits:
                 rendered = f"{entity.name} (id {entity.uuid}): {entity.summary}\n{facts}"
                 others = [f"{other.name} (id {other.uuid})" for other in entity.others]
@@ -117,7 +118,7 @@ class KnowledgeGraphTools(Toolkit):
                 # Without ids, the other entities found under the name asked for cannot be looked up.
                 others = [] if entity.exact else [other.name for other in entity.others]
             if others:
-                rendered += f"\nOther close matches: {', '.join(others)}"
+                rendered += f"\n{label}: {', '.join(others)}"
             return rendered
 
         return await self._in_graph("graph_entity", look_up)

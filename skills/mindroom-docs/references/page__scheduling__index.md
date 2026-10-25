@@ -397,5 +397,5 @@ A turn whose message was redacted can still be listed until the agent next repli
 | `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run, if people talked to the agent since |
 | `model` | the agent's model | A key of `models` to run the exploration with |
 
-Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`; for an agent with `knowledge_graph_edits`, its `{fix_step}` and `{fix_exception}` placeholders insert `EXPLORATION_FIX_STEP` and `EXPLORATION_FIX_EXCEPTION`, which are overridable too.
 Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.

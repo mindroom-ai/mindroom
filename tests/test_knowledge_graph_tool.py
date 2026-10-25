@@ -250,7 +250,8 @@ async def test_an_editing_agent_sees_the_ids_it_edits_by(tmp_path: Path) -> None
     assert f"- Alice leads Project Atlas\n  id: {FACT_ID}\n" in found
     assert exact.startswith("Alice (id alice-id): Alice leads Atlas.\n")
     assert f"id: {FACT_ID}" in exact
-    assert exact.endswith("\nOther close matches: alice (id stray-alice-id), Ali (id ali-id)")
+    # Entities found under the name asked for are duplicates to merge, not close matches.
+    assert exact.endswith("\nOther entities under this name: alice (id stray-alice-id), Ali (id ali-id)")
     assert fuzzy.endswith("\nOther close matches: Dana Whitfield (id whitfield-id), Dana's workspace (id workspace-id)")
 
 
