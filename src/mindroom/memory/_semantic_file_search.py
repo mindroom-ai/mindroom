@@ -96,11 +96,8 @@ def _memory_results_from_hits(
                 id=f"semantic:{source_file}:{rank}",
                 memory=content,
                 user_id=scope_user_id,
-                # Hits arrive nearest first; the score keeps that order without claiming a similarity.
-                # TODO(simplify): Whatever its distance, a hit scores just under 1.0, so it outranks every merged team
-                # keyword match short of one matching all query words. Score from the hit's distance. Models would see
-                # merged memories in another order.
-                score=1.0 - (rank * 0.000001),
+                # The cosine similarity, which merged keyword matches' word-overlap scores rank against.
+                score=1.0 - hit.meta_data["distances"],
                 metadata={"source_file": source_file, "semantic": True, "search_mode": "semantic"},
             ),
         )

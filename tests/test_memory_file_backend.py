@@ -295,7 +295,12 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
         async def asearch(self, query: str, limit: int) -> list[SearchHit]:
             assert query == "semantic memory"
             assert limit == 5
-            return [SearchHit(content="Published semantic memory.", meta_data={"source_path": "memory/2026-06-02.md"})]
+            return [
+                SearchHit(
+                    content="Published semantic memory.",
+                    meta_data={"source_path": "memory/2026-06-02.md", "distances": 0.2},
+                ),
+            ]
 
     access_base_ids: list[str] = []
 
@@ -343,11 +348,54 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
     assert scheduled_base_ids == []
 
 
+@pytest.mark.asyncio
+async def test_semantic_memory_scores_each_hit_by_its_similarity(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A semantic hit scores one minus its cosine distance, so merged keyword matches rank against its similarity."""
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "notes.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Close note.\nFar note.\n", encoding="utf-8")
+
+    class FakeKnowledge:
+        async def asearch(self, _query: str, _limit: int) -> list[SearchHit]:
+            return [
+                SearchHit(content="Close note.", meta_data={"source_path": "memory/notes.md", "distances": 0.25}),
+                SearchHit(content="Far note.", meta_data={"source_path": "memory/notes.md", "distances": 0.75}),
+            ]
+
+    async def resolve_access(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(knowledge=FakeKnowledge(), availability=KnowledgeAvailability.READY)
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args: [memory_file.resolve()])
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
+
+    results = await semantic_file_search.search_semantic_file_memories(
+        "note",
+        scope_user_id="agent_general",
+        root=root,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        search_config=config.memory.search,
+        limit=5,
+    )
+
+    assert [(result["memory"], result["score"]) for result in results] == [("Close note.", 0.75), ("Far note.", 0.25)]
+
+
 class _FakeSemanticTimingKnowledge:
     async def asearch(self, query: str, limit: int) -> list[SearchHit]:
         assert query == "semantic memory"
         assert limit == 5
-        return [SearchHit(content="Published semantic memory.", meta_data={"source_path": "memory/2026-06-02.md"})]
+        return [
+            SearchHit(
+                content="Published semantic memory.",
+                meta_data={"source_path": "memory/2026-06-02.md", "distances": 0.2},
+            ),
+        ]
 
 
 @pytest.mark.asyncio
