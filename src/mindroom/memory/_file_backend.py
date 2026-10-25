@@ -17,14 +17,13 @@ from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.constants import resolve_config_relative_path
 from mindroom.embeddings.errors import classified_embedder_error
 from mindroom.logging_config import get_logger
-from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
+from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id, build_team_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_char_tokens
 
 from ._policy import (
     allowed_scope_storage_paths,
-    build_team_user_id,
     effective_storage_paths_for_context,
     get_team_ids_for_agent,
     resolve_file_memory_resolution,

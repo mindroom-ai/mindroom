@@ -376,7 +376,7 @@ class DynamicWorkflowStore:
 
     def _scope_dir(self, scope: str, owner_id: str) -> Path:
         _validate_scope(scope)
-        owner_dir = _owner_dir_name(scope, owner_id)
+        owner_dir = owner_dir_name(scope, owner_id)
         return self._root / scope / owner_dir
 
     def _workflow_dir(self, scope: str, owner_id: str, workflow_id: str) -> Path:
@@ -576,7 +576,8 @@ def _validate_revision(value: str) -> None:
         raise DynamicWorkflowError(msg)
 
 
-def _owner_dir_name(scope: str, owner_id: str) -> str:
+def owner_dir_name(scope: str, owner_id: str) -> str:
+    """Return the directory below ``dynamic_workflows/<scope>/`` that holds one owner's workflows."""
     if scope == "tenant":
         return "tenant"
     if ID_RE.fullmatch(owner_id):
@@ -598,7 +599,7 @@ def _private_report_url(
 ) -> str | None:
     if base_url is None or not base_url.strip():
         return None
-    owner_key = _owner_dir_name(scope, owner_id)
+    owner_key = owner_dir_name(scope, owner_id)
     return f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
 
 

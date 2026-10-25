@@ -25,7 +25,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-_TEAM_STATE_ROOT_DIRNAME = "teams"
+# The directory of the storage root that holds one state root per team history scope.
+TEAM_STATE_ROOT_DIRNAME = "teams"
 
 _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 
@@ -161,8 +162,7 @@ def create_scope_session_storage(
     """Open the canonical conversation store of one persisted history scope; an agent scope's id is its agent."""
     if scope.kind == "agent":
         return create_session_storage(scope.scope_id, config, runtime_paths, execution_identity=execution_identity)
-    normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
-    storage_name = f"team_{normalized_scope_id}_{hashlib.sha256(scope.key.encode()).hexdigest()[:12]}"
+    storage_name = scope_session_storage_name(scope)
     return create_state_storage(
         storage_name,
         resolve_session_state_root(
@@ -172,5 +172,14 @@ def create_scope_session_storage(
     )
 
 
+def scope_session_storage_name(scope: HistoryScope) -> str:
+    """Return the name of a scope's session store: its state root, database file and table prefix."""
+    if scope.kind == "agent":
+        return scope.scope_id
+    normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
+    digest = hashlib.sha256(scope.key.encode()).hexdigest()[:12]
+    return f"team_{normalized_scope_id}_{digest}"
+
+
 def _team_scope_state_root(*, storage_name: str, runtime_paths: RuntimePaths) -> Path:
-    return runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME / storage_name
+    return runtime_paths.storage_root / TEAM_STATE_ROOT_DIRNAME / storage_name

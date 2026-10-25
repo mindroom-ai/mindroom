@@ -96,6 +96,30 @@ def _make_private_directory(path: Path) -> None:
     path.mkdir(mode=_PRIVATE_DIRECTORY_MODE, parents=True, exist_ok=True)
 
 
+@contextmanager
+def _scratch_beside(path: Path) -> Iterator[Path]:
+    """Yield an empty private directory beside ``path``, so renames between the two stay on one filesystem.
+
+    The directory and anything left in it are removed afterwards.
+    """
+    scratch = Path(tempfile.mkdtemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"))
+    try:
+        yield scratch
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _swap_directory(replacement: Path, destination: Path, scratch: Path) -> None:
+    """Put ``replacement`` in the place of the directory ``destination``, which moves into ``scratch``."""
+    replaced = scratch / f"{destination.name}.replaced"
+    destination.rename(replaced)
+    try:
+        replacement.rename(destination)
+    except BaseException:
+        replaced.rename(destination)
+        raise
+
+
 @dataclass(frozen=True)
 class MovePath:
     """Rename a file or directory; refuses when the destination already exists."""
@@ -167,6 +191,40 @@ class FileRewrite:
 
 
 @dataclass(frozen=True)
+class DirectoryEdit:
+    """Run ``edit`` on a copy of a directory, then swap the edited copy into the directory's place."""
+
+    path: Path
+    edit: Callable[[Path], None]
+    description: str
+    stores_backup: ClassVar[bool] = True
+
+    def apply(self, backup: Path) -> None:
+        """Copy the directory into ``backup``, run ``edit`` on a second copy beside it, then swap that copy in.
+
+        ``edit`` receives the second copy's path. The swap is the commit point, so a failing edit changes nothing.
+        """
+        _make_private_directory(backup)
+        shutil.copytree(self.path, backup / self.path.name, symlinks=True)
+        with _scratch_beside(self.path) as scratch:
+            edited = scratch / self.path.name
+            shutil.copytree(self.path, edited, symlinks=True)
+            self.edit(edited)
+            # Once swapped, the step must also return so the plan records it as done and can undo it;
+            # removing the replaced original takes a while, so Ctrl-C is ignored from the swap on.
+            with _sigint_ignored():
+                _swap_directory(edited, self.path, scratch)
+                shutil.rmtree(scratch, ignore_errors=True)
+
+    def _undo(self, backup: Path) -> None:
+        """Swap a copy of the backup into the directory's place."""
+        with _scratch_beside(self.path) as scratch:
+            restored = scratch / self.path.name
+            shutil.copytree(backup / self.path.name, restored, symlinks=True)
+            _swap_directory(restored, self.path, scratch)
+
+
+@dataclass(frozen=True)
 class DropPath:
     """Remove a path from its place by moving it into the backup directory, so a drop is recoverable."""
 
@@ -182,6 +240,43 @@ class DropPath:
     def _undo(self, backup: Path) -> None:
         """Move the path back out of ``backup``."""
         _move(backup / self.path.name, self.path)
+
+
+def _replace_link(path: Path, *, expected: str, target: str) -> None:
+    """Atomically replace the symlink ``path`` whose text is ``expected`` with one pointing at ``target``."""
+    # Path.readlink normalizes the text, which would hide a change such as an added trailing /.
+    if not path.is_symlink() or os.readlink(path) != expected:  # noqa: PTH115
+        msg = f"{path} is no longer a symlink to {expected}; it changed since the rename was planned."
+        raise RenameRefusedError(msg)
+    with _scratch_beside(path) as scratch:
+        replacement = scratch / path.name
+        replacement.symlink_to(target)
+        # Once replaced, the step must also return so the plan records it as done and can undo it.
+        with _sigint_ignored():
+            replacement.replace(path)
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class RetargetLink:
+    """Point the symlink ``path`` at ``target`` instead of ``old_target``, its text when the plan was built.
+
+    Refuses when ``path`` is no longer a symlink with that text. The manifest records both texts, so no backup is kept.
+    """
+
+    path: Path
+    old_target: str
+    target: str
+    description: str
+    stores_backup: ClassVar[bool] = False
+
+    def apply(self, backup: Path) -> None:  # noqa: ARG002
+        """Replace the link with one pointing at ``target``, through a new link renamed over it."""
+        _replace_link(self.path, expected=self.old_target, target=self.target)
+
+    def _undo(self, backup: Path) -> None:  # noqa: ARG002
+        """Point the link back at ``old_target``."""
+        _replace_link(self.path, expected=self.target, target=self.old_target)
 
 
 @dataclass(frozen=True)
@@ -200,7 +295,7 @@ class FinalAction:
         """Do nothing: final actions are never undone."""
 
 
-Step = MovePath | SqliteEdit | FileRewrite | DropPath | FinalAction
+Step = MovePath | SqliteEdit | FileRewrite | DirectoryEdit | DropPath | RetargetLink | FinalAction
 
 
 @dataclass(frozen=True)
@@ -210,6 +305,8 @@ class RenamePlan:
     storage_root: Path
     steps: tuple[Step, ...]
     reports: tuple[str, ...]
+    # The paths the reports name as staying where they are, which a leftover scan finds on purpose.
+    staying: tuple[Path, ...] = ()
 
     def describe(self) -> list[str]:
         """Return every step description, then every report prefixed with ``report:``."""
@@ -229,17 +326,20 @@ def _manifest_entry(step: Step, step_backup: Path) -> dict[str, str | None]:
         source, destination = step.source, step.destination
     elif isinstance(step, SqliteEdit):
         source, destination = step.database, None
-    elif isinstance(step, FileRewrite | DropPath):
+    elif isinstance(step, FileRewrite | DirectoryEdit | DropPath | RetargetLink):
         source, destination = step.path, None
     else:
         source, destination = None, None
-    return {
+    entry = {
         "type": type(step).__name__,
         "description": step.description,
         "source": None if source is None else str(source),
         "destination": None if destination is None else str(destination),
         "backup": str(step_backup) if step.stores_backup and step_backup.exists() else None,
     }
+    if isinstance(step, RetargetLink):
+        entry |= {"old_target": step.old_target, "new_target": step.target}
+    return entry
 
 
 def _write_manifest(plan: RenamePlan, *, kind: str, now: datetime, backup_dir: Path) -> None:
