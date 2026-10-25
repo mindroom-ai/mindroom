@@ -123,8 +123,11 @@ def chat_file_part(file: File) -> dict[str, Any] | None:
 
 
 def _responses_file_mime_type(file: File, filename: str) -> str:
-    """Prefer the original filename over an opaque storage path, which may end in ``.bin``."""
-    if file.mime_type:
+    """Prefer the original filename over an opaque storage path, which may end in ``.bin``.
+
+    A declared ``application/octet-stream`` names no type, and Responses rejects it, so the filename decides then too.
+    """
+    if file.mime_type and file.mime_type != "application/octet-stream":
         return file.mime_type
     display_name = file.filename or file.name
     if display_name:

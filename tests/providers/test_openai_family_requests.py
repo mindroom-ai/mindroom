@@ -878,6 +878,11 @@ def test_a_stored_continuation_does_not_resend_the_instructions() -> None:
 @pytest.mark.parametrize(
     ("filename", "declared_mime", "expected_mime"),
     [
+        ("notes.txt", "application/octet-stream", "text/plain"),
+        ("data.csv", "application/octet-stream", "text/csv"),
+        ("report.pdf", "application/octet-stream", "application/pdf"),
+        ("notes.md", "text/markdown; charset=utf-8", "text/markdown"),
+        ("script.sh", "text/x-sh", "text/x-sh"),
         ("report.pdf", None, "application/pdf"),
         ("report.docx", None, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         ("report.pptx", None, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
