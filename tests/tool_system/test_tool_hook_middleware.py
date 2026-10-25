@@ -19,7 +19,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ToolSpec, complete
+from mindroom.llm.provider import ModelRequest, complete
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, current_tool_call, execute_tool_call
@@ -153,16 +153,7 @@ async def test_a_declined_call_reaches_claude_and_gemini_as_a_failed_call(
     wire = Wire(FAMILIES[family].reply())
     call = {"id": "call-1", "type": "function", "function": {"name": "echo", "arguments": '{"text": "secret"}'}}
     turn = [Message(role="user", content="Echo the secret."), Message(role="assistant", tool_calls=[call]), answer]
-    definition = ToolSpec(
-        name="echo",
-        description="Echo.",
-        parameters=echo.parameters,
-        strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
-    )
-    await complete(FAMILIES[family].adapter(tmp_path, wire), ModelRequest(messages=turn, tools=[definition]))
+    await complete(FAMILIES[family].adapter(tmp_path, wire), ModelRequest(messages=turn, tools=[echo.definition()]))
 
     assert probes.calls == []
     assert _sent_result(family, wire.body()) == expected

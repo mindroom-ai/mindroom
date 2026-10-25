@@ -72,13 +72,13 @@ _DECLINED_RESULT_TEMPLATE = (
 _ToolHookResult = Any
 
 
-def _declined(tool_name: str, reason: str) -> ToolOutcome:
-    """Return the failed outcome that answers a call that was declined before it ran.
+def _declined_text(tool_name: str, reason: str) -> str:
+    """Return the text of a call declined before it ran.
 
-    Its text is the result the after-call hooks receive for a call a plugin hook declined and for a background
-    script call whose approval was denied; only the first answers the model with it.
+    The after-call hooks receive it as the result of a call a plugin hook declined and of a background script call
+    whose approval was denied; a call a plugin hook declined also answers with it, as a failed call.
     """
-    return ToolOutcome(content=_DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason), is_error=True)
+    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,8 +415,8 @@ async def _run_before_hooks(
     resolved_context: _ResolvedToolContext,
     arguments: dict[str, Any],
     tool_name: str,
-) -> ToolOutcome | None:
-    """Run the before-call hooks; return the declined outcome when one of them declines the call."""
+) -> str | None:
+    """Run the before-call hooks; return the declined result when one of them declines the call."""
     before_context = ToolBeforeCallContext(
         **resolved_context.hook_context_kwargs(arguments),
         tool_name=tool_name,
@@ -439,7 +439,7 @@ async def _run_before_hooks(
     )
     if not before_context.declined:
         return None
-    return _declined(tool_name, before_context.decline_reason)
+    return _declined_text(tool_name, before_context.decline_reason)
 
 
 @dataclass(slots=True)
@@ -603,29 +603,26 @@ async def _execute_bridge(  # noqa: C901
 
     if has_before_hooks:
         before_hooks_started_at = time.perf_counter()
-        declined = await _run_before_hooks(
+        declined_result = await _run_before_hooks(
             hook_registry=hook_registry,
             resolved_context=resolved_context,
             arguments=hook_arguments,
             tool_name=tool_name,
         )
         timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
-        if declined is not None:
+        if declined_result is not None:
             duration_ms = timing.mark_result_ready()
-            await finish("blocked_before_hooks", duration_ms=duration_ms, result=declined.content, blocked=True)
-            return declined
+            await finish("blocked_before_hooks", duration_ms=duration_ms, result=declined_result, blocked=True)
+            # The call answers as failed, so the model reads the decline as one.
+            return ToolOutcome(content=declined_result, is_error=True)
 
     if origin is not None and approval_gate is not None:
         decision = await approval_gate(origin, tool_name, deepcopy(args))
         if not decision.approved:
             reason = denial_note_for(decision.reason)
+            declined_result = _declined_text(tool_name, reason)
             duration_ms = timing.mark_result_ready()
-            await finish(
-                "blocked_approval",
-                duration_ms=duration_ms,
-                result=_declined(tool_name, reason).content,
-                blocked=True,
-            )
+            await finish("blocked_approval", duration_ms=duration_ms, result=declined_result, blocked=True)
             return BackgroundToolApprovalDenied(reason=reason)
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
@@ -666,11 +663,7 @@ async def dispatch_external_tool_hooks(
     blocked: bool = False,
     duration_ms: float = 0,
 ) -> str | None:
-    """Dispatch one phase of a durable external tool through the ordinary hook policy.
-
-    The before phase returns the declined result's text when a plugin hook declines the call, which the caller then
-    answers as a failed call.
-    """
+    """Dispatch one phase of a durable external tool through the ordinary hook policy."""
     dispatch = ToolDispatchContext(execution_identity=execution_identity)
     runtime_context = get_tool_runtime_context()
     if runtime_context is not None and execution_identity_matches_tool_runtime_context(
@@ -689,13 +682,12 @@ async def dispatch_external_tool_hooks(
     if before:
         if not hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
             return None
-        declined = await _run_before_hooks(
+        return await _run_before_hooks(
             hook_registry=hook_registry,
             resolved_context=resolved,
             arguments=deepcopy(arguments),
             tool_name=tool_name,
         )
-        return None if declined is None else declined.content
     if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
         await _emit_after_call(
             hook_registry=hook_registry,
