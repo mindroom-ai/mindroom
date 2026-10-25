@@ -1942,6 +1942,16 @@ class Config(BaseModel):
         agent = self.get_agent(agent_name)
         return agent.knowledge_graph if agent.knowledge_graph is not None else self.defaults.knowledge_graph
 
+    def agent_edits_knowledge_graph(self, agent_name: str) -> bool:
+        """Return whether an agent may delete facts and entities from its knowledge graph and merge entities."""
+        agent = self.get_agent(agent_name)
+        edits = (
+            agent.knowledge_graph_edits
+            if agent.knowledge_graph_edits is not None
+            else self.defaults.knowledge_graph_edits
+        )
+        return edits and self.agent_uses_knowledge_graph(agent_name)
+
     def knowledge_graph_agents(self) -> list[str]:
         """Return the agents that build a knowledge graph."""
         return [agent_name for agent_name in self.agents if self.agent_uses_knowledge_graph(agent_name)]
@@ -2085,7 +2095,11 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_knowledge_graph(self) -> Config:
-        """Validate the graph's model once any agent enables the graph."""
+        """Validate that agents allowing graph edits have a graph, and the graph's model once any agent enables it."""
+        for agent_name, agent in self.agents.items():
+            if agent.knowledge_graph_edits and not self.agent_uses_knowledge_graph(agent_name):
+                msg = f"Agent {agent_name!r} knowledge_graph_edits needs knowledge_graph: true"
+                raise ValueError(msg)
         settings = self.knowledge_graph
         if not self.knowledge_graph_agents():
             return self

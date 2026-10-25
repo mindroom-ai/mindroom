@@ -36,6 +36,10 @@ logger = get_logger(__name__)
 _DAY_SECONDS = 86_400
 _STATE_FILE = "exploration.json"
 _MAX_ARGUMENT_CHARS = 300
+_FIX_STEP = (
+    "\n4. Fix the mistakes step 1 showed in your graph: delete facts that never held and entities that do not belong, "
+    "and merge entities that are the same person or thing."
+)
 
 
 @dataclass(frozen=True)
@@ -129,10 +133,13 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
     # A revisit catches changes in the sources people use; an agent or instance nobody talked to since needs none.
     if not leads and not (revisit_due and active):
         return None
+    fixes = ctx.config.agent_edits_knowledge_graph(ctx.agent_name)
     prompt = ctx.config.render_prompt(
         "EXPLORATION_PROMPT_TEMPLATE",
         max_tool_calls=entry.max_tool_calls,
         leads=_render_leads(leads),
+        fix_step=_FIX_STEP if fixes else "",
+        fix_exception=", apart from fixing your graph" if fixes else "",
     )
     return Ask(prompt, new_thread=True, then=partial(_after_run, ctx.state_dir, now))
 

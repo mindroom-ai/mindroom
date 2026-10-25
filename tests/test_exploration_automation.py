@@ -27,12 +27,13 @@ if TYPE_CHECKING:
 DAY = 86_400
 
 
-def _config(**entry: object) -> Config:
+def _config(*, graph_edits: bool = False, **entry: object) -> Config:
     return Config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
                 knowledge_graph=True,
+                knowledge_graph_edits=graph_edits,
                 tools=["github", "duckduckgo"],
                 automations=[{"name": "exploration", "room": "lab", **entry}],
             ),
@@ -249,6 +250,24 @@ def test_lead_arguments_mention_nobody(tmp_path: Path) -> None:
     lead = next(line for line in ask.text.splitlines() if line.startswith("- send_message("))
     assert "@" not in lead
     assert "research then -\uff20ops .\uff20qa +\uff20dev, cc bob\uff20example.org" in lead
+
+
+def test_an_agent_that_may_edit_its_graph_is_asked_to_fix_it(tmp_path: Path) -> None:
+    """Only an agent allowed to edit its graph is asked to fix what it finds wrong there, and nothing else changes."""
+    reader_paths, editor_paths = _paths(tmp_path / "reader"), _paths(tmp_path / "editor")
+    reader, editor = _config(), _config(graph_edits=True)
+    for config, paths in ((reader, reader_paths), (editor, editor_paths)):
+        _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=int(time.time()))
+
+    read_only = check_exploration(_context(reader, reader_paths, tmp_path / "reader"))
+    fixing = check_exploration(_context(editor, editor_paths, tmp_path / "editor"))
+
+    assert read_only is not None
+    assert fixing is not None
+    assert "4. " not in read_only.text
+    assert "\nOnly read: never create, change, send, or delete anything.\n" in read_only.text
+    assert "\n4. Fix the mistakes step 1 showed in your graph: " in fixing.text
+    assert "\nOnly read: never create, change, send, or delete anything, apart from fixing your graph.\n" in fixing.text
 
 
 def test_old_runs_of_an_updated_conversation_are_not_leads(tmp_path: Path) -> None:

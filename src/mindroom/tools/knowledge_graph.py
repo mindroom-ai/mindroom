@@ -18,7 +18,10 @@ register_builtin_tool_metadata(
         name="knowledge_graph",
         file_access=ToolFileAccess.NONE,
         display_name="Knowledge Graph",
-        description="Look up facts, entities, and their sources in the agent's knowledge graph",
+        description=(
+            "Look up facts, entities, and their sources in the agent's knowledge graph, and with knowledge_graph_edits "
+            "delete wrong facts and entities and merge duplicates"
+        ),
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
@@ -26,6 +29,12 @@ register_builtin_tool_metadata(
         icon_color="text-teal-500",
         config_fields=[],
         dependencies=["graphiti-core"],
-        function_names=("graph_entity", "search_graph"),
+        function_names=(
+            "delete_graph_entity",
+            "delete_graph_fact",
+            "graph_entity",
+            "merge_graph_entities",
+            "search_graph",
+        ),
     ),
 )

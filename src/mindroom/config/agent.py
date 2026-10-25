@@ -301,6 +301,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
     )
+    knowledge_graph_edits: bool | None = Field(
+        default=None,
+        description="Let this agent delete wrong facts and entities from its knowledge graph and merge duplicate entities",
+    )
     model: str = Field(
         default="default",
         description="Configured model alias used for this agent's replies",

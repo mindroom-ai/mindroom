@@ -49,14 +49,14 @@ _CONTROL_CHARACTERS = str.maketrans(dict.fromkeys([*range(0x20), *range(0x7F, 0x
 _MAX_ENTITY_FACTS = 30
 # Entities a fuzzy lookup considers: the best hit is the answer and the rest are named as other close matches.
 _ENTITY_CANDIDATES = 5
-# FalkorDB's Cypher has no case-insensitive regex, so names are compared lowercased. Among several exact matches the
-# one with the most facts wins, because a duplicate extracted once has few; the oldest, then the lowest uuid, settles a
-# tie so the same name always finds the same entity.
+# An entity's id, or its name: FalkorDB's Cypher has no case-insensitive regex, so names are compared lowercased. Among
+# several exact matches the one with the most facts wins, because a duplicate extracted once has few; the oldest, then
+# the lowest uuid, settles a tie so the same name always finds the same entity.
 _EXACT_ENTITY_QUERY = """
-MATCH (n:Entity) WHERE toLower(n.name) = toLower($name)
+MATCH (n:Entity) WHERE n.uuid = $name OR toLower(n.name) = toLower($name)
 OPTIONAL MATCH (n)-[r:RELATES_TO]-()
-RETURN n.uuid AS uuid, n.created_at AS created_at, count(r) AS facts
-ORDER BY facts DESC, created_at, uuid LIMIT 1
+RETURN n.uuid AS uuid, n.name AS name, n.created_at AS created_at, count(r) AS facts
+ORDER BY facts DESC, created_at, uuid LIMIT $limit
 """
 
 
@@ -85,6 +85,7 @@ class _FactSource:
 class GraphFact:
     """A fact with the window it held in; ``invalid_at`` is set once later evidence superseded it."""
 
+    uuid: str
     fact: str
     valid_at: datetime | None
     invalid_at: datetime | None
@@ -94,13 +95,31 @@ class GraphFact:
 
 
 @dataclass(frozen=True)
-class _GraphEntity:
-    """An entity's summary and the facts that touch it, and the names of the next closest entities after a fuzzy match."""
+class _EntityRef:
+    """An entity's name and id."""
 
+    name: str
+    uuid: str
+
+
+@dataclass(frozen=True)
+class _GraphEntity:
+    """An entity's summary and the facts that touch it, and the next closest entities, or the others of its name."""
+
+    uuid: str
     name: str
     summary: str
     facts: list[GraphFact]
-    others: list[str]
+    others: list[_EntityRef]
+
+
+@dataclass(frozen=True)
+class _MergedEntities:
+    """The names of a merged duplicate and the entity it went into, and how many of its facts moved."""
+
+    duplicate: str
+    into: str
+    moved_facts: int
 
 
 class GraphStore(Protocol):
@@ -113,7 +132,16 @@ class GraphStore(Protocol):
         """Return the scope's facts most relevant to ``query``."""
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
-        """Return the scope's entity named ``name`` or the name it stands for, else the best fuzzy match, or None."""
+        """Return the scope's entity with id ``name``, named ``name`` or the name it stands for, else the best fuzzy match."""
+
+    async def delete_fact(self, scope: GraphScope, fact_id: str) -> str | None:
+        """Delete the scope's fact with id ``fact_id`` and return its text, or None when it has none."""
+
+    async def delete_entity(self, scope: GraphScope, entity_id: str) -> str | None:
+        """Delete the scope's entity with id ``entity_id`` and its facts and return its name, or None when it has none."""
+
+    async def merge_entities(self, scope: GraphScope, duplicate_id: str, into_id: str) -> _MergedEntities | None:
+        """Move one entity's facts onto another of the scope and delete it, or return None when either is missing."""
 
 
 class UnusableExtractionError(ValueError):
@@ -199,6 +227,7 @@ async def _facts(driver: GraphDriver, edges: Sequence[EntityEdge]) -> list[Graph
         episodes = {episode.uuid: episode for episode in await EpisodicNode.get_by_uuids(driver, episode_uuids)}
     return [
         GraphFact(
+            uuid=edge.uuid,
             fact=edge.fact,
             valid_at=edge.valid_at,
             invalid_at=edge.invalid_at,
@@ -344,8 +373,20 @@ class GraphitiStore:
         return await self._run(self._search_facts(scope, query, limit))
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
-        """Return the scope's entity named ``name`` or the name it stands for, else the best fuzzy match, with facts."""
+        """Return the scope's entity with id ``name``, named ``name`` or the name it stands for, else the best fuzzy match."""
         return await self._run(self._entity(scope, name))
+
+    async def delete_fact(self, scope: GraphScope, fact_id: str) -> str | None:
+        """Delete the scope's fact with id ``fact_id`` and return its text, or None when it has none."""
+        return await self._run(self._delete_fact(scope, fact_id))
+
+    async def delete_entity(self, scope: GraphScope, entity_id: str) -> str | None:
+        """Delete the scope's entity with id ``entity_id`` and its facts and return its name, or None when it has none."""
+        return await self._run(self._delete_entity(scope, entity_id))
+
+    async def merge_entities(self, scope: GraphScope, duplicate_id: str, into_id: str) -> _MergedEntities | None:
+        """Move one entity's facts onto another of the scope and delete it, or return None when either is missing."""
+        return await self._run(self._merge_entities(scope, duplicate_id, into_id))
 
     async def _add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
         # The client installs and imports Graphiti first, so the imports below find it loaded.
@@ -397,12 +438,13 @@ class GraphitiStore:
         # Hybrid search ranks an entity whose summary or longer name mentions the text above one named exactly that
         # (a bare first name), so an exact name is looked up first.
         for exact in dict.fromkeys([canonical, name]):
-            records, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=exact)
+            records, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=exact, limit=_ENTITY_CANDIDATES)
             if records:
                 break
-        others: list[str] = []
         if records:
             node = await EntityNode.get_by_uuid(driver, records[0]["uuid"])
+            # Other entities of the same name are duplicates that only their ids reach.
+            others = [_EntityRef(record["name"], record["uuid"]) for record in records[1:]]
         else:
             results = await graphiti.search_(
                 canonical,
@@ -412,16 +454,75 @@ class GraphitiStore:
             if not results.nodes:
                 return None
             node = results.nodes[0]
-            others = [other.name for other in results.nodes[1:]]
+            others = [_EntityRef(other.name, other.uuid) for other in results.nodes[1:]]
         edges = await EntityEdge.get_by_node_uuid(driver, node.uuid)
         # Current facts first, then the most recently valid.
         edges.sort(key=lambda edge: (edge.invalid_at is not None, -(edge.valid_at or edge.created_at).timestamp()))
         return _GraphEntity(
+            uuid=node.uuid,
             name=node.name,
             summary=node.summary,
             facts=await _facts(driver, edges[:_MAX_ENTITY_FACTS]),
             others=others,
         )
+
+    async def _delete_fact(self, scope: GraphScope, fact_id: str) -> str | None:
+        graphiti = await self._graphiti_client()
+        from graphiti_core.edges import EntityEdge  # noqa: PLC0415
+        from graphiti_core.errors import EdgeNotFoundError  # noqa: PLC0415
+
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        try:
+            edge = await EntityEdge.get_by_uuid(driver, fact_id)
+        except EdgeNotFoundError:
+            return None
+        await edge.delete(driver)
+        return edge.fact
+
+    async def _delete_entity(self, scope: GraphScope, entity_id: str) -> str | None:
+        graphiti = await self._graphiti_client()
+        from graphiti_core.errors import NodeNotFoundError  # noqa: PLC0415
+        from graphiti_core.nodes import EntityNode  # noqa: PLC0415
+
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        try:
+            node = await EntityNode.get_by_uuid(driver, entity_id)
+        except NodeNotFoundError:
+            return None
+        # Deleting a node detaches it, which deletes every fact that touches it.
+        await node.delete(driver)
+        return node.name
+
+    async def _merge_entities(self, scope: GraphScope, duplicate_id: str, into_id: str) -> _MergedEntities | None:
+        assert duplicate_id != into_id, "merging an entity into itself would delete it"
+        graphiti = await self._graphiti_client()
+        from graphiti_core.edges import EntityEdge  # noqa: PLC0415
+        from graphiti_core.errors import NodeNotFoundError  # noqa: PLC0415
+        from graphiti_core.nodes import EntityNode  # noqa: PLC0415
+
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        try:
+            duplicate = await EntityNode.get_by_uuid(driver, duplicate_id)
+            into = await EntityNode.get_by_uuid(driver, into_id)
+        except NodeNotFoundError:
+            return None
+        moved = 0
+        for edge in await EntityEdge.get_by_node_uuid(driver, duplicate.uuid):
+            source, target = (
+                into.uuid if end == duplicate.uuid else end for end in (edge.source_node_uuid, edge.target_node_uuid)
+            )
+            # A fact between the two would join the kept entity to itself; deleting the duplicate deletes it.
+            if source == target:
+                continue
+            # Saving writes every property, so the embedding that lookups never load is loaded first.
+            await edge.load_fact_embedding(driver)
+            edge.source_node_uuid, edge.target_node_uuid = source, target
+            # This adds the fact to the kept entity under the same id; deleting the duplicate removes the original, so
+            # a merge interrupted in between leaves both, and repeating it saves the same facts again and finishes.
+            await edge.save(driver)
+            moved += 1
+        await duplicate.delete(driver)
+        return _MergedEntities(duplicate=duplicate.name, into=into.name, moved_facts=moved)
 
     async def close(self) -> None:
         """Close the client, stop the embedded database server, and stop the graph loop."""

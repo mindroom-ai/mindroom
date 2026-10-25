@@ -177,6 +177,19 @@
           "description": "Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
           "title": "Knowledge Graph"
         },
+        "knowledge_graph_edits": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Let this agent delete wrong facts and entities from its knowledge graph and merge duplicate entities",
+          "title": "Knowledge Graph Edits"
+        },
         "model": {
           "default": "default",
           "description": "Configured model alias used for this agent's replies",
@@ -1344,6 +1357,12 @@
           "default": false,
           "description": "Default knowledge graph setting",
           "title": "Knowledge Graph",
+          "type": "boolean"
+        },
+        "knowledge_graph_edits": {
+          "default": false,
+          "description": "Default knowledge graph edits setting",
+          "title": "Knowledge Graph Edits",
           "type": "boolean"
         },
         "cheap_model": {
@@ -5202,6 +5221,7 @@
         "show_stop_button": true,
         "max_consecutive_agent_replies": 50,
         "knowledge_graph": false,
+        "knowledge_graph_edits": false,
         "cheap_model": null,
         "compaction": {
           "enabled": true,

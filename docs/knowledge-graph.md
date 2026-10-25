@@ -58,7 +58,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](scheduling.md#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
+Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -109,12 +109,37 @@ Each fact comes back with its validity, for example `valid 2026-01-05 until 2026
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
-An agent reads only its own graph; a [private agent](configuration/agents.md#private-instances) has one graph per requester.
+An agent reaches only its own graph; a [private agent](configuration/agents.md#private-instances) has one graph per requester.
+
+## Letting the Agent Fix Its Graph
+
+```yaml
+agents:
+  mind:
+    knowledge_graph: true
+    knowledge_graph_edits: true
+```
+
+`agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `false`) lets an agent with a graph correct it; setting it on an agent without `knowledge_graph` is a config error.
+Its lookups then show each fact's and entity's id, `graph_entity` also takes an id and lists the other entities with the same name, and the tool gains three functions:
+
+```python
+delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing
+delete_graph_entity("<entity id>")                   # a file path, URL, or other non-entity, with every fact that touches it
+merge_graph_entities("<duplicate id>", "<kept id>")  # the duplicate's facts and their sources move to the kept entity
+```
+
+The kept entity keeps its name and summary, and facts between the two merged entities are dropped.
+Ask the agent to fix what it finds wrong, or let an [`exploration`](scheduling.md#exploration) run do it: with edits on, its prompt also asks the agent to fix the mistakes it found in the graph.
+Deleting is permanent, and a later conversation or tool result that states a deleted fact again adds it back; the agent is told to keep a fact that held and later changed, because newer evidence marks it superseded.
+To approve each edit before it happens, add [`tool_approval`](tool-approval.md) rules for `delete_graph_*` and `merge_graph_entities`.
+To keep extraction from creating a merged-away name again, list it in [`knowledge_graph.aliases`](#names).
 
 ## Privacy
 
 A shared agent's graph holds what it learned from every requester's conversations, including tool results, and anyone who can talk to that agent can query it.
-Use a private agent when requesters must not see each other's facts.
+With `knowledge_graph_edits`, anyone who can talk to a shared agent can also have it delete or merge what that graph holds.
+Use a private agent when requesters must not see or change each other's facts.
 
 ## Cost and Health
 

@@ -16880,7 +16880,7 @@
       },
       {
         "name": "graph_entity",
-        "description": "Show what the knowledge graph knows about one person, organization, project, or other entity.\nAn entity named exactly ``name``, in any letter case, is returned, and a configured alias, agent key, or Matrix\nID finds the entity it names; otherwise the closest match, followed by the names of other close matches to look\nup if it is not the one you meant.",
+        "description": "Show what the knowledge graph knows about one person, organization, project, or other entity.\nAn entity with the id ``name``, or named exactly ``name`` in any letter case, is returned, and a configured\nalias, agent key, or Matrix ID finds the entity it names; otherwise the closest match, followed by the names of\nother close matches to look up if it is not the one you meant.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -16902,6 +16902,109 @@
           },
           "required": [
             "name"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": false,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false,
+        "show_result": false
+      },
+      {
+        "name": "delete_graph_fact",
+        "description": "Delete a wrong fact from your knowledge graph.\nDelete a fact that never held, names the wrong person or thing, or records your own lookups instead of a fact\nabout your subjects. A fact that held and later changed is history: keep it, because newer evidence marks it\nsuperseded. A later conversation or tool result that states the fact again can add it back.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "fact_id": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "fact_id"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": false,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false,
+        "show_result": false
+      },
+      {
+        "name": "delete_graph_entity",
+        "description": "Delete an entity that does not belong in your knowledge graph, with every fact that touches it.\nDelete an entity that is not a person, agent, organization, location, event, project, product, document, or\naccount, such as a file path, URL, or setting, or that never existed. To combine two entities for the same\nperson or thing, merge them with `merge_graph_entities` instead, which keeps the facts.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "entity_id": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "entity_id"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": false,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false,
+        "show_result": false
+      },
+      {
+        "name": "merge_graph_entities",
+        "description": "Merge an entity into another entity for the same person or thing, such as a nickname into a full name.\nThe duplicate's facts move onto the other entity, which keeps its name and summary; facts between the two are\ndropped, and the duplicate is deleted.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "duplicate_id": {
+              "type": "string"
+            },
+            "into_id": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "duplicate_id",
+            "into_id"
           ]
         },
         "strict": false,
