@@ -28,7 +28,7 @@ from mindroom.model_defaults import (
 )
 from mindroom.providers.credentials import uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, provider_failure
-from mindroom.providers.extra_kwargs import reject_malformed_client_settings, settings_from_extra_kwargs, settings_keys
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_keys
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
@@ -578,8 +578,6 @@ def _responses_route(model_config: ModelConfig, runtime_paths: RuntimePaths) -> 
     if route_key != "openai":
         return None
     extra_kwargs = model_config.extra_kwargs or {}
-    # This reads authored values before any settings parse, at config load and when the model is built.
-    reject_malformed_client_settings(extra_kwargs)
     base_url = _route_base_url("openai", extra_kwargs.get("client_params"), extra_kwargs.get("base_url"), runtime_paths)
     if model_config.api == "responses" or (
         model_config.api is None and openai_native_tool_search_supported("openai", model_config.id, base_url=base_url)

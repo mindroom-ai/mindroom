@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import render_transient_context
@@ -893,22 +894,20 @@ _NESTED_NOT_A_STRING = "extra_kwargs.client_params.base_url must be a string, no
         ("ollama", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
     ],
 )
-def test_a_wrongly_typed_client_setting_fails_config_load_and_build_naming_the_model_and_key(
-    tmp_path: Path,
+def test_a_wrongly_typed_client_setting_fails_config_validation_at_the_model(
     provider: str,
     extra_kwargs: dict[str, Any],
     error: str,
 ) -> None:
-    """Every adapter merges ``client_params`` into its SDK client and reads its endpoint from these keys."""
-    runtime_paths = _runtime_paths(tmp_path)
+    """The type of ``client_params`` and the endpoints is checked with the model, whatever its provider."""
     data = {"models": {"default": {"provider": provider, "id": "gpt-6-astra", "extra_kwargs": extra_kwargs}}}
 
-    with pytest.raises(ConfigRuntimeValidationError) as load_error:
-        Config.validate_with_runtime(data, runtime_paths)
-    with pytest.raises(ValueError, match="must be a") as build_error:
-        build_model_provider(Config.model_validate(data), runtime_paths)
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(data)
 
-    assert (str(load_error.value), str(build_error.value)) == (f"models.default: {error}", error)
+    assert iter_config_validation_messages(exc_info.value) == [
+        ("models → default → extra_kwargs", f"Value error, {error}"),
+    ]
 
 
 _OPENAI_ENDPOINT_ENV = {"OPENAI_BASE_URL": "http://127.0.0.1:9/v1"}
