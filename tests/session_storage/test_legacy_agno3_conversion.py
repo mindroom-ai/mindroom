@@ -158,6 +158,7 @@ def _insert_summary(
     legacy: int = 0,
     segment_run_id: str | None = None,
     segment: dict[str, Any] | None = None,
+    raw_segment: str | None = None,
     event_ids: tuple[str, ...] = (),
     session_id: str = _SESSION,
     created_at: int = 200,
@@ -177,7 +178,7 @@ def _insert_summary(
                 legacy,
                 created_at,
                 segment_run_id,
-                None if segment is None else json.dumps(segment),
+                raw_segment if segment is None else json.dumps(segment),
             ),
         )
 
@@ -437,6 +438,70 @@ def test_a_run_whose_metadata_is_not_an_object_converts(tmp_path: Path) -> None:
     store = _converted(database)
 
     assert store.get_run("odd").metadata == ["not", "an", "object"]  # type: ignore[union-attr]
+
+
+def test_fold_runs_without_a_row_sort_by_their_latest_fold(tmp_path: Path) -> None:
+    """Runs without a row go by their latest fold's place, even when one's first fold comes before the other's."""
+    database = _agno_database(tmp_path)
+    for index in range(3):
+        _insert_run(database, _run(f"r{index}"), run_index=index)
+    _insert_summary(database, 1, -1, segment_run_id="a", segment=_segment())
+    _insert_summary(database, 2, 0, segment_run_id="b", segment=_segment())
+    _insert_summary(database, 3, 1, segment_run_id="a", segment=_segment())
+
+    _converted(database)
+
+    assert sorted(_seqs(database), key=_seqs(database).get) == ["r0", "b", "r1", "a", "r2"]
+    assert _query(database, 'SELECT id, through FROM "code_sessions_log_summaries" ORDER BY id') == [
+        (1, 0),
+        (2, 1),
+        (3, 3),
+    ]
+
+
+def test_rows_worker_code_wrote_in_odd_shapes_convert_alone(tmp_path: Path) -> None:
+    """Segments, segment entries, and paused team rows of any shape convert as far as they read; other sessions convert."""
+    database = _agno_database(tmp_path, ("odd", "agent", "code"), ("healthy", "agent", "code"))
+    _insert_run(database, _run("fine"), run_index=0, session_id="healthy")
+    _insert_run(database, _run("live", status=RunStatus.paused), run_index=0, session_id="odd")
+    _insert_run(database, _run("live-member", parent_run_id="live"), run_index=1, session_id="odd")
+    team = TeamRunRecord(
+        run_id="team",
+        team_id="squad",
+        session_id="odd",
+        status=RunStatus.paused,
+        created_at=100,
+        member_responses=[_run("emb-replaced"), _run("emb-created")],
+    ).to_dict()
+    for member in team["member_responses"]:
+        member.pop("parent_run_id", None)
+    _insert_run(database, team, run_index=2, session_id="odd")
+    # The embedded copy replaces its member's own row, even one that does not decode.
+    _insert_run(database, _run("emb-replaced"), run_index=3, run_data="{not json", session_id="odd")
+    paused_team = {"run_id": "team-bad", "team_id": "squad", "status": "PAUSED", "member_responses": []}
+    _insert_run(database, paused_team, run_index=4, run_data="{not json", session_id="odd")
+    odd = {"session_id": "odd", "segment_run_id": "live"}
+    _insert_summary(database, 1, -1, raw_segment="{not json", **odd)
+    _insert_summary(database, 2, -1, raw_segment="[1, 2]", **odd)
+    folded = Message(role="assistant", content="folded", id="live.f1", created_at=100).to_dict()
+    entries = {
+        "metadata": {},
+        "messages": [5, {"id": "live.no-role", "content": "x"}, folded],
+        "tools": [7, {"tool_call_id": 9}, {"tool_call_id": "ok-call", "tool_name": "probe"}],
+        "member_responses": ["m", {"run_id": 5}, {"run_id": "live-member"}],
+    }
+    _insert_summary(database, 3, -1, segment=entries, **odd)
+    members = {"member_responses": [{"run_id": 7}, {"run_id": "bad-member", "status": "BOGUS"}]}
+    _insert_summary(database, 4, -1, segment=members, session_id="odd", segment_run_id="gone")
+
+    store = _converted(database)
+
+    assert set(_seqs(database)) == {"fine", "live", "live-member", "team", "emb-replaced", "emb-created", "gone"}
+    assert set(_message_rows(database, "live")) == {("live.u", None), ("live.f1", 3), ("live:3:ok-call", 3)}
+    assert _query(database, "SELECT folded_by FROM \"code_sessions_log_runs\" WHERE run_id = 'live-member'") == [(3,)]
+    parents = dict(_query(database, 'SELECT run_id, parent_run_id FROM "code_sessions_log_runs"'))
+    assert (parents["emb-replaced"], parents["emb-created"]) == ("team", "team")
+    assert _loaded_ids(store, "healthy") == ["fine"]
 
 
 def test_workflow_rows_and_rows_that_do_not_decode_are_left_out(tmp_path: Path) -> None:
@@ -884,6 +949,31 @@ def test_a_link_planted_after_the_check_is_refused(tmp_path: Path, monkeypatch: 
     assert target.read_bytes() == before
 
 
+def test_a_sessions_directory_swapped_for_a_link_after_the_check_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link swapped in for the sessions directory between the check and the connect gets no v2 tables written."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    database = _NAMES.database_path(tmp_path / "store")
+    database.parent.mkdir(parents=True)
+    connect = legacy_agno3_conversion.connect_conversation_database
+
+    def swapped(path: Path, *, timeout: float) -> sqlite3.Connection:
+        path.parent.rename(tmp_path / "moved")
+        path.parent.symlink_to(outside, target_is_directory=True)
+        return connect(path, timeout=timeout)
+
+    monkeypatch.setattr(legacy_agno3_conversion, "connect_conversation_database", swapped)
+    with pytest.raises(ValueError, match="instead"):
+        migrate_conversation_database(database, _NAMES)
+
+    # SQLite's open may have left an empty file at the link's target, never a database with tables.
+    planted = outside / database.name
+    assert not planted.exists() or planted.stat().st_size == 0
+
+
 def _wal_crash_copy(tmp_path: Path) -> tuple[Path, TableNames]:
     """Return a copy of a golden in write-ahead-log mode as a crash left it: a commit only in its log."""
     source, names = _restore(GOLDEN_DUMPS[0], tmp_path / "source")
@@ -1031,6 +1121,40 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     assert garbage.read_bytes() == b"not a database"
     migrate_conversation_database(locked, TableNames.of_database(locked))
     assert _is_converted(locked)
+
+
+@pytest.mark.asyncio
+async def test_the_startup_sweep_does_not_follow_a_linked_root(tmp_path: Path) -> None:
+    """An ``agents`` root worker code replaced with a link is not walked; the other roots convert."""
+    paths, root = _runtime(tmp_path)
+    healthy = _store_at(root / "teams/code")
+    outside = _store_at(tmp_path / "outside/agents/code")
+    (root / "agents").symlink_to(tmp_path / "outside/agents", target_is_directory=True)
+
+    await migrate_conversation_storage(paths)
+
+    assert _is_converted(healthy)
+    assert not _is_converted(outside)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+async def test_the_startup_sweep_skips_an_unlistable_private_instance(tmp_path: Path) -> None:
+    """A private instance directory worker code made unlistable is logged and skipped, and startup goes on."""
+    paths, root = _runtime(tmp_path)
+    healthy = _store_at(root / "teams/code")
+    hidden = _store_at(root / "private_instances/scope/code")
+    scope = root / "private_instances/scope"
+    scope.chmod(0)
+    try:
+        with capture_logs() as logs:
+            await migrate_conversation_storage(paths)
+    finally:
+        scope.chmod(0o755)
+
+    assert _is_converted(healthy)
+    assert not _is_converted(hidden)
+    assert _skipped(logs, "conversation_conversion_skipped_store") == [str(scope)]
 
 
 @pytest.mark.asyncio
