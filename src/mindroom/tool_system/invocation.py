@@ -296,7 +296,8 @@ async def execute_tool_call(
 ) -> ToolOutcome:
     """Run one tool call as ``run_tool_call`` does and return what the model should read.
 
-    Any exception other than cancellation becomes a failed outcome whose content is its ``failure_text``. The run
+    Any exception other than cancellation becomes a failed outcome whose content is its ``failure_text``, and the call
+    fails too when it returned a failed outcome, as minimal mode's Bash does when its shell call failed. The run
     stops after the call when the function always stops it, or when this call returned an outcome that does, as
     minimal mode's Bash does after a control tool it ran.
     """
@@ -311,6 +312,7 @@ async def execute_tool_call(
         videos=value.videos,
         files=value.files,
         stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
+        is_error=isinstance(value, ToolOutcome) and value.is_error,
     )
 
 

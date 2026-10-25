@@ -215,16 +215,16 @@ def _complete_call(call: PlannedCall, outcome: ToolOutcome, elapsed: float) -> M
     execution.stop_after_call = outcome.stop_after_call
     ended = time.time()
     execution.metrics = ToolCallMetrics(start_time=ended - elapsed, end_time=ended, duration=elapsed)
-    return tool_result_message(execution, media=None if outcome.is_error else outcome)
+    return tool_result_message(execution, media=outcome)
 
 
 def tool_result_message(execution: ToolExecution, media: ToolValue | None = None) -> Message:
     """Return the tool message that answers ``execution`` with its recorded result.
 
-    ``media`` is the successful tool value whose media the message carries; a failed call carries none.
+    ``media`` is the tool value whose media the message carries when the call succeeded; a failed call carries none.
     """
     images = audio = videos = files = None
-    if media is not None:
+    if media is not None and not execution.is_error:
         images, audio, videos, files = (
             list(items) or None for items in (media.images, media.audios, media.videos, media.files)
         )

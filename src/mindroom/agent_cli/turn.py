@@ -125,17 +125,21 @@ def _with_media(content: object, media_results: list[ToolValue]) -> str | ToolVa
     )
 
 
-def _stopping(result: str | ToolValue) -> ToolOutcome:
-    """Return ``result`` as an outcome that ends the run after its batch, so the next attempt runs the control."""
-    if isinstance(result, str):
-        return ToolOutcome(content=result, stop_after_call=True)
+def _bash_outcome(result: str | ToolValue, *, stop_after_call: bool, is_error: bool) -> ToolOutcome:
+    """Return ``result`` as one minimal Bash call's outcome.
+
+    ``stop_after_call`` ends the run after its batch, so the next attempt runs the control; ``is_error`` marks the
+    call failed, so Claude and Gemini read a failed shell call as one.
+    """
+    value = ToolValue(content=result) if isinstance(result, str) else result
     return ToolOutcome(
-        content=result.content,
-        images=result.images,
-        audios=result.audios,
-        videos=result.videos,
-        files=result.files,
-        stop_after_call=True,
+        content=value.content,
+        images=value.images,
+        audios=value.audios,
+        videos=value.videos,
+        files=value.files,
+        stop_after_call=stop_after_call,
+        is_error=is_error,
     )
 
 
@@ -391,7 +395,7 @@ class LiveTurnTools(TurnToolBridge):
             msg = "Agent CLI admitted operation failed"
             raise ExceptionGroup(msg, failures)
 
-    async def execute_bash(self, key: ToolKey, arguments: dict[str, object], call_id: str) -> str | ToolValue:
+    async def execute_bash(self, key: ToolKey, arguments: dict[str, object], call_id: str) -> ToolOutcome:
         """Own canonical execution of provider call ``call_id`` and forward the response's cancellation reason."""
         task = asyncio.create_task(self._execute_bash(key, arguments, call_id), name="agent-cli-bash")
 
@@ -402,12 +406,16 @@ class LiveTurnTools(TurnToolBridge):
 
         return await wait_for_future_until_complete(task, on_cancel=cancel)
 
-    async def _execute_bash(self, key: ToolKey, arguments: dict[str, object], call_id: str) -> str | ToolValue:
+    async def _execute_bash(self, key: ToolKey, arguments: dict[str, object], call_id: str) -> ToolOutcome:
         """Checkpoint exact provider history before any binding, hook or shell IO."""
         async with self._outer:
             self._check_live()
             if self.control_calls:
-                return _stopping("Bash cancelled before dispatch: continuation requires a rebuilt tool catalog.")
+                return _bash_outcome(
+                    "Bash cancelled before dispatch: continuation requires a rebuilt tool catalog.",
+                    stop_after_call=True,
+                    is_error=False,
+                )
             if self._binding_retired or key.toolkit != "shell":
                 msg = "Bash binding is unavailable"
                 raise ValueError(msg)
@@ -437,10 +445,14 @@ class LiveTurnTools(TurnToolBridge):
             if terminal is None:
                 msg = "Canonical shell returned no terminal execution"
                 raise RuntimeError(msg)
-            result_with_media = _with_media(str(terminal.result or ""), media_results)
-            self.checkpoint.complete(call_id, result_with_media)
             # A control tool this command ran ends the run after its batch, so the next attempt runs with it.
-            return _stopping(result_with_media) if self.control_calls else result_with_media
+            outcome = _bash_outcome(
+                _with_media(str(terminal.result or ""), media_results),
+                stop_after_call=bool(self.control_calls),
+                is_error=bool(terminal.is_error),
+            )
+            self.checkpoint.complete(call_id, outcome)
+            return outcome
 
     async def execute_shell(
         self,
