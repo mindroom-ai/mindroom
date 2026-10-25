@@ -33,7 +33,7 @@ from mindroom.response_turn import (
     apply_exact_approval_decisions,
 )
 from mindroom.session_storage.store import write_with_session_state
-from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_tool_call
+from mindroom.tool_system.agent_tool_calls import AgentToolCallMedia, AgentToolCallStep, execute_agent_tool_call
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.tool_access import ToolKey
@@ -268,9 +268,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                                 presentation.complete_tool(event.call, origin=event.origin)
                             await presentation.publish(progress)
                         continue
-                    if not isinstance(event, AgentToolCallEvent):
-                        continue
-                    if event.media is not None:
+                    if isinstance(event, AgentToolCallMedia):
                         media_results.append(event.media)
                         register_cli_media(
                             event.media,
@@ -278,10 +276,10 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                             policy=build.surface.output_file_policy,
                             call_id=call_id,
                         )
-                    if event.call is not None:
+                    elif isinstance(event, AgentToolCallStep):
                         if event.kind == "started":
                             presentation.start_tool(event.call, origin=call_origin)
-                        elif event.kind in {"completed", "failed", "continuation_required"}:
+                        else:
                             presentation.complete_tool(event.call, origin=call_origin)
                             result = str(event.call.result or "")
                         if event.kind == "continuation_required":

@@ -8706,6 +8706,9 @@ depends_on = [
 from = ["mindroom.tool_system.agent_tool_calls"]
 expose = [
     "AgentToolCallEvent",
+    "AgentToolCallMedia",
+    "AgentToolCallStep",
+    "AgentToolCallWaiting",
     "DeferredAgentToolkit",
     "PreparedAgentToolBinding",
     "PreparedAgentToolCatalog",

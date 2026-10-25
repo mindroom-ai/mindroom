@@ -39,9 +39,17 @@ from mindroom.cancellation import current_task_is_process_shutdown, request_task
 from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.resources import defer_execution_cleanup
-from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_shell_call, execute_agent_tool_call
+from mindroom.tool_system.agent_tool_calls import (
+    AgentToolCallEvent,
+    AgentToolCallMedia,
+    AgentToolCallStep,
+    AgentToolCallWaiting,
+    execute_agent_shell_call,
+    execute_agent_tool_call,
+)
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.invocation import tool_outcome
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
@@ -110,34 +118,14 @@ def _page(items: list[dict[str, object]], cursor: str | None, limit: int) -> dic
     return {"items": selected, "next_cursor": str(end) if end < len(items) else None}
 
 
-def _with_media(content: object, media_results: list[ToolValue]) -> str | ToolValue:
+def _with_media(content: object, media_results: list[ToolValue]) -> ToolValue:
     """Attach media that CLI calls returned during one shell command to its text result."""
-    if not media_results:
-        return str(content)
     return ToolValue(
         content=str(content),
         images=tuple(item for media in media_results for item in media.images),
         audios=tuple(item for media in media_results for item in media.audios),
         videos=tuple(item for media in media_results for item in media.videos),
         files=tuple(item for media in media_results for item in media.files),
-    )
-
-
-def _bash_outcome(result: str | ToolValue, *, stop_after_call: bool, is_error: bool) -> ToolOutcome:
-    """Return ``result`` as one minimal Bash call's outcome.
-
-    ``stop_after_call`` ends the run after its batch, so the next attempt runs the control; ``is_error`` marks the
-    call failed, so Claude and Gemini read a failed shell call as one.
-    """
-    value = ToolValue(content=result) if isinstance(result, str) else result
-    return ToolOutcome(
-        content=value.content,
-        images=value.images,
-        audios=value.audios,
-        videos=value.videos,
-        files=value.files,
-        stop_after_call=stop_after_call,
-        is_error=is_error,
     )
 
 
@@ -408,8 +396,8 @@ class LiveTurnTools(TurnToolBridge):
             self._check_live()
             if self.control_calls:
                 # This call never runs, so it answers as failed, as the loop answers a call it did not run.
-                return _bash_outcome(
-                    "Bash cancelled before dispatch: continuation requires a rebuilt tool catalog.",
+                return ToolOutcome(
+                    content="Bash cancelled before dispatch: continuation requires a rebuilt tool catalog.",
                     stop_after_call=True,
                     is_error=True,
                 )
@@ -435,15 +423,16 @@ class LiveTurnTools(TurnToolBridge):
             async with closing_async_stream(events):
                 terminal = None
                 async for event in events:
-                    if event.media is not None:
+                    if isinstance(event, AgentToolCallMedia):
                         media_results.append(event.media)
-                    if event.call is not None:
+                    elif isinstance(event, AgentToolCallStep):
                         terminal = event.call
             if terminal is None:
                 msg = "Canonical shell returned no terminal execution"
                 raise RuntimeError(msg)
-            # A control tool this command ran ends the run after its batch, so the next attempt runs with it.
-            outcome = _bash_outcome(
+            # A control tool this command ran ends the run after its batch, so the next attempt runs with it, and a
+            # failed shell call answers as failed, so Claude and Gemini read it as one.
+            outcome = tool_outcome(
                 _with_media(str(terminal.result or ""), media_results),
                 stop_after_call=bool(self.control_calls),
                 is_error=bool(terminal.is_error),
@@ -482,7 +471,7 @@ class LiveTurnTools(TurnToolBridge):
                 self._check_control(event)
                 yield event
         for media in self._media.pop(parent, []):
-            yield AgentToolCallEvent("media", call_id, binding.key, media=media)
+            yield AgentToolCallMedia(media)
 
     async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
         """Run one standard-mode native shell call inside its own CLI window and environment."""
@@ -519,7 +508,7 @@ class LiveTurnTools(TurnToolBridge):
             # Sync calls must finish before the owning operation's lifetime ends.
             return await wait_for_future_until_complete(asyncio.create_task(asyncio.to_thread(entrypoint, **arguments)))
 
-    async def _execute(
+    async def _execute(  # noqa: C901 - one call through its approval waits and its delegation
         self,
         binding: PreparedAgentToolBinding,
         call_id: str,
@@ -546,8 +535,9 @@ class LiveTurnTools(TurnToolBridge):
             waiting = None
             async with closing_async_stream(events):
                 async for event in events:
-                    emit_cli_tool_event(event, parent)
-                    if event.kind == "waiting":
+                    if isinstance(event, AgentToolCallStep):
+                        emit_cli_tool_event(event, parent)
+                    elif isinstance(event, AgentToolCallWaiting):
                         waiting = event.requirement
                     yield event
             if waiting is None:
@@ -606,7 +596,7 @@ class LiveTurnTools(TurnToolBridge):
         *,
         parent: str,
         authorize: Callable[[], Awaitable[None]],
-    ) -> AsyncIterator[AgentToolCallEvent]:
+    ) -> AsyncIterator[AgentToolCallStep]:
         decisions = None
         denial_reasons = None
         approval_calls = ()
@@ -623,8 +613,7 @@ class LiveTurnTools(TurnToolBridge):
             async with self.catalog.dispatch(binding, authorize):
                 if not started:
                     started = True
-                    tool = requirement.tool_execution
-                    yield AgentToolCallEvent("started", tool.tool_call_id, binding.key, call=tool.call)
+                    yield AgentToolCallStep("started", binding.key, requirement.tool_execution.call)
                 result = await advance_cli_delegation(
                     binding,
                     requirement,
@@ -637,7 +626,7 @@ class LiveTurnTools(TurnToolBridge):
                     on_event=on_child_event,
                 )
             if not isinstance(result, PausedAttempt):
-                yield AgentToolCallEvent("completed", result.tool_call_id, binding.key, call=result.call)
+                yield AgentToolCallStep("completed", binding.key, result.call)
                 return
             handler = self.catalog.runtime_context.cli_approval_handler
             if handler is None:
@@ -659,7 +648,7 @@ class LiveTurnTools(TurnToolBridge):
             denial_reasons = {item.tool_execution.tool_call_id: item.confirmation_note for item in resolved}
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
-        if event.kind == "continuation_required" and event.call is not None:
+        if isinstance(event, AgentToolCallStep) and event.kind == "continuation_required":
             # Synchronous fencing happens while the executing call owns the catalog lock:
             # new calls are rejected, executing lifetimes drain, waiting calls fail at dispatch.
             self.control_calls.append(event.call)
@@ -746,15 +735,15 @@ class LiveTurnTools(TurnToolBridge):
             async with closing_async_stream(events):
                 async for event in events:
                     self._check_control(event)
-                    if event.media is not None:
+                    if isinstance(event, AgentToolCallMedia):
                         self._media.setdefault(window, []).append(event.media)
                         media_results.append(event.media)
-                    if event.kind == "started":
+                    elif isinstance(event, AgentToolCallWaiting):
+                        call.receipt = call.receipt.model_copy(update={"status": "waiting"})
+                    elif event.kind == "started":
                         started = True
                         call.receipt = call.receipt.model_copy(update={"status": "running"})
-                    if event.kind == "waiting":
-                        call.receipt = call.receipt.model_copy(update={"status": "waiting"})
-                    if event.kind in {"completed", "failed", "continuation_required"} and event.call is not None:
+                    else:
                         status = "failed" if event.call.is_error else "completed"
                         result = event.call.result
         except _StaleAttemptError as exc:

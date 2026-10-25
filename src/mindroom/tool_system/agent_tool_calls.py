@@ -96,15 +96,32 @@ class PreparedAgentToolBinding:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentToolCallEvent:
-    """One step of a CLI call; ``media`` holds what a successful call returned beside its text."""
+class AgentToolCallStep:
+    """A CLI call started or ended, with the call as reported then; an ended call carries its result.
 
-    kind: Literal["started", "media", "waiting", "continuation_required", "completed", "failed"]
-    call_id: str
+    ``continuation_required`` ends a call after which the run stops, so the next attempt runs with what it did.
+    """
+
+    kind: Literal["started", "continuation_required", "completed", "failed"]
     key: ToolKey
-    call: ReportedCall | None = None
-    requirement: RunRequirement | None = None
-    media: ToolValue | None = None
+    call: ReportedCall
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolCallWaiting:
+    """A CLI call that waits for ``requirement``: a person's confirmation or its execution elsewhere."""
+
+    requirement: RunRequirement
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolCallMedia:
+    """The media a successful CLI call returned beside its text."""
+
+    media: ToolValue
+
+
+AgentToolCallEvent = AgentToolCallStep | AgentToolCallWaiting | AgentToolCallMedia
 
 
 @dataclass
@@ -314,9 +331,9 @@ def _failure(
     call_id: str,
     arguments: dict[str, object],
     message: str,
-) -> AgentToolCallEvent:
+) -> AgentToolCallStep:
     call = ReportedCall(call_id, binding.key.function, arguments, result=message, is_error=True)
-    return AgentToolCallEvent("failed", call_id, binding.key, call=call)
+    return AgentToolCallStep("failed", binding.key, call)
 
 
 def _check_resolves(
@@ -419,18 +436,12 @@ async def _execute_agent_tool_call(
         if execution is not None and execution.is_paused:
             if execution.external_execution_required:
                 catalog._call_count += 1
-            yield AgentToolCallEvent(
-                "waiting",
-                call_id,
-                binding.key,
-                call=execution.call,
-                requirement=RunRequirement(execution),
-            )
+            yield AgentToolCallWaiting(RunRequirement(execution))
             return
         catalog._call_count += 1
         call = ReportedCall(call_id, binding.key.function, deepcopy(arguments))
         # The start reports a copy, so a consumer that edits its arguments changes neither the call nor its completion.
-        yield AgentToolCallEvent("started", call_id, binding.key, call=deepcopy(call))
+        yield AgentToolCallStep("started", binding.key, deepcopy(call))
         function = binding.function
         if shell_leaf is not None:
 
@@ -458,10 +469,9 @@ async def _execute_agent_tool_call(
         finally:
             await _settle_call(binding, tracker)
         if outcome.images or outcome.audios or outcome.videos or outcome.files:
-            yield AgentToolCallEvent("media", call_id, binding.key, media=outcome)
+            yield AgentToolCallMedia(outcome)
         kind = "continuation_required" if outcome.stop_after_call else "failed" if outcome.is_error else "completed"
-        call = replace(call, result=outcome.content, is_error=outcome.is_error)
-        yield AgentToolCallEvent(kind, call_id, binding.key, call=call)
+        yield AgentToolCallStep(kind, binding.key, replace(call, result=outcome.content, is_error=outcome.is_error))
 
 
 async def _settle_call(binding: PreparedAgentToolBinding, tracker: SyncToolCompletionTracker) -> None:
@@ -479,6 +489,9 @@ async def _settle_call(binding: PreparedAgentToolBinding, tracker: SyncToolCompl
 
 __all__ = [
     "AgentToolCallEvent",
+    "AgentToolCallMedia",
+    "AgentToolCallStep",
+    "AgentToolCallWaiting",
     "DeferredAgentToolkit",
     "PreparedAgentToolBinding",
     "PreparedAgentToolCatalog",

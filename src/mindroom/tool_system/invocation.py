@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from mindroom.history.types import HistoryScope
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import ToolFunction, ToolValue
 
 # What the loop sends the model for a call that names no function it offered, kept as main behaves.
 MISSING_TOOL_ERROR_TEXT = "Error: The requested tool does not exist or is not available."
@@ -297,14 +297,23 @@ async def execute_tool_call(
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
         return ToolOutcome(content=failure_text(error), stop_after_call=function.stop_after_call, is_error=True)
+    return tool_outcome(
+        value,
+        stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
+        is_error=isinstance(value, ToolOutcome) and value.is_error,
+    )
+
+
+def tool_outcome(value: ToolValue, *, stop_after_call: bool, is_error: bool) -> ToolOutcome:
+    """Return ``value``'s text and media as one call's outcome, which stops the run after it or fails as given."""
     return ToolOutcome(
         content=value.content,
         images=value.images,
         audios=value.audios,
         videos=value.videos,
         files=value.files,
-        stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
-        is_error=isinstance(value, ToolOutcome) and value.is_error,
+        stop_after_call=stop_after_call,
+        is_error=is_error,
     )
 
 
@@ -379,4 +388,5 @@ __all__ = [
     "execute_tool_call",
     "parse_tool_arguments",
     "run_tool_call",
+    "tool_outcome",
 ]

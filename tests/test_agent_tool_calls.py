@@ -286,9 +286,10 @@ async def test_sync_async_generators_media_and_generated_functions(tmp_path: Pat
         events = await _events(catalog, "ordinary", name, args)
         assert events[-1].kind == "completed"
         assert events[-1].call.result == expected
-    events = await _events(catalog, "ordinary", "media")
-    assert [event.kind for event in events] == ["started", "media", "completed"]
-    assert events[1].media.images[0].url == "https://example.org/image.png"
+    started, media, completed = await _events(catalog, "ordinary", "media")
+    assert (started.kind, completed.kind) == ("started", "completed")
+    assert isinstance(media, agent_tool_calls.AgentToolCallMedia)
+    assert media.media.images[0].url == "https://example.org/image.png"
     events = await _events(catalog, "agent", "search_knowledge_base", {"query": "binding"})
     assert events[-1].call.result == "Knowledge about binding"
     assert catalog.run.session_state["streamed"] is True
@@ -315,9 +316,9 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
 
     for flag in ("requires_confirmation", "external_execution"):
         catalog = await _catalog(tmp_path, [_function(action, **{flag: True})])
-        events = await _events(catalog, "actions", "action", {"value": 3})
-        assert events[-1].kind == "waiting"
-        assert events[-1].requirement.tool_execution.tool_args == {"value": 3}
+        [waiting] = await _events(catalog, "actions", "action", {"value": 3})
+        assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
+        assert waiting.requirement.tool_execution.tool_args == {"value": 3}
     assert seen == [1]
     catalog = await _catalog(tmp_path, [_function(action, stop_after_tool_call=True)])
     events = await _events(catalog, "actions", "action", {"value": 4})
@@ -351,10 +352,10 @@ async def test_a_waiting_cli_call_keeps_its_function_s_approval_type_and_silence
         return value
 
     catalog = await _catalog(tmp_path, [_function(action, **flags)])
-    events = await _events(catalog, "actions", "action", {"value": 3})
+    [waiting] = await _events(catalog, "actions", "action", {"value": 3})
 
-    assert [event.kind for event in events] == ["waiting"]
-    stored = events[0].requirement.tool_execution.to_dict()
+    assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
+    stored = waiting.requirement.tool_execution.to_dict()
     expected = {**paused, "approval_type": "audit", "external_execution_silent": True, "tool_args": {"value": 3}}
     assert {key: stored[key] for key in expected} == expected
 
@@ -749,9 +750,9 @@ async def test_exact_native_confirmation_resumes_prepared_call(
 
     catalog = await _catalog(tmp_path, [_function(action, requires_confirmation=True)])
     binding = await catalog.bind(ToolKey("actions", "action"))
-    events = await _events(catalog, "actions", "action", {"value": 3})
-    requirement = events[-1].requirement
-    assert requirement is not None
+    [waiting] = await _events(catalog, "actions", "action", {"value": 3})
+    assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
+    requirement = waiting.requirement
     if approved:
         requirement.confirm()
     else:
