@@ -389,8 +389,9 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     built = _built_team(config, _team_members(config, monkeypatch), system_enrichment=rendered)
     spec = built.spec
 
-    assert spec.system_message is not None
-    assert rendered.strip() in str(spec.system_message.content)
+    leader_system = spec.leader.system_message
+    assert leader_system is not None
+    assert rendered.strip() in str(leader_system.content)
     member_systems = [member.spec.system_message for member in spec.members]
     assert all(message is not None and rendered.strip() in str(message.content) for message in member_systems)
     prepared = await prepare_materialized_team_execution(
@@ -418,7 +419,7 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     [transient] = prepared.turn.transient
     assert transient.add_to_agent_memory is False
     assert "Current location" in str(transient.content)
-    assert "Current location" not in str(spec.system_message.content)
+    assert "Current location" not in str(leader_system.content)
 
 
 @pytest.mark.asyncio

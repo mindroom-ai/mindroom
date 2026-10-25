@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, ca
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.approval.receipt_readers import add_approval_receipt_reader
+from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_call_ids
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
@@ -60,6 +60,7 @@ from mindroom.delegation.state import (
     child_call_id,
     child_card_id,
     delegation_card_id,
+    member_call_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.history.types import HistoryScope
@@ -264,23 +265,28 @@ async def _run_child(
     approval_calls: Sequence[ApprovalCall],
     fresh: bool,
 ) -> _ChildOutcome:
-    """Reserve the child and run it in its execution scope; the caller holds its liveness through settlement."""
+    """Reserve the child and run it in its execution scope; the caller holds its liveness through settlement.
+
+    ``decisions``, ``denial_reasons``, and ``approval_calls`` name the child's calls by its own ids, as
+    ``child_call_id`` gives them, and so does a bound approval receipt within the scope.
+    """
     await reserve_child_turn(child, owner=caller_identity, runtime_paths=runtime_paths)
     async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
-        response = await run_with_tool_execution_identity(
-            child_execution_identity(child),
-            operation=lambda: _execute_child(
-                child,
-                run_child=run_child,
-                config=config,
-                runtime_paths=runtime_paths,
-                refresh_scheduler=refresh_scheduler,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
-                approval_calls=approval_calls,
-                fresh=fresh,
-            ),
-        )
+        with approval_receipt_call_ids(partial(child_call_id, child.delegation_id)):
+            response = await run_with_tool_execution_identity(
+                child_execution_identity(child),
+                operation=lambda: _execute_child(
+                    child,
+                    run_child=run_child,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    refresh_scheduler=refresh_scheduler,
+                    decisions=decisions,
+                    denial_reasons=denial_reasons,
+                    approval_calls=approval_calls,
+                    fresh=fresh,
+                ),
+            )
         observation.keep_outcome(response.response)
         return response
 
@@ -1043,7 +1049,10 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         )
     if card_decision is not None or child_decisions is not None:
         # The run that made the call continues with its result, so that run reads the approval's receipt.
-        add_approval_receipt_reader(requirement.member_run_id or response.run_id)
+        add_approval_receipt_reader(
+            requirement.member_run_id or response.run_id,
+            partial(member_call_id, requirement.member_agent_id),
+        )
     # A child saved before a crash keeps its accepted owner when startup policy changes.
     if retained is not None:
         if background is not None and not background.has_job(retained.delegation_id):

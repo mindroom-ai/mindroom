@@ -19,7 +19,7 @@ from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
 
-from mindroom.llm.media import Image, Video
+from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import (
     ToolArgumentError,
@@ -27,11 +27,13 @@ from mindroom.tool_system.invocation import (
     ToolCallContext,
     ToolNext,
     ToolOutcome,
+    client_tool_result,
     current_tool_call,
     execute_tool_call,
     parse_tool_arguments,
     run_tool_call,
 )
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from tests.tool_system import agno_parity_support as support
 
@@ -448,6 +450,31 @@ async def test_runners_outside_the_loop_get_the_tools_own_value_and_its_exceptio
         await run_tool_call(functions["fails"], {}, _context(), middleware=())
     assert seen == ["numbers"]
     assert current_tool_call() is None
+
+
+def test_clients_get_a_tool_values_text_with_references_to_its_media() -> None:
+    """A tool value gives its text, with each medium referenced instead of sent; other values pass unchanged."""
+    drawn = ToolValue(
+        content="drawn",
+        images=(Image(url="https://example.org/cat.png"),),
+        audios=(Audio(content=b"RIFF", mime_type="audio/wav"),),
+        videos=(Video(url="https://example.org/cat.mp4", mime_type="video/mp4"),),
+        files=(File(content=b"a,b", mime_type="text/csv"),),
+    )
+
+    assert client_tool_result(ToolResult(content="hello")) == "hello"
+    assert client_tool_result(ToolValue(content="hello")) == "hello"
+    assert client_tool_result(drawn) == {
+        "content": "drawn",
+        "attachments": [
+            {"kind": "image", "mime_type": None, "url": "https://example.org/cat.png"},
+            {"kind": "audio", "mime_type": "audio/wav"},
+            {"kind": "video", "mime_type": "video/mp4", "url": "https://example.org/cat.mp4"},
+            {"kind": "file", "mime_type": "text/csv"},
+        ],
+    }
+    assert client_tool_result({"a": 1}) == {"a": 1}
+    assert client_tool_result(None) is None
 
 
 @pytest.mark.asyncio

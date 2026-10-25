@@ -20,26 +20,30 @@ if TYPE_CHECKING:
 
 _MARKER_KEY = "mindroom_approval_receipt"
 _SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# Provider and card call ids, such as ``toolu_01…``, ``functions.save_file:0``, or ``member_id:call_id``.
+_SAFE_TOOL_CALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
 _APPROVAL_RECEIPT_HEADER = (
     "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
     "paused tool calls were authorized. Do not infer approval policy from tool success alone."
 )
 
 
-def _receipt_call_label(tool_name: str, call_ordinal: int) -> str:
-    if _SAFE_TOOL_NAME.fullmatch(tool_name) is None:
-        return f"invalid tool name (call #{call_ordinal})"
-    return f"`{tool_name}` (call #{call_ordinal})"
+def _receipt_call_label(call: ApprovalCall) -> str:
+    """Name the call by its tool and its id, which stays the same across every approval in the response."""
+    name = f"`{call.tool_name}`" if _SAFE_TOOL_NAME.fullmatch(call.tool_name) else "invalid tool name"
+    call_id = (
+        f"tool call id `{call.tool_call_id}`"
+        if _SAFE_TOOL_CALL_ID.fullmatch(call.tool_call_id)
+        else "invalid tool call id"
+    )
+    return f"{name} ({call_id})"
 
 
 def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
-    """Render trusted model context for one exact approval generation."""
+    """Render trusted model context for decided ``calls``, as one reader sees what ``approval_receipt_context`` binds."""
     lines = [_APPROVAL_RECEIPT_HEADER]
-    for call_ordinal, call in enumerate(calls, start=1):
-        if call.decision is None:
-            msg = f"Cannot build trusted receipt for pending approval call #{call_ordinal}"
-            raise ValueError(msg)
-        call_label = _receipt_call_label(call.tool_name, call_ordinal)
+    for call in calls:
+        call_label = _receipt_call_label(call)
         if call.decision is ContinuationDecision.APPROVED:
             if call.human_approval_required is True:
                 outcome = (
@@ -119,18 +123,18 @@ def messages_with_approval_receipt(
 def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
     """Return the pre-request hook that sends the bound receipt with a reader run's first request, once per run.
 
-    The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt. It is projected
-    into the request only, so no run's history holds it.
+    The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt, and under which
+    ids it names their calls. It is projected into the request only, so no run's history holds it.
     """
 
     async def hook(state: LoopState) -> RequestDecision:
-        receipt_text = take_unsent_receipt(state.run.run_id)
-        if receipt_text is None:
+        calls = take_unsent_receipt(state.run.run_id)
+        if calls is None:
             return SendRequest()
         return SendRequest(
             messages=messages_with_approval_receipt(
                 state.messages,
-                receipt_text,
+                build_approval_receipt(calls),
                 after_response_id=capabilities.continues_stored_responses,
             ),
         )

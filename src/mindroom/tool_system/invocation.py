@@ -10,7 +10,8 @@ itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
 ``current_tool_call()`` names the call being run to the middleware and the entrypoint below it, so a tool that needs
 its own call id reads it there instead of taking it as a parameter.
-``run_tool_call`` is the same execution for runners outside the loop that need the tool's own return value.
+``run_tool_call`` is the same execution for runners outside the loop that need the tool's own return value, and
+``client_tool_result`` reads that value for a runner that hands it to a client.
 """
 
 from __future__ import annotations
@@ -24,11 +25,17 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, tool_value
+from mindroom.tool_system.agno_toolkits import (
+    StreamCollector,
+    framework_arguments,
+    model_arguments,
+    read_tool_value,
+    tool_value,
+)
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
 if TYPE_CHECKING:
@@ -250,8 +257,8 @@ async def run_tool_call(
 ) -> object:
     """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it returned.
 
-    Runners outside the model loop that hand the tool's own value onward (background scripts, the MCP gateway,
-    scheduled calls) use this; an exception the call raises propagates.
+    Runners outside the model loop that need the tool's own value use this; one that hands the value to a client reads
+    it through ``client_tool_result``. An exception the call raises propagates.
     Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
     running from its stored arguments is as clean as a freshly parsed one.
     """
@@ -262,6 +269,22 @@ async def run_tool_call(
             return await _run_chain(call, middleware)
     finally:
         _CURRENT_CALL.reset(token)
+
+
+def client_tool_result(result: object) -> object:
+    """Return what a runner outside the model loop hands its client for a tool's own return value.
+
+    A ``ToolResult`` or ``ToolValue`` gives its text. When the tool produced media, the text goes under ``content``
+    beside ``attachments``, one reference per medium with its kind, its MIME type, and its URL when it has one, so
+    the media's bytes never reach the client. Any other value passes unchanged, for the runner to encode as JSON.
+    """
+    value = read_tool_value(result)
+    if value is None:
+        return result
+    attachments = [media_reference(kind, item) for kind, item in value.media()]
+    if not attachments:
+        return value.content
+    return {"content": value.content, "attachments": attachments}
 
 
 async def execute_tool_call(
@@ -358,6 +381,7 @@ __all__ = [
     "ToolMiddleware",
     "ToolNext",
     "ToolOutcome",
+    "client_tool_result",
     "current_tool_call",
     "execute_tool_call",
     "parse_tool_arguments",

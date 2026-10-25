@@ -25,7 +25,7 @@ from mindroom.agent_loop.model_loop import (
 )
 from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
 from mindroom.llm.errors import ProviderError, RateLimited
-from mindroom.llm.events import ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
@@ -95,10 +95,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
 
     assert events[0] == ReasoningDelta("hmm")
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
-    assert events[-2:] == [
-        RequestCompleted(usage(12, 3, time_to_first_token=0.25)),
-        LoopEnded(paused=False),
-    ]
+    assert events[-1] == LoopEnded(paused=False)
     assert record.content == "Hello, Alice."
     assert record.status is RunStatus.running  # The run, not the loop, ends the record.
     assert record.tools is None
@@ -123,6 +120,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     }
     assistant = messages[-1]
     assert (assistant.role, assistant.content) == ("assistant", "Hello, Alice.")
+    assert assistant.metrics == usage(12, 3, time_to_first_token=0.25)
     assert assistant.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
     [request] = model.requests
     assert request.messages == tuple(messages[:2])
@@ -183,7 +181,6 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
 
     assert _names(events) == [
         "TextDelta",
-        "RequestCompleted",
         "ToolStarted",
         "ToolStarted",
         "ToolCompleted",
@@ -191,7 +188,6 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
         "TextDelta",
         "TextDelta",
         "TextDelta",
-        "RequestCompleted",
         "LoopEnded",
     ]
     started = [event.call for event in events if isinstance(event, ToolStarted)]
@@ -711,12 +707,14 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     assert len(record.metrics.details["model"]) == 1
 
 
-async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagates() -> None:
+@pytest.mark.parametrize("retried", [False, True], ids=["one-attempt", "retried-sum"])
+async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagates(retried: bool) -> None:
     async def throttle() -> None:
         msg = "slow down"
         raise RateLimited(msg, provider="Synthetic")
 
-    model = ScriptedModel([[UsageReported(usage(7, 0), final=False), Await(throttle)]])
+    # After a retry the reports add up the attempts, which the pipeline marks on them.
+    model = ScriptedModel([[UsageReported(usage(7, 0), final=False, sums_attempts=retried), Await(throttle)]])
     messages = _prompt()
     record = _record()
 
@@ -724,6 +722,10 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
         await _run(spec(model), messages, record=record)
 
     assert messages[-1].metrics == usage(7, 0)
+    assert messages[-1].provider_data == {
+        **({AGGREGATE_USAGE_KEY: True} if retried else {}),
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
     assert record.metrics is not None
     assert record.metrics.tokens.input_tokens == 7
 
@@ -763,9 +765,8 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
     )
     messages = _prompt()
 
-    events, record = await _run(spec(model), messages)
+    _, record = await _run(spec(model), messages)
 
-    assert events[-2] == RequestCompleted(usage(1, 1))
     assert record.metrics is not None
     assert record.metrics.details == {
         "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI Chat")],

@@ -7,7 +7,8 @@ request as the run's stored assistant messages did, with their usage and tool ca
 and the history preparation returns what the run's stored metadata says it prepared: the capture kept that result,
 not the stored history and prompt it came from. An approval resume prepares no history, so the resumes run from the
 stores the capture dumped just before them: the team's here, and the agent's in ``tests/test_approval_resume.py``.
-A run's duration is a clock reading, so only its presence is compared.
+A run's duration is a clock reading, so only its presence is compared, and ``golden_metadata`` names where the
+expected metadata departs from the capture.
 """
 
 from __future__ import annotations
@@ -249,10 +250,11 @@ async def _team_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: s
         await team.stream(ctx=ctx, run_metadata_collector=published)
     else:
         await team.respond(ctx=ctx, run_metadata_collector=published)
-    # The stored team run is named for its members, as Agno named it.
+    # The stored team run is identified by its team alone; the members' label it held before is not stored.
     stored = team.storage.get_run(run_id)
     assert isinstance(stored, TeamRunRecord)
-    assert stored.team_name == record.team_name
+    assert stored.team_id == record.team_id
+    assert "team_name" not in stored.to_dict()
     return published
 
 

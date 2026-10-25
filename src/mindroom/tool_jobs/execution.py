@@ -49,7 +49,7 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload,
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, format_job_handle, get_background_runtime
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
-from mindroom.tool_system.agno_toolkits import ToolResult, tool_value
+from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
@@ -496,7 +496,8 @@ async def _run_job_call(
         returned = await _owned_by_job(lambda: run_tool_call(function, call.arguments, call.context, middleware=inner))
     except Exception as error:
         return None, failure_text(error)
-    return (tool_value(returned) if isinstance(returned, ToolResult) else returned), None
+    value = read_tool_value(returned)
+    return (returned if value is None else value), None
 
 
 def _saved_outcome(

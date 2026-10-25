@@ -21,7 +21,6 @@ from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metad
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
 from mindroom.approval.execution import AgentApprovalExecution
-from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.response import (
     ApprovalResponseCoordinator,
@@ -2642,7 +2641,7 @@ class ResponseRunner:
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
         paused_answer = _paused_answer()
-        with approval_receipt_context(build_approval_receipt(continuation.calls), run_id=continuation.run_id):
+        with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
             if continuation.entity_kind == "team":
 
                 async def continue_team() -> CompletedApprovalRun | PausedAttempt:

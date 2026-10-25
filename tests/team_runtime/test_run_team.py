@@ -22,9 +22,9 @@ from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageR
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
-from mindroom.teams.runtime import MemberEvent, team_paused_content, team_usage
+from mindroom.teams.runtime import MemberEvent, leader_tool_specs, team_paused_content, team_usage
 from mindroom.teams.spec import TeamMode
-from tests.agent_loop.helpers import echo, external, gated, toolkit
+from tests.agent_loop.helpers import add, echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
 from tests.providers.golden_support import hide_provider_environment
@@ -137,13 +137,7 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
     ]
     # Member events are tagged with the member and its run; the leader's own tool events are not wrapped.
     writer_events = _member_events(events, "writer")
-    assert [type(event).__name__ for event in writer_events] == [
-        "RequestCompleted",
-        "ToolStarted",
-        "ToolCompleted",
-        "TextDelta",
-        "RequestCompleted",
-    ]
+    assert [type(event).__name__ for event in writer_events] == ["ToolStarted", "ToolCompleted", "TextDelta"]
     assert all(event.run_id == member.run_id for event in events if isinstance(event, MemberEvent))
     completed = next(event for event in writer_events if isinstance(event, ToolCompleted))
     assert completed.call.tool_name == "add"
@@ -342,6 +336,28 @@ async def test_a_collaborate_member_that_pauses_adds_agno_s_notice_in_its_place_
     [requirement] = record.requirements
     assert (requirement.member_agent_id, requirement.member_run_id) == ("checker", checker_record.run_id)
     assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
+
+
+@pytest.mark.parametrize("mode", list(TeamMode))
+async def test_the_leader_tool_definitions_are_the_tools_each_leader_request_sends(mode: TeamMode) -> None:
+    """``leader_tool_specs`` lists, without a run, the tools a leader request sends, in the order it sends them."""
+    leader = scripted("leader-model", answer("Nothing to hand out."))
+    team = squad(
+        leader,
+        scripted("writer-model"),
+        scripted("checker-model"),
+        mode=mode,
+        leader_toolkits=(toolkit(echo, add, name="job_controls"),),
+    )
+
+    await collect(
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+
+    [request] = leader.requests
+    assert tuple(request.tools) == leader_tool_specs(team)
+    delegation = "delegate_task_to_members" if mode is TeamMode.COLLABORATE else "delegate_task_to_member"
+    assert [definition.name for definition in request.tools] == ["add", delegation, "echo"]
 
 
 async def test_a_leader_level_confirmation_pauses_the_team_without_member_fields() -> None:

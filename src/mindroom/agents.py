@@ -1311,13 +1311,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     persona_tools = persona.tools if persona is not None else None
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
+    # A team member is built under its team turn's identity; its tool hooks and job controls act as the member.
+    agent_identity = replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None
     hook_middleware = _build_agent_tool_middleware(
         hook_registry=hook_registry,
         plugins=plugins,
         agent_name=agent_name,
-        dispatch_context=(
-            ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None
-        ),
+        dispatch_context=ToolDispatchContext(execution_identity=agent_identity) if agent_identity is not None else None,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -1524,7 +1524,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     controls = JobTools.build(
         [entry.toolkit for entry in entries],
         runtime_paths,
-        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+        agent_identity,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
         output_file_policy=_agent_tool_output_file_policy(

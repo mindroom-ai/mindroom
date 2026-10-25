@@ -199,6 +199,20 @@ async def test_real_bash_carries_media_and_scoped_attachment_references(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_bash_receipt_references_url_media_by_url_without_an_attachment(tmp_path) -> None:
+    """A medium the tool gave by URL is referenced by that URL; nothing is saved or registered for it."""
+    linked = ToolResult(content="linked", images=[Image(url="https://example.test/linked.png", mime_type="image/png")])
+    owner, _messages, receipt = await _run(tmp_path, linked)
+    try:
+        assert receipt["status"] == "completed"
+        assert receipt["attachments"] == [
+            {"kind": "image", "mime_type": "image/png", "url": "https://example.test/linked.png"},
+        ]
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [False, True])
 @pytest.mark.parametrize("content", ["complete output\n" * 10000, "\x01" * 12000], ids=["large-text", "json-escapes"])
 async def test_completed_large_media_result_uses_workspace_artifact(tmp_path, failure, content) -> None:

@@ -9,7 +9,6 @@ from mindroom.llm.provider import ReasoningDelta, TextDelta
 
 if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.llm.usage import MessageMetrics
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,25 +47,17 @@ class ToolCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class RequestCompleted:
-    """One provider request finished with the usage it reported."""
-
-    usage: MessageMetrics
-
-
-@dataclass(frozen=True, slots=True)
 class RunFinished:
     """The run reached ``COMPLETED`` or ``PAUSED``; the record carries content, tools, and requirements."""
 
     record: AnyRunRecord
 
 
-type RunEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | RunFinished
+type RunEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RunFinished
 
 __all__ = [
     "ReasoningDelta",
     "ReportedCall",
-    "RequestCompleted",
     "RunEvent",
     "RunFinished",
     "TextDelta",
