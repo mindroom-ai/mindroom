@@ -5305,10 +5305,10 @@ depends_on = []
 [[interfaces]]
 from = ["mindroom.tool_system.tool_access"]
 expose = [
-    "ToolDescriptor",
     "ToolKey",
     "UnknownToolError",
     "search_tool_metadata",
+    "tool_definition",
     "validate_tool_arguments",
 ]
 

@@ -238,9 +238,9 @@ async def test_prepared_call_preserves_real_owner_context_and_middleware(tmp_pat
     assert catalog.run.session_state == {"changed": True}
     assert catalog.record is None
     assert get_tool_runtime_context() is None
-    descriptor = await catalog.describe(ToolKey("inspect", "inspect_binding"))
-    assert descriptor.instructions == ("Keep identity.",)
-    assert descriptor.input_schema["properties"] == {}
+    described = await catalog.bind(ToolKey("inspect", "inspect_binding"))
+    assert described.instructions == ("Keep identity.",)
+    assert described.function.parameters["properties"] == {}
 
 
 @pytest.mark.asyncio
@@ -411,8 +411,8 @@ async def test_lazy_metadata_and_single_materialization(tmp_path: Path) -> None:
     assert catalog.metadata() == [{"toolkit": "lazy", "description": "Lazy operations", "deferred": True}]
     assert builds == []
     key = ToolKey("lazy", "action")
-    first, second = await asyncio.gather(catalog.describe(key), catalog.describe(key))
-    assert first == second
+    first, second = await asyncio.gather(catalog.bind(key), catalog.bind(key))
+    assert first is second
     assert first.instructions == ("Actual lazy instructions",)
     assert builds == [catalog.runtime_context]
     assert (await _events(catalog, "lazy", "action", {"value": 9}))[-1].call.result == "9"
@@ -588,8 +588,8 @@ async def test_authored_alias_and_toolkit_guidance_are_described(tmp_path: Path)
         [_toolkit("implementation", action, instructions="Source guidance")],
         owners={"action": "authored_alias"},
     )
-    descriptor = await catalog.describe(ToolKey("authored_alias", "action"))
-    assert descriptor.instructions == ("Source guidance",)
+    binding = await catalog.bind(ToolKey("authored_alias", "action"))
+    assert binding.instructions == ("Source guidance",)
 
 
 @pytest.mark.asyncio

@@ -51,7 +51,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import tool_outcome
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
-from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata
+from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata, tool_definition
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
@@ -664,7 +664,7 @@ class LiveTurnTools(TurnToolBridge):
             self._check_dispatch()
             try:
                 await self._authorize(key, {})
-                descriptor = await self.catalog.describe(key, check_current=self._check_dispatch)
+                binding = await self.catalog.bind(key, check_current=self._check_dispatch)
             except PermissionError as exc:
                 msg = "Tool is unavailable"
                 raise CliOperationError(msg) from exc
@@ -672,12 +672,13 @@ class LiveTurnTools(TurnToolBridge):
                 # Production authorization binds the key, so an unknown name can surface from either call.
                 raise CliOperationError(str(exc)) from exc
             self._check_dispatch()
+            definition = tool_definition(binding.function.definition())
             result: dict[str, object] = {
                 "toolkit": key.toolkit,
                 "function": key.function,
-                "description": descriptor.description,
-                "input_schema": descriptor.input_schema,
-                "instructions": list(descriptor.instructions),
+                "description": definition["description"],
+                "input_schema": definition["parameters"],
+                "instructions": list(binding.instructions),
             }
             document = schema_context_document(result)
             if len(document.encode()) > 32 * 1024:

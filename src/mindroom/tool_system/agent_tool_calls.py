@@ -25,7 +25,7 @@ from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_access import ToolDescriptor, ToolKey, UnknownToolError, validate_tool_arguments
+from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, validate_tool_arguments
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.worker_routing import tool_execution_identity
@@ -303,21 +303,6 @@ class PreparedAgentToolCatalog:
                     msg = f"No toolkit {key.toolkit!r}"
                 raise UnknownToolError(msg)
             return binding
-
-    async def describe(
-        self,
-        key: ToolKey,
-        *,
-        check_current: Callable[[], None] | None = None,
-    ) -> ToolDescriptor:
-        """Return the actual prepared schema and toolkit instructions."""
-        binding = await self.bind(key, check_current=check_current)
-        return ToolDescriptor(
-            key,
-            binding.function.description or "",
-            dict(binding.function.parameters),
-            binding.instructions,
-        )
 
     async def close(self) -> None:
         """Refuse new work, wait for the operation that currently holds the catalog, then close what it connected."""

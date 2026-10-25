@@ -1496,9 +1496,10 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
             loaded.append(index)
 
             async def selected() -> str:
+                """Return the selected item."""
                 return "selected"
 
-            return _toolkit(f"tool{index}", selected)
+            return _toolkit(f"tool{index}", selected, instructions=f"Select with tool {index}.")
 
         catalog.add_deferred(DeferredAgentToolkit(f"tool{index}", f"Metadata {index}", factory))
     owner = live_turn_tools_for_test(
@@ -1531,7 +1532,13 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     assert loaded == []
     async with owner._window("describe-bash"):
         descriptor = await owner.operation(window="describe-bash", operation=operation)
-        assert descriptor["input_schema"]["properties"] == {}
+        assert descriptor == {
+            "toolkit": "tool12",
+            "function": "selected",
+            "description": "Return the selected item.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "instructions": ["Select with tool 12."],
+        }
         with pytest.raises(CliOperationError, match=r"^No toolkit 'unassigned'$"):
             await owner.operation(
                 window="describe-bash",
