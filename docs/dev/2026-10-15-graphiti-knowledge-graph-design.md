@@ -64,7 +64,8 @@ Edits take ids, which lookups show only when edits are on, so read-only agents' 
 Rejected: a separate edit tool listed in `tools`, because the lookups would still need to know about it to show ids.
 Rejected: clearing the summaries of a deleted fact's entities, which drops the condensed summary of a central entity for one wrong fact, and removing the fact's text from them, which misses the condensed ones that central entities have.
 
-Limitations: edits do not wait for ingestion, so an episode extracted into the same graph during a merge or deletion can recreate the entity it resolved against, and a later episode that states a deleted fact again adds it back.
+Limitations: edits do not wait for ingestion, because an extraction takes about a minute and an agent's edit would wait for it, so an episode extracted into the same graph during a merge or deletion can recreate the entity it resolved against, and a later episode that states a deleted fact again adds it back.
+A merge lists the duplicate's facts again until none is new, so a fact ingestion adds to the duplicate meanwhile moves too, except one added between that last listing and the duplicate's deletion.
 The conversation in which the agent confirms a deletion is ingested too; a live probe on 2026-10-25 with GPT-6 Luna through Codex extracted a wrong fact, deleted it, and then extracted a conversation where the agent quoted it as deleted.
 In three such runs the wrong fact never came back; one run added the correction ("Alice never waters the plant") and a fact about the agent's deletion, which the built-in rule against an assistant's housekeeping did not stop.
 Naming graph edits in that rule was not tried, because the rule asks the model to extract the knowledge such housekeeping contains, which for a deletion is the deleted fact.

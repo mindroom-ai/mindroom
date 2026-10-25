@@ -111,17 +111,23 @@ class EntityNames:
 
         A name wins over an alias, so an alias that another entity is named never finds the entry, as in the instructions.
         """
+        if (named := self._named(name)) is not None:
+            return named.name
         wanted = name.casefold()
         entities = (*self.entries.values(), *self.agents.values())
-        named = (entity.name for entity in entities if entity.name.casefold() == wanted)
         called = (entity.name for entity in entities if wanted in {alias.casefold() for alias in entity.aliases})
-        return next(named, None) or next(called, name)
+        return next(called, name)
 
     def aliases_of(self, name: str) -> tuple[str, ...]:
         """Return the other names of the entry or agent named ``name`` in any letter case, or none."""
+        named = self._named(name)
+        return named.aliases if named is not None else ()
+
+    def _named(self, name: str) -> KnownEntity | None:
+        """Return the entry or agent named ``name`` in any letter case."""
         wanted = name.casefold()
         entities = (*self.entries.values(), *self.agents.values())
-        return next((entity.aliases for entity in entities if entity.name.casefold() == wanted), ())
+        return next((entity for entity in entities if entity.name.casefold() == wanted), None)
 
 
 def _entry(name: str, aliases: list[str]) -> KnownEntity:

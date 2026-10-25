@@ -97,7 +97,7 @@ class KnowledgeGraphTools(Toolkit):
         up if it is not the one you meant.
 
         Args:
-            name: The entity's name, for example "Alice" or "Project Atlas", or an id an earlier lookup showed.
+            name: The entity's name, for example "Alice" or "Project Atlas".
 
         Returns:
             The entity's summary and the facts that touch it.
@@ -174,7 +174,7 @@ class KnowledgeGraphTools(Toolkit):
         """Merge an entity into another entity for the same person or thing, such as a nickname into a full name.
 
         The duplicate's facts move onto the other entity, which keeps its name and summary; facts between the two are
-        dropped, and the duplicate is deleted.
+        dropped, and the duplicate is deleted. `graph_entity` also takes an id, to check an entity before merging it.
 
         Args:
             duplicate_id: The id of the entity to merge away, as `graph_entity` shows it.

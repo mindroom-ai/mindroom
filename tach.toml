@@ -8813,6 +8813,7 @@ depends_on = [
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.filters",
     "mindroom.tool_system.registry_state",
+    "mindroom.tools.knowledge_graph",
     "mindroom.agent_policy",
 ]
 

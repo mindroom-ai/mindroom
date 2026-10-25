@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import re
 import threading
 from contextvars import copy_context
 from dataclasses import dataclass
@@ -50,6 +51,9 @@ _MAX_ENTITY_FACTS = 30
 # Entities a lookup takes per name it tries: the best is the answer, and the rest are named as other close matches
 # after a fuzzy match, or as the other entities under that name after an exact one.
 _ENTITY_CANDIDATES = 5
+# The shape of an id, which an entity lookup never matches fuzzily, since a deleted or merged entity's id would find
+# some unrelated entity.
+_ID_PATTERN = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.IGNORECASE)
 # An entity's id, or its name: FalkorDB's Cypher has no case-insensitive regex, so names are compared lowercased. Among
 # several exact matches the one with the most facts wins, because a duplicate extracted once has few; the oldest, then
 # the lowest uuid, settles a tie so the same name always finds the same entity.
@@ -478,6 +482,8 @@ class GraphitiStore:
             first, *rest = records
             node = await EntityNode.get_by_uuid(driver, first)
             others = [_EntityRef(records[uuid], uuid) for uuid in rest]
+        elif _ID_PATTERN.fullmatch(name):
+            return None
         else:
             results = await graphiti.search_(
                 canonical,
@@ -541,20 +547,25 @@ class GraphitiStore:
         except NodeNotFoundError:
             return None
         moved = 0
-        for edge in await EntityEdge.get_by_node_uuid(driver, duplicate.uuid):
-            source, target = (
-                into.uuid if end == duplicate.uuid else end for end in (edge.source_node_uuid, edge.target_node_uuid)
-            )
-            # A fact between the two would join the kept entity to itself; deleting the duplicate deletes it.
-            if source == target:
-                continue
-            # Saving writes every property, so the embedding that lookups never load is loaded first.
-            await edge.load_fact_embedding(driver)
-            edge.source_node_uuid, edge.target_node_uuid = source, target
-            # This adds the fact to the kept entity under the same id; deleting the duplicate removes the original, so
-            # a merge interrupted in between leaves both, and repeating it saves the same facts again and finishes.
-            await edge.save(driver)
-            moved += 1
+        seen: set[str] = set()
+        # Ingestion can add a fact to the duplicate while its facts move, so they are listed again until none is new.
+        while edges := [e for e in await EntityEdge.get_by_node_uuid(driver, duplicate.uuid) if e.uuid not in seen]:
+            for edge in edges:
+                seen.add(edge.uuid)
+                source, target = (
+                    into.uuid if end == duplicate.uuid else end
+                    for end in (edge.source_node_uuid, edge.target_node_uuid)
+                )
+                # A fact between the two would join the kept entity to itself; deleting the duplicate deletes it.
+                if source == target:
+                    continue
+                # Saving writes every property, so the embedding that lookups never load is loaded first.
+                await edge.load_fact_embedding(driver)
+                edge.source_node_uuid, edge.target_node_uuid = source, target
+                # This adds the fact to the kept entity under the same id; deleting the duplicate removes the original,
+                # so a merge interrupted in between leaves both, and repeating it saves the same facts again and finishes.
+                await edge.save(driver)
+                moved += 1
         await duplicate.delete(driver)
         return _MergedEntities(duplicate=duplicate.name, into=into.name, moved_facts=moved)
 

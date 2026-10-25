@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from falkordb.query_result import QueryResult
+    from graphiti_core.driver.driver import GraphDriver
     from graphiti_core.prompts.models import Message
     from pydantic import BaseModel
 
@@ -474,6 +475,20 @@ async def test_entity_is_found_by_its_id(store: GraphitiStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_unknown_id_finds_no_entity(store: GraphitiStore) -> None:
+    """An id that names no entity, such as one deleted or merged away, finds nothing rather than a fuzzy match."""
+    gone = await _seed_entity(store, ALPHA, "Ali")
+    # A name embedding equal to the id's, so a search for the id would rank this entity first.
+    [id_embedding] = await _HashEmbedder().aembed([gone], purpose="query")
+    await _seed_entity(store, ALPHA, "Alice Smith", summary="A person.", name_embedding=id_embedding)
+    assert await store.delete_entity(ALPHA, gone) == "Ali"
+    assert (await _search_ranking(store, ALPHA, gone))[0] == "Alice Smith"
+
+    assert await store.entity(ALPHA, gone) is None
+    assert await store.entity(ALPHA, gone.upper()) is None
+
+
+@pytest.mark.asyncio
 async def test_deleting_a_fact_removes_only_that_fact(store: GraphitiStore) -> None:
     """A deleted fact is gone from its own graph, its entities and other facts stay, and another graph's id finds nothing."""
     alice = await _seed_entity(store, ALPHA, "Alice")
@@ -539,6 +554,47 @@ async def test_merging_moves_the_duplicates_facts_onto_the_kept_entity(store: Gr
     assert entity.summary == "A person."
     employs = next(fact for fact in entity.facts if fact.fact == "Acme employs Ali")
     assert [source.description for source in employs.sources] == ["tool_results: hr"]
+
+
+@pytest.mark.asyncio
+async def test_a_fact_added_to_the_duplicate_during_a_merge_moves_too(store: GraphitiStore) -> None:
+    """An episode extracted while a merge runs can add a fact to the duplicate, which the merge moves before deleting it."""
+    alice = await _seed_entity(store, ALPHA, "Alice Smith")
+    ali = await _seed_entity(store, ALPHA, "Ali")
+    acme = await _seed_entity(store, ALPHA, "Acme")
+    await _seed_edge(store, ALPHA, ali, acme, "Ali chairs the Acme board")
+    load = EntityEdge.load_fact_embedding
+    ingested: list[str] = []
+
+    async def load_while_ingesting(edge: EntityEdge, driver: GraphDriver) -> None:
+        await load(edge, driver)
+        if not ingested:
+            # What ingestion saves when an episode resolves a new fact against the duplicate.
+            new = EntityEdge(
+                source_node_uuid=ali,
+                target_node_uuid=acme,
+                name="RELATES",
+                fact="Ali founded the Acme lab",
+                group_id=ALPHA.graph_name,
+                episodes=[],
+                created_at=MAR,
+                valid_at=MAR,
+                fact_embedding=[1.0] * 32,
+            )
+            await new.save(driver)
+            ingested.append(new.uuid)
+
+    with patch.object(EntityEdge, "load_fact_embedding", load_while_ingesting):
+        merged = await store.merge_entities(ALPHA, ali, alice)
+
+    assert merged == _MergedEntities(duplicate="Ali", into="Alice Smith", moved_facts=2)
+    assert await _graph_contents(store, ALPHA) == (
+        {"Alice Smith", "Acme"},
+        {
+            ("Alice Smith", "Ali chairs the Acme board", "Acme"),
+            ("Alice Smith", "Ali founded the Acme lab", "Acme"),
+        },
+    )
 
 
 @pytest.mark.asyncio

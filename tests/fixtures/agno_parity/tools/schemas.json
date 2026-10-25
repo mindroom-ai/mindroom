@@ -16979,7 +16979,7 @@
       },
       {
         "name": "merge_graph_entities",
-        "description": "Merge an entity into another entity for the same person or thing, such as a nickname into a full name.\nThe duplicate's facts move onto the other entity, which keeps its name and summary; facts between the two are\ndropped, and the duplicate is deleted.",
+        "description": "Merge an entity into another entity for the same person or thing, such as a nickname into a full name.\nThe duplicate's facts move onto the other entity, which keeps its name and summary; facts between the two are\ndropped, and the duplicate is deleted. `graph_entity` also takes an id, to check an entity before merging it.",
         "parameters": {
           "type": "object",
           "properties": {

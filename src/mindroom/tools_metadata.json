@@ -9016,11 +9016,11 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
+        "graph_entity",
+        "search_graph",
         "delete_graph_entity",
         "delete_graph_fact",
-        "graph_entity",
         "merge_graph_entities",
-        "search_graph",
         "update_graph_entity_summary"
       ],
       "helper_text": null,

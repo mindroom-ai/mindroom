@@ -185,7 +185,7 @@ async def test_graph_entity_shows_other_close_matches(tmp_path: Path) -> None:
 
     assert fuzzy.endswith("\nOther close matches: Dana Whitfield, Dana's workspace")
     # Without ids a duplicate found under the name asked for cannot be looked up, so it is not offered.
-    assert "Other close matches" not in exact
+    assert exact == "Alice: Alice leads Atlas.\n" + _render_fact(FACT)
     assert "(id " not in fuzzy + exact
     assert "id: " not in fuzzy + exact
 

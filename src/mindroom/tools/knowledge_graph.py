@@ -13,6 +13,14 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.registration import register_builtin_tool_metadata
 
+# The functions only an agent with knowledge_graph_edits gets.
+KNOWLEDGE_GRAPH_EDIT_FUNCTIONS = (
+    "delete_graph_entity",
+    "delete_graph_fact",
+    "merge_graph_entities",
+    "update_graph_entity_summary",
+)
+
 register_builtin_tool_metadata(
     ToolMetadata(
         name="knowledge_graph",
@@ -29,13 +37,6 @@ register_builtin_tool_metadata(
         icon_color="text-teal-500",
         config_fields=[],
         dependencies=["graphiti-core"],
-        function_names=(
-            "delete_graph_entity",
-            "delete_graph_fact",
-            "graph_entity",
-            "merge_graph_entities",
-            "search_graph",
-            "update_graph_entity_summary",
-        ),
+        function_names=("graph_entity", "search_graph", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS),
     ),
 )
