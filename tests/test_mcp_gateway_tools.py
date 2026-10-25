@@ -459,6 +459,18 @@ def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> No
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", lambda *_args, **_kwargs: toolkit)
 
 
+def _load_plugin_hooks(monkeypatch: pytest.MonkeyPatch, name: str, *hooks: object) -> None:
+    """Make the gateway load one plugin named ``name`` whose hooks are ``hooks``."""
+    plugin = SimpleNamespace(
+        name=name,
+        entry_config=PluginEntryConfig(path=f"{name}.py"),
+        plugin_order=0,
+        discovered_hooks=hooks,
+        discovered_automations=(),
+    )
+    monkeypatch.setattr(gateway, "load_plugins", lambda *_args, **_kwargs: [plugin])
+
+
 @pytest.mark.asyncio
 async def test_search_describes_each_function_as_its_schema_does(
     context: AgentToolContext,
@@ -959,19 +971,7 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
     toolkit = Toolkit(name="calculator", tools=[account])
     toolkit.functions["account"].cache_results = True
     _replace_calculator(monkeypatch, toolkit)
-    monkeypatch.setattr(
-        gateway,
-        "load_plugins",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(
-                name="audit",
-                entry_config=PluginEntryConfig(path="audit.py"),
-                plugin_order=0,
-                discovered_hooks=(before, after),
-                discovered_automations=(),
-            ),
-        ],
-    )
+    _load_plugin_hooks(monkeypatch, "audit", before, after)
     for _ in range(2):
         assert await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={}) == {
             "result": "fresh",
@@ -996,19 +996,7 @@ async def test_a_call_a_plugin_hook_declines_answers_with_the_decline_as_an_erro
         return "fresh"
 
     _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[account]))
-    monkeypatch.setattr(
-        gateway,
-        "load_plugins",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(
-                name="policy",
-                entry_config=PluginEntryConfig(path="policy.py"),
-                plugin_order=0,
-                discovered_hooks=(before,),
-                discovered_automations=(),
-            ),
-        ],
-    )
+    _load_plugin_hooks(monkeypatch, "policy", before)
 
     result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
 
