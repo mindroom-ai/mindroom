@@ -91,6 +91,13 @@ def _receipt(result: object) -> dict[str, object]:
     return envelope
 
 
+def _refusal(result: object) -> str:
+    """Return why a call whose output path was refused failed: it fails, as a call that raised does."""
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    return result.content
+
+
 def test_ensure_output_path_schema_optional_preserves_custom_schema_shape() -> None:
     function = Function(
         name="attachment_reader",
@@ -675,7 +682,7 @@ def test_invalid_output_paths_rejected_without_calling_tool(tmp_path: Path, bad_
     ).execute()
 
     assert seen == []
-    assert _receipt(result.result)["status"] == "error"
+    assert "mindroom_output_path" in _refusal(result.result)
 
 
 @pytest.mark.parametrize(
@@ -712,7 +719,7 @@ def test_existing_directory_rejected_without_calling_tool(tmp_path: Path) -> Non
     ).execute()
 
     assert seen == []
-    assert _receipt(result.result)["status"] == "error"
+    assert "mindroom_output_path" in _refusal(result.result)
 
 
 @pytest.mark.parametrize("git_path", ["knowledge/docs/.git/config", "knowledge/docs/.git", "repo/.GIT/config"])
@@ -732,7 +739,7 @@ def test_git_metadata_output_paths_rejected_without_calling_tool(tmp_path: Path,
     ).execute()
 
     assert seen == []
-    assert _receipt(result.result)["status"] == "error"
+    assert "mindroom_output_path" in _refusal(result.result)
     assert validate_output_path_syntax(git_path) == "mindroom_output_path must not target Git metadata ('.git')."
     assert git_config.read_text(encoding="utf-8") == "[core]\n"
     assert not (tmp_path / "repo").exists()
@@ -755,7 +762,7 @@ def test_symlink_into_git_metadata_rejected_without_calling_tool(tmp_path: Path)
     ).execute()
 
     assert seen == []
-    assert _receipt(result.result)["status"] == "error"
+    assert "mindroom_output_path" in _refusal(result.result)
     assert git_config.read_text(encoding="utf-8") == "[core]\n"
 
 
@@ -774,7 +781,7 @@ def test_intermediate_symlink_escape_rejected_without_calling_tool(tmp_path: Pat
     ).execute()
 
     assert seen == []
-    assert _receipt(result.result)["status"] == "error"
+    assert "mindroom_output_path" in _refusal(result.result)
     assert not (outside / "out.txt").exists()
 
 
@@ -793,7 +800,7 @@ def test_existing_symlink_leaf_rejected_without_calling_tool(tmp_path: Path) -> 
     ).execute()
 
     assert seen == []
-    assert _receipt(result.result)["status"] == "error"
+    assert "mindroom_output_path" in _refusal(result.result)
     assert outside.read_text(encoding="utf-8") == "outside"
 
 
@@ -810,7 +817,7 @@ def test_existing_regular_file_parent_rejected_without_calling_tool(tmp_path: Pa
     ).execute()
 
     assert seen == []
-    assert _receipt(result.result)["status"] == "error"
+    assert "mindroom_output_path" in _refusal(result.result)
     assert str(tmp_path) not in str(result.result)
 
 
@@ -1127,3 +1134,63 @@ async def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_p
     assert result.is_error
     assert "[TOOL CALL DECLINED]" in result.content
     assert seen == [("after", True, result.content)]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_output_path_fails_the_call_with_why(tmp_path: Path) -> None:
+    """The tool never runs and the call fails with the refusal's text, which the after-call hooks receive too."""
+    seen: list[object] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append((ctx.result, ctx.error, ctx.blocked))
+
+    toolkit = _EchoToolkit(seen, result="should not run")
+    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    registry = HookRegistry.from_plugins([_plugin(after)])
+
+    result = await _run_through_hooks(toolkit, registry, {"text": "hi", OUTPUT_PATH_ARGUMENT: "../escape.txt"})
+
+    assert result == ToolOutcome(content="mindroom_output_path must stay inside the workspace.", is_error=True)
+    assert seen == [("mindroom_output_path must stay inside the workspace.", None, False)]
+
+
+class _OutcomeToolkit(Toolkit):
+    """A tool that answers with an outcome, as ``run_scheduled_call`` answers its own failure with a failed one."""
+
+    def __init__(self, outcome: ToolOutcome) -> None:
+        self.outcome = outcome
+        super().__init__(name="outcome", tools=[self.attempt])
+
+    def attempt(self) -> ToolOutcome:
+        """Answer with the outcome."""
+        return self.outcome
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("save", ["explicit-path", "auto-save"])
+@pytest.mark.parametrize("failed", [True, False])
+async def test_a_failed_answer_goes_to_no_file_and_keeps_failing_the_call(
+    tmp_path: Path,
+    save: str,
+    *,
+    failed: bool,
+) -> None:
+    """A failed answer answers with its text, as a call that raised does, however large; nothing is saved.
+
+    The same answer that did not fail is saved, as any other result is.
+    """
+    answer = ToolOutcome(content="❌ Could not run: " + "x" * 400, is_error=failed)
+    toolkit = _OutcomeToolkit(answer)
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100_000, auto_save_threshold_bytes=100)
+    wrap_toolkit_for_output_files(toolkit, policy)
+    arguments = {OUTPUT_PATH_ARGUMENT: "out.txt"} if save == "explicit-path" else {}
+
+    result = await _run_through_hooks(toolkit, HookRegistry.empty(), arguments)
+
+    if failed:
+        assert result == answer
+        assert list(tmp_path.iterdir()) == []
+    else:
+        assert _receipt(result)["status"] == "saved_to_file"
+        assert answer.content in "".join(path.read_text() for path in tmp_path.rglob("*") if path.is_file())

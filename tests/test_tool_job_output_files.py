@@ -142,13 +142,13 @@ async def test_job_retrieval_applies_workspace_output_policy(output_agent: _Outp
 
 
 async def test_job_output_path_is_validated_before_claiming_result(output_agent: _OutputAgent) -> None:
-    """A bad destination neither escapes the workspace nor consumes the stored value."""
+    """A bad destination fails the call with why, and neither escapes the workspace nor consumes the stored value."""
     case = output_agent
     job_id = await case.save_job()
     response = await case.call("job", action="wait", job_id=job_id, mindroom_output_path="../escape.txt")
     assert response.tools
-    assert not response.tools[0].is_error
-    assert literal_eval(str(response.tools[0].result))["mindroom_tool_output"]["status"] == "error"
+    assert response.tools[0].is_error
+    assert response.tools[0].result == "mindroom_output_path must stay inside the workspace."
     saved = await lookup(case.runtime, job_id, owner=case.owner, depth=0)
     assert not saved.consumed
     assert not (case.workspace.parent / "escape.txt").exists()
