@@ -4,6 +4,7 @@ The toolkit (``mindroom.custom_tools.knowledge_graph.KnowledgeGraphTools``) read
 resolves from agent context in ``create_agent()``, so it has no generic factory in ``TOOL_REGISTRY``.
 """
 
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
@@ -12,14 +13,6 @@ from mindroom.tool_system.declarations import (
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_builtin_tool_metadata
-
-# The functions only an agent with knowledge_graph_edits gets.
-KNOWLEDGE_GRAPH_EDIT_FUNCTIONS = (
-    "delete_graph_entity",
-    "delete_graph_fact",
-    "merge_graph_entities",
-    "update_graph_entity_summary",
-)
 
 register_builtin_tool_metadata(
     ToolMetadata(

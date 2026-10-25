@@ -291,6 +291,17 @@ def test_automation_thread_renders_nothing() -> None:
             ],
             id="shell-lookup",
         ),
+        # A graph edit through a shell echoes the facts and names it changed.
+        pytest.param(
+            [
+                _tool(
+                    "bash",
+                    "Deleted the fact 'Alice leads Atlas'.",
+                    command="mindroom-agent tools call knowledge_graph delete_graph_fact --json '{}'",
+                ),
+            ],
+            id="shell-edit",
+        ),
         # `think` and `analyze` return the model's own thoughts, not anything a tool observed.
         pytest.param([_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")], id="reasoning"),
         # A subagent's answer is another model's prose; its own tool results come in through its own session.

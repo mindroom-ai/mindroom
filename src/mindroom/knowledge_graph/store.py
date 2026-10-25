@@ -475,9 +475,16 @@ class GraphitiStore:
         # others, named as asked or by another of its configured names, are duplicates, such as one extracted under an
         # alias or Matrix ID, that only their ids reach.
         records: dict[str, str] = {}
-        for exact in dict.fromkeys([canonical, name, *names.aliases_of(canonical)]):
+        for exact in dict.fromkeys([canonical, name]):
             found, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=exact, limit=_ENTITY_CANDIDATES)
             records.update((record["uuid"], record["name"]) for record in found)
+        aliased: list[dict[str, Any]] = []
+        for alias in names.aliases_of(canonical):
+            found, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=alias, limit=_ENTITY_CANDIDATES)
+            aliased += found
+        # Among the entities under its other names, the one with the most facts comes first, as among exact names.
+        aliased.sort(key=lambda record: -record["facts"])
+        records.update((record["uuid"], record["name"]) for record in aliased if record["uuid"] not in records)
         if records:
             first, *rest = records
             node = await EntityNode.get_by_uuid(driver, first)

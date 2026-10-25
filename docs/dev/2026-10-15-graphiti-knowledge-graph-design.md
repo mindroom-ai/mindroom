@@ -70,6 +70,7 @@ The conversation in which the agent confirms a deletion is ingested too; a live 
 In three such runs the wrong fact never came back; one run added the correction ("Alice never waters the plant") and a fact about the agent's deletion, which the built-in rule against an assistant's housekeeping did not stop.
 Naming graph edits in that rule was not tried, because the rule asks the model to extract the knowledge such housekeeping contains, which for a deletion is the deleted fact.
 A merge drops the duplicate's links from episodes to entities (Graphiti's `MENTIONS` edges), which MindRoom never reads; each fact's own sources stay.
+A fact both entities held appears twice on the kept entity, each copy with its own sources, so deleting either copy deletes those sources.
 The kept entity keeps its summary until Graphiti rewrites it for the next episode that mentions the entity.
 
 ### Exploration runs as a visible automation turn

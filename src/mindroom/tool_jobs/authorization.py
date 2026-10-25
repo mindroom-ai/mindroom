@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_policy import resolve_agent_policy_from_data
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origin
-from mindroom.tools.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

@@ -119,9 +119,12 @@ class EntityNames:
         return next(called, name)
 
     def aliases_of(self, name: str) -> tuple[str, ...]:
-        """Return the other names of the entry or agent named ``name`` in any letter case, or none."""
+        """Return the other names of the entry or agent named ``name`` in any letter case, or none.
+
+        An alias that another entry or agent is named is left out, since that name finds the other one.
+        """
         named = self._named(name)
-        return named.aliases if named is not None else ()
+        return tuple(alias for alias in named.aliases if self._named(alias) is None) if named is not None else ()
 
     def _named(self, name: str) -> KnownEntity | None:
         """Return the entry or agent named ``name`` in any letter case."""

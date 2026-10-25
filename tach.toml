@@ -8813,7 +8813,7 @@ depends_on = [
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.filters",
     "mindroom.tool_system.registry_state",
-    "mindroom.tools.knowledge_graph",
+    "mindroom.config.knowledge_graph",
     "mindroom.agent_policy",
 ]
 
@@ -9406,6 +9406,7 @@ depends_on = [
 path = "mindroom.knowledge_graph.episodes"
 depends_on = [
     "mindroom.automations.steps",
+    "mindroom.config.knowledge_graph",
     "mindroom.constants",
     "mindroom.delegation.state",
     "mindroom.history.conversation_text",
@@ -9459,7 +9460,7 @@ visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.tools.knowledge_graph"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+depends_on = ["mindroom.config.knowledge_graph", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
 
 # Exploration: the automation that asks the agent to explore its sources.
 [[modules]]

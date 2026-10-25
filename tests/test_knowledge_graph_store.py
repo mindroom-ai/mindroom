@@ -386,6 +386,19 @@ async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: Gra
 
 
 @pytest.mark.asyncio
+async def test_among_entities_under_other_names_the_one_with_most_facts_wins(store: GraphitiStore) -> None:
+    """With nothing under the one name, the entity under another of its names with the most facts is the answer."""
+    by_id = await _seed_entity(store, ALPHA, "@robin:example.test", summary="Fewer facts.", facts=1)
+    await _seed_entity(store, ALPHA, "Robin", summary="More facts.", facts=3)
+
+    entity = await store.entity(ALPHA, "Robin Vale")
+
+    assert entity is not None
+    assert entity.summary == "More facts."
+    assert entity.others == [_EntityRef(name="@robin:example.test", uuid=by_id)]
+
+
+@pytest.mark.asyncio
 async def test_entity_falls_back_to_the_name_asked_for(store: GraphitiStore) -> None:
     """A graph extracted before an alias entry existed can hold only the alias, which is then found as asked.
 
