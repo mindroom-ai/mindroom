@@ -74,6 +74,7 @@ from tests.history_helpers import (
     folded_run_ids,
     latest_summary_model,
 )
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord, TeamRunRecord
@@ -1883,17 +1884,33 @@ def _reported_run(
     model: str = "fake-model",
     created_at: int = _SUMMARY_WRITTEN_AT + 1,
     images: list[Image] | None = None,
+    reasoning_tokens: int | None = None,
 ) -> RunRecord:
     """Return a completed run whose answer carries the request size its provider reported and the model's stamp.
 
-    By default the answer's request starts the second after any summary a test writes.
+    By default the answer's request starts the second after any summary a test writes. With ``reasoning_tokens``
+    the answer also stores one encrypted reasoning item, as a Responses route records it, and reports that much
+    reasoning.
     """
     answer = Message(
         role="assistant",
         content="a" * 2_000,
-        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens)),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens, reasoning_tokens=reasoning_tokens or 0)),
         created_at=created_at,
     )
+    if reasoning_tokens is not None:
+        answer.provider_data = {
+            "mindroom_response_output": [
+                {"type": "reasoning", "id": "rs_answer", "summary": [], "encrypted_content": "gAAAA" * 1_000},
+                {
+                    "type": "message",
+                    "id": "msg_answer",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "a" * 2_000, "annotations": []}],
+                },
+            ],
+        }
     stamp_model(answer, ModelIdentity(id=model, provider="fake", provider_name="fake"))
     run = _completed_run(run_id, messages=[Message(role="user", content="u" * 2_000, images=images), answer])
     run.model = model
@@ -2012,6 +2029,24 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
     # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
     assert estimate < 4_000
     assert prepared.compaction_decision.current_history_tokens == 8_000 + 1_200 - 400
+
+
+@pytest.mark.asyncio
+async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays(tmp_path: Path) -> None:
+    """A model that renders earlier turns' reasoning holds the answer's reasoning, which its own request did not."""
+    sized = {}
+    for reasoning_tokens in (1_000, 3_000):
+        root = tmp_path / str(reasoning_tokens)
+        root.mkdir()
+        prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+            root,
+            {"input_tokens": 8_000, "reasoning_tokens": reasoning_tokens},
+            replay_estimator=responses_adapter(root, store=False),
+        )
+        sized[reasoning_tokens] = prepared.compaction_decision.current_history_tokens
+
+    # Both answers size above their 500-token chars / 4 floor, so the difference is the extra reasoning alone.
+    assert sized[3_000] - sized[1_000] == 2_000
 
 
 @pytest.mark.asyncio

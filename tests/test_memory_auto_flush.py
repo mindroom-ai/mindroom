@@ -9,15 +9,17 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from structlog.testing import capture_logs
 
 import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics
 from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.prompt_message_tags import render_msg_tag
@@ -1106,6 +1108,30 @@ async def test_a_failed_extraction_run_is_a_failure_not_a_memory(
             existing_context="",
             execution_identity=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_extraction_is_given_up_at_once_and_the_next_turns_flush(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A safeguard refusal never changes on a retry, so the pass warns once and moves past the refused turns."""
+    config = _config(tmp_path, extractor={"max_messages_per_flush": 2})
+    worker = await _started(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10), _run("r2", session, T0 + 11)])
+    extractor.error = ModelSafeguardRefusal(provider="Synthetic", usage=MessageMetrics())
+
+    with capture_logs() as logs:
+        await worker._run_cycle(config)
+
+    assert [entry["log_level"] for entry in logs] == ["warning"]
+    entry = _entry(tmp_path, session)
+    assert (entry["failures"], entry["retry_at"], entry["marker"]) == (0, 0, [T0 + 10, "r1"])
+    extractor.error = None
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("r1"), _lines("r2")]
+    assert len(_general_notes(tmp_path)) == 1
 
 
 def test_credentials_are_removed_before_the_extractor() -> None:

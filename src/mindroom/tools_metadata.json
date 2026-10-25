@@ -14623,11 +14623,9 @@
       "file_access": "none",
       "function_names": [
         "delete_meeting",
-        "get_access_token",
         "get_meeting",
         "get_meeting_recordings",
         "get_upcoming_meetings",
-        "instructions",
         "list_meetings",
         "schedule_meeting"
       ],

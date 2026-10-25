@@ -58,7 +58,7 @@ from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
 )
-from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 
@@ -1000,6 +1000,6 @@ def _wrap_tool_function(
             except Exception as error:
                 logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
                 return f"Tool {function.name} failed: {error}"
-        return _normalize_tool_result(result)
+        return _normalize_tool_result(client_tool_result(result))
 
     return llm.function_tool(_handler, raw_schema=raw_schema)

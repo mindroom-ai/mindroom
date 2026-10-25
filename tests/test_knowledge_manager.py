@@ -1348,6 +1348,37 @@ async def test_knowledge_polling_repeats_after_poll_interval(
     assert [call.args for call in refresh_scheduler.schedule_refresh.call_args_list] == [("docs",), ("docs",)]
 
 
+@pytest.mark.asyncio
+async def test_source_watcher_skips_bases_whose_folder_was_replaced(tmp_path: Path) -> None:
+    """A link or file planted at one shared base's folder must not keep the other bases' watchers from starting."""
+    linked = tmp_path / "mindroom_data" / "agents" / "coder" / "workspace" / "repo"
+    linked.parent.mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    linked.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    planted = tmp_path / "planted"
+    planted.write_text("not a folder", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": tmp_path / "docs", "linked": linked, "planted": planted},
+        agent_bases=["docs", "linked", "planted"],
+        poll_intervals={"linked": 5},
+        watch=True,
+    )
+    source_watcher = KnowledgeSourceWatcher(MagicMock())
+
+    with capture_logs() as logs:
+        await source_watcher.sync(config=config, runtime_paths=runtime_paths_for(config))
+        await source_watcher.shutdown()
+
+    started = [entry["base_ids"] for entry in logs if entry["event"] == "Knowledge filesystem watcher started"]
+    skipped = [
+        entry["base_ids"] for entry in logs if entry["event"] == "Knowledge source not watched: its path is unusable"
+    ]
+    assert started == [["docs"]]
+    assert not [entry for entry in logs if entry["event"] == "Knowledge poller started"]
+    assert sorted(skipped) == [["linked"], ["linked"], ["planted"]]
+
+
 def test_local_knowledge_without_poll_interval_starts_no_poller(tmp_path: Path) -> None:
     """Without poll_interval_seconds a local base gets no poll target, so the watcher starts no poller for it."""
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])

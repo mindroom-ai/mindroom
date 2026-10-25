@@ -193,7 +193,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
     for model in (agent.spec.model, member.spec.model, router):
         assert model.identity.id == expected_id
         assert _temperature(model) == (0.1 if context_only else 0.7)
-    assert team.spec.model.identity.id == ("other-model" if context_only else "updated-team-model")
+    assert team.spec.leader.model.identity.id == ("other-model" if context_only else "updated-team-model")
     after = resolve_entity_preparation_inputs(
         entity_name="general",
         history_settings=agent.history_settings,

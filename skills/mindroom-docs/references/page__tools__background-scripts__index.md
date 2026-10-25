@@ -108,6 +108,7 @@ print(result, flush=True)
 ```
 
 `MindRoomTools.call(toolkit_name, function_name, **arguments)` blocks until the call finishes and returns a JSON-compatible value.
+A tool that produces media such as an image returns an object with its text under `content` and an `attachments` list that gives each medium's `kind`, `mime_type`, and `url` when it has one, without the media's bytes.
 Arguments must have an unambiguous strict-JSON representation.
 A result larger than about 64 KiB fails the call with kind `result_too_large`.
 Calls within one run execute one at a time, in order.

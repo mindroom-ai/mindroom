@@ -19,7 +19,6 @@ from mindroom.llm.errors import (
 from mindroom.llm.events import (
     ReasoningDelta,
     ReportedCall,
-    RequestCompleted,
     RunFinished,
     ToolCompleted,
     ToolStarted,
@@ -489,7 +488,6 @@ def test_run_events_are_frozen_values() -> None:
         ReasoningDelta("why"),
         ToolStarted(tool.call),
         ToolCompleted(tool.call),
-        RequestCompleted(MessageMetrics(tokens=TokenCounts(output_tokens=1))),
         RunFinished(record),
     ]
 
@@ -498,10 +496,9 @@ def test_run_events_are_frozen_values() -> None:
         "ReasoningDelta",
         "ToolStarted",
         "ToolCompleted",
-        "RequestCompleted",
         "RunFinished",
     ]
-    assert events[5].record is record  # type: ignore[union-attr]
+    assert events[4].record is record  # type: ignore[union-attr]
     with pytest.raises(FrozenInstanceError):
         events[0].text = "changed"  # type: ignore[misc]
 

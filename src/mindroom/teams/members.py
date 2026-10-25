@@ -305,7 +305,10 @@ def resolve_team_turn_models(
 
 
 def materialized_team_label(display_names: Sequence[str]) -> str:
-    """Return the entity label an ad hoc team's turn and resume carry in their logs and notices."""
+    """Return the label of a team of these members, its leader's name.
+
+    An ad hoc team's turn and resume carry it as their entity label in logs and notices.
+    """
     return f"Team ({', '.join(display_names)})"
 
 
@@ -320,12 +323,12 @@ def _team_member(
     """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
 
     A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
-    mid-turn compaction, and the approval receipt hook; its tools run under its own identity. It replays no history,
-    so its compaction stays within the run, and the leader owns the queued-message notices of the turn.
-    ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
+    mid-turn compaction, and the approval receipt hook; its tool-call policy and tools run under its own identity. It
+    replays no history, so its compaction stays within the run, and the leader owns the queued-message notices of the
+    turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
     """
-    # The binding joins the policy a managed job runs again, so a member's call that becomes a job runs as the member.
-    as_member = replace(build, tool_policy=(*build.tool_policy, _as_member(build.spec.id, model_name)))
+    # The binding opens the policy a managed job runs again, so a member's call that becomes a job runs as the member.
+    as_member = replace(build, tool_policy=(_as_member(build.spec.id, model_name), *build.tool_policy))
     turn = HookTurn(
         config=config,
         runtime_paths=runtime_paths,
@@ -351,19 +354,27 @@ def _team_member(
 
 
 def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
-    """Return the innermost step of a member's tool calls, which runs the tool under the member's own identity.
+    """Return the outermost step of a member's tool-call policy, which runs the rest under the member's own identity.
 
-    The turn's tool runtime context names the team. Tools that act for the running agent, such as ``todo``'s default
-    assignee and workspace templates or ``claude_agent``'s sessions and model, read it from that context, so each
-    call reaches its entrypoint with the member's name and the model it runs on. The tool-call policy around the
-    step still sees the turn's context, kept as main behaves.
+    The turn's tool runtime context names the configured team, or for an ad hoc team the agent whose account posts
+    the reply. Tools that act for the running agent, such as ``todo``'s default assignee and workspace templates or
+    ``claude_agent``'s sessions and model, and the policy's plugin tool hooks read it from that context, so each
+    call runs its policy and reaches its entrypoint with the member's name and the model it runs on. The member
+    still answers through the turn's Matrix account, so its context keeps that account as the recipient, and the
+    hooks keep the turn's Matrix bindings.
     """
 
     async def run_as_member(call: ToolCall, call_next: ToolNext) -> object:
         context = get_tool_runtime_context()
         if context is None:
             return await call_next(call.arguments)
-        with tool_runtime_context(replace(context, agent_name=member_id, active_model_name=model_name)):
+        member_context = replace(
+            context,
+            agent_name=member_id,
+            transport_agent_name=context.recipient,
+            active_model_name=model_name,
+        )
+        with tool_runtime_context(member_context):
             return await call_next(call.arguments)
 
     return run_as_member
@@ -396,10 +407,11 @@ def build_team_spec(
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
-    The team is named for its requested members, as Agno named it. The leader prompt holds each
-    member's roster role, the leader's tool instructions in offer order, the provider family's note, and the date
-    context with ``system_enrichment`` appended; the team's own history settings and call budget come from the
-    configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
+    The leader is named by the team's label (``materialized_team_label``) and identified by the team's history scope,
+    or by that label for a team that names no member and so has no scope. The leader prompt holds each member's
+    roster role, the leader's tool instructions in offer order, the provider family's note, and the date context with
+    ``system_enrichment`` appended; the team's own history settings and call budget come from the configured team
+    ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
     model = provider_registry.build_model_provider(
         config,
@@ -407,7 +419,7 @@ def build_team_spec(
         model_name,
         execution_identity=execution_identity,
     )
-    team_display_name = f"Team-{'-'.join(members.requested_agent_names)}"
+    label = materialized_team_label(members.display_names)
     team_view = config.resolve_entity(configured_team_name)
     if scope_context is not None:
         team_id = scope_context.scope.scope_id
@@ -418,9 +430,8 @@ def build_team_spec(
             team_name=configured_team_name,
             execution_identity=execution_identity,
         )
-        team_id = scope.scope_id if scope is not None else team_display_name
+        team_id = scope.scope_id if scope is not None else label
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
-    leader_toolkits = () if jobs is None else (jobs.controls,)
     team_members = tuple(
         _team_member(
             build,
@@ -431,8 +442,13 @@ def build_team_spec(
         )
         for build in members.builds
     )
-    prepared = prepare_run_tools(
-        AgentSpec(id=team_id, name=team_display_name, model=model, system_message=None, toolkits=leader_toolkits),
+    leader = AgentSpec(
+        id=team_id,
+        name=label,
+        model=model,
+        system_message=None,
+        toolkits=() if jobs is None else (jobs.controls,),
+        max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
     )
     additional_context = appended_context(
         render_date_context(config.timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
@@ -441,23 +457,13 @@ def build_team_spec(
     system_message = render_leader_system_message(
         team_members,
         mode,
-        tool_instructions=prepared.instructions,
+        tool_instructions=prepare_run_tools(leader).instructions,
         # The delegation tool is always offered, so every leader request offers tools.
         model_note=model_note_for(model.capabilities, offers_tools=True),
         additional_context=additional_context,
     )
-    spec = TeamSpec(
-        id=team_id,
-        name=team_display_name,
-        mode=mode,
-        model=model,
-        system_message=system_message,
-        toolkits=leader_toolkits,
-        max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
-        members=team_members,
-    )
     return BuiltTeam(
-        spec=spec,
+        spec=TeamSpec(leader=replace(leader, system_message=system_message), mode=mode, members=team_members),
         history_settings=team_view.history_settings,
         leader_middleware=() if jobs is None else jobs.middleware,
         leader_jobs=None if jobs is None else jobs.actor,

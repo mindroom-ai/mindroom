@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
+from mindroom.approval.receipt import build_approval_receipt
+from mindroom.event_journal.approval_continuations import (
+    ApprovalAdvance,
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalDecision,
+)
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.response_sources import ResponseSources
@@ -20,13 +27,38 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
-    from mindroom.event_journal.approval_continuations import ApprovalCall
     from mindroom.llm.provider import ModelRequest
+
+# The decided calls of a receipt that a test binds only to see which requests carry it, and its text.
+RECEIPT_CALLS = (
+    ApprovalCall(
+        tool_call_id="call-receipt",
+        tool_name="publish_report",
+        invoking_agent="agent",
+        expires_at_ns=1,
+        decision=ApprovalDecision.APPROVED,
+        human_approval_required=True,
+    ),
+)
+RECEIPT_TEXT = build_approval_receipt(RECEIPT_CALLS)
 
 
 def carries_approval_receipt(request: ModelRequest) -> bool:
     """Return whether ``request`` carries a projected approval receipt, by the marker its projection sets."""
     return any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
+
+
+def receipt_call_ids(request: ModelRequest) -> list[str]:
+    """Return the tool call ids the approval receipt projected into ``request`` names, in its order."""
+    [receipt] = [
+        message for message in request.messages if (message.provider_data or {}).get("mindroom_approval_receipt")
+    ]
+    return re.findall(r"tool call id `([^`]+)`", str(receipt.content))
+
+
+def request_call_ids(request: ModelRequest) -> list[str]:
+    """Return the ids of the tool calls the assistant messages of ``request`` hold, in order."""
+    return [call["id"] for message in request.messages for call in message.tool_calls or ()]
 
 
 def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN401

@@ -496,7 +496,7 @@ class GitKnowledgeSource:
             return frozenset()
         try:
             output = await self._run_git(
-                ["diff", "--name-only", "--no-renames", "-z", f"{before_head}..{after_head}"],
+                ["diff", "--name-only", "--no-renames", "-z", "--end-of-options", f"{before_head}..{after_head}"],
             )
         except RuntimeError:
             logger.warning(

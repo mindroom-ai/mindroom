@@ -241,6 +241,14 @@ def delegation_card_id(member_id: str | None, call_id: str) -> str:
     return f"{member_id}:{call_id}" if member_id else call_id
 
 
+def member_call_id(member_id: str | None, card_id: str) -> str:
+    """Return the id member ``member_id``'s run gives the call ``card_id`` names, undoing ``delegation_card_id``.
+
+    Without a member, as for an agent's run, every id is the run's own.
+    """
+    return card_id.removeprefix(f"{member_id}:") if member_id else card_id
+
+
 def member_delegation_card(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str, str] | None:
     """Return the member and its own call id when ``requirement`` is the card of a delegation call a member made.
 
