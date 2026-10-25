@@ -21,12 +21,14 @@ __all__ = [
 ]
 
 
-def sdk_failures() -> tuple[type[Exception], ...]:
-    """Return the exception types adapters map with ``provider_error``; resolved late to keep the SDK unloaded."""
-    import httpx2  # noqa: PLC0415 - the SDK's transport, loaded with it
+def sdk_failures() -> type[Exception]:
+    """Return the exception type adapters map with ``provider_error``; resolved late to keep the SDK unloaded.
+
+    The SDK raises every failure as its own error, a transport failure in a request or a stream included.
+    """
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
-    return (openai.OpenAIError, httpx2.TransportError)
+    return openai.OpenAIError
 
 
 def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
