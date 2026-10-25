@@ -20,7 +20,7 @@ from mindroom.llm.errors import TRANSPORT_TIMEOUT, ProviderError, ProviderUnavai
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.openai.build import build_provider
-from tests.providers.golden_support import pipeline_provider, sse_response
+from tests.providers.golden_support import pipeline_provider, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
@@ -65,59 +65,54 @@ def _response(
 ) -> httpx.Response:
     """Return the route's streamed summary reply "Project facts", cut off for ``reason`` unless ``complete``."""
     if route == "chat":
-        chunk = {"id": "chatcmpl-summary", "object": "chat.completion.chunk", "created": 1, "model": model}
-        usage = {"prompt_tokens": 10, "completion_tokens": output_tokens, "total_tokens": 10 + output_tokens}
-        return sse_response(
-            [
-                {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Project facts"}}]},
-                {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop" if complete else reason}]},
-                {**chunk, "choices": [], "usage": usage},
-                "[DONE]",
-            ],
-        )
-    response = {
-        "id": "resp_summary",
-        "object": "response",
-        "created_at": 1,
-        "model": model,
-        "status": "completed" if complete else "incomplete",
-        "incomplete_details": None if complete else {"reason": "max_output_tokens" if reason == "length" else reason},
-        "error": None,
-        "output": [
+        return streamed_reply(
             {
-                "id": "msg_summary",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed" if complete else "incomplete",
-                "content": [{"type": "output_text", "text": "Project facts", "annotations": []}],
+                "id": "chatcmpl-summary",
+                "object": "chat.completion",
+                "created": 1,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop" if complete else reason,
+                        "message": {"role": "assistant", "content": "Project facts"},
+                    },
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": output_tokens, "total_tokens": 10 + output_tokens},
             },
-        ],
-        "parallel_tool_calls": True,
-        "tool_choice": "auto",
-        "tools": [],
-        "usage": {
-            "input_tokens": 10,
-            "output_tokens": output_tokens,
-            "total_tokens": 10 + output_tokens,
-            "input_tokens_details": {"cached_tokens": 0},
-            "output_tokens_details": {"reasoning_tokens": 0},
+        )
+    return streamed_reply(
+        {
+            "id": "resp_summary",
+            "object": "response",
+            "created_at": 1,
+            "model": model,
+            "status": "completed" if complete else "incomplete",
+            "incomplete_details": None
+            if complete
+            else {"reason": "max_output_tokens" if reason == "length" else reason},
+            "error": None,
+            "output": [
+                {
+                    "id": "msg_summary",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed" if complete else "incomplete",
+                    "content": [{"type": "output_text", "text": "Project facts", "annotations": []}],
+                },
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": output_tokens,
+                "total_tokens": 10 + output_tokens,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
         },
-    }
-    text = {
-        "type": "response.output_text.delta",
-        "sequence_number": 1,
-        "item_id": "msg_summary",
-        "output_index": 0,
-        "content_index": 0,
-        "delta": "Project facts",
-        "logprobs": [],
-    }
-    ended = {
-        "type": "response.completed" if complete else "response.incomplete",
-        "sequence_number": 2,
-        "response": response,
-    }
-    return sse_response([text, ended], named=True)
+    )
 
 
 @pytest.mark.parametrize("route", ["chat", "responses"])

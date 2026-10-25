@@ -36,7 +36,7 @@ from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
 from tests.providers.anthropic_family_support import claude_turn, route_provider, sse_reply
-from tests.providers.golden_support import Wire, sse_response
+from tests.providers.golden_support import Wire, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
@@ -728,18 +728,19 @@ def test_bedrock_claude_records_none_of_the_aws_keys_it_reads_from_the_runtime_e
     }
 
 
-_CHUNK = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": "m"}
-_CHAT_STREAM = [
-    {**_CHUNK, "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]},
-    {**_CHUNK, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
-    "[DONE]",
-]
+_COMPLETION = {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "m",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+}
 
 
 @pytest.fixture
 def chat_wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
     """Answer every request sent through the shared model HTTP client with a finished chat completion stream."""
-    wire = Wire(lambda _request: sse_response(_CHAT_STREAM))
+    wire = Wire(lambda _request: streamed_reply(_COMPLETION))
     monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
     return wire
 
