@@ -942,6 +942,39 @@ async def test_prepare_agent_execution_context_names_the_current_prompts_sender_
     )
 
 
+@pytest.mark.asyncio
+async def test_current_message_time_is_rendered_in_the_responding_agents_timezone() -> None:
+    """An agent with its own timezone sees the current message's time in that zone, not the global one."""
+    config = Config.model_validate(
+        {"timezone": "UTC", "agents": {"atlas": {"display_name": "Atlas", "timezone": "America/Los_Angeles"}}},
+    )
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context("atlas"),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=None,
+        response_sender_id="@mindroom_atlas:localhost",
+        current_sender_id="@alice:localhost",
+        current_timestamp_ms=1_774_018_800_000,
+        current_event_id="$current",
+        config=config,
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+    )
+
+    assert prepared.turn.prompt.content == config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO") + render_msg_tag(
+        sender="@alice:localhost",
+        body="Current request",
+        event_id="$current",
+        ts="2026-03-20 08:00 PDT",
+    )
+
+
 def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> None:
     """Oversized Matrix fallback messages should stay in context with a capped body."""
     long_body = "x" * 201

@@ -3678,3 +3678,52 @@ async def test_a_stored_task_without_a_timezone_keeps_the_global_timezone(tmp_pa
         runtime_paths=runtime_paths,
     )
     assert edited_task.workflow.timezone is None
+
+
+@pytest.mark.asyncio
+async def test_recurring_task_listing_names_a_timezone_other_than_the_global_one(tmp_path: Path) -> None:
+    """Two daily 09:00 tasks fire hours apart when one is stored in another zone, so its line names that zone."""
+    tokyo_task = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="0"),
+        message="Tokyo standup",
+        description="Tokyo standup",
+        created_by="@alice:server",
+        room_id="!test:server",
+        timezone="Asia/Tokyo",
+    )
+    global_task = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9"),
+        message="Global standup",
+        description="Global standup",
+        created_by="@alice:server",
+        room_id="!test:server",
+    )
+    client = AsyncMock()
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse.from_dict(
+            [
+                {
+                    "type": _SCHEDULED_TASK_EVENT_TYPE,
+                    "state_key": task_id,
+                    "content": {"workflow": workflow.model_dump_json(), "status": "pending"},
+                    "event_id": f"$state_{task_id}",
+                    "sender": SCHEDULE_WRITER_ID,
+                    "origin_server_ts": 1234567890,
+                }
+                for task_id, workflow in [("tokyo", tokyo_task), ("global", global_task)]
+            ],
+            room_id="!test:server",
+        ),
+    )
+
+    listed = await list_scheduled_tasks(
+        client=client,
+        room_id="!test:server",
+        runtime_paths=_test_runtime_paths(tmp_path),
+        config=Config(timezone="UTC"),
+    )
+
+    assert "• `tokyo` - At 09:00 (Asia/Tokyo)\n" in listed
+    assert "• `global` - At 09:00\n" in listed

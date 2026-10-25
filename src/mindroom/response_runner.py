@@ -4617,7 +4617,8 @@ class ResponseRunner:
             request.thread_history,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
+            # A team turn keeps the global timezone, even when an agent's bot posts it.
+            timezone=self.deps.runtime.config.timezone,
             model_prompt=request.model_prompt,
         )
         assert turn_models is not None
