@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.config
 import os
 import subprocess
 import sys
@@ -966,3 +967,38 @@ for index in range(1000):
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
     assert [record["event"] for record in records] == ["Logging initialized"] + ["logged_after_another_config"] * 1000
     assert [record["index"] for record in records[1:]] == list(range(1000))
+
+
+def test_log_file_writer_survives_a_failed_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A reopen that fails once, as a stalled network file system can, loses that record but not later ones."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    log_file = current_log_file()
+    assert log_file is not None
+    # Closes the log file, which the writer reopens for the next record.
+    logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+    open_file = logging.FileHandler._open
+    failed_opens: list[str] = []
+
+    def open_failing_once(handler: logging.FileHandler) -> TextIO:
+        if not failed_opens:
+            failed_opens.append(handler.baseFilename)
+            msg = "Stale file handle"
+            raise OSError(msg)
+        return open_file(handler)
+
+    monkeypatch.setattr(logging.FileHandler, "_open", open_failing_once)
+    logger = get_logger("tests.logging")
+    logger.info("lost_to_failed_reopen")
+    logger.info("logged_after_failed_reopen")
+    for handler in logging.getLogger().handlers:
+        handler.close()
+
+    assert failed_opens == [str(log_file)]
+    assert "Stale file handle" in capsys.readouterr().err
+    events = [json.loads(line)["event"] for line in log_file.read_text().splitlines()]
+    assert events == ["Logging initialized", "logged_after_failed_reopen"]

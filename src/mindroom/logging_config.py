@@ -210,6 +210,17 @@ def _build_logger_levels(
 _MAX_QUEUED_LOG_FILE_RECORDS = 10_000
 
 
+class _LogFile(logging.FileHandler):
+    """A log file whose failed reopen is reported like a failed write, so it cannot end the writer thread."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Append the record, reopening the file first if it was closed."""
+        try:
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
+
+
 class _QueuedFileHandler(logging.handlers.QueueHandler):
     """Format records on the logging thread and append them to the log file from a writer thread.
 
@@ -222,7 +233,7 @@ class _QueuedFileHandler(logging.handlers.QueueHandler):
     def __init__(self, filename: str, mode: str, encoding: str) -> None:
         # Unlike `queue.Queue`, `SimpleQueue` is reentrant, so a finalizer that logs during a put cannot deadlock it.
         super().__init__(queue.SimpleQueue())
-        self._file = logging.FileHandler(filename, mode=mode, encoding=encoding)
+        self._file = _LogFile(filename, mode=mode, encoding=encoding)
         self._dropped_records = 0
         # A later `dictConfig`, such as uvicorn's, drops this handler from the list `logging.shutdown` closes at exit.
         atexit.register(self.close)
