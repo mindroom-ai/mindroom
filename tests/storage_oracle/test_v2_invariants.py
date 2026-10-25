@@ -52,6 +52,7 @@ class _Run:
     scope_key: str
     status: str
     seq: int
+    folded_by: int | None
     metadata: dict[str, Any] | None
 
     @property
@@ -92,9 +93,9 @@ def _read(backend: NextBackend) -> _Tables:
     with closing(sqlite3.connect(backend.store.path)) as connection:
         (next_seq,) = connection.execute(f"SELECT next_seq FROM {quote_identifier(names.log_meta)}").fetchone()  # noqa: S608
         runs = {
-            run_id: _Run(run_id, parent, scope_key, status, seq, json.loads(metadata) if metadata else None)
-            for run_id, session_id, parent, scope_key, status, seq, metadata in connection.execute(
-                "SELECT run_id, session_id, parent_run_id, scope_key, status, seq, metadata "  # noqa: S608
+            run_id: _Run(run_id, parent, scope_key, status, seq, folded_by, json.loads(metadata) if metadata else None)
+            for run_id, session_id, parent, scope_key, status, seq, folded_by, metadata in connection.execute(
+                "SELECT run_id, session_id, parent_run_id, scope_key, status, seq, folded_by, metadata "  # noqa: S608
                 f"FROM {quote_identifier(names.log_runs)}",
             )
             if session_id == SESSION_ID
@@ -153,6 +154,7 @@ class _InvariantBackend(NextBackend):
         self.barrier_ids: set[int] = set()
         # The independent model of spec 3.2's run positions: each top-level run's place, from the writes alone.
         self.places: dict[str, int] = {}
+        self.flagged: set[str] = set()
         self.ticks = 0
         super().__init__(root, kind, determinism)
 
@@ -217,6 +219,7 @@ class _InvariantBackend(NextBackend):
         if appended:
             # A fold's commit places its running run after the fold's summary.
             self._place(fold.record.run_id)
+            self.flagged.update(member.run_id for member in fold.members)
         return appended
 
     @override
@@ -231,6 +234,7 @@ class _InvariantBackend(NextBackend):
         self._check_runs(tables)
         self._check_messages(tables)
         self._check_rows(tables)
+        self._check_folds(tables)
         self._check_replay(tables)
         self.row_ids = {row.id for row in tables.rows}
 
@@ -322,6 +326,12 @@ class _InvariantBackend(NextBackend):
             for row in tables.rows
             if any(barrier.id > row.id for barrier in tables.scope_rows(row.scope_key) if barrier.summary is None)
         }
+
+    def _check_folds(self, tables: _Tables) -> None:
+        # I10: the members that ended before a fold keep its flag, or an earlier fold's, while their rows stay.
+        self.flagged &= tables.runs.keys()
+        for member_id in self.flagged:
+            assert tables.runs[member_id].folded_by is not None, f"I10: folded member {member_id} lost its flag"
         for row in tables.rows:
             # I10: a fold row keeps the running run's live metadata at its fold as its provenance.
             fold = self.folds.get(row.id)
@@ -333,6 +343,9 @@ class _InvariantBackend(NextBackend):
             assert row.fold_run_id == fold.record.run_id, f"I10: row {row.id}'s run"
             assert row.fold_event_ids == sorted(source_event_ids(metadata)), f"I10: row {row.id}'s answered ids"
             assert row.fold_seen_event_ids == sorted(seen_event_ids(metadata)), f"I10: row {row.id}'s seen ids"
+            # The row's event sets hold what its running run answered and read, so redaction matches them.
+            assert {*row.fold_event_ids, *row.fold_seen_event_ids} <= row.event_ids, f"I10: row {row.id}'s events"
+            assert set(row.fold_seen_event_ids) <= row.seen_event_ids, f"I10: row {row.id}'s seen events"
 
     def _check_replay(self, tables: _Tables) -> None:
         """I6: replay is the latest summary's text and the runs no summary covered, in the model's order.
@@ -416,6 +429,18 @@ def _drive(scenario: Scenario) -> None:
 @example(
     # A resumed approval folds after a later turn completed, so its fold moves it after that turn.
     scenario=Scenario("agent", (Action("pause"), Action("add"), Action("fold", index=1))),
+)
+@example(
+    # A redaction cuts a team turn with its members; a late save of one of them then writes nothing.
+    scenario=Scenario("team", (Action("add"), Action("redact"), Action("member_late"))),
+)
+@example(
+    # A redaction of what the running team turn answered cuts its fold, so its next members and fold write nothing.
+    scenario=Scenario("team", (Action("fold"), Action("redact"), Action("fold"))),
+)
+@example(
+    # A stale save stores a member of a discarded fold owner again, as a new row without the fold's flag.
+    scenario=Scenario("team", (Action("fold_first_turn"), Action("discard", index=1), Action("stale_save"))),
 )
 @example(scenario=NAMED["team_pause_advanced"])
 @example(scenario=NAMED["linked_covered_run_redacted"])
