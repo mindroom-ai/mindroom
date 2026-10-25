@@ -616,14 +616,16 @@ def _resolve_delegation_requirement(
 ) -> str:
     """Answer one external call with its finished result and close its live tool trace, including rejections.
 
-    A ``refused`` call answers as failed, so Claude and Gemini read the refusal as a failure.
+    A ``refused`` call answers with its refusal, marked failed so Claude and Gemini read it as a failure; only a
+    result the call produced goes to its ``output_request``'s file.
     The answer stays on the parent's requirement, so a later entry never advances the call again; the parent's
     continuation hands every answer to the loop's own decision check.
     """
-    result = _finalize_delegation_output(result, output_request)
-    requirement.set_external_execution_result(result)
     if refused:
         requirement.tool_execution.is_error = True
+    else:
+        result = _finalize_delegation_output(result, output_request)
+    requirement.set_external_execution_result(result)
     emit_call(ToolCompleted(requirement.tool_execution.call))
     return result
 

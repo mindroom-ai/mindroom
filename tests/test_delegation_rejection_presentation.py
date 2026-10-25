@@ -11,7 +11,14 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.delegation.execution import _drive_delegations, drive_delegation_stream
 from mindroom.delegation.state import DelegationState
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.hooks import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    HookRegistry,
+    ToolAfterCallContext,
+    ToolBeforeCallContext,
+    hook,
+)
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
@@ -148,3 +155,110 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
     assert child_model.requests == []
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
     assert private_instances_for_agent(paths.storage_root, "child", "user") == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rejection", "expected_result"),
+    [
+        ("plugin", "[TOOL CALL DECLINED]\nTool: run_subagent\nReason: Subagents disabled by plugin"),
+        ("policy", "Delegation denied by requester; child was not executed."),
+    ],
+)
+async def test_a_refused_subagent_call_answers_with_its_refusal_instead_of_its_output_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rejection: str,
+    expected_result: str,
+) -> None:
+    """A refusal after the output path was accepted writes no file; the model reads the refusal as a failed call."""
+    config = Config(
+        agents={
+            # A private leader has the workspace that output redirection writes to.
+            "leader": AgentConfig(display_name="Leader", delegate_to=["child"], private=AgentPrivateConfig(per="user")),
+            "child": AgentConfig(display_name="Child"),
+        },
+        defaults={"tools": []},
+        memory={"backend": "none"},
+        tool_approval={
+            "rules": [{"match": "run_subagent", "action": "require_approval"}] if rejection == "policy" else [],
+        },
+    )
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    observed: list[object] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(context: ToolBeforeCallContext) -> None:
+        if rejection == "plugin":
+            context.decline("Subagents disabled by plugin")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(context: ToolAfterCallContext) -> None:
+        observed.append(context.result)
+
+    context = _delegate_runtime_context(
+        config,
+        paths,
+        execution_identity=identity,
+        hook_registry=HookRegistry.from_plugins([_plugin("subagent-policy", [before, after])]),
+    )
+    parent_model = ScriptedModel(
+        [
+            calls(
+                tool_call(
+                    "run_subagent",
+                    "delegate",
+                    agent_name="child",
+                    task="Write the report",
+                    mindroom_output_path="report.txt",
+                ),
+            ),
+            answer("Parent done"),
+        ],
+    )
+    child_model = ScriptedModel([])
+    ScriptedAgents({"child": child_model}, by_session={identity.session_id: parent_model}).install(monkeypatch)
+
+    async def unused_child(**_kwargs: object) -> str:
+        pytest.fail("A rejected delegation must not execute a child")
+
+    with tool_runtime_context(context):
+        parent = await pause_parent("leader", "Delegate", config=config, runtime_paths=paths, identity=identity)
+        response = parent.record
+        options = {
+            "storage": parent.runner.storage,
+            "continue_parent": parent.runner.continue_run,
+            "agent_name": "leader",
+            "run_child": unused_child,
+            "config": config,
+            "runtime_paths": paths,
+            "execution_identity": identity,
+        }
+        decisions = None
+        if rejection == "policy":
+            response = await _drive_delegations(response, **options)
+            state = DelegationState.from_metadata(response.metadata)
+            decisions = {str(tool["tool_call_id"]): False for tool in state.pending_tools}
+
+        async def stored_run() -> AsyncIterator[RunEvent]:
+            yield RunFinished(response)
+
+        async for _event in drive_delegation_stream(
+            stored_run(),
+            record_type=RunRecord,
+            **options,
+            decisions=decisions,
+            denial_reasons=dict.fromkeys(decisions or {}),
+        ):
+            pass
+
+    [refused] = [message for message in parent_model.requests[-1].messages if message.role == "tool"]
+    assert str(refused.content).startswith(expected_result)
+    assert refused.tool_call_error is True
+    assert not list(tmp_path.rglob("report.txt"))
+    assert child_model.requests == []
+    if rejection == "plugin":
+        assert len(observed) == 1
+        assert str(observed[0]).startswith(expected_result)
