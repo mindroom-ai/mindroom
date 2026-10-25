@@ -25,7 +25,7 @@ from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker,
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.ollama_settings import OllamaSettings
+from mindroom.providers.ollama.settings import OllamaSettings
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider

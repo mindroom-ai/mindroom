@@ -38,7 +38,8 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tools.openbb import openbb_tools
 
-HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool_extras_sync.py"
+REPO_ROOT = Path(__file__).parent.parent
+HOOK_SCRIPT = REPO_ROOT / ".github" / "scripts" / "check_tool_extras_sync.py"
 TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
 
 
@@ -108,11 +109,12 @@ def test_core_runtime_imports_are_declared_as_base_dependencies() -> None:
         # Agno is installed without its provider extras, so each provider SDK is a base dependency.
         "src/mindroom/providers/anthropic/messages.py": "anthropic",
         "src/mindroom/providers/gemini/adapter.py": "google-genai",
-        "src/mindroom/providers/ollama_adapter.py": "ollama",
+        "src/mindroom/providers/ollama/adapter.py": "ollama",
         "src/mindroom/providers/openai/build.py": "openai",
     }
 
     for module_path, dependency_name in required_runtime_dependencies.items():
+        assert (REPO_ROOT / module_path).is_file(), f"{module_path} does not exist"
         assert dependency_name in base_dependencies, (
             f"{module_path} imports {dependency_name!r} directly and it should be declared in project.dependencies"
         )

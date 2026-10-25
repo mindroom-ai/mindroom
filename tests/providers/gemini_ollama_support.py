@@ -18,7 +18,7 @@ from google.oauth2.credentials import Credentials
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
-from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
+from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Replay,

@@ -36,8 +36,8 @@ from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
-from mindroom.providers.ollama_errors import provider_error
-from mindroom.providers.ollama_settings import OllamaSettings
+from mindroom.providers.ollama.errors import provider_error
+from mindroom.providers.ollama.settings import OllamaSettings
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import provider_tools_disabled
 

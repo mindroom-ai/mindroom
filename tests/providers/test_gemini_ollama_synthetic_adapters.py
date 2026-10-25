@@ -32,7 +32,7 @@ from mindroom.providers import remote_media, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
 from mindroom.providers.gemini import wire as gemini_wire
-from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
+from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 from mindroom.providers.tool_policy import without_provider_tools
 from tests.providers.gemini_ollama_support import (

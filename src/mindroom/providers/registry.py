@@ -17,7 +17,7 @@ from mindroom.providers.credentials import dashboard_api_key
 from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.names import provider_route
-from mindroom.providers.ollama_settings import OllamaSettings
+from mindroom.providers.ollama.settings import OllamaSettings
 from mindroom.providers.openai.build import ENDPOINT_VARIABLES as OPENAI_ENDPOINT_VARIABLES
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
 from mindroom.providers.openai.build import accepted_extra_kwargs as openai_accepted_extra_kwargs
@@ -94,7 +94,7 @@ def _build_adapter(
 
         return build_gemini_provider(model_config, runtime_paths)
     if provider == "ollama":
-        from mindroom.providers.ollama_adapter import (  # noqa: PLC0415 - keep the ollama SDK out of import time
+        from mindroom.providers.ollama.adapter import (  # noqa: PLC0415 - keep the ollama SDK out of import time
             build_provider as build_ollama_provider,
         )
 
