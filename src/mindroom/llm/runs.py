@@ -415,7 +415,7 @@ class TeamRunRecord(_RunRecordCommon):
         # LEGACY_COMPAT: Team run dicts carry the ``team_name`` label of their members.
         # Legacy format: team ``run_data`` rows hold ``team_name``, ``Team-`` followed by the requested member names
         # joined by ``-``; no MindRoom code read it.
-        # Last legacy release: v2026.10.500, whose owned runtime wrote it as the Agno-backed runtime before it did;
+        # Last legacy release: v2026.10.506, whose owned runtime wrote it as the Agno-backed runtime before it did;
         # replacement: unreleased, whose team runs store no ``team_name``.
         # Handling: the key is ignored on read and never written again, so a rewritten row drops it.
         # Coverage: tests/llm/test_codecs.py::test_team_run_record_round_trips_agno_dict_minus_dropped_keys,
