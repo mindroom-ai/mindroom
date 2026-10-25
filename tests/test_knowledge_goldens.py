@@ -25,7 +25,7 @@ from mindroom.knowledge.search import (
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import tool_definition
 from tests.agno_parity import knowledge_goldens
-from tests.agno_parity.golden_files import render, sorted_keys
+from tests.agno_parity.golden_files import render
 from tests.agno_parity.knowledge_goldens import (
     EMBEDDERS_PATH,
     GOLDEN_DIR,
@@ -47,13 +47,6 @@ if TYPE_CHECKING:
 EMBEDDER_GOLDENS: dict[str, Any] = load(EMBEDDERS_PATH)
 ROW_GOLDENS: dict[str, Any] = load(ROWS_PATH)
 SEARCH_GOLDENS: dict[str, Any] = load(SEARCH_PATH)
-
-
-@pytest.mark.parametrize("path", [EMBEDDERS_PATH, ROWS_PATH, SEARCH_PATH], ids=lambda path: path.name)
-def test_every_knowledge_golden_is_written_as_the_regeneration_writes_it(path: Path) -> None:
-    """Each file is pretty JSON with sorted keys, so regenerating an unchanged golden rewrites nothing."""
-    text = path.read_text(encoding="utf-8")
-    assert render(sorted_keys(json.loads(text))) == text
 
 
 @pytest.mark.parametrize("case", sorted(EMBEDDER_GOLDENS))

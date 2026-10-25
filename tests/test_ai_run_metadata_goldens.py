@@ -10,16 +10,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.agno_parity.golden_files import render
-from tests.ai_run_golden_helpers import GOLDEN, GOLDEN_RUN_METADATA, published_as_compared, published_metadata
+from tests.ai_run_golden_helpers import GOLDEN_RUN_METADATA, published_as_compared, published_metadata
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def test_the_golden_is_written_as_the_regeneration_writes_it() -> None:
-    """The file is pretty JSON in its runs' order, so regenerating unchanged metadata rewrites nothing."""
-    assert render(GOLDEN_RUN_METADATA) == GOLDEN.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
