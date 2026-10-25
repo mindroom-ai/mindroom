@@ -1,8 +1,8 @@
 """The ``exploration`` automation: unattended exploration of the agent's sources, feeding its knowledge graph.
 
 The check runs when conversations used tools since the last run, or a revisit is due, and asks the agent in a new
-thread to explore with its own tools and approval rules. The thread's tool results reach the graph through ingestion,
-never through anything the agent writes.
+thread to explore with its own tools and approval rules. Facts reach the graph only through ingestion of the thread's
+tool results, never through anything the agent writes.
 """
 
 from __future__ import annotations
@@ -36,10 +36,6 @@ logger = get_logger(__name__)
 _DAY_SECONDS = 86_400
 _STATE_FILE = "exploration.json"
 _MAX_ARGUMENT_CHARS = 300
-_FIX_STEP = (
-    "\n4. Fix the mistakes step 1 showed in your graph: delete facts that never held and entities that do not belong, "
-    "merge entities that are the same person or thing, and rewrite summaries that still state what you deleted."
-)
 
 
 @dataclass(frozen=True)
@@ -138,8 +134,8 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
         "EXPLORATION_PROMPT_TEMPLATE",
         max_tool_calls=entry.max_tool_calls,
         leads=_render_leads(leads),
-        fix_step=_FIX_STEP if fixes else "",
-        fix_exception=", apart from fixing your graph" if fixes else "",
+        fix_step=ctx.config.get_prompt("EXPLORATION_FIX_STEP") if fixes else "",
+        fix_exception=ctx.config.get_prompt("EXPLORATION_FIX_EXCEPTION") if fixes else "",
     )
     return Ask(prompt, new_thread=True, then=partial(_after_run, ctx.state_dir, now))
 

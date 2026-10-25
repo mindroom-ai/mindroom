@@ -232,5 +232,6 @@ class KnowledgeGraphTools(Toolkit):
                 agent=self._agent_name,
                 function=function,
                 error=f"{type(exc).__name__}: {exc}",
+                exc_info=True,
             )
             return "The knowledge graph is unavailable right now; try again later."

@@ -25,6 +25,8 @@ __all__ = [
     "DREAMING_PROMPT_TEMPLATE",
     "DREAMING_VERIFY_TEMPLATE",
     "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
+    "EXPLORATION_FIX_EXCEPTION",
+    "EXPLORATION_FIX_STEP",
     "EXPLORATION_PROMPT_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE",
@@ -354,6 +356,12 @@ End with a short report of what you checked and what is still unknown.
 
 Tool calls in your conversations since the last exploration, newest first:
 {leads}"""
+# The parts of EXPLORATION_PROMPT_TEMPLATE for an agent that may edit its graph.
+EXPLORATION_FIX_STEP = (
+    "\n4. Fix the mistakes step 1 showed in your graph: delete facts that never held and entities that do not belong, "
+    "merge entities that are the same person or thing, and rewrite summaries that still state what you deleted."
+)
+EXPLORATION_FIX_EXCEPTION = ", apart from fixing your graph"
 DREAMING_VERIFY_TEMPLATE = """🔍 Dreaming review: another run proposed `{patch_path}`, changing {changed_files} memory files to reconcile them with the inputs in `{agenda_path}`; its report is `{report_path}`.
 A confident, well-argued proposal is what a subtly wrong one looks like, so assume nothing until you have read the source yourself.
 

@@ -65,6 +65,9 @@ Rejected: a separate edit tool listed in `tools`, because the lookups would stil
 Rejected: clearing the summaries of a deleted fact's entities, which drops the condensed summary of a central entity for one wrong fact, and removing the fact's text from them, which misses the condensed ones that central entities have.
 
 Limitations: edits do not wait for ingestion, so an episode extracted into the same graph during a merge or deletion can recreate the entity it resolved against, and a later episode that states a deleted fact again adds it back.
+The conversation in which the agent confirms a deletion is ingested too; a live probe on 2026-10-25 with GPT-6 Luna through Codex extracted a wrong fact, deleted it, and then extracted a conversation where the agent quoted it as deleted.
+In three such runs the wrong fact never came back; one run added the correction ("Alice never waters the plant") and a fact about the agent's deletion, which the built-in rule against an assistant's housekeeping did not stop.
+Naming graph edits in that rule was not tried, because the rule asks the model to extract the knowledge such housekeeping contains, which for a deletion is the deleted fact.
 A merge drops the duplicate's links from episodes to entities (Graphiti's `MENTIONS` edges), which MindRoom never reads; each fact's own sources stay.
 The kept entity keeps its summary until Graphiti rewrites it for the next episode that mentions the entity.
 

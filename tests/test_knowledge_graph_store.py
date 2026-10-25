@@ -552,7 +552,7 @@ async def test_concurrent_merges_keep_a_fact_between_both_duplicates(store: Grap
 
 @pytest.mark.asyncio
 async def test_an_entity_summary_can_be_rewritten(store: GraphitiStore) -> None:
-    """A summary that still states a deleted fact can be rewritten, and lookups and search read the new one."""
+    """A summary that still states a deleted fact can be rewritten, and a lookup reads the new one."""
     alice = await _seed_entity(store, ALPHA, "Alice", summary="Alice leads Project Atlas and waters the office plant.")
 
     assert await store.update_entity_summary(BETA, alice, "Alice leads Project Atlas.") is None

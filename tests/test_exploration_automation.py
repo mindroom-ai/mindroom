@@ -270,6 +270,18 @@ def test_an_agent_that_may_edit_its_graph_is_asked_to_fix_it(tmp_path: Path) -> 
     assert "\nOnly read: never create, change, send, or delete anything, apart from fixing your graph.\n" in fixing.text
 
 
+def test_the_fix_step_follows_a_prompt_override(tmp_path: Path) -> None:
+    """Operators can reword the fix step through the prompts block, as any other built-in prompt."""
+    config = _config(graph_edits=True).model_copy(update={"prompts": {"EXPLORATION_FIX_STEP": "\n4. Tidy the graph."}})
+    paths = _paths(tmp_path)
+    _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=int(time.time()))
+
+    ask = check_exploration(_context(config, paths, tmp_path))
+
+    assert ask is not None
+    assert "lacks.\n4. Tidy the graph.\n" in ask.text
+
+
 def test_old_runs_of_an_updated_conversation_are_not_leads(tmp_path: Path) -> None:
     """A text-only reply in an old thread does not bring back the thread's earlier tool calls."""
     config, paths = _config(), _paths(tmp_path)
