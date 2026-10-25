@@ -29,6 +29,7 @@ from mindroom.llm.runs import (
 )
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts, ToolCallMetrics
 from tests.llm.agno_dict_helpers import (
+    DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
     DROPPED_TOOL_EXECUTION_KEYS,
     expected_requirement_dict,
@@ -137,10 +138,10 @@ def test_tool_call_metrics_round_trip_agno_dict() -> None:
     assert ToolCallMetrics.from_dict({**expected, "timer": None}).to_dict() == expected
 
 
-def test_run_metrics_round_trip_agno_dict() -> None:
-    expected = agno("run_metrics")
+def test_run_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
+    expected = without(agno("run_metrics"), DROPPED_METRICS_KEYS)
 
-    assert RunMetrics.from_dict(expected).to_dict() == expected
+    assert RunMetrics.from_dict(agno("run_metrics")).to_dict() == expected
     assert RunMetrics().to_dict() == {}
 
 
@@ -178,7 +179,7 @@ def test_run_metrics_add_matches_agno_accumulate_model_metrics() -> None:
 def test_run_metrics_addition_matches_agno() -> None:
     owned = RunMetrics.from_dict(agno("run_metrics")) + RunMetrics.from_dict(agno("run_metrics_addend"))
 
-    assert owned.to_dict() == agno("run_metrics_sum")
+    assert owned.to_dict() == without(agno("run_metrics_sum"), DROPPED_METRICS_KEYS)
     assert (RunMetrics(tokens=TokenCounts(input_tokens=1)) + RunMetrics()).to_dict() == {"input_tokens": 1}
 
 
@@ -545,7 +546,9 @@ def test_stored_metrics_keep_agno_key_order_at_every_level(fixture: str) -> None
     stored = list(json.loads((FIXTURE_RUNS / f"{fixture}.json").read_text()).values())
     for key, value in AGNO.items():
         if key.startswith(fixture):
-            stored.extend(value if isinstance(value, list) else [value])
+            stored.extend(
+                without(item, DROPPED_METRICS_KEYS) for item in (value if isinstance(value, list) else [value])
+            )
 
     for value in stored:
         assert json.dumps(_METRIC_CODECS[fixture](value).to_dict()) == json.dumps(value)
@@ -603,7 +606,7 @@ def test_session_metrics_count_token_counters_as_agno_accumulated_them() -> None
         owned.count_run(RunMetrics.from_dict(case), replacing=None)
 
         assert owned.to_dict() == _counted_totals(agno_totals)
-    assert SessionMetrics.from_dict(totals[-1]).to_dict() == totals[-1]
+    assert SessionMetrics.from_dict(totals[-1]).to_dict() == without(totals[-1], DROPPED_METRICS_KEYS)
 
 
 def test_session_metrics_count_token_counters_only() -> None:
@@ -614,7 +617,6 @@ def test_session_metrics_count_token_counters_only() -> None:
         cost=1.5,
         duration=3.0,
         details={"model": [ModelMetrics(tokens=counters, cost=1.5, id="m", provider="P", provider_metrics={"x": 1})]},
-        additional_metrics={"y": 1},
     )
     totals = SessionMetrics()
 

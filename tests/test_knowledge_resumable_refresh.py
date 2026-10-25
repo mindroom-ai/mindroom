@@ -36,8 +36,10 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.embeddings.batching import RefreshEmbedder, plan_embedding_batches
 from mindroom.embeddings.errors import (
+    EMBEDDER_EMPTY_VECTOR_DETAIL,
     EmbedderRequestError,
     embedder_failure_is_transient,
+    embedder_request_error,
     embedder_retry_after_seconds,
 )
 from mindroom.embeddings.signatures import effective_knowledge_embedder_signature, effective_mem0_embedder_signature
@@ -78,7 +80,9 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.llm.errors import ProviderUnavailable
 from mindroom.model_defaults import SENTENCE_TRANSFORMERS_DEFAULT
+from mindroom.providers.errors import classify_provider_error
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import chroma_get_result, metadata_matches, validate_where_operands
 
@@ -576,6 +580,11 @@ def _published_state(config: Config, runtime_paths: RuntimePaths) -> PublishedIn
 _AUTH_FAILURE = EmbedderRequestError("embedder authentication failed (HTTP 401)")
 
 
+def _server_error() -> EmbedderRequestError:
+    """Return the retryable error an embedder raises for an HTTP 503."""
+    return EmbedderRequestError("embedder request failed (HTTP 503)", retryable=True)
+
+
 def _api_error() -> Exception:
     import httpx  # noqa: PLC0415
     from openai import APIStatusError  # noqa: PLC0415
@@ -714,7 +723,7 @@ async def test_transient_embedding_failure_retries_only_the_failed_work(
     _write_corpus(docs_path, 5)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
-    embedder.failures["content 4"] = [EmbedderRequestError("embedder request failed (HTTP 503)")]
+    embedder.failures["content 4"] = [_server_error()]
 
     manager = _manager(config)
     assert await manager.reindex_all() == RefreshOutcome(indexed_count=5, published=True, error=None)
@@ -749,7 +758,7 @@ async def test_exhausted_transient_retries_keep_candidate_and_resume_only_unreso
     _write_corpus(docs_path, 4)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
-    embedder.failures["content 3"] = [EmbedderRequestError("embedder request failed (HTTP 503)") for _ in range(20)]
+    embedder.failures["content 3"] = [_server_error() for _ in range(20)]
 
     manager = _manager(config)
     outcome = await manager.reindex_all()
@@ -837,19 +846,34 @@ async def test_permanent_embedding_failure_never_publishes_and_reports_classifie
     ]
 
 
+def _classified(status_code: int | None = None, *, unreachable: bool = False) -> EmbedderRequestError:
+    """Return the embedder error of a typed provider failure, as an embedder boundary builds it."""
+    if unreachable:
+        failure = ProviderUnavailable("connection refused", provider="ollama", code="connection_error")
+    else:
+        failure = classify_provider_error("rejected", provider="ollama", status_code=status_code)
+    return embedder_request_error(RuntimeError("rejected"), failure)
+
+
 def test_embedding_failure_classification_splits_transient_from_permanent() -> None:
-    """Only retryable transport and throttling faults are classified transient."""
-    assert embedder_failure_is_transient(EmbedderRequestError("embedder endpoint unreachable"))
-    assert embedder_failure_is_transient(EmbedderRequestError("embedder request failed (HTTP 429)"))
-    assert embedder_failure_is_transient(EmbedderRequestError("embedder request failed (HTTP 408)"))
-    assert embedder_failure_is_transient(EmbedderRequestError("embedder request failed (HTTP 502)"))
+    """Only retryable transport and throttling faults are classified transient, by their type and status."""
+    assert embedder_failure_is_transient(_classified(unreachable=True))
+    assert embedder_failure_is_transient(_classified(429))
+    assert embedder_failure_is_transient(_classified(408))
+    assert embedder_failure_is_transient(_classified(502))
+    assert embedder_failure_is_transient(_classified(520))
     assert embedder_failure_is_transient(TimeoutError())
     assert embedder_failure_is_transient(ConnectionResetError())
-    assert not embedder_failure_is_transient(EmbedderRequestError("embedder authentication failed (HTTP 401)"))
-    assert not embedder_failure_is_transient(EmbedderRequestError("embedder permission denied (HTTP 403)"))
-    assert not embedder_failure_is_transient(EmbedderRequestError("embedder request failed (HTTP 400)"))
-    assert not embedder_failure_is_transient(EmbedderRequestError("embedder returned an empty vector"))
+    assert not embedder_failure_is_transient(_classified(401))
+    assert not embedder_failure_is_transient(_classified(403))
+    assert not embedder_failure_is_transient(_classified(400))
+    assert not embedder_failure_is_transient(_classified(409))
+    assert not embedder_failure_is_transient(_classified())
+    assert not embedder_failure_is_transient(embedder_request_error(RuntimeError("out of memory"), None))
+    assert not embedder_failure_is_transient(EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL))
     assert not embedder_failure_is_transient(ValueError("nonsense"))
+    # The detail text alone never makes a failure retryable.
+    assert not embedder_failure_is_transient(EmbedderRequestError("embedder endpoint unreachable"))
 
 
 def test_provider_retry_after_header_survives_error_classification() -> None:
@@ -1292,7 +1316,7 @@ async def test_batch_failure_falls_back_to_per_file_without_reembedding_successe
     _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
     # "content 1" poisons the batch twice, exhausting the batch-level retry.
-    embedder.failures["content 1"] = [EmbedderRequestError("embedder request failed (HTTP 503)") for _ in range(2)]
+    embedder.failures["content 1"] = [_server_error() for _ in range(2)]
 
     assert (await _manager(config).reindex_all()).indexed_count == 3
 

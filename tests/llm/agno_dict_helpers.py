@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 DROPPED_TOOL_EXECUTION_KEYS = frozenset(
     {"requires_user_input", "user_input_schema", "user_feedback_schema", "answered", "approval_id"},
 )
+# Keys Agno wrote on run and session metrics that the owned metrics do not model; only tests ever filled them in.
+DROPPED_METRICS_KEYS = frozenset({"additional_metrics"})
 # Keys Agno wrote on run dicts that the owned records do not model; nothing in MindRoom reads them.
 DROPPED_RUN_KEYS = frozenset(
     {
@@ -43,8 +45,10 @@ def without(data: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
 
 
 def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's run dict minus dropped keys, recursively over tools, requirements, and member runs."""
+    """Agno's run dict minus dropped keys, recursively over metrics, tools, requirements, and member runs."""
     result = without(data, DROPPED_RUN_KEYS)
+    if isinstance(result.get("metrics"), dict):
+        result["metrics"] = without(result["metrics"], DROPPED_METRICS_KEYS)
     if "tools" in result:
         result["tools"] = [without(tool, DROPPED_TOOL_EXECUTION_KEYS) for tool in result["tools"]]
     if "requirements" in result:
