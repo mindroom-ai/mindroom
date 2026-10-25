@@ -248,6 +248,10 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             status="approved",
             reason=None,
             authorize_responder=lambda _entity_name: True,
+            before_consume=None,
+            auto_approve_seconds=None,
+            current_binding=None,
+            scheduled_scope=None,
         )
         assert wrong_actor.consumed is False
         assert decision_task.done() is False
@@ -260,6 +264,10 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             status=status,
             reason="operator decision",
             authorize_responder=lambda _entity_name: True,
+            before_consume=None,
+            auto_approve_seconds=None,
+            current_binding=None,
+            scheduled_scope=None,
         )
         assert result.consumed is True
         committed = await cards.background_approval_decision(run_id="run-1", call_id="call-1")
@@ -281,6 +289,10 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             status="denied" if status == "approved" else "approved",
             reason="late conflicting decision",
             authorize_responder=lambda _entity_name: True,
+            before_consume=None,
+            auto_approve_seconds=None,
+            current_binding=None,
+            scheduled_scope=None,
         )
         assert repeated.consumed is True
         persisted = await journal.principal("router@shared").background_approval_decision(

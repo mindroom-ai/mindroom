@@ -33,7 +33,19 @@ if TYPE_CHECKING:
 async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalContinuation]]:
     """Create real journal ownership, a paused reply shown as ``$waiting``, and this runtime's claim of its approval."""
     bot = _bot(tmp_path)
-    initialize_approval_store(bot.runtime_paths, cards=bot.journal_principal())
+    initialize_approval_store(
+        bot.runtime_paths,
+        cards=bot.journal_principal(),
+        prepare_event=None,
+        send_delivery=None,
+        resolve_delivery=None,
+        resolve_action_delivery=None,
+        transport_sender=None,
+        sending_device=None,
+        continuation_ready=None,
+        recovery=None,
+        responder_principal=None,
+    )
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -46,7 +58,19 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
         assert claimed.state == "claimed"
     # The next instance takes the replies over and recovers the resume the stopped one left.
     restarted = _bot(tmp_path)
-    initialize_approval_store(restarted.runtime_paths, cards=restarted.journal_principal())
+    initialize_approval_store(
+        restarted.runtime_paths,
+        cards=restarted.journal_principal(),
+        prepare_event=None,
+        send_delivery=None,
+        resolve_delivery=None,
+        resolve_action_delivery=None,
+        transport_sender=None,
+        sending_device=None,
+        continuation_ready=None,
+        recovery=None,
+        responder_principal=None,
+    )
     await restarted._reply_runtime.start()
     left = await restarted.journal_principal().approval_continuation(continuation.approval_id)
     assert left is not None

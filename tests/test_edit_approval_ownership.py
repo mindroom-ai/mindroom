@@ -85,6 +85,10 @@ class _ApprovalCase:
                 status="approved",
                 reason=None,
                 authorize_responder=lambda _entity: True,
+                before_consume=None,
+                auto_approve_seconds=None,
+                current_binding=None,
+                scheduled_scope=None,
             )
             assert result.consumed
 
@@ -380,6 +384,10 @@ async def _paused_case(  # noqa: PLR0915
         cards=journal_store.principal("router@shared"),
         transport_sender=lambda: "@router:localhost",
         sending_device=lambda: "DEVICE",
+        resolve_action_delivery=None,
+        continuation_ready=None,
+        recovery=None,
+        responder_principal=None,
     )
     resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
     model = AsyncMock(side_effect=ResponsePausedForApproval(pause))

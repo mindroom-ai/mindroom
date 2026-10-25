@@ -94,6 +94,10 @@ async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterato
         cards=bot._journal_store.principal("router@shared"),
         transport_sender=lambda: "@router:localhost",
         sending_device=lambda: "DEVICE",
+        resolve_action_delivery=None,
+        continuation_ready=None,
+        recovery=None,
+        responder_principal=None,
     )
     try:
         with patch(

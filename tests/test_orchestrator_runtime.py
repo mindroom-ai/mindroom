@@ -5074,7 +5074,19 @@ class TestMultiAgentOrchestrator:
         router_cards = MagicMock()
         orchestrator.config = config
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(approval_store=router_cards)}
-        store = initialize_approval_store(runtime_paths, cards=old_cards)
+        store = initialize_approval_store(
+            runtime_paths,
+            cards=old_cards,
+            prepare_event=None,
+            send_delivery=None,
+            resolve_delivery=None,
+            resolve_action_delivery=None,
+            transport_sender=None,
+            sending_device=None,
+            continuation_ready=None,
+            recovery=None,
+            responder_principal=None,
+        )
 
         try:
             with (

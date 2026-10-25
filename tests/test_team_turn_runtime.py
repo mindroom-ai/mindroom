@@ -2213,6 +2213,10 @@ async def _approving_team_bot(
         cards=bot._journal_store.principal("router@shared"),
         transport_sender=lambda: "@router:localhost",
         sending_device=lambda: "DEVICE",
+        resolve_action_delivery=None,
+        continuation_ready=None,
+        recovery=None,
+        responder_principal=None,
     )
     try:
         with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):
@@ -2236,6 +2240,10 @@ async def _approve(bot: TeamBot, card_event_id: str) -> None:
         status="approved",
         reason=None,
         authorize_responder=lambda _entity: True,
+        before_consume=None,
+        auto_approve_seconds=None,
+        current_binding=None,
+        scheduled_scope=None,
     )
     assert result.consumed
     runner = bot._response_runner

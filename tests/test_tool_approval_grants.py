@@ -80,6 +80,7 @@ async def test_terminal_wire_edits_preserve_thread_scope_for_grant_and_revocatio
             card_event_id=card,
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
         )
         await asyncio.wait_for(revoked.wait(), timeout=2)
         edits = list(wire_edits.values())
@@ -461,6 +462,9 @@ async def test_automatic_receipt_reply_is_consumed_before_maintenance(
             reason="Do not run this.",
             authorize_responder=lambda _agent: True,
             before_consume=before_consume,
+            auto_approve_seconds=None,
+            current_binding=None,
+            scheduled_scope=None,
         )
         assert result.consumed is True
         before_consume.assert_awaited_once()
@@ -542,6 +546,10 @@ async def test_republished_receipt_aliases_remain_terminal(
                 status="denied",
                 reason="Do not run this.",
                 authorize_responder=lambda _agent: True,
+                before_consume=None,
+                auto_approve_seconds=None,
+                current_binding=None,
+                scheduled_scope=None,
             )
             assert result.consumed is False
             assert not await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=event_id)
@@ -555,6 +563,9 @@ async def test_republished_receipt_aliases_remain_terminal(
                 reason="Do not run this.",
                 authorize_responder=lambda _agent: True,
                 before_consume=before_consume,
+                auto_approve_seconds=None,
+                current_binding=None,
+                scheduled_scope=None,
             )
             assert result.consumed is True
             before_consume.assert_awaited_once()
@@ -894,6 +905,8 @@ async def test_changed_binding_refuses_originating_timed_action(
             auto_approve_seconds=600,
             current_binding="new-binding",
             authorize_responder=lambda _agent: True,
+            before_consume=None,
+            scheduled_scope=None,
         )
         continuation = await journal.principal("agent@code").approval_continuation("first")
         assert continuation is not None
@@ -1008,6 +1021,7 @@ async def test_revocation_ack_waits_for_original_edit_and_recovers_after_restart
             card_event_id=card,
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
         )
         assert [delivery for delivery in delivered if delivery.stage is DeliveryStage.FINAL] == []
     finally:
@@ -1103,6 +1117,10 @@ async def test_grant_maintenance_removes_unused_retired_card_scope(
             status=status,
             reason=None,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
+            auto_approve_seconds=None,
+            current_binding=None,
+            scheduled_scope=None,
         )
         await manager.recover_cards_on_startup()
         scopes = await journal.backend.read(
@@ -1336,6 +1354,9 @@ async def _approve(
         reason=None,
         auto_approve_seconds=seconds,
         authorize_responder=lambda _agent: True,
+        before_consume=None,
+        current_binding=None,
+        scheduled_scope=None,
     )
 
 
@@ -1439,6 +1460,7 @@ async def test_revoke_survives_card_retirement_and_replay_cannot_regrant(
             card_event_id=first,
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
         )
         assert not result.consumed
         result = await manager.handle_grant_revocation(
@@ -1447,6 +1469,7 @@ async def test_revoke_survives_card_retirement_and_replay_cannot_regrant(
             card_event_id=first,
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
+            before_consume=None,
         )
         assert result.consumed
         await _approve(manager, first)
@@ -1530,6 +1553,7 @@ async def test_timed_action_delivers_its_scope_without_startup_recovery(
             card_event_id=first,
             grant_id=grant.grant_id,
             authorize_responder=lambda _name: True,
+            before_consume=None,
         )
         recover.assert_not_awaited()
         assert len(sent) == 1
@@ -1746,6 +1770,7 @@ async def test_job_call_outside_an_active_grant_still_asks(
             card_event_id=first,
             grant_id=grant.grant_id,
             authorize_responder=lambda _entity_name: True,
+            before_consume=None,
         )
         assert revoked.consumed
     if outside == "expired":

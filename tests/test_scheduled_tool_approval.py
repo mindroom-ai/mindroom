@@ -173,6 +173,9 @@ async def _decide(
         reason=None,
         authorize_responder=lambda _agent: True,
         scheduled_scope=scheduled_scope,
+        before_consume=None,
+        auto_approve_seconds=None,
+        current_binding=None,
     )
 
 
@@ -252,6 +255,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         expires_at_ns=9_000_000_000_000_000_000,
         agent_name=_AGENT,
         thread_id=_THREAD,
+        grant_operation=None,
     )
     assert card is not None
     assert await manager.reserve_and_publish(
@@ -791,6 +795,9 @@ async def test_scope_is_ignored_on_an_ordinary_approval_card(
             reason=None,
             authorize_responder=lambda _agent: True,
             scheduled_scope="any_arguments",
+            before_consume=None,
+            auto_approve_seconds=None,
+            current_binding=None,
         )
 
         assert result.consumed is False

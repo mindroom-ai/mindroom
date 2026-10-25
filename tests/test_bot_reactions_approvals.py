@@ -1541,6 +1541,10 @@ class TestAgentBot(AgentBotTestBase):
                 cards=first._journal_store.principal(router_principal_id),
                 transport_sender=lambda: "@mindroom_router:localhost",
                 sending_device=lambda: "DEVICE",
+                resolve_action_delivery=None,
+                continuation_ready=None,
+                recovery=None,
+                responder_principal=None,
             )
         source = InboundEvent(
             event_id="$source",
@@ -1621,6 +1625,9 @@ class TestAgentBot(AgentBotTestBase):
                     room_id,
                     source_ids,
                 ),
+                resolve_action_delivery=None,
+                recovery=None,
+                responder_principal=None,
             )
             restarted._journal_dispatcher.release_turn_replay()
             try:
@@ -1631,6 +1638,10 @@ class TestAgentBot(AgentBotTestBase):
                     status="approved",
                     reason=None,
                     authorize_responder=lambda _entity_name: True,
+                    before_consume=None,
+                    auto_approve_seconds=None,
+                    current_binding=None,
+                    scheduled_scope=None,
                 )
                 assert resolved.consumed is True
                 await drain_restarted_runtime()
@@ -2126,6 +2137,14 @@ class TestAgentBot(AgentBotTestBase):
                 runtime_paths,
                 cards=cards,
                 resolve_action_delivery=transport.resolve_approval_action_delivery,
+                prepare_event=None,
+                send_delivery=None,
+                resolve_delivery=None,
+                transport_sender=None,
+                sending_device=None,
+                continuation_ready=None,
+                recovery=None,
+                responder_principal=None,
             )
             on_approval = bot._journal_dispatcher.callbacks.on_approval
 

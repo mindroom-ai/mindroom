@@ -107,7 +107,19 @@ async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tm
     cards = MagicMock()
     cards.pending_approval_card = AsyncMock(return_value=None)
     cards.is_terminal_approval_card = AsyncMock(return_value=True)
-    initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        send_delivery=AsyncMock(),
+        prepare_event=None,
+        resolve_delivery=None,
+        resolve_action_delivery=None,
+        transport_sender=None,
+        sending_device=None,
+        continuation_ready=None,
+        recovery=None,
+        responder_principal=None,
+    )
     before_consume = AsyncMock()
 
     result = await handle_matrix_approval_action(
@@ -132,7 +144,19 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
     cards = MagicMock()
     cards.pending_approval_card = AsyncMock(return_value=MagicMock(resolution={"status": "approved"}))
     cards.is_terminal_approval_card = AsyncMock()
-    manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    manager = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        send_delivery=AsyncMock(),
+        prepare_event=None,
+        resolve_delivery=None,
+        resolve_action_delivery=None,
+        transport_sender=None,
+        sending_device=None,
+        continuation_ready=None,
+        recovery=None,
+        responder_principal=None,
+    )
     before_consume = AsyncMock()
 
     try:
@@ -290,6 +314,9 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
             reason=None,
             authorize_responder=lambda _entity_name: True,
             before_consume=before_consume,
+            auto_approve_seconds=None,
+            current_binding=None,
+            scheduled_scope=None,
         )
     finally:
         await manager.shutdown()
@@ -468,6 +495,9 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
                 reason=None,
                 authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
+                auto_approve_seconds=None,
+                current_binding=None,
+                scheduled_scope=None,
             )
     finally:
         await manager.shutdown()
@@ -523,6 +553,9 @@ async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path
                 reason=None,
                 authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
+                auto_approve_seconds=None,
+                current_binding=None,
+                scheduled_scope=None,
             )
     finally:
         await manager.shutdown()
@@ -574,6 +607,9 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
                 reason="No",
                 authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
+                auto_approve_seconds=None,
+                current_binding=None,
+                scheduled_scope=None,
             )
     finally:
         await manager.shutdown()
@@ -637,6 +673,9 @@ async def test_legacy_action_retries_a_transient_transport_failure(tmp_path: Pat
                 reason=None,
                 authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
+                auto_approve_seconds=None,
+                current_binding=None,
+                scheduled_scope=None,
             )
     finally:
         await manager.shutdown()
@@ -752,6 +791,10 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
             status="approved",
             reason=None,
             authorize_responder=authorize_responder,
+            before_consume=None,
+            auto_approve_seconds=None,
+            current_binding=None,
+            scheduled_scope=None,
         )
 
         assert result.consumed is True
@@ -2272,7 +2315,19 @@ async def test_evaluate_tool_approval_script_error_is_sanitized(tmp_path: Path) 
 def test_get_approval_store_returns_initialized_store(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
 
-    store = initialize_approval_store(runtime_paths)
+    store = initialize_approval_store(
+        runtime_paths,
+        prepare_event=None,
+        send_delivery=None,
+        resolve_delivery=None,
+        resolve_action_delivery=None,
+        cards=None,
+        transport_sender=None,
+        sending_device=None,
+        continuation_ready=None,
+        recovery=None,
+        responder_principal=None,
+    )
 
     assert get_approval_store() is store
 
