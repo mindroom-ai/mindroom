@@ -617,6 +617,7 @@ async def compact_scope_mid_turn(
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
     on_commit: Callable[[str], None],
+    rewritten_request_tokens: Callable[[], int],
 ) -> CompactionOutcome | None:
     """Fold the stored runs after the latest summary row and the running turn into one summary row."""
     execution_plan = resolved_inputs.execution_plan
@@ -648,6 +649,7 @@ async def compact_scope_mid_turn(
             threshold_tokens=execution_plan.trigger_threshold_tokens,
             available_history_budget=execution_plan.hard_replay_budget_tokens,
             on_commit=on_commit,
+            rewritten_request_tokens=rewritten_request_tokens,
             complete=complete,
         )
 

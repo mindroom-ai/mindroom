@@ -53,7 +53,6 @@ from mindroom.token_budget import (
     CompactionEstimateKind,
     compaction_estimate_kind,
     estimate_compaction_input_tokens,
-    estimate_text_tokens,
 )
 from mindroom.tool_system.runtime_context import (
     get_detached_requester_context,
@@ -596,6 +595,7 @@ async def compact_running_turn(
     threshold_tokens: int | None,
     available_history_budget: int | None,
     on_commit: Callable[[str], None],
+    rewritten_request_tokens: Callable[[], int],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
 ) -> CompactionOutcome:
     """Summarize the basis's stored runs and the running turn's ``snapshots``, then append one row with ``segment``.
@@ -603,7 +603,9 @@ async def compact_running_turn(
     Nothing is written until every chunk has been summarized. The append leaves ``session`` holding what the store
     does; once it starts, ``on_commit`` receives the stored summary and the compaction is reported even when the turn
     is cancelled meanwhile, so the turn's in-memory state always matches the log and a stored fold never reads as
-    failed. Raises when the conversation changed since ``basis`` was read.
+    failed. ``before_tokens`` sizes the request that triggered the fold, and ``rewritten_request_tokens`` sizes it
+    after ``on_commit`` rewrote it, so the report compares one request before and after. Raises when the conversation
+    changed since ``basis`` was read.
     """
     runs = [*basis.runs, *snapshots]
     # The summary's usage row and summary row reference the session row, which a first turn has not written yet.
@@ -644,6 +646,8 @@ async def compact_running_turn(
         if not appended:
             raise ConversationChangedError
         on_commit(summary)
+        # Sizing can tokenize the whole request, so it stays off the event loop.
+        after_tokens = await asyncio.to_thread(rewritten_request_tokens)
         outcome = CompactionOutcome(
             mode="auto",
             session_id=session.session_id,
@@ -651,10 +655,7 @@ async def compact_running_turn(
             summary=summary,
             summary_model=summarizer.model.name,
             before_tokens=before_tokens,
-            # TODO(simplify): this notice compares the whole request before the fold with the summary text alone
-            # after it. Report both sides in the same units, such as the rewritten request's size. Users would see
-            # different "after" numbers in mid-turn compaction notices.
-            after_tokens=estimate_text_tokens(summary),
+            after_tokens=after_tokens,
             window_tokens=replay_window_tokens or 0,
             threshold_tokens=threshold_tokens or 0,
             # The running turn counts once beside the stored runs it folded with.

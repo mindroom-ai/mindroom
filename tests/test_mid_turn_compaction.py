@@ -1389,6 +1389,29 @@ async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
+async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_its_fold(tmp_path: Path) -> None:
+    """The notice compares the request that triggered the fold with the request the fold left, in the same units."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    lifecycle = RecordingCompactionLifecycle()
+    model = ToolLoopModel(tool_rounds=5)
+
+    await _run(_scoped_agent(model, config, paths, storage, lifecycle=lifecycle), "Do the task")
+
+    outcome = next(event for event in lifecycle.events if isinstance(event, CompactionOutcome))
+    # The first request after the fold carries its summary.
+    rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
+    rewritten_tokens = (
+        estimate_request_messages_tokens(rewritten.messages, replay_model=None)
+        + mid_turn_compaction._thinking_tokens(rewritten.messages)
+        + mid_turn_compaction._tool_tokens(rewritten.request.tools, rewritten.messages, frozenset())
+    )
+    assert outcome.after_tokens == rewritten_tokens
+    assert outcome.after_tokens < outcome.before_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
 async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
