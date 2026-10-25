@@ -212,13 +212,13 @@ class DynamicWorkflowTools(Toolkit):
         register_toolkit_functions(
             self,
             entrypoints={
-                "create_workflow": self.acreate_workflow,
-                "validate_workflow": self.avalidate_workflow,
-                "update_workflow": self.aupdate_workflow,
-                "run_workflow": self.arun_workflow,
-                "get_workflow_run": self.aget_workflow_run,
-                "list_workflows": self.alist_workflows,
-                "list_workflow_revisions": self.alist_workflow_revisions,
+                "create_workflow": self.create_workflow,
+                "validate_workflow": self.validate_workflow,
+                "update_workflow": self.update_workflow,
+                "run_workflow": self.run_workflow,
+                "get_workflow_run": self.get_workflow_run,
+                "list_workflows": self.list_workflows,
+                "list_workflow_revisions": self.list_workflow_revisions,
             },
             descriptions=_TOOL_DESCRIPTIONS,
             parameters=_TOOL_PARAMETERS,
@@ -258,7 +258,7 @@ class DynamicWorkflowTools(Toolkit):
             minimal_valid_spec_example=_MINIMAL_SPEC_EXAMPLE,
         )
 
-    def create_workflow(
+    async def create_workflow(
         self,
         spec: dict[str, Any],
         scope: str = "agent",
@@ -291,7 +291,7 @@ class DynamicWorkflowTools(Toolkit):
             name=summary.name,
         )
 
-    def validate_workflow(self, spec: dict[str, Any]) -> str:
+    async def validate_workflow(self, spec: dict[str, Any]) -> str:
         """Validate a declarative Dynamic Workflow spec without saving it."""
         context = get_tool_runtime_context()
         if context is None:
@@ -305,7 +305,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", message=str(exc))
         return self._payload("ok", workflow_id=validated["id"], name=validated["name"])
 
-    def update_workflow(
+    async def update_workflow(
         self,
         workflow_id: str,
         patch: dict[str, Any],
@@ -338,7 +338,7 @@ class DynamicWorkflowTools(Toolkit):
             name=summary.name,
         )
 
-    def get_workflow_run(
+    async def get_workflow_run(
         self,
         workflow_id: str,
         run_id: str,
@@ -361,7 +361,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", workflow_id=workflow_id, run_id=run_id, message=str(exc))
         return self._run_payload(run, steps=run.steps)
 
-    def list_workflows(self, scope: str = "agent") -> str:
+    async def list_workflows(self, scope: str = "agent") -> str:
         """List Dynamic Workflows available in one scope."""
         context = get_tool_runtime_context()
         if context is None:
@@ -387,7 +387,7 @@ class DynamicWorkflowTools(Toolkit):
             ],
         )
 
-    def list_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
+    async def list_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
         """List immutable revisions for one Dynamic Workflow."""
         context = get_tool_runtime_context()
         if context is None:
@@ -403,30 +403,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
         return self._payload("ok", workflow_id=workflow_id, revisions=revisions)
 
-    async def acreate_workflow(
-        self,
-        spec: dict[str, Any],
-        scope: str = "agent",
-        reason: str | None = None,
-    ) -> str:
-        """Create a Dynamic Workflow from a declarative workflow spec."""
-        return self.create_workflow(spec, scope=scope, reason=reason)
-
-    async def avalidate_workflow(self, spec: dict[str, Any]) -> str:
-        """Validate a declarative Dynamic Workflow spec without saving it."""
-        return self.validate_workflow(spec)
-
-    async def aupdate_workflow(
-        self,
-        workflow_id: str,
-        patch: dict[str, Any],
-        reason: str,
-        scope: str = "agent",
-    ) -> str:
-        """Create and publish a new Dynamic Workflow revision from a patch."""
-        return self.update_workflow(workflow_id, patch, reason, scope=scope)
-
-    async def arun_workflow(
+    async def run_workflow(
         self,
         workflow_id: str,
         input: dict[str, Any],  # noqa: A002
@@ -456,23 +433,6 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
         return self._run_payload(run, step_count=len(run.steps))
 
-    async def aget_workflow_run(
-        self,
-        workflow_id: str,
-        run_id: str,
-        scope: str = "agent",
-    ) -> str:
-        """Read one Dynamic Workflow run record."""
-        return self.get_workflow_run(workflow_id, run_id, scope=scope)
-
-    async def alist_workflows(self, scope: str = "agent") -> str:
-        """List Dynamic Workflows available in one scope."""
-        return self.list_workflows(scope=scope)
-
-    async def alist_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
-        """List immutable revisions for one Dynamic Workflow."""
-        return self.list_workflow_revisions(workflow_id, scope=scope)
-
 
 def _participant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> ParticipantExecutor:
     async def execute(
@@ -496,12 +456,12 @@ async def _execute_participant(
 ) -> ParticipantOutput:
     if participant["kind"] == "room_agent":
         return ParticipantOutput(
-            await _aexecute_room_agent_participant(context, participant, prompt, run_scope=state.scope),
+            await _execute_room_agent_participant(context, participant, prompt, run_scope=state.scope),
         )
-    return await _aexecute_subagent_participant(context, participant, prompt, state)
+    return await _execute_subagent_participant(context, participant, prompt, state)
 
 
-async def _aexecute_room_agent_participant(
+async def _execute_room_agent_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,
@@ -535,7 +495,7 @@ async def _aexecute_room_agent_participant(
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
     )
-    return await _arun_agent(participant_context, build, prompt)
+    return await _run_room_agent_turn(participant_context, build, prompt)
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
@@ -583,7 +543,7 @@ def _validate_room_agent_reference_for_context(
     return agent_name
 
 
-async def _aexecute_subagent_participant(
+async def _execute_subagent_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,
@@ -905,7 +865,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
     return frozenset(tool.strip() for tool in raw_allowed if isinstance(tool, str) and tool.strip())
 
 
-async def _arun_agent(context: ToolRuntimeContext, build: AgentBuild, prompt: str) -> object:
+async def _run_room_agent_turn(context: ToolRuntimeContext, build: AgentBuild, prompt: str) -> object:
     """Run one turn of a room agent on the prompt alone and return its answer.
 
     Like every agent turn it streams, which the Anthropic and Vertex SDKs require of a request whose budget could

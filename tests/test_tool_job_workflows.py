@@ -97,7 +97,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                assert json.loads(toolkit.create_workflow(spec))["status"] == "ok"
+                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
                 outcome = await call_job_tool(
                     caller,
                     "run_workflow",
@@ -154,7 +154,7 @@ async def test_workflow_participant_tools_run_under_their_own_grants(
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                assert json.loads(toolkit.create_workflow(spec))["status"] == "ok"
+                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
                 await call_job_tool(
                     caller,
                     "run_workflow",
@@ -290,7 +290,7 @@ async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorizatio
         await coordinator.sync()
         async with execution_resources():
             with tool_runtime_context(context):
-                assert json.loads(toolkit.create_workflow(spec))["status"] == "ok"
+                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
                 arguments = {"workflow_id": "competitor-research-report", "input": {"topic": "test"}}
                 await call_job_tool(
                     caller,

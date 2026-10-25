@@ -71,8 +71,8 @@ class ReportPublishingTools(Toolkit):
         register_toolkit_functions(
             self,
             entrypoints={
-                "publish_report": self.apublish_report,
-                "revoke_public_report": self.arevoke_public_report,
+                "publish_report": self.publish_report,
+                "revoke_public_report": self.revoke_public_report,
             },
             descriptions=_TOOL_DESCRIPTIONS,
             parameters=_TOOL_PARAMETERS,
@@ -89,7 +89,7 @@ class ReportPublishingTools(Toolkit):
             message="Report Publishing tool context is unavailable in this runtime path.",
         )
 
-    def publish_report(
+    async def publish_report(
         self,
         source_type: str,
         source: dict[str, Any],
@@ -124,7 +124,7 @@ class ReportPublishingTools(Toolkit):
             published_at=report.published_at,
         )
 
-    def revoke_public_report(self, slug: str) -> str:
+    async def revoke_public_report(self, slug: str) -> str:
         """Revoke a previously published public report link."""
         context = get_tool_runtime_context()
         if context is None:
@@ -143,19 +143,6 @@ class ReportPublishingTools(Toolkit):
             source=revoked.source,
             revoked_at=revoked.revoked_at,
         )
-
-    async def apublish_report(
-        self,
-        source_type: str,
-        source: dict[str, Any],
-        confirm_public: bool,
-    ) -> str:
-        """Publish an authorized report artifact through a revocable public link."""
-        return self.publish_report(source_type, source, confirm_public)
-
-    async def arevoke_public_report(self, slug: str) -> str:
-        """Revoke a previously published public report link."""
-        return self.revoke_public_report(slug)
 
 
 def _resolve_publishable_source(

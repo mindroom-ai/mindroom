@@ -130,13 +130,13 @@ class _Workflow:
 
     async def create(self, spec: dict[str, object]) -> dict[str, Any]:
         with self.context():
-            return json.loads(await self.tools.acreate_workflow(spec))
+            return json.loads(await self.tools.create_workflow(spec))
 
     async def run(self, spec: dict[str, object]) -> dict[str, Any]:
         created = await self.create(spec)
         assert created["status"] == "ok", created
         with self.context():
-            return json.loads(await self.tools.arun_workflow(workflow_id="review", input={}))
+            return json.loads(await self.tools.run_workflow(workflow_id="review", input={}))
 
     def workspace(self) -> Path:
         return self.paths.storage_root / "agents" / "leader" / "workspace"
@@ -170,7 +170,7 @@ async def test_participant_steps_write_delegation_records(tmp_path: Path, monkey
     assert run["status"] == "completed", run
     assert workflow.model.authored_prompts == ["Critic prompt", "Critic prompt"]
     with workflow.context():
-        stored = json.loads(await workflow.tools.aget_workflow_run(workflow_id="review", run_id=run["run_id"]))
+        stored = json.loads(await workflow.tools.get_workflow_run(workflow_id="review", run_id=run["run_id"]))
     delegation_ids = [step["delegation_id"] for step in stored["steps"]]
     assert all(delegation_ids)
     assert len(set(delegation_ids)) == 2
@@ -347,7 +347,7 @@ async def test_legacy_revision_runs_as_subagent(tmp_path: Path, monkeypatch: pyt
     _rewrite_as_legacy(revision)
 
     with workflow.context():
-        run = json.loads(await workflow.tools.arun_workflow(workflow_id="review", input={}))
+        run = json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
 
     assert run["status"] == "completed", run
     assert workflow.model.authored_prompts == ["You are Writer.\n\nWrites\n\n- Cite sources"]
@@ -535,7 +535,7 @@ async def test_failed_step_keeps_its_delegation_record(tmp_path: Path, monkeypat
 
     assert run["status"] == "failed", run
     with workflow.context():
-        stored = json.loads(await workflow.tools.aget_workflow_run(workflow_id="review", run_id=run["run_id"]))
+        stored = json.loads(await workflow.tools.get_workflow_run(workflow_id="review", run_id=run["run_id"]))
     [step] = stored["steps"]
     assert step["delegation_id"]
     assert next(workflow.workspace().glob(f".mindroom/delegations/*/{step['delegation_id']}/run.json"))
