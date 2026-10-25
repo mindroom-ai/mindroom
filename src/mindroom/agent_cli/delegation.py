@@ -112,7 +112,7 @@ async def advance_cli_delegation(
     view.status = RunStatus.paused
     paused = paused_attempt_from_response(
         view,
-        toolkit_owners={(context.agent_name, binding.key.function): binding.key.toolkit},
+        toolkit_owners={(context.agent_name, binding.key.function): binding.approval_toolkit},
     )
     if paused is None:
         msg = "Delegated child paused without supported exact approval requirements"
@@ -121,7 +121,7 @@ async def advance_cli_delegation(
         paused,
         runtime_model_name=catalog.run.model_name,
         cli_call=CliApprovalCall(
-            toolkit=binding.key.toolkit,
+            toolkit=binding.approval_toolkit,
             function=binding.key.function,
             arguments=deepcopy(tool.tool_args or {}),
             call_id=tool.tool_call_id,
