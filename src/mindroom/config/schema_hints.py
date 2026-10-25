@@ -33,8 +33,8 @@ def dashboard_hint(
 
     ``reference`` names the configured entity a string (or each list item or
     mapping value) refers to, and ``key_reference`` does the same for mapping
-    keys. ``key_placeholder`` is an example key the dashboard shows in an empty
-    mapping's new-key input.
+    keys. ``key_placeholder`` is an example key the dashboard shows in a
+    mapping's new-key input while that input is empty.
     """
     hint: JsonDict = {}
     if reference is not None:

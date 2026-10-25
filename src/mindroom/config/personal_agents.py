@@ -63,15 +63,15 @@ class PersonalAgentTemplateConfig(BaseModel):
     agent: AgentConfig = Field(
         description=(
             "Agent fields shared by every user's agent; display_name, role, and instructions accept "
-            "{user}, {username}, and {user_display_name}, and the owner is always added to access.users "
-            "and credential_managers"
+            "{user}, {username}, and {user_display_name}. Only the owner may use each agent unless access "
+            "admits others, and the owner is always added to access.users and credential_managers"
         ),
     )
     users: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description=(
             "Per-user agent field overrides as YAML, such as model: opus, keyed by concrete Matrix user ID; "
-            "each replaces the template field whole, so a list is not merged"
+            "each replaces the template field whole, so a list or object is not merged"
         ),
         json_schema_extra=dashboard_hint(key_placeholder="@alice:example.org"),
     )

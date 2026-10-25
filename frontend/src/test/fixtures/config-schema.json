@@ -3722,7 +3722,7 @@
         },
         "agent": {
           "$ref": "#/$defs/AgentConfig",
-          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, and {user_display_name}, and the owner is always added to access.users and credential_managers"
+          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, and {user_display_name}. Only the owner may use each agent unless access admits others, and the owner is always added to access.users and credential_managers"
         },
         "users": {
           "additionalProperties": {
@@ -3730,7 +3730,7 @@
             "type": "object"
           },
           "default": {},
-          "description": "Per-user agent field overrides as YAML, such as model: opus, keyed by concrete Matrix user ID; each replaces the template field whole, so a list is not merged",
+          "description": "Per-user agent field overrides as YAML, such as model: opus, keyed by concrete Matrix user ID; each replaces the template field whole, so a list or object is not merged",
           "title": "Users",
           "type": "object",
           "x-mindroom": {
