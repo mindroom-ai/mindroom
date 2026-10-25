@@ -325,6 +325,41 @@ async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [None, ToolResultPayload(value=None, error="")],
+    ids=["runtime_failure", "call_failure"],
+)
+async def test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed(
+    tmp_path: Path,
+    payload: ToolResultPayload | None,
+) -> None:
+    """A failed job that older releases saved without error text still reads as a failure that says so."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    # Releases through v2026.10.501 saved the empty text of an exception such as TimeoutError: the runtime as the job's
+    # result alone, and the job executor in its payload's error too.
+    encoded = None if payload is None else encode_result_payload(payload)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("failed", "", result_payload=encoded)
+
+    tools = JobTools(paths, owner)
+    try:
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        with tool_runtime_context(context), pytest.raises(RuntimeError) as raised:
+            await tools.job("wait", "ordinary", wait_timeout=None)
+        assert str(raised.value) == "Background tool job failed."
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["tool", "delegation"])
 async def test_discovery_bounds_large_results_without_truncating_wait(
     tmp_path: Path,

@@ -69,6 +69,7 @@ from tests.tool_job_helpers import (
     tool_job_runtime,
     toolkit_job_tools,
     wait_for_status,
+    write_saved_job,
 )
 
 if TYPE_CHECKING:
@@ -587,6 +588,37 @@ async def test_exact_call_reattachment_rejects_changed_arguments(tmp_path: Path)
         assert invocations == ["first"]
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_reattached_call_reads_a_job_saved_failed_without_error_text_as_failed(tmp_path: Path) -> None:
+    """A call that reattaches to a failed job older releases saved without error text fails with a text that says so."""
+
+    async def times_out() -> str:
+        raise TimeoutError
+
+    actor = job_actor(job_tool(times_out))
+    context, runtime = await _managed_context(tmp_path)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                first = await call_job_tool(actor, "times_out", call_id="same-call", run_id="same-run")
+    finally:
+        await runtime.shutdown()
+    assert first == ToolOutcome(content="TimeoutError", is_error=True)
+    [job] = (await saved_jobs(tmp_path)).values()
+    # Releases through v2026.10.501 saved the empty text of such an exception; the runtime saved it as the result alone.
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(replace(job, result="", has_result_payload=False))))
+    restored = await tool_job_runtime(tmp_path)
+    register_background_runtime(context.runtime_paths, restored)
+    try:
+        await restored.recover()
+        async with execution_resources():
+            with tool_runtime_context(context):
+                again = await call_job_tool(actor, "times_out", call_id="same-call", run_id="same-run")
+    finally:
+        await restored.shutdown()
+    assert again == ToolOutcome(content="Background tool job failed.", is_error=True)
 
 
 @pytest.mark.asyncio

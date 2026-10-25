@@ -26,7 +26,17 @@ if TYPE_CHECKING:
 _OWNER: ContextVar[ConsumptionOwner | None] = ContextVar("tool_job_consumption", default=None)
 logger = get_logger(__name__)
 
-# What a failed job reads as when it recorded no error text, as jobs that older releases stored may have.
+# LEGACY_COMPAT: Failed tool jobs saved without error text.
+# Legacy format: a saved job with status ``failed`` whose result is empty and whose payload, when it has one, holds an
+# empty error. The job runtime saved the text of an exception its operation raised as the job's result, and the job
+# executor saved a failed call's exception text as both the result and the payload's error; that text is empty for
+# exceptions such as ``TimeoutError`` and ``httpx.ReadTimeout``.
+# Last legacy release: v2026.10.501; replacement: unreleased, whose writers save the exception's type name when its
+# text is empty.
+# Handling: such a job reads as this text, both when the call that started it reads its outcome and when the job tool
+# waits for it, so the model reads that the call failed instead of an empty failure.
+# Coverage: tests/test_tool_job_execution.py::test_a_reattached_call_reads_a_job_saved_failed_without_error_text_as_failed;
+# tests/test_job_tools.py::test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed
 JOB_FAILED_TEXT = "Background tool job failed."
 
 
