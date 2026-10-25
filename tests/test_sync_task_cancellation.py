@@ -907,7 +907,7 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
         preparation = asyncio.create_task(
             bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN),
         )
-        # These waits stay below the preparation budget, which would end a stuck preparation on its own.
+        # Below the preparation budget, which would end a stuck preparation on its own.
         await asyncio.wait_for(router_cleanup_started.wait(), timeout=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS / 2)
         try:
             with pytest.raises(
@@ -917,7 +917,7 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
                 await client.send("GET", "/_matrix/client/v3/account/whoami")
         finally:
             release_router_cleanup.set()
-            await asyncio.wait_for(preparation, timeout=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS / 2)
+            await asyncio.wait_for(preparation, timeout=SETTLE_TIMEOUT_SECONDS)
             await client.close()
 
 
@@ -4272,8 +4272,7 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
     bot._release_stopped_resources.assert_not_awaited()
 
     release_proof.set()
-    # Below the default finalization budget, so a stop that drops its explicit budget fails.
-    await asyncio.wait_for(finalizing, timeout=RESPONSE_FINALIZATION_TIMEOUT_SECONDS / 2)
+    await asyncio.wait_for(finalizing, timeout=SETTLE_TIMEOUT_SECONDS)
 
     bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
     assert not bot.deferred_stop_required
@@ -4369,8 +4368,7 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
         bot._release_stopped_resources.assert_not_awaited()
 
         release_first_proof.set()
-        # Below the default finalization budget, so a stop that drops its explicit budget fails.
-        await asyncio.wait_for(finalizing, timeout=RESPONSE_FINALIZATION_TIMEOUT_SECONDS / 2)
+        await asyncio.wait_for(finalizing, timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert proof_calls == 2
     bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)

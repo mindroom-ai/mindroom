@@ -4002,13 +4002,12 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
         assert await asyncio.to_thread(first_revocation_started.wait, SETTLE_TIMEOUT_SECONDS)
         assert await asyncio.to_thread(lease_released.wait, 0.2) is False
         release_revocations.set()
-        # Below shutdown's default budget, so a shutdown that drops its explicit budget fails.
-        await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
+        await asyncio.wait_for(shutdown, timeout=SETTLE_TIMEOUT_SECONDS)
         assert await asyncio.to_thread(lease_released.wait, SETTLE_TIMEOUT_SECONDS)
     finally:
         release_revocations.set()
         if not shutdown.done():
-            await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
+            await asyncio.wait_for(shutdown, timeout=SETTLE_TIMEOUT_SECONDS)
 
     expected_run_ids = {run.run_id for run in runs}
     assert release_observations == [expected_run_ids]
@@ -4262,7 +4261,9 @@ async def test_shutdown_deadline_leaves_revoked_run_nonterminal(tmp_path: Path) 
     runtime._activated_once = True
     runtime._current_worker_lease = lease
 
-    await runtime.shutdown(timeout_seconds=1.0)
+    # The status call never returns, so shutdown runs to its deadline; this bound sits below shutdown's default
+    # budget, so a shutdown that drops its explicit budget fails.
+    await asyncio.wait_for(runtime.shutdown(timeout_seconds=1.0), timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
 
     assert status_started.is_set()
     durable = store.get_run(run.run_id)
