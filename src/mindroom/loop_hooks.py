@@ -183,7 +183,7 @@ def _loop_hooks(
             turn_recorder=turn.turn_recorder,
         ),
     )
-    before_request.append(approval_receipt_hook())
+    before_request.append(approval_receipt_hook)
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     return LoopHooks(
         before_request=tuple(before_request),

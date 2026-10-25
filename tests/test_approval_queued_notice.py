@@ -51,7 +51,7 @@ def _tool_calls() -> list[dict[str, Any]]:
 def _hooks() -> LoopHooks:
     """Return the notice and receipt hooks an agent run and its resume install."""
     return LoopHooks(
-        before_request=(approval_receipt_hook(),),
+        before_request=(approval_receipt_hook,),
         after_tool_batch=(queued_notice_after_tool_batch(_NOTICE),),
         on_resume_entry=(queued_notice_on_resume_entry(_NOTICE),),
     )

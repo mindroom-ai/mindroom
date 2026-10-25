@@ -15,7 +15,7 @@ from mindroom.llm.messages import Message
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
+    from mindroom.agent_loop.model_loop import LoopState, RequestDecision
 
 _MARKER_KEY = "mindroom_approval_receipt"
 _SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -87,20 +87,16 @@ def messages_with_approval_receipt(messages: Sequence[Message], receipt_text: st
     return outbound
 
 
-def approval_receipt_hook() -> BeforeRequestHook:
-    """Return the pre-request hook that sends the bound receipt with a reader run's first request, once per run.
+async def approval_receipt_hook(state: LoopState) -> RequestDecision:
+    """Send the bound receipt with a reader run's first request, once per run.
 
     The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt. It is projected
     into the request only, so no run's history holds it.
     """
-
-    async def hook(state: LoopState) -> RequestDecision:
-        receipt_text = take_unsent_receipt(state.run.run_id)
-        if receipt_text is None:
-            return SendRequest()
-        return SendRequest(messages=messages_with_approval_receipt(state.messages, receipt_text))
-
-    return hook
+    receipt_text = take_unsent_receipt(state.run.run_id)
+    if receipt_text is None:
+        return SendRequest()
+    return SendRequest(messages=messages_with_approval_receipt(state.messages, receipt_text))
 
 
 __all__ = [

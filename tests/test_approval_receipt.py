@@ -197,7 +197,6 @@ def test_a_request_without_a_prompt_message_gets_the_receipt_as_its_own_system_m
 async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only() -> None:
     """The run the receipt names reads it in its first request only; another run and every stored run never do."""
     model = ScriptedModel([calls(tool_call("echo", "call-1", text="x")), answer("first"), answer("second")])
-    hook = approval_receipt_hook()
 
     with approval_receipt_context("trusted approval receipt", run_id="run-1"):
         _, first = await collect(
@@ -205,7 +204,7 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
                 spec(model, toolkit(echo)),
                 [Message(role="user", content="Go")],
                 ctx=context(),
-                hooks=LoopHooks(before_request=(hook,)),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
                 persist=None,
                 request_template=EMPTY_REQUEST,
             ),
@@ -215,7 +214,7 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
                 spec(model),
                 [Message(role="user", content="Again")],
                 ctx=context(run_id="run-2"),
-                hooks=LoopHooks(before_request=(hook,)),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
                 persist=None,
                 request_template=EMPTY_REQUEST,
             ),
@@ -477,7 +476,7 @@ async def test_a_background_job_an_approval_continuation_starts_never_reads_its_
                 spec(model),
                 [Message(role="user", content="Go")],
                 ctx=context(run_id="job-run"),
-                hooks=LoopHooks(before_request=(approval_receipt_hook(),)),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
                 persist=None,
                 request_template=EMPTY_REQUEST,
             ),
@@ -506,7 +505,6 @@ async def test_a_background_job_an_approval_continuation_starts_never_reads_its_
 @pytest.mark.asyncio
 async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> None:
     """Outside an approval continuation, the hook is a no-op."""
-    hook = approval_receipt_hook()
     model = ScriptedModel([answer("ok")])
 
     _, record = await collect(
@@ -514,7 +512,7 @@ async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> No
             spec(model),
             [Message(role="user", content="Go")],
             ctx=context(),
-            hooks=LoopHooks(before_request=(hook,)),
+            hooks=LoopHooks(before_request=(approval_receipt_hook,)),
             persist=None,
             request_template=EMPTY_REQUEST,
         ),
@@ -522,7 +520,7 @@ async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> No
 
     assert record.content == "ok"
     assert model.requests[0].messages[0].content == "You are Code."
-    assert isinstance(await hook(_state_stub()), SendRequest)
+    assert isinstance(await approval_receipt_hook(_state_stub()), SendRequest)
 
 
 def _state_stub() -> object:
