@@ -188,7 +188,7 @@
       ],
       "description": "Invite the MindRoom router to the current Matrix room",
       "display_name": "Invite Router",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -2438,7 +2438,7 @@
       "dependencies": [],
       "description": "Find code, search across files, and make precise edits",
       "display_name": "Coding Tools",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#coding",
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
@@ -3044,7 +3044,7 @@
       "dependencies": [],
       "description": "Search deferred tools and call them",
       "display_name": "Dynamic Tools",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/dynamic-tools/#mindroom-tool-search",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -5496,7 +5496,7 @@
       "dependencies": null,
       "description": "Convenience bundle that implies shell, coding, browser, and other common tools",
       "display_name": "OpenClaw Compat",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/openclaw/#openclaw_compat",
       "executes_code": false,
       "file_access": "none",
       "function_names": [],
@@ -6291,7 +6291,7 @@
       ],
       "description": "Run Python scripts in the background, monitor them, or cancel them",
       "display_name": "Background Scripts",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/background-scripts/",
       "executes_code": true,
       "file_access": "unconfined",
       "function_names": [
@@ -6321,7 +6321,7 @@
       "dependencies": [],
       "description": "Allow an agent to read and modify its own configuration",
       "display_name": "Self Config",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/agent-orchestration/#self_config",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -7535,7 +7535,7 @@
       ],
       "description": "Inspect retained token usage without modifying session storage",
       "display_name": "Usage Statistics",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/usage/#usage_stats",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -7650,7 +7650,7 @@
       ],
       "description": "Get a link to manage this agent's passwords and API keys in Agent Vault",
       "display_name": "Agent Vault Access",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/deployment/sandbox-proxy/#self-service-vault-access",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -7689,7 +7689,7 @@
       "dependencies": null,
       "description": "Request approval for temporary access to a blocked website or service",
       "display_name": "Network Access Requests",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/deployment/approved-egress/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -7946,7 +7946,7 @@
       "dependencies": null,
       "description": "Opt this agent's shell and python calls into Agent Keys and see which keys and accounts it can use",
       "display_name": "Egress Credentials",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -7974,7 +7974,7 @@
       ],
       "description": "Get a confirmation link to reset an account connection for this agent",
       "display_name": "OAuth Connections",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/oauth-framework/#oauth_connections",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8152,7 +8152,7 @@
       "dependencies": [],
       "description": "Find files attached to a conversation and make workspace files available as attachments",
       "display_name": "Attachments",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/attachments/#the-attachments-tool",
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
@@ -8279,7 +8279,7 @@
       "dependencies": [],
       "description": "Request context compaction before the next reply in this conversation scope",
       "display_name": "Context Compaction",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/configuration/history/#manual-compaction",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8443,7 +8443,7 @@
       "dependencies": [],
       "description": "Start allowed subagents, continue their conversations, and return their results",
       "display_name": "Subagents",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/agent-orchestration/#delegate",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8623,7 +8623,7 @@
       "dependencies": [],
       "description": "Create, update, run, and inspect reusable multi-agent Dynamic Workflows",
       "display_name": "Dynamic Workflows",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -9012,7 +9012,7 @@
       ],
       "description": "Look up facts, entities, and their sources in the agent's knowledge graph",
       "display_name": "Knowledge Graph",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/knowledge-graph/#the-knowledge_graph-tool",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -9190,7 +9190,7 @@
       "dependencies": [],
       "description": "Save, find, and update information the agent remembers",
       "display_name": "Agent Memory",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/memory/#memory",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -9783,7 +9783,7 @@
       "dependencies": [],
       "description": "Share reports through public links that you can revoke",
       "display_name": "Report Publishing",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -9873,7 +9873,7 @@
       "dependencies": [],
       "description": "Create and change the agent's workspace skills",
       "display_name": "Skill Manage",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/skills/#the-skill_manage-tool",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -11193,7 +11193,7 @@
       "dependencies": [],
       "description": "Native Playwright browser tools in an isolated worker Computer. If you have chat_ui, your first call in a conversation already shows the user the Computer panel; use chat_ui.open_panel(panel='computer') only to show it again.",
       "display_name": "Browser MCP",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -14418,7 +14418,7 @@
       ],
       "description": "Social media platform for browsing, posting, and interacting with Reddit communities",
       "display_name": "Reddit",
-      "docs_url": null,
+      "docs_url": "https://docs.mindroom.chat/tools/messaging-and-social/#reddit",
       "executes_code": false,
       "file_access": "none",
       "function_names": [

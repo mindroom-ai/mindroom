@@ -21,6 +21,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Self Config",
         description="Allow an agent to read and modify its own configuration",
+        docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#self_config",
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

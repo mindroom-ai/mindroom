@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Invite Router",
     description="Invite the MindRoom router to the current Matrix room",
+    docs_url="https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

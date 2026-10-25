@@ -221,13 +221,15 @@ def _heading_anchors(page: Path) -> set[str]:
     return anchors
 
 
-def test_every_builtin_tool_docs_link_opens_an_existing_heading_of_mindroom_docs() -> None:
-    """A built-in tool's dashboard docs button opens MindRoom's docs, on a page and heading the docs have."""
+def test_every_builtin_tool_links_an_existing_heading_of_mindroom_docs() -> None:
+    """Every built-in tool's dashboard docs button opens MindRoom's docs, on a page and heading the docs have."""
     _restore_builtin_tool_metadata_state()
-    links = {tool["name"]: urlsplit(tool["docs_url"]) for tool in export_tools_metadata() if tool.get("docs_url")}
+    tools = export_tools_metadata()
 
-    assert links
-    for name, link in sorted(links.items()):
+    assert tools
+    unlinked = sorted(tool["name"] for tool in tools if not tool.get("docs_url"))
+    assert not unlinked, f"Built-in tools without a MindRoom docs link: {unlinked}"
+    for name, link in sorted((tool["name"], urlsplit(tool["docs_url"])) for tool in tools):
         assert link.netloc == "docs.mindroom.chat", f"{name} links to {link.geturl()}, outside MindRoom's docs"
         page = _docs_page(link.path)
         assert page.is_file(), f"{name} links to {link.geturl()}, which has no page"

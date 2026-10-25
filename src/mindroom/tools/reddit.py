@@ -74,7 +74,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["praw"],
-    docs_url=None,
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#reddit",
     function_names=(
         "create_post",
         "get_subreddit_info",

@@ -21,6 +21,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Agent Memory",
         description="Save, find, and update information the agent remembers",
+        docs_url="https://docs.mindroom.chat/memory/#memory",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
