@@ -138,7 +138,7 @@ notify    at most once per hour
 ```
 
 Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
-Each call to a tool the run does not offer logs a `tool_not_offered` warning, and each call whose arguments cannot be decoded logs an `invalid_tool_arguments` warning, both with `entity` and `tool_name` but never the arguments.
+Each call to a tool the run does not offer logs a `tool_not_offered` warning, and each call whose arguments cannot be decoded logs an `invalid_tool_arguments` warning with `reason` `decode` or `not_object`; both carry `entity` and `tool_name`, never the arguments.
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
 

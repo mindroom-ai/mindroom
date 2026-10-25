@@ -23,7 +23,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.failure_text import failure_text
 from mindroom.tool_system.agno_toolkits import (
@@ -61,9 +61,13 @@ DETACHED_SESSION_ID = "default"
 
 @dataclass(frozen=True, slots=True)
 class ToolArgumentError:
-    """A tool call the model sent with arguments that cannot be decoded; ``error_text`` is what the model reads."""
+    """A tool call the model sent with arguments that cannot be decoded; ``error_text`` is what the model reads.
+
+    ``reason`` says whether the arguments did not parse or parsed to something other than an object.
+    """
 
     error_text: str
+    reason: Literal["decode", "not_object"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -229,13 +233,13 @@ def parse_tool_arguments(
         except Exception:
             decoded = ast.literal_eval(raw_arguments)
     except Exception as error:
-        return ToolArgumentError(_DECODE_ERROR_TEXT.format(error=error))
+        return ToolArgumentError(_DECODE_ERROR_TEXT.format(error=error), "decode")
     # TODO(simplify): ``[]`` decodes to None while an empty string decodes to ``{}``, two forms of "no arguments".
     # Both could decode to ``{}``. Stored data would notice: such a call's ``tool_args`` is stored as ``{}``, not null.
     if isinstance(decoded, list) and not decoded:
         return None
     if not isinstance(decoded, dict):
-        return ToolArgumentError(_NOT_AN_OBJECT_ERROR_TEXT)
+        return ToolArgumentError(_NOT_AN_OBJECT_ERROR_TEXT, "not_object")
     cleaned = {name: _argument_value(name, value, function.parameters) for name, value in decoded.items()}
     return model_arguments(cleaned, function)
 

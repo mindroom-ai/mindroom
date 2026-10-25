@@ -5099,12 +5099,7 @@ class ResponseRunner:
             return handle.reply.event_id
 
         return SpanAttempt(
-            register=partial(
-                handle.runtime.spans.register,
-                handle.span_id,
-                room_id=handle.reply.room_id,
-                thread_id=handle.reply.thread_id,
-            ),
+            register=partial(handle.runtime.spans.register, handle.span_id),
             add_stop_button=lambda message_id: self.deps.delivery_gateway.add_reply_stop_button(handle, message_id),
             reply_event=reply_event,
         )

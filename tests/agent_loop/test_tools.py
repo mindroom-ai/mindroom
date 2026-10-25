@@ -151,8 +151,9 @@ def test_unknown_and_undecodable_calls_are_logged_without_their_arguments() -> N
         plan_tool_batch(
             [
                 tool_call("missing", "c1", x="secret-1"),
-                raw_tool_call("add", "c2", "{'a': secret-2"),
-                raw_tool_call("add", "c3", '"secret-3"'),
+                tool_call("m" * 500, "c2"),
+                raw_tool_call("add", "c3", "{'a': secret-2"),
+                raw_tool_call("add", "c4", '"secret-3"'),
             ],
             functions,
             [],
@@ -161,13 +162,15 @@ def test_unknown_and_undecodable_calls_are_logged_without_their_arguments() -> N
             entity="code",
         )
 
-    assert [(entry["log_level"], entry["event"], entry["tool_name"], entry["entity"]) for entry in logs] == [
-        ("warning", "tool_not_offered", "missing", "code"),
-        ("warning", "invalid_tool_arguments", "add", "code"),
-        ("warning", "invalid_tool_arguments", "add", "code"),
+    warning = {"log_level": "warning", "entity": "code"}
+    # Arguments can hold user data, so neither they nor the decode error, which can quote them, are logged; the
+    # model writes an unknown tool's name, so a long one is cut.
+    assert logs == [
+        {**warning, "event": "tool_not_offered", "tool_name": "missing"},
+        {**warning, "event": "tool_not_offered", "tool_name": "m" * 100},
+        {**warning, "event": "invalid_tool_arguments", "tool_name": "add", "reason": "decode"},
+        {**warning, "event": "invalid_tool_arguments", "tool_name": "add", "reason": "not_object"},
     ]
-    # Arguments can hold user data, so neither they nor the decode error, which can quote them, are logged.
-    assert "secret" not in repr(logs)
 
 
 def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:

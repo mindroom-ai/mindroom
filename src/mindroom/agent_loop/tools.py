@@ -34,6 +34,8 @@ logger = get_logger(__name__)
 
 # The model reads the first for a call past the limit and the second for a result that carries media.
 _LIMIT_ERROR_TEXT = "Tool call limit reached. Tool call {name} not executed. Don't try to execute it again."
+# The model writes the name of a tool it was not offered, so the log keeps only this much of it.
+_MAX_LOGGED_TOOL_NAME = 100
 MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
 
 
@@ -142,12 +144,12 @@ def plan_tool_batch(
         name = function_data.get("name")
         function = functions.get(name) if isinstance(name, str) else None
         if function is None:
-            logger.warning("tool_not_offered", entity=entity, tool_name=name)
+            logger.warning("tool_not_offered", entity=entity, tool_name=str(name)[:_MAX_LOGGED_TOOL_NAME])
             messages.append(failed_answer(call_id, name, MISSING_TOOL_ERROR_TEXT))
             continue
         arguments = parse_tool_arguments(function_data.get("arguments"), function)
         if isinstance(arguments, ToolArgumentError):
-            logger.warning("invalid_tool_arguments", entity=entity, tool_name=name)
+            logger.warning("invalid_tool_arguments", entity=entity, tool_name=name, reason=arguments.reason)
             messages.append(failed_answer(call_id, name, arguments.error_text))
             continue
         if max_tool_calls_per_turn is not None:

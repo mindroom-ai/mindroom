@@ -1066,7 +1066,7 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
 
     await runtime.departed(ROOM)
     task = asyncio.create_task(asyncio.Event().wait())
-    runtime.spans.register(span.span_id, task, room_id=ROOM, thread_id=None)
+    runtime.spans.register(span.span_id, task)
 
     with pytest.raises(asyncio.CancelledError):
         await task

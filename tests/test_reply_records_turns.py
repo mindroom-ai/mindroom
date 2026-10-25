@@ -1108,11 +1108,7 @@ async def test_a_stop_reaction_reaches_a_running_reply_only_in_its_room(tmp_path
 
     await asyncio.wait_for(response, timeout=5)
     assert (await _reply(bot)).state is rl.ReplyState.CANCELLED
-    # The Stop's logs name the reply's room, and its cancel the reply's thread too.
-    stop_logs = {entry["event"]: entry for entry in logs}
-    assert stop_logs["Stop requested for message"]["room_id"] == reply.room_id
-    cancel_log = stop_logs["Hard cancelling reply span task"]
-    assert (cancel_log["room_id"], cancel_log["thread_id"]) == (reply.room_id, reply.thread_id)
+    assert [entry["room_id"] for entry in logs if entry["event"] == "Stop requested for message"] == [reply.room_id]
 
 
 async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_path: Path) -> None:
