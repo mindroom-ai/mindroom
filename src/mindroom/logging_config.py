@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import logging.config
+import logging.handlers
 import os
+import queue
 import sys
 import traceback
 from datetime import UTC, datetime
@@ -202,6 +204,50 @@ def _build_logger_levels(
     return handler_level, loggers
 
 
+# Several minutes of busy logging at tens of records a second, in a few tens of megabytes at most.
+_MAX_QUEUED_LOG_FILE_RECORDS = 10_000
+
+
+class _QueuedFileHandler(logging.handlers.QueueHandler):
+    """Format records on the logging thread and append them to the log file from a writer thread.
+
+    A log directory on a network file system can stall writes for minutes, and a write on the event loop would stall
+    every agent with it. Formatting stays on the logging thread, so records keep their bound context and timestamps.
+    The queue is capped so a long stall cannot grow memory without limit: records past the cap skip the file only,
+    stderr still gets them, and the file records how many it skipped once it catches up.
+    """
+
+    def __init__(self, filename: str, mode: str, encoding: str) -> None:
+        # Created first, so `logging.shutdown`, which closes the newest handlers first, drains the queue before the file.
+        file_handler = logging.FileHandler(filename, mode=mode, encoding=encoding)
+        super().__init__(queue.Queue())
+        self.dropped_records = 0
+        self.listener = logging.handlers.QueueListener(self.queue, file_handler)
+        self.listener.start()
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        """Queue the formatted record, or count it as dropped while the queue is at its cap."""
+        if cast("queue.Queue[logging.LogRecord]", self.queue).qsize() >= _MAX_QUEUED_LOG_FILE_RECORDS:
+            self.dropped_records += 1
+            return
+        if self.dropped_records:
+            dropped_records, self.dropped_records = self.dropped_records, 0
+            get_logger(__name__).warning(
+                "Log file dropped records while its writes were stalled",
+                dropped_records=dropped_records,
+            )
+        self.queue.put_nowait(record)
+
+    def close(self) -> None:
+        """Write every queued record, then close the file."""
+        if self.listener is not None:
+            self.listener.stop()
+            for handler in self.listener.handlers:
+                handler.close()
+            self.listener = None
+        super().close()
+
+
 _current_log_file: Path | None = None
 
 
@@ -319,7 +365,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     if log_file is not None:
         handlers["file"] = {
             "level": handler_level,
-            "class": "logging.FileHandler",
+            "()": _QueuedFileHandler,
             "filename": str(log_file),
             "mode": "a",
             "encoding": "utf-8",
