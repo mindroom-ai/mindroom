@@ -52,7 +52,7 @@ Placeholders are replaced as exact tokens, so other braces in prompts stay liter
 
 If the rendered `name` or Matrix account is already taken, `{username}` becomes the slug plus `_` and the first 6 hex characters of the SHA-256 of the user ID, for example `alice_86f01a` for `@alice:example.org`.
 Taken means an authored agent or team, including one saved but not yet reloaded, a template key, `router`, `user`, `_shared`, another generated agent, or an account MindRoom already manages.
-A user on another server than MindRoom's always gets this hashed form, and so does a local user whose slug is not just their localpart lowercased, so nobody elsewhere can take a local person's plain name and `@a.b` never takes the `a_b` that `@a_b` would get.
+A user on another server than MindRoom's always gets this hashed form, so nobody elsewhere can take a local person's plain name.
 A second clash fails that user's onboarding.
 
 Every generated agent also gets these settings, whatever the template says:

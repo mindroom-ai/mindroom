@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_USER_ID = "@Alice_Smith:localhost"
+_USER_ID = "@Alice.Smith:localhost"
 _SUFFIXED_NAME = f"mind_alice_smith_{sha256(_USER_ID.encode()).hexdigest()[:6]}"
 
 
@@ -276,17 +276,6 @@ async def test_remote_user_always_gets_the_hashed_name(tmp_path: Path) -> None:
 
     with patch("mindroom.personal_agents.create_agent_user", new=create_user):
         assert await _provision(config, paths, "@alice:example.org") == _hashed("alice", "@alice:example.org")
-
-
-@pytest.mark.asyncio
-async def test_lossy_slug_gets_only_the_hashed_name(tmp_path: Path) -> None:
-    """A local user whose slug is not their lowercased localpart never takes the plain name it shares with another."""
-    paths = test_runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(deepcopy(BASE), paths)
-
-    with patch("mindroom.personal_agents.create_agent_user", new=_create_agent_user()):
-        assert await _provision(config, paths, "@a.b:localhost") == _hashed("a_b", "@a.b:localhost")
-        assert await _provision(config, paths, "@A_B:localhost") == "mind_a_b"
 
 
 @pytest.mark.asyncio

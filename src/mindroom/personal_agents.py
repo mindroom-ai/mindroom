@@ -120,11 +120,9 @@ def _new_roster_entry(
     }
     slug = personal_agent_username(user_id)
     hashed = f"{slug}_{sha256(user_id.encode()).hexdigest()[:6]}"
-    # A slug that changed the localpart is shared with others, and someone on another server
-    # must not claim a local person's plain name first.
-    localpart, _, domain = user_id.removeprefix("@").partition(":")
-    plain = slug == localpart.lower() and domain == runtime_matrix_domain(runtime_paths)
-    for username in (slug, hashed) if plain else (hashed,):
+    # Someone on another server must not claim a local person's plain name first.
+    local = user_id.partition(":")[2] == runtime_matrix_domain(runtime_paths)
+    for username in (slug, hashed) if local else (hashed,):
         agent_name = template_config.agent_name(template, username)
         rendered = template_config.rendered_matrix_username(username)
         matrix_username = None if rendered is None else namespaced_username_localpart(rendered, runtime_paths)
