@@ -294,6 +294,32 @@ async def test_a_stop_after_tool_call_ends_the_loop_without_another_request() ->
     assert messages[-1].stop_after_tool_call is True
 
 
+async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_its_stop_flag() -> None:
+    """A denied call is answered with its note, marked failed; a stored call that stops the run still stops it."""
+    model = ScriptedModel([answer("never sent")])
+    execution = ToolExecution(tool_call_id="c1", tool_name="echo", tool_args={"text": "switch"}, stop_after_call=True)
+    execution.requires_confirmation = True
+    requirement = RunRequirement(execution)
+    requirement.reject("Alice declined.")
+    record = _record()
+    record.requirements = [requirement]
+    messages = _prompt()
+
+    events, _ = await _run(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
+
+    assert events == [LoopEnded(paused=False)]
+    assert model.requests == []
+    denial = messages[-1]
+    assert (denial.role, denial.tool_call_id, denial.tool_name, denial.tool_args, denial.content) == (
+        "tool",
+        "c1",
+        "echo",
+        {"text": "switch"},
+        "Alice declined.",
+    )
+    assert (denial.tool_call_error, denial.stop_after_tool_call) == (True, True)
+
+
 async def test_a_batch_that_stops_the_run_skips_the_batch_hooks_as_agno_did() -> None:
     """No later request reads what a batch hook adds after a stopping batch, so Agno fired none there."""
     batches: list[list[str | None]] = []

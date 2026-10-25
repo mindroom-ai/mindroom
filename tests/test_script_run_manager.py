@@ -837,6 +837,33 @@ async def test_worker_launch_requires_primary_visible_state_before_snapshot(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("worker pool exhausted"), "worker pool exhausted"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_launch_that_raises_fails_its_run_with_why(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    text: str,
+) -> None:
+    """A run whose launch raises fails with the exception's text, or its type name when it has none."""
+    manager, backend, _client = _manager(tmp_path)
+
+    def fail(*_arguments: object, **_options: object) -> WorkerHandle:
+        raise error
+
+    monkeypatch.setattr(backend, "ensure_worker", fail)
+
+    with pytest.raises(type(error)):
+        await manager.run(_context(tmp_path), source="print('ok')\n")
+
+    [failed] = manager.store.list_runs()
+    assert (failed.state, failed.error) == (ScriptRunState.FAILED, text)
+
+
+@pytest.mark.asyncio
 async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path: Path) -> None:
     """The authored allowlist can only narrow the agent's resolved launch surface."""
     manager, _backend, _client = _manager(tmp_path)
