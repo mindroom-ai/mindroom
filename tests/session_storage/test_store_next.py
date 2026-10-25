@@ -1379,6 +1379,20 @@ def test_unreadable_session_columns_load_as_empty_and_usage_leaves_their_bytes(s
     assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 3
 
 
+def test_json_null_session_data_counts_usage_like_an_empty_row(store: ConversationStore) -> None:
+    """Agno wrote ``null`` for a session without data; its runs count in the totals and move its update time."""
+    store.save_session_state(_session(), {})
+    _execute(store, "UPDATE code_sessions SET session_data = 'null', updated_at = 5 WHERE session_id = 's1'")
+
+    _persist(store, _session(), _run("r1", RunStatus.paused, metrics=_usage(3)))
+    [(updated_at,)] = _query(store, "SELECT updated_at FROM code_sessions")
+    assert updated_at > 5
+    assert _totals(store)["input_tokens"] == 3
+
+    _persist(store, _session(), _run("r1", metrics=_usage(7)))
+    assert _totals(store)["input_tokens"] == 7
+
+
 # --- usage ------------------------------------------------------------------------------------------------------
 
 
