@@ -42,7 +42,6 @@ __all__ = [
     "knowledge_runtime_identity",
     "resolve_agent_knowledge_access",
     "resolve_agent_knowledge_access_async",
-    "resolve_knowledge_base_access",
     "resolve_knowledge_base_access_async",
     "semantic_agent_knowledge_base_ids",
 ]
@@ -409,36 +408,14 @@ def _merge_agent_knowledge_resolutions(
     )
 
 
-def resolve_knowledge_base_access(
-    base_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> KnowledgeBaseAccessResolution:
-    """Resolve one knowledge base without going through an agent assignment."""
-    source, availability, last_error = _resolve_base_knowledge(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        refresh_scheduler=None,
-        execution_identity=execution_identity,
-    )
-    return KnowledgeBaseAccessResolution(
-        knowledge=AgentKnowledge(sources=(source,)) if source is not None else None,
-        availability=availability,
-        last_error=last_error,
-    )
-
-
 async def resolve_knowledge_base_access_async(
     base_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> KnowledgeBaseAccessResolution:
-    """Resolve one knowledge base without blocking the event loop on index I/O."""
+    """Resolve one knowledge base, without going through an agent assignment or blocking the loop on index I/O."""
     source, availability, last_error = await _resolve_base_knowledge_async(
         base_id,
         config=config,

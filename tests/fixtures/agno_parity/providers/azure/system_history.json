@@ -70,6 +70,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -88,8 +90,6 @@
           "content": "And for the evening?"
         }
       ],
-      "model": "gpt-6-astra",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       }

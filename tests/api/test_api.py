@@ -45,6 +45,7 @@ from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from mindroom.workers.backend import WorkerBackend
@@ -59,6 +60,7 @@ from tests.api.conftest import (
     use_trusted_upstream_runtime,
 )
 from tests.oauth_test_utils import publish_oauth_credentials
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 TEST_WORKER_AUTH = "token"
 
@@ -1467,6 +1469,83 @@ def test_get_agents(test_client: TestClient) -> None:
     assert "display_name" in agent
     assert "tools" in agent
     assert "rooms" in agent
+
+
+def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Every roster entry is listed with its account, status, and whether its template still exists.
+
+    Dave is onboarded after the config was loaded, so the loaded config has no agent for him yet.
+    Alice's account was registered under an earlier namespace on the real server name, which the listing keeps.
+    """
+    runtime_paths = main._app_runtime_paths(main.app)
+    for entry in (
+        personal_agent_entry(),
+        personal_agent_entry(
+            "@bob:localhost",
+            agent_name="mind_bob",
+            matrix_username="bob.mind",
+            user_display_name="Bob",
+            pending=True,
+        ),
+        personal_agent_entry("@carol:localhost", template="old", agent_name="old_carol"),
+    ):
+        _append_personal_agent_roster_entry(runtime_paths, entry)
+    config_data = yaml.safe_load(temp_config_file.read_text())
+    config_data["personal_agents"] = {"mind": {"agent": {"display_name": "{user_display_name}'s Mind"}}}
+    temp_config_file.write_text(yaml.dump(config_data))
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app)
+    _append_personal_agent_roster_entry(
+        runtime_paths,
+        personal_agent_entry("@dave:localhost", agent_name="mind_dave", user_display_name="Dave"),
+    )
+    matrix_state = MatrixState.load(runtime_paths=runtime_paths)
+    matrix_state.add_account("agent_mind_alice_smith", "mindroom_mind_alice_smith_old", None, domain="example.org")
+    matrix_state.save(runtime_paths=runtime_paths)
+
+    response = test_client.get("/api/config/personal-agents")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "template": "mind",
+            "user_id": "@Alice.Smith:example.org",
+            "agent_name": "mind_alice_smith",
+            "matrix_user_id": "@mindroom_mind_alice_smith_old:example.org",
+            "display_name": "Alice's Mind",
+            "pending": False,
+            "template_exists": True,
+        },
+        {
+            "template": "mind",
+            "user_id": "@bob:localhost",
+            "agent_name": "mind_bob",
+            "matrix_user_id": "@bob.mind:localhost",
+            "display_name": "Bob's Mind",
+            "pending": True,
+            "template_exists": True,
+        },
+        {
+            "template": "old",
+            "user_id": "@carol:localhost",
+            "agent_name": "old_carol",
+            "matrix_user_id": "@mindroom_old_carol:localhost",
+            "display_name": None,
+            "pending": False,
+            "template_exists": False,
+        },
+        {
+            "template": "mind",
+            "user_id": "@dave:localhost",
+            "agent_name": "mind_dave",
+            "matrix_user_id": "@mindroom_mind_dave:localhost",
+            "display_name": "Dave's Mind",
+            "pending": False,
+            "template_exists": True,
+        },
+    ]
 
 
 def test_create_agent(test_client: TestClient, sample_agent_data: dict[str, Any], temp_config_file: Path) -> None:

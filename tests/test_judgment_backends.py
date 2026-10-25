@@ -8,6 +8,7 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 import httpx
+import httpx2
 import pytest
 from google.oauth2.credentials import Credentials
 
@@ -238,13 +239,13 @@ async def test_llm_gemini_judgment_requires_json_output(tmp_path: Path, vertexai
 @pytest.mark.asyncio
 async def test_llm_native_tool_mode_is_refused_before_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A dedicated judge cannot execute automatic provider tools."""
-    requests: list[httpx.Request] = []
+    requests: list[httpx2.Request] = []
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
-        return httpx.Response(500)
+        return httpx2.Response(500)
 
-    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx.AsyncClient(transport=httpx.MockTransport(respond)).send)
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx2.AsyncClient(transport=httpx2.MockTransport(respond)).send)
     config = Config(models={"cheap": ModelConfig(provider="groq", id="groq/compound", api_key="synthetic")})
     result = await judge_with_llm(
         _request(),

@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from mindroom.providers.openai import codex_auth, kimi_auth
+from mindroom.providers.errors import CliLoginError
+from mindroom.providers.openai import cli_login, codex_auth, kimi_auth
 from tests.providers.openai_family_support import unsigned_jwt
 
 if TYPE_CHECKING:
@@ -159,20 +160,22 @@ def test_an_expired_codex_token_is_refreshed_and_saved(tmp_path: Path, monkeypat
     assert "last_refresh" in auth
 
 
-def test_refreshed_codex_tokens_are_never_world_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The temporary file the refreshed tokens go through is private from the start, as is the auth file."""
-    codex_home = tmp_path / ".codex"
-    codex_home.mkdir()
-    auth_path = codex_home / "auth.json"
+def test_a_saved_cli_login_is_never_world_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The temporary file refreshed tokens go through is private from the start, as is the login file."""
+    auth_path = tmp_path / "auth.json"
     observed = _temp_file_modes(monkeypatch, "auth.json.tmp")
     old_umask = os.umask(0o022)
     try:
-        codex_auth._write_codex_auth(auth_path, {"auth_mode": "chatgpt", "tokens": {"access_token": "token"}})
+        cli_login.write_private_json(auth_path, {"auth_mode": "chatgpt", "tokens": {"access_token": "token"}})
     finally:
         os.umask(old_umask)
 
     assert observed == [0o600]
     assert stat.S_IMODE(auth_path.stat().st_mode) == 0o600
+    assert json.loads(auth_path.read_text(encoding="utf-8")) == {
+        "auth_mode": "chatgpt",
+        "tokens": {"access_token": "token"},
+    }
 
 
 def test_concurrent_codex_borrowers_share_one_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,22 +324,6 @@ def test_an_expired_kimi_token_is_refreshed_and_saved(tmp_path: Path, monkeypatc
     assert credentials["expires_at"] > int(time.time())
 
 
-def test_refreshed_kimi_tokens_are_never_world_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The temporary file the refreshed credentials go through is private from the start, as is the file itself."""
-    credentials_dir = tmp_path / "credentials"
-    credentials_dir.mkdir()
-    credentials_path = credentials_dir / "kimi-code.json"
-    observed = _temp_file_modes(monkeypatch, "kimi-code.json.tmp")
-    old_umask = os.umask(0o022)
-    try:
-        kimi_auth._write_kimi_credentials(credentials_path, {"access_token": "token"})
-    finally:
-        os.umask(old_umask)
-
-    assert observed == [0o600]
-    assert stat.S_IMODE(credentials_path.stat().st_mode) == 0o600
-
-
 def test_concurrent_kimi_borrowers_share_one_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A second borrower waits for the first one's refresh instead of racing the refresh-token rotation."""
     kimi_home = tmp_path / ".kimi-code"
@@ -421,3 +408,58 @@ def test_a_failed_kimi_refresh_keeps_the_saved_login(
         kimi_auth.borrow_kimi_token(kimi_home=kimi_home)
 
     assert credentials_path.read_text(encoding="utf-8") == saved
+
+
+# --- Both logins ---------------------------------------------------------------------------------------------
+
+
+def _expired_login(tmp_path: Path, login: str) -> Callable[[], object]:
+    """Save an expired ``login`` under ``tmp_path`` and return the call that borrows it."""
+    if login == "codex":
+        _write_codex_auth(tmp_path / ".codex", unsigned_jwt({"exp": int(time.time()) - 60}), "refresh-value")
+        return lambda: codex_auth.borrow_codex_key(codex_home=tmp_path / ".codex")
+    _write_kimi_credentials(tmp_path / ".kimi-code", "old-access", "refresh-value", expires_at=int(time.time()) - 60)
+    return lambda: kimi_auth.borrow_kimi_token(kimi_home=tmp_path / ".kimi-code")
+
+
+@pytest.mark.parametrize(("login", "body_kind"), [("codex", "json"), ("kimi", "data")])
+def test_each_login_refreshes_with_the_body_its_server_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    login: str,
+    body_kind: str,
+) -> None:
+    """Codex's login server reads the refresh as JSON and Kimi's as a form."""
+    borrow = _expired_login(tmp_path, login)
+    sent: list[dict[str, object]] = []
+
+    def post(_url: str, **kwargs: object) -> httpx.Response:
+        sent.append({kind: body for kind, body in kwargs.items() if kind in {"json", "data"} and body is not None})
+        return httpx.Response(200, json={"access_token": "new-access"})
+
+    monkeypatch.setattr(httpx, "post", post)
+    borrow()
+
+    [body] = sent
+    assert list(body) == [body_kind]
+    assert body[body_kind] == {
+        "client_id": codex_auth._CODEX_CLIENT_ID if login == "codex" else kimi_auth._KIMI_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh-value",
+    }
+
+
+@pytest.mark.parametrize("login", ["codex", "kimi"])
+def test_a_refused_refresh_reports_the_status_the_login_server_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    login: str,
+) -> None:
+    """The error of a refused refresh carries its HTTP status, which tells a revoked login from an outage."""
+    borrow = _expired_login(tmp_path, login)
+    _answer_refresh(monkeypatch, httpx.Response(503, text="maintenance"))
+
+    with pytest.raises(CliLoginError) as raised:
+        borrow()
+
+    assert raised.value.status_code == 503

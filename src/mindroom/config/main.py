@@ -495,7 +495,11 @@ class Config(BaseModel):
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     personal_agents: dict[str, PersonalAgentTemplateConfig] = Field(
         default_factory=dict,
-        description="Templates that give every onboarded user their own agent",
+        description=(
+            "Templates that give every onboarded user their own agent; "
+            "select a template's key as the Personal rooms agent to use it"
+        ),
+        json_schema_extra=dashboard_hint(key_placeholder="mind"),
     )
     personal_rooms: PersonalRoomsConfig | None = Field(default=None, description="Optional native personal agent rooms")
     budgets: BudgetsConfig | None = Field(default=None, description="Optional per-user monthly spending budgets")
@@ -1348,6 +1352,10 @@ class Config(BaseModel):
             msg = f"Unknown agent: {agent_name}. Available agents: {available}"
             raise ValueError(msg)
         return self.agents[agent_name]
+
+    def configured_team_name(self, team_name: str) -> str | None:
+        """Return ``team_name`` when it names a configured team, else None: an ad hoc team is no configured entity."""
+        return team_name if team_name in self.teams else None
 
     def _default_history_settings(self) -> ResolvedHistorySettings:
         """Return defaults-only replay settings for ad hoc shared team scope."""

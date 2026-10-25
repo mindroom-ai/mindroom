@@ -304,6 +304,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "messages": [
         {
           "role": "developer",
@@ -314,8 +316,6 @@
           "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
         }
       ],
-      "model": "gpt-6-astra",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

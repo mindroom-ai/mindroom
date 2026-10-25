@@ -25,6 +25,7 @@ from mindroom.orchestrator import _finish_runtime_shutdown
 from mindroom.providers.model_http_client import aclose_model_http_client, closing_model_connections
 from mindroom.providers.registry import build_model_provider
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.providers.family_support import FAMILIES
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -55,10 +56,14 @@ _REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")], stream=Fa
 
 
 class _ModelsServer:
-    """A keep-alive server that answers chat and message requests with a finished reply, anything else empty."""
+    """A keep-alive server that answers chat and message requests with a finished reply, anything else empty.
+
+    A streamed request gets ``stream`` as a chunked event stream, whose terminating chunk follows its last event.
+    """
 
     def __init__(self) -> None:
         self.url = ""
+        self.stream = b""
         self.connections = 0
         self.peer: tuple[str, int] = ("", 0)
         self.closed = asyncio.Event()
@@ -71,8 +76,13 @@ class _ModelsServer:
                 head = (await reader.readuntil(b"\r\n\r\n")).decode()
                 request_line, *header_lines = head.split("\r\n")
                 headers = dict(line.lower().split(": ", 1) for line in header_lines if ": " in line)
-                await reader.readexactly(int(headers.get("content-length", "0")))
+                request_body = await reader.readexactly(int(headers.get("content-length", "0")))
                 path = request_line.split(" ")[1]
+                if request_body and json.loads(request_body).get("stream"):
+                    start = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    writer.write(start + b"%x\r\n%s\r\n0\r\n\r\n" % (len(self.stream), self.stream))
+                    await writer.drain()
+                    continue
                 reply = (
                     _CHAT_COMPLETION
                     if path.endswith("/chat/completions")
@@ -100,12 +110,12 @@ async def server() -> AsyncIterator[_ModelsServer]:
     listener.close()
 
 
-def _provider(tmp_path: Path, provider: str, base_url: str) -> ModelProvider:
+def _provider(tmp_path: Path, provider: str, base_url: str, api: str | None = None) -> ModelProvider:
     """Build the configured model as the runtime does, sending to ``base_url``."""
     runtime_paths = test_runtime_paths(tmp_path)
     client_params = {"base_url": f"{base_url}/v1" if provider == "openai" else base_url, "max_retries": 0}
     extra_kwargs = {"api_key": "test", "client_params": client_params}
-    model = ModelConfig(provider=provider, id="test-model", extra_kwargs=extra_kwargs)
+    model = ModelConfig(provider=provider, id="test-model", api=api, extra_kwargs=extra_kwargs)
     config = bind_runtime_paths(Config(models={"default": model}), runtime_paths)
     return build_model_provider(config, runtime_paths)
 
@@ -147,6 +157,31 @@ async def test_collected_model_leaves_its_pooled_connection_alone(
     finally:
         gc.enable()
     await _send(_provider(tmp_path, provider, server.url))
+    assert server.connections == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "api", "family"),
+    [
+        ("openai", "chat_completions", "openai_chat"),
+        ("openai", "responses", "openai_responses"),
+        ("anthropic", None, "anthropic"),
+    ],
+)
+async def test_a_streamed_reply_returns_its_connection_to_the_pool(
+    tmp_path: Path,
+    server: _ModelsServer,
+    provider: str,
+    api: str | None,
+    family: str,
+) -> None:
+    """A reply streamed to its end leaves its connection pooled, so the next request opens no new one."""
+    server.stream = FAMILIES[family].reply().content
+    model = _provider(tmp_path, provider, server.url, api)
+    for _ in range(2):
+        turn = await complete(model, ModelRequest(messages=[Message(role="user", content="Hi")]))
+        assert turn.message.content == "ok"
     assert server.connections == 1
 
 

@@ -49,6 +49,7 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
       "input": [
         {
           "role": "developer",
@@ -59,7 +60,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
       "store": true
     },

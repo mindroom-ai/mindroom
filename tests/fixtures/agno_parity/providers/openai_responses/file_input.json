@@ -57,6 +57,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "role": "developer",
@@ -77,10 +79,8 @@
           ]
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
-      "store": true,
-      "stream": true
+      "store": true
     },
     "headers": {
       "accept": "application/json",

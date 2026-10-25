@@ -591,6 +591,8 @@ class TestDelegateKnowledge:
             execution_identity=None,
             include_interactive_questions=False,
             refresh_scheduler=_FakeRefreshScheduler(),
+            knowledge=None,
+            active_model_name=None,
         )
         run_subagent = next(
             function
@@ -991,6 +993,8 @@ class TestDelegateAutoInjection:
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" in tool_names
@@ -1009,6 +1013,8 @@ class TestDelegateAutoInjection:
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1033,6 +1039,8 @@ class TestDelegateAutoInjection:
             execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
+            knowledge=None,
+            active_model_name=None,
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1055,6 +1063,8 @@ class TestDelegateAutoInjection:
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1080,6 +1090,8 @@ class TestDelegateAutoInjection:
             execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
+            knowledge=None,
+            active_model_name=None,
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1106,6 +1118,8 @@ class TestDelegateAutoInjection:
             execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
+            knowledge=None,
+            active_model_name=None,
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names

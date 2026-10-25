@@ -9,8 +9,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
-import httpx
-
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.providers.errors import classify_provider_error, provider_failure
@@ -23,11 +21,14 @@ __all__ = [
 ]
 
 
-def sdk_failures() -> tuple[type[Exception], ...]:
-    """Return the exception types adapters map with ``provider_error``; resolved late to keep the SDK unloaded."""
+def sdk_failures() -> type[Exception]:
+    """Return the exception type adapters map with ``provider_error``; resolved late to keep the SDK unloaded.
+
+    The SDK raises every failure as its own error, a transport failure in a request or a stream included.
+    """
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
-    return (openai.OpenAIError, httpx.TransportError)
+    return openai.OpenAIError
 
 
 def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:

@@ -16,9 +16,6 @@ from mindroom import interactive
 from mindroom.approval import manager as approval_manager
 from mindroom.approval import transport as approval_transport
 from mindroom.approval.inbound import maybe_handle_tool_approval_reply
-from mindroom.approval.manager import (
-    initialize_approval_store,
-)
 from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     ApprovalActionResult,
@@ -73,6 +70,8 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     activate_interactive_prompt,
+    handle_card_response_for_test,
+    initialize_approval_store_for_test,
     install_relation_lookup,
     make_matrix_client_mock,
     record_turn_answered,
@@ -1533,7 +1532,7 @@ class TestAgentBot(AgentBotTestBase):
             async def send_delivery(delivery: MatrixDelivery) -> str:
                 return "$approval" if delivery.stage is DeliveryStage.INITIAL else "$approval-edit"
 
-            initialize_approval_store(
+            initialize_approval_store_for_test(
                 runtime_paths,
                 prepare_event=prepare_event,
                 send_delivery=send_delivery,
@@ -1609,7 +1608,7 @@ class TestAgentBot(AgentBotTestBase):
             await restarted._journal_dispatcher.drain_once()
 
         if requires_human:
-            manager = initialize_approval_store(
+            manager = initialize_approval_store_for_test(
                 runtime_paths,
                 prepare_event=prepare_event,
                 send_delivery=send_delivery,
@@ -1624,12 +1623,12 @@ class TestAgentBot(AgentBotTestBase):
             )
             restarted._journal_dispatcher.release_turn_replay()
             try:
-                resolved = await manager.handle_card_response(
+                resolved = await handle_card_response_for_test(
+                    manager,
                     room_id="!test:localhost",
                     sender_id="@user:localhost",
                     card_event_id="$approval",
                     status="approved",
-                    reason=None,
                     authorize_responder=lambda _entity_name: True,
                 )
                 assert resolved.consumed is True
@@ -2122,7 +2121,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             cards = bot._journal_store.principal("router@shared")
             transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: router)
-            initialize_approval_store(
+            initialize_approval_store_for_test(
                 runtime_paths,
                 cards=cards,
                 resolve_action_delivery=transport.resolve_approval_action_delivery,

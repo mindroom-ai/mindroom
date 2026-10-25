@@ -49,6 +49,7 @@
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
       "messages": [
         {
           "role": "system",
@@ -59,7 +60,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "openai/gpt-oss-120b",
       "tools": []
     },
     "headers": {

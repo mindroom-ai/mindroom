@@ -172,8 +172,8 @@ signal.signal(signal.SIGUSR1, lambda *_: release.set())
 original = read_worker.read_collection
 
 @contextmanager
-def select(request):
-    with original(request) as collection:
+def select(*selection):
+    with original(*selection) as collection:
         Path(sys.argv[1]).write_text(collection)
         release.wait()
         yield collection

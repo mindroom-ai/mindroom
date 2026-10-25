@@ -226,7 +226,7 @@ With `defer_reaction` set, each message that can wait gets that reaction once.
 
 When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
 If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
-A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
+A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the agent starts sending its reply, leaves the original text as the one answered.
 Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
 While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
 Edits by agents never trigger regeneration, and an agent's message edited while it still waits is answered with its original text.

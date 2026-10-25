@@ -492,11 +492,7 @@ def _parse_optional_execution_identity(
 ) -> ToolExecutionIdentity | None:
     if payload is None:
         return None
-    return parse_tool_execution_identity_payload(
-        payload,
-        strict=True,
-        error_prefix=f"Delegation locator {field_name}",
-    )
+    return parse_tool_execution_identity_payload(payload, error_prefix=f"Delegation locator {field_name}")
 
 
 def _validate_metadata(metadata: DelegationMetadata) -> None:

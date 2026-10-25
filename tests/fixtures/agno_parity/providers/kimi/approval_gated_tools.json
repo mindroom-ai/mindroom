@@ -130,6 +130,8 @@
   },
   "request": {
     "body": {
+      "model": "k3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -140,8 +142,6 @@
           "content": "Email the invoice for order A-1001."
         }
       ],
-      "model": "k3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

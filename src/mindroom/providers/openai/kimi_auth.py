@@ -1,8 +1,4 @@
-"""Borrow the Kimi Code CLI's OAuth login for the Kimi route.
-
-The access token is refreshed under the CLI's file lock when it is about to expire, so MindRoom and a
-running Kimi Code CLI never write the credentials file at the same time.
-"""
+"""Borrow the Kimi Code CLI's OAuth login for the Kimi route, refreshing its access token when about to expire."""
 
 from __future__ import annotations
 
@@ -12,10 +8,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
-
-from mindroom.file_locks import advisory_file_lock
 from mindroom.providers.errors import CliLoginError
+from mindroom.providers.openai.cli_login import borrow_under_lock, post_token_refresh, write_private_json
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -39,30 +33,31 @@ def normalize_kimi_model_id(model_id: str) -> str:
     return model_id.strip().removeprefix(_KIMI_MODEL_PREFIX)
 
 
-def borrow_kimi_token(*, kimi_home: str | Path | None = None) -> str:
+def borrow_kimi_token(*, kimi_home: str | Path | None) -> str:
     """Return a valid Kimi Code CLI OAuth access token, refreshing it when expired."""
     credentials_path = _kimi_credentials_path(kimi_home=kimi_home)
-    if (usable_token := _usable_access_token(_read_kimi_credentials(credentials_path))) is not None:
-        return usable_token
+    return borrow_under_lock(
+        credentials_path,
+        usable=lambda: _usable_access_token(_read_kimi_credentials(credentials_path)),
+        refresh=lambda: _refresh_kimi_credentials(credentials_path),
+    )
 
-    with advisory_file_lock(credentials_path.with_name(f"{credentials_path.name}.lock")):
-        credentials = _read_kimi_credentials(credentials_path)
-        if (usable_token := _usable_access_token(credentials)) is not None:
-            return usable_token
 
-        refresh_token = credentials.get("refresh_token")
-        if not refresh_token:
-            msg = "No Kimi Code refresh token found. Run `kimi` and `/login` to re-authenticate."
-            raise KimiAuthError(msg)
+def _refresh_kimi_credentials(credentials_path: Path) -> str:
+    credentials = _read_kimi_credentials(credentials_path)
+    refresh_token = credentials.get("refresh_token")
+    if not refresh_token:
+        msg = "No Kimi Code refresh token found. Run `kimi` and `/login` to re-authenticate."
+        raise KimiAuthError(msg)
 
-        refreshed = _refresh_kimi_tokens(str(refresh_token))
-        if not refreshed.get("access_token"):
-            msg = "Kimi token refresh response did not include an access token."
-            raise KimiAuthError(msg)
+    refreshed = _refresh_kimi_tokens(str(refresh_token))
+    if not refreshed.get("access_token"):
+        msg = "Kimi token refresh response did not include an access token."
+        raise KimiAuthError(msg)
 
-        _update_credentials(credentials, refreshed)
-        _write_kimi_credentials(credentials_path, credentials)
-        return str(credentials["access_token"])
+    _update_credentials(credentials, refreshed)
+    write_private_json(credentials_path, credentials)
+    return str(credentials["access_token"])
 
 
 def _kimi_credentials_path(*, kimi_home: str | Path | None) -> Path:
@@ -95,44 +90,17 @@ def _usable_access_token(credentials: Mapping[str, Any]) -> str | None:
     return access_token
 
 
-def _write_kimi_credentials(credentials_path: Path, credentials: dict[str, Any]) -> None:
-    temp_path = credentials_path.with_name(f"{credentials_path.name}.tmp")
-    temp_path.unlink(missing_ok=True)
-    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
-        temp_file.write(json.dumps(credentials, indent=2))
-    temp_path.replace(credentials_path)
-    credentials_path.chmod(0o600)
-
-
 def _refresh_kimi_tokens(refresh_token: str) -> dict[str, Any]:
-    payload = {
-        "client_id": _KIMI_CLIENT_ID,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-    }
-    try:
-        response = httpx.post(_KIMI_REFRESH_URL, data=payload, timeout=10)
-    except httpx.HTTPError as exc:
-        msg = f"Kimi token refresh failed: {exc}"
-        raise KimiAuthError(msg) from exc
-
-    if not response.is_success:
-        msg = (
+    return post_token_refresh(
+        _KIMI_REFRESH_URL,
+        service="Kimi",
+        error=KimiAuthError,
+        refused=lambda response: (
             f"Kimi token refresh failed (HTTP {response.status_code}): {response.text}. "
             "Run `kimi` and `/login` to re-authenticate if the refresh token expired."
-        )
-        raise KimiAuthError(msg, status_code=response.status_code) from None
-
-    try:
-        refreshed = response.json()
-    except json.JSONDecodeError as exc:
-        msg = "Kimi token refresh returned invalid JSON."
-        raise KimiAuthError(msg) from exc
-    if not isinstance(refreshed, dict):
-        msg = "Kimi token refresh returned an unexpected payload."
-        raise KimiAuthError(msg)
-    return refreshed
+        ),
+        form_body={"client_id": _KIMI_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": refresh_token},
+    )
 
 
 def _update_credentials(credentials: dict[str, Any], refreshed: dict[str, Any]) -> None:

@@ -576,12 +576,22 @@ async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shared_key_in", ["credentials", "environment"])
 async def test_an_azure_model_with_an_ad_token_never_sends_the_shared_key(
     runtime_paths: RuntimePaths,
     wire: Wire,
+    tmp_path: Path,
+    shared_key_in: str,
 ) -> None:
     """An Azure model that authenticates with an Entra ID token needs no key, so the shared one stays local."""
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("azure", {"api_key": "sk-shared"})
+    if shared_key_in == "credentials":
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("azure", {"api_key": "sk-shared"})
+    else:
+        runtime_paths = resolve_runtime_paths(
+            config_path=runtime_paths.config_path,
+            storage_path=tmp_path / "data",
+            process_env={"AZURE_OPENAI_API_KEY": "sk-shared"},
+        )
     extra_kwargs = {"azure_ad_token": "entra-token", "azure_endpoint": "https://test.openai.azure.com"}
     model_config = ModelConfig(
         provider="azure",

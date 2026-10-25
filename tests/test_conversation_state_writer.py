@@ -126,6 +126,8 @@ def test_private_ad_hoc_team_history_scope_is_requester_partitioned(tmp_path: Pa
     assert alice_scope.scope_id.startswith("team_private_worker+shared_requester_")
     assert bob_scope.scope_id.startswith("team_private_worker+shared_requester_")
     assert alice_scope != bob_scope
+    with pytest.raises(ValueError, match=r"^Private ad hoc team history scope requires requester identity$"):
+        writer.team_history_scope([ids["private_worker"], ids["shared"]], requester_user_id=None)
 
 
 def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: Path) -> None:

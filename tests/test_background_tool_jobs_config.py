@@ -82,7 +82,15 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
     ScriptedAgents({"lead": ScriptedModel([answer("done")])}).install(monkeypatch)
     owner = completed_delegation_job().owner
     try:
-        build = create_agent("lead", config, paths, owner, include_interactive_questions=False)
+        build = create_agent(
+            "lead",
+            config,
+            paths,
+            owner,
+            include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
+        )
         record = await run_built_turn(build, config=config, runtime_paths=paths, prompt="hello")
         assert "mindroom_tool_authority" not in (record.metadata or {})
         assert (build.tool_jobs is not None) is enabled
@@ -224,7 +232,15 @@ async def test_an_agent_admits_its_calls_as_jobs_only_when_enabled(
     model = ScriptedModel([answer("done")])
     # Without an execution identity, the agent's model is served by its configured model name.
     ScriptedAgents({"default": model}).install(monkeypatch)
-    build = create_agent("lead", config, paths, execution_identity=None, persist_runtime_state=False)
+    build = create_agent(
+        "lead",
+        config,
+        paths,
+        execution_identity=None,
+        persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
+    )
     assert (build.tool_jobs is not None) is enabled
     if build.tool_jobs is not None:
         assert "add" in build.tool_jobs.tools

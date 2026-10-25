@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 # The dashboard's configSchema.ts understands exactly this hint vocabulary.
 HINT_KEY = "x-mindroom"
-_HINT_FIELDS = {"reference", "key_reference", "secret", "multiline"}
+_HINT_FIELDS = {"reference", "key_reference", "key_placeholder", "secret", "multiline"}
 _REFERENCE_KINDS = {"model", "agent", "personal_room_agent", "room", "tool"}
 
 
@@ -107,6 +107,7 @@ def test_dashboard_hint_omits_unset_fields() -> None:
     }
     assert dashboard_hint(secret=True) == {HINT_KEY: {"secret": True}}
     assert dashboard_hint(multiline=True) == {HINT_KEY: {"multiline": True}}
+    assert dashboard_hint(key_placeholder="mind") == {HINT_KEY: {"key_placeholder": "mind"}}
 
 
 def test_reference_fields_are_annotated() -> None:

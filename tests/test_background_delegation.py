@@ -719,6 +719,10 @@ async def test_early_child_failure_retains_liveness_through_settlement(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     settling, release = asyncio.Event(), asyncio.Event()
     original_interrupt = delegation_execution.interrupt_child
@@ -757,6 +761,7 @@ async def test_early_child_failure_retains_liveness_through_settlement(
                 config=config,
                 runtime_paths=paths,
                 refresh_scheduler=None,
+                output_request=None,
             ),
         )
         try:
@@ -837,13 +842,17 @@ async def _drive_background_child(
     run_child: Callable[..., Awaitable[str]],
     *,
     while_waiting: Callable[[], Awaitable[None]] | None = None,
+    child_model: ScriptedModel | None = None,
 ) -> RunRecord:
-    """Drive one parent delegation whose child runs as a managed job, acting once the child starts."""
+    """Drive one parent delegation whose child runs as a managed job, acting once the child starts.
+
+    ``child_model`` answers a child that ``run_child`` runs as a real child turn.
+    """
     paths = _runtime_paths(tmp_path)
     config = _config(jobs=False)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
-    agents = ScriptedAgents({})
+    agents = ScriptedAgents({} if child_model is None else {"code": child_model})
     agents.install(monkeypatch)
     leader = DelegatingLeader(config, paths, _BACKGROUND_PARENT, agents)
     try:
@@ -962,7 +971,10 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Losing access while the parent waits on its background child ends the call, not the parent's reply."""
+    """Losing access while the parent waits on its background child fails the call, not the parent's reply.
+
+    The call answers as failed, as an ordinary job's call does when its wait is refused.
+    """
     allowed = True
     runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
     child = _BlockingChild()
@@ -975,8 +987,9 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(
 
     response = await _drive_background_child(tmp_path, monkeypatch, runtime, child, while_waiting=revoke)
     assert response.status is RunStatus.completed
-    result = next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting")
-    assert "not available" in str(result)
+    [answered] = [message for message in response.messages or () if message.tool_call_id == "waiting"]
+    assert answered.content == "Tool job is not available in this conversation."
+    assert answered.tool_call_error is True
     state = DelegationState.from_metadata(response.metadata)
     assert state.children == []
     assert all(hook.after_called for hook in state.hooks.values())
@@ -1072,21 +1085,86 @@ async def test_a_child_that_fails_without_error_text_tells_its_parent_what_faile
     if background:
         response = await _drive_background_child(tmp_path, monkeypatch, await tool_job_runtime(tmp_path), run_child)
     else:
-        paths = _runtime_paths(tmp_path)
-        config = _config(jobs=False)
-        agents = ScriptedAgents({})
-        agents.install(monkeypatch)
-        leader = DelegatingLeader(config, paths, _BACKGROUND_PARENT, agents)
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)):
-            paused = await leader.turn(
-                calls(tool_call("run_subagent", "waiting", agent_name="code", task="Research")),
-                answer("Parent done"),
-            )
-            response = await leader.drive(paused, run_child)
+        response = await _drive_inline_child(tmp_path, monkeypatch, run_child)
     result = str(next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting"))
     assert result.startswith("Delegation to 'code' failed: TimeoutError\n\n")
     [record] = [json.loads(path.read_text()) for path in tmp_path.rglob("delegations/**/run.json")]
     assert (record["status"], record["error"]) == ("failed", "TimeoutError")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("background", "outcome"),
+    [(False, "completed"), (False, "failed"), (True, "completed"), (True, "failed"), (True, "cancelled")],
+)
+async def test_a_child_that_ran_and_did_not_complete_answers_its_parent_s_call_as_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    background: bool,
+    outcome: Literal["completed", "failed", "cancelled"],
+) -> None:
+    """A child that failed or was cancelled answers its parent's call as failed, which Claude and Gemini read as one.
+
+    The parent's model reads the same text either way; a child that completed answers as an ordinary result.
+    """
+    child_model = ScriptedModel([answer("Child finished")])
+    blocking = _BlockingChild()
+
+    async def run_child(child: DelegationChild, **kwargs: Any) -> str:  # noqa: ANN401
+        if outcome == "failed":
+            msg = "provider down"
+            raise RuntimeError(msg)
+        if outcome == "cancelled":
+            return await blocking(child)
+        return await ai.run_delegated_child_response(child, **kwargs)
+
+    if background:
+        runtime = await tool_job_runtime(tmp_path)
+
+        async def cancel_child() -> None:
+            running = await blocking.running()
+            await cancel_settled(runtime, running.delegation_id, owner=_BACKGROUND_PARENT, depth=0)
+
+        response = await _drive_background_child(
+            tmp_path,
+            monkeypatch,
+            runtime,
+            run_child,
+            while_waiting=cancel_child if outcome == "cancelled" else None,
+            child_model=child_model,
+        )
+    else:
+        response = await _drive_inline_child(tmp_path, monkeypatch, run_child, child_model=child_model)
+    [answered] = [message for message in response.messages or () if message.tool_call_id == "waiting"]
+    expected = {
+        "completed": "Child finished",
+        "failed": "Delegation to 'code' failed: provider down",
+        "cancelled": "Delegation cancelled.",
+    }[outcome]
+    assert str(answered.content).startswith(expected)
+    assert bool(answered.tool_call_error) is (outcome != "completed")
+
+
+async def _drive_inline_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_child: Callable[..., Awaitable[str]],
+    *,
+    child_model: ScriptedModel | None = None,
+) -> RunRecord:
+    """Drive one parent delegation whose child runs inline in the parent's call, without the job runtime."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(jobs=False)
+    agents = ScriptedAgents({} if child_model is None else {"code": child_model})
+    agents.install(monkeypatch)
+    leader = DelegatingLeader(config, paths, _BACKGROUND_PARENT, agents)
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)):
+        paused = await leader.turn(
+            calls(tool_call("run_subagent", "waiting", agent_name="code", task="Research")),
+            answer("Parent done"),
+        )
+        return await leader.drive(paused, run_child)
 
 
 @pytest.mark.asyncio
@@ -1144,6 +1222,10 @@ async def test_child_failure_remains_primary_when_native_interruption_fails(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
@@ -1171,6 +1253,7 @@ async def test_child_failure_remains_primary_when_native_interruption_fails(
             config=config,
             runtime_paths=paths,
             refresh_scheduler=None,
+            output_request=None,
         )
 
     assert outcome.status == "failed"
@@ -1203,6 +1286,10 @@ async def test_child_failure_remains_primary_when_terminal_receipt_fails(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
@@ -1229,6 +1316,7 @@ async def test_child_failure_remains_primary_when_terminal_receipt_fails(
             config=config,
             runtime_paths=paths,
             refresh_scheduler=None,
+            output_request=None,
         )
 
     assert outcome.status == "failed"
@@ -1263,6 +1351,10 @@ async def test_native_job_source_survives_restart(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     runtime = await tool_job_runtime(tmp_path)
 

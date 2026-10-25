@@ -312,12 +312,49 @@ async def test_suggest_responder_for_message_returns_aliases_for_actual_ids(
         config,
         runtime_paths,
         [make_visible_message(sender="@actual_facts:localhost", body="Prior context")],
+        room_id="!room:localhost",
+        thread_id="$thread",
     )
 
     assert result == "news"
     mock_suggest_responder.assert_awaited_once()
     assert mock_suggest_responder.await_args.args[1] == ["news", "facts"]
     assert mock_suggest_responder.await_args.args[4][0].sender == "facts"
+
+
+@pytest.mark.asyncio
+@patch("mindroom.routing.suggest_responder", new_callable=AsyncMock)
+async def test_suggest_responder_for_message_keeps_each_human_senders_matrix_id(
+    mock_suggest_responder: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Two people on one homeserver reach the router as two speakers, not as their shared server."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"news": AgentConfig(display_name="News")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    mock_suggest_responder.return_value = ResponderSelection("news")
+
+    await suggest_responder_for_message(
+        "what happened?",
+        [ids["news"]],
+        config,
+        runtime_paths,
+        [
+            make_visible_message(sender="@alice:example.org", body="Did the deploy finish?"),
+            make_visible_message(sender="@bob:example.org", body="Not yet."),
+        ],
+        room_id="!room:localhost",
+        thread_id="$thread",
+    )
+
+    context = mock_suggest_responder.await_args.args[4]
+    assert [message.sender for message in context] == ["@alice:example.org", "@bob:example.org"]
 
 
 def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path) -> None:

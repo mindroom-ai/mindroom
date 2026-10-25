@@ -39,7 +39,6 @@ from mindroom.agent_cli.session import (
     TurnToolRegistry,
 )
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
@@ -54,7 +53,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test
 from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, run_bash_batch, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit
 from tests.test_tool_hooks import _plugin
@@ -64,6 +63,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.run import RunContext
+
+    from mindroom.agent_cli.turn import LiveTurnTools
 
 # Scripted shells call the owner directly; only the real `mindroom-agent` test dials this URL.
 _SHELL_ENV = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
@@ -132,7 +133,7 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
         assert receipt["status"] == "completed", receipt
         return receipt
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -174,7 +175,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -222,7 +223,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -253,7 +254,7 @@ async def _native_owner(tmp_path: Path, tools: list, authorize, middleware: tupl
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
     catalog.store = create_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir(exist_ok=True)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -339,7 +340,7 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
         return (requirement,)
 
     catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=decide_later)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=_allow,
@@ -390,7 +391,7 @@ async def test_a_cli_approval_pause_records_its_run_and_that_run_s_model(tmp_pat
         cli_approval_handler=approve,
         active_model_name="ambient-model",
     )
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=_allow,
@@ -422,7 +423,13 @@ async def test_a_call_a_plugin_hook_declines_settles_failed_and_the_cli_exits_1(
     async def decline(ctx: ToolBeforeCallContext) -> None:
         ctx.decline("notes are paused")
 
-    policy = build_tool_hook_middleware(HookRegistry.from_plugins([_plugin("policy", [decline])]), "helper")
+    policy = build_tool_hook_middleware(
+        HookRegistry.from_plugins([_plugin("policy", [decline])]),
+        "helper",
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
     owner = await _native_owner(tmp_path, [write_note], _allow, middleware=(policy,))
     receipts: list[dict] = []
 
@@ -613,7 +620,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
 
     catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
     catalog.store = create_state_storage("helper", tmp_path)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1020,7 +1027,7 @@ async def test_write_failure_prevents_shell_and_inner_effects(
     async def authorize(key, arguments) -> None:
         effects.append("authorize")
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1070,7 +1077,7 @@ async def test_a_failed_shell_call_answers_its_bash_call_as_failed(
 
     catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)], max_tool_calls_per_turn=limit)
     catalog.store = create_state_storage("helper", tmp_path)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=_allow,
@@ -1160,7 +1167,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1238,7 +1245,7 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
 
         catalog = await _catalog(tmp_path / name, [_toolkit("shell", run_shell_command)])
         catalog.store = create_state_storage("helper", tmp_path / name)
-        owner = LiveTurnTools(
+        owner = live_turn_tools_for_test(
             CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
             catalog=catalog,
             authorize=authorize,
@@ -1295,7 +1302,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
         return None
 
     old = await _catalog(tmp_path, [])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(old.runtime_context), "turn", "run"),
         catalog=old,
         authorize=authorize,
@@ -1360,7 +1367,7 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
         [_toolkit("shell", run_shell_command), _toolkit("state", wait)],
     )
     catalog.store = create_state_storage("helper", tmp_path)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1403,7 +1410,7 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
         return None
 
     catalog = await _catalog(tmp_path, [_toolkit("state", change)])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1487,7 +1494,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
             return _toolkit(f"tool{index}", selected)
 
         catalog.add_deferred(DeferredAgentToolkit(f"tool{index}", f"Metadata {index}", factory))
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1552,7 +1559,7 @@ async def test_refused_describe_is_a_caller_safe_rejection(tmp_path: Path) -> No
         raise PermissionError(msg)
 
     catalog = await _catalog(tmp_path, [_toolkit("state", selected)])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1582,7 +1589,7 @@ async def test_live_turn_bounds_receipts_and_concurrent_operations(
         return None
 
     catalog = await _catalog(tmp_path, [_toolkit("state", slow)])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1616,7 +1623,7 @@ async def test_owner_rejects_catalog_bound_to_another_execution_identity(
         return None
 
     with pytest.raises(ValueError, match="identity"):
-        LiveTurnTools(
+        live_turn_tools_for_test(
             CliTurnOwner(
                 replace(
                     build_execution_identity_from_runtime_context(catalog.runtime_context),
@@ -1639,7 +1646,7 @@ async def test_context_page_caps_complete_unicode_envelope(tmp_path: Path) -> No
         return None
 
     context = "😀" * 20000
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1683,7 +1690,7 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
         return None
 
     catalog = await _catalog(tmp_path, [_toolkit("state", change)])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1779,7 +1786,7 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
     async def authorize(key, arguments):
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1830,7 +1837,7 @@ async def test_admitted_describe_waiter_settles_when_its_task_is_cancelled(
     async def authorize(key, arguments):
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1922,7 +1929,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
     async def authorize(key, arguments):
         pass
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,

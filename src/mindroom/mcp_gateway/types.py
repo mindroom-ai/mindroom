@@ -33,6 +33,7 @@ class GatewayErrorCode(StrEnum):
     TOOL_NOT_FOUND = "tool_not_found"
     APPROVAL_REQUIRED = "approval_required"
     TOOL_UNAVAILABLE = "tool_unavailable"
+    TOOL_DECLINED = "tool_declined"
     INVALID_ARGUMENTS = "invalid_arguments"
     RESULT_TOO_LARGE = "result_too_large"
     SCHEMA_TOO_LARGE = "schema_too_large"
@@ -98,8 +99,12 @@ type GatewayToolResponse = _GatewayResult[GatewaySuccessResponse]
 
 
 class GatewayError(Exception):
-    """Carry a safe typed error code across gateway module boundaries."""
+    """Carry a safe typed error code across gateway module boundaries.
 
-    def __init__(self, code: GatewayErrorCode) -> None:
+    ``message`` replaces the code's own message, for an error whose reason MindRoom wrote, such as a plugin's decline.
+    """
+
+    def __init__(self, code: GatewayErrorCode, message: str | None = None) -> None:
         self.code = code
+        self.message = message
         super().__init__(code)

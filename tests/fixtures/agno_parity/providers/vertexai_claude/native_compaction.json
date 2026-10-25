@@ -103,6 +103,8 @@
           {
             "content": "<summary>Alice is packing for a rainy Paris trip and asked about the evening.</summary>",
             "encrypted_content": "parity-compaction",
+            "signature": null,
+            "tool_changes": null,
             "type": "compaction"
           }
         ],

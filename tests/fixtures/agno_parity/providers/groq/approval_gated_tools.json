@@ -132,6 +132,8 @@
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -142,8 +144,6 @@
           "content": "Email the invoice for order A-1001."
         }
       ],
-      "model": "openai/gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

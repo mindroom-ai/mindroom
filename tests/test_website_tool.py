@@ -117,6 +117,34 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
     assert "Detailed reference material" in content_by_url[docs_url]
 
 
+def test_website_reader_pauses_only_between_fetches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single-page read fetches at once; a crawl pauses before each later fetch so it does not hammer the host."""
+    root_url = "https://example.test/"
+    docs_url = "https://example.test/docs"
+    pages = {
+        root_url: '<html><body><main><p>Home page.</p><a href="/docs">Docs</a></main></body></html>',
+        docs_url: "<html><body><main><p>Docs page.</p></main></body></html>",
+    }
+    steps: list[str] = []
+
+    def fake_get(url: str, **_kwargs: object) -> httpx.Response:
+        steps.append(f"fetch {url}")
+        return httpx.Response(200, content=pages[url].encode(), request=httpx.Request("GET", url))
+
+    def record_delay(_reader: _MindRoomWebsiteReader) -> None:
+        steps.append("pause")
+
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", record_delay)
+
+    _MindRoomWebsiteReader().read(docs_url)
+    assert steps == [f"fetch {docs_url}"]
+
+    steps.clear()
+    _MindRoomWebsiteReader().read(root_url)
+    assert steps == [f"fetch {root_url}", "pause", f"fetch {docs_url}"]
+
+
 def test_website_reader_rejects_private_starting_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Agent-callable website reads should not fetch private network URLs."""
     requested_urls: list[str] = []

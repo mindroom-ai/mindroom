@@ -6,9 +6,11 @@ import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 
+import mindroom.tool_system.skills as skills_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -55,15 +57,15 @@ def _build(
 ) -> SkillsToolkit:
     storage = tmp_path / "storage"
     config = Config(agents={AGENT_NAME: AgentConfig(display_name="Assistant", role="", skills=configured or [])})
-    toolkit = build_skills_toolkit(
-        AGENT_NAME,
-        config,
-        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
-        output_file_policy=ToolOutputFilePolicy(workspace_root=_workspace(tmp_path)) if output_files else None,
-    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage, process_env={})
+    with patch.object(skills_module, "_get_default_skill_roots", return_value=[tmp_path / "global"]):
+        toolkit = build_skills_toolkit(
+            AGENT_NAME,
+            config,
+            runtime_paths,
+            workspace_root=None,
+            output_file_policy=ToolOutputFilePolicy(workspace_root=_workspace(tmp_path)) if output_files else None,
+        )
     assert toolkit is not None
     return toolkit
 
@@ -320,12 +322,15 @@ async def test_workspace_loads_record_usage_and_configured_skills_do_not(tmp_pat
     assert not (tmp_path / "global" / ".usage.json").exists()
 
 
-def test_skills_from_later_sources_win_a_name(tmp_path: Path) -> None:
-    """A skill from an explicit root wins its name over a workspace skill, so the explicit skill is the one offered."""
+def test_a_workspace_skill_wins_its_name_over_a_default_root_skill(tmp_path: Path) -> None:
+    """Of two skills that share a name, the workspace's is the one offered, not the default root's."""
     _write_skill(_workspace(tmp_path) / "skills", "alpha", "Workspace alpha")
-    _write_skill(tmp_path / "global", "alpha", "Explicit alpha")
+    _write_skill(tmp_path / "global", "alpha", "Default alpha")
 
     toolkit = _build(tmp_path, configured=["alpha"])
 
     [skill] = [skill for skill in toolkit.skills if skill.name == "alpha"]
-    assert (skill.description, skill.source_path) == ("Explicit alpha", (tmp_path / "global" / "alpha").resolve())
+    assert (skill.description, skill.source_path) == (
+        "Workspace alpha",
+        (_workspace(tmp_path) / "skills" / "alpha").resolve(),
+    )

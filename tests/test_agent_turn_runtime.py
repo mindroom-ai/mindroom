@@ -88,6 +88,7 @@ from tests.conftest import (
     make_turn_context,
     make_visible_message,
     message_origin,
+    process_and_respond_for_test,
     seed_session,
     test_runtime_paths,
 )
@@ -185,7 +186,6 @@ def _reply(
     *,
     tools: Sequence[str] = (PROBE_TOOL,),
     approval_rules: Sequence[ApprovalRuleConfig] = (),
-    capabilities: Capabilities | None = None,
     plugins: Sequence[object] = (),
     max_tool_calls_per_turn: int | None = None,
     context_window: int | None = None,
@@ -212,7 +212,7 @@ def _reply(
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     if approval_rules:
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
-    model = ScriptedModel([list(turn) for turn in turns], capabilities=capabilities or Capabilities())
+    model = ScriptedModel([list(turn) for turn in turns])
     install_model_providers(monkeypatch, {"default": model})
     if plugins:
         monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: list(plugins))
@@ -981,7 +981,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
         "mid_turn_compaction_hook",
         "approval_receipt_hook",
     ]
-    assert hooks.answer_tool_calls is None
+    assert hooks.answer_tool_calls is not None
     assert hooks.rewrite_tool_calls is None
     # This agent offers no scheduler, so its calls run without the live-function binding step.
     assert [middleware.__name__ for middleware in hooks.tool_middleware] == ["middleware"]
@@ -1107,12 +1107,11 @@ async def test_a_cut_off_response_answers_its_calls_without_running_them(
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """On a Claude route, calls of a response the output limit cut off are answered, not run, and the model retries."""
+    """On any route, calls of a response the output limit cut off are answered, not run, and the model retries."""
     reply = _reply(
         tmp_path,
         monkeypatch,
         [_cut_off(tool_call("touch", "call_1", label="huge")), answer("Split into parts.")],
-        capabilities=Capabilities(claude_family=True),
     )
 
     chunks = await _stream(reply)
@@ -1136,7 +1135,6 @@ async def test_a_third_cut_off_response_fails_the_run(
         tmp_path,
         monkeypatch,
         [_cut_off(tool_call("touch", f"call_{index}", label="huge")) for index in range(3)],
-        capabilities=Capabilities(claude_family=True),
     )
 
     chunks = await _stream(reply)
@@ -1250,9 +1248,13 @@ async def _respond_through_runner(
 ) -> tuple[Any, list[str]]:
     """Run one reply through the runner's turn, in its reply span, and return the outcome and the attempt run ids."""
     run_ids: list[str] = []
-    respond = runner._process_and_respond_streaming if streaming else runner._process_and_respond
     async with response_span(runner, request):
-        outcome = await respond(request, attempt_run_id_collector=run_ids)
+        outcome = await process_and_respond_for_test(
+            runner,
+            request,
+            streaming=streaming,
+            attempt_run_id_collector=run_ids,
+        )
     return outcome, run_ids
 
 

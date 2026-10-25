@@ -103,7 +103,7 @@ if TYPE_CHECKING:
         "google-auth-httplib2",
         "google-auth-oauthlib",
     ],
-    docs_url="https://docs.agno.com/tools/toolkits/others/google_drive",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_drive",
     function_names=(
         "google_drive_list_files",
         "google_drive_search_files",

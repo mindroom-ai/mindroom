@@ -66,12 +66,13 @@ class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 
     @pytest.mark.asyncio
-    async def test_decide_team_for_sender_passes_sender_filtered_dm_agents(
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    async def test_team_formation_sees_only_the_responders_the_requester_may_reach(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """DM team fallback should only see agents allowed for the requester."""
+        """A turn decides its team from the room's responders its requester may reach, not every agent in the room."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -89,7 +90,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-
+        ids = entity_ids(config, runtime_paths_for(config))
         context = MessageContext(
             am_i_mentioned=False,
             is_thread=False,
@@ -98,34 +99,25 @@ class TestAgentBot(AgentBotTestBase):
             mentioned_agents=[],
             has_non_agent_mentions=False,
         )
-
         room = _matrix_room(
             room_id="!dm:localhost",
             own_user_id=mock_agent_user.user_id,
-            user_ids=[
-                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
-                entity_ids(config, runtime_paths_for(config))["general"].full_id,
-            ],
+            user_ids=[ids["calculator"].full_id, ids["general"].full_id],
         )
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+        bot.orchestrator = MagicMock()
+        bot.orchestrator.agent_bots = {"calculator": MagicMock()}
 
-        with patch("mindroom.turn_policy.decide_team_formation", new_callable=MagicMock) as mock_decide:
-            mock_decide.return_value = TeamResolution.none()
-            bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-            bot.orchestrator = MagicMock()
-            bot.orchestrator.agent_bots = {"calculator": MagicMock()}
-
-            await bot._turn_policy._decide_team_for_sender(
-                agents_in_thread=[],
-                context=context,
-                room=room,
-                requester_user_id="@alice:localhost",
-                availability=bot._turn_policy.responder_availability(),
+        with patch("mindroom.turn_policy.decide_team_formation", return_value=TeamResolution.none()) as mock_decide:
+            await bot._turn_policy._resolve_response_action(
+                _policy_dispatch(bot, room, context, "@alice:localhost", "help me"),
+                room,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert mock_decide.call_count == 1
-        assert mock_decide.call_args.kwargs["available_responders_in_room"] == [
-            entity_ids(config, runtime_paths_for(config))["calculator"],
-        ]
+        assert mock_decide.call_args.kwargs["available_responders_in_room"] == [ids["calculator"]]
         assert mock_decide.call_args.kwargs["materializable_agent_names"] == {"calculator"}
 
     @pytest.mark.asyncio

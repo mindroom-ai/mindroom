@@ -136,6 +136,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6.1-sol",
+      "stream": true,
       "include": [
         "reasoning.encrypted_content"
       ],
@@ -150,12 +152,10 @@
         }
       ],
       "instructions": "You are a helpful assistant.",
-      "model": "gpt-6.1-sol",
       "reasoning": {
         "effort": "medium"
       },
       "store": false,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",

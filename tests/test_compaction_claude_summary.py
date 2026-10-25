@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 import pytest
 
 from mindroom.history.summary_call import (
@@ -16,7 +17,7 @@ from mindroom.history.summary_call import (
 )
 from mindroom.llm.errors import TRANSPORT_TIMEOUT, ModelSafeguardRefusal, ProviderError, ProviderUnavailable
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
-from tests.providers.golden_support import pipeline_provider
+from tests.providers.golden_support import httpx2_transport, pipeline_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -57,7 +58,7 @@ def _model(
     """Build the route's owned Claude adapter inside the request pipeline, answering with ``respond``."""
     config = json.loads(json.dumps(_ROUTES[route]))
     config["extra_kwargs"].update(extra_kwargs)
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    http_client = httpx2.AsyncClient(transport=httpx2_transport(respond))
     return pipeline_provider(provider_for(config, root, http_client))
 
 
@@ -83,6 +84,7 @@ async def _summarize(model: ModelProvider, *, timeout_seconds: float = 10) -> st
         summary_input="Conversation",
         summary_prompt="Summarize",
         timeout_seconds=timeout_seconds,
+        on_usage=None,
     )
 
 
@@ -155,9 +157,9 @@ async def test_summary_uses_an_authored_provider_timeout_shorter_than_the_deadli
 async def test_a_summary_whose_transport_times_out_fails_as_a_timeout(route: str, tmp_path: Path) -> None:
     """The SDK's timeout error keeps the transport timeout's code, so compaction reports a timeout."""
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx.Response:
         msg = "The read operation timed out"
-        raise httpx.ReadTimeout(msg, request=request)
+        raise httpx2.ReadTimeout(msg, request=request)
 
     with pytest.raises(ProviderUnavailable) as raised:
         await _summarize(_model(route, tmp_path, respond))

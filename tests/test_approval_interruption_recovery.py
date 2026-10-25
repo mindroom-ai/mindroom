@@ -8,14 +8,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
-from mindroom.approval.manager import initialize_approval_store
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.bot_helpers import unique_room_send_responses
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import initialize_approval_store_for_test, unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot
 from tests.test_response_runner_focused import _admit_approval_source
@@ -33,7 +32,7 @@ if TYPE_CHECKING:
 async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalContinuation]]:
     """Create real journal ownership, a paused reply shown as ``$waiting``, and this runtime's claim of its approval."""
     bot = _bot(tmp_path)
-    initialize_approval_store(bot.runtime_paths, cards=bot.journal_principal())
+    initialize_approval_store_for_test(bot.runtime_paths, cards=bot.journal_principal())
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -46,7 +45,7 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
         assert claimed.state == "claimed"
     # The next instance takes the replies over and recovers the resume the stopped one left.
     restarted = _bot(tmp_path)
-    initialize_approval_store(restarted.runtime_paths, cards=restarted.journal_principal())
+    initialize_approval_store_for_test(restarted.runtime_paths, cards=restarted.journal_principal())
     await restarted._reply_runtime.start()
     left = await restarted.journal_principal().approval_continuation(continuation.approval_id)
     assert left is not None
