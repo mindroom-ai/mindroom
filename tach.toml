@@ -4565,6 +4565,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.declarations",
+    "mindroom.tool_system.failure_text",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
@@ -5497,11 +5498,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.tool_system.failure_text"
+depends_on = []
+
+[[modules]]
 path = "mindroom.tool_system.invocation"
 depends_on = [
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.failure_text",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -7703,6 +7709,7 @@ depends_on = [
     "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.failure_text",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
@@ -8019,6 +8026,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.redaction",
     "mindroom.response_turn",
+    "mindroom.tool_system.failure_text",
 ]
 
 [[modules]]
@@ -8447,6 +8455,7 @@ depends_on = [
     "mindroom.tool_jobs.instances",
     "mindroom.tool_jobs.resources",
     "mindroom.tool_system.call_record",
+    "mindroom.tool_system.failure_text",
     "mindroom.tool_system.progress",
 ]
 visibility = [
@@ -8532,6 +8541,7 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.call_record",
+    "mindroom.tool_system.failure_text",
     "mindroom.tool_system.invocation",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.authorization",

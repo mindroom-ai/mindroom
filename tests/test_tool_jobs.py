@@ -1933,6 +1933,39 @@ async def test_invalid_saved_snapshot_fails_enabled_recovery(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("approval unavailable"), "approval unavailable"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_an_operation_that_raises_fails_its_job_with_the_exception_text(
+    tmp_path: Path,
+    error: Exception,
+    text: str,
+) -> None:
+    """A job whose operation raises fails with the exception's text, or its type name when it has none."""
+    runtime = await tool_job_runtime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        raise error
+
+    try:
+        await start_job(
+            runtime,
+            "raising",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
+        waited = await runtime.wait("raising", owner=job_owner(), depth=0)
+        assert (waited.job.status, waited.job.result) == ("failed", text)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_failure_while_draining_cancellation_is_not_reported_cancelled(tmp_path: Path) -> None:
     """An operation's failing finalizer remains visible after its cancellation request."""
     runtime = await tool_job_runtime(tmp_path)

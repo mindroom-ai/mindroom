@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
@@ -263,11 +264,6 @@ async def run_tool_call(
         _CURRENT_CALL.reset(token)
 
 
-def failure_text(error: BaseException) -> str:
-    """Return what the model reads of a failed call: the exception's text, or its type name when it has none."""
-    return str(error) or type(error).__name__
-
-
 async def execute_tool_call(
     function: ToolFunction,
     arguments: Mapping[str, Any] | None,
@@ -284,11 +280,7 @@ async def execute_tool_call(
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
-        return ToolOutcome(
-            content=failure_text(error),
-            stop_after_call=function.stop_after_call,
-            is_error=True,
-        )
+        return ToolOutcome(content=failure_text(error), stop_after_call=function.stop_after_call, is_error=True)
     return ToolOutcome(
         content=value.content,
         images=value.images,
@@ -368,7 +360,6 @@ __all__ = [
     "ToolOutcome",
     "current_tool_call",
     "execute_tool_call",
-    "failure_text",
     "parse_tool_arguments",
     "run_tool_call",
 ]

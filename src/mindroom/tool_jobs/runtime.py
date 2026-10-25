@@ -31,6 +31,7 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.failure_text import failure_text
 from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
@@ -588,7 +589,7 @@ class ToolJobRuntime:
                         returned = True
                         await finalize_queued_notice_response_turn_async(notice)
             except Exception as error:
-                outcome = BackgroundOutcome("failed", str(error))
+                outcome = BackgroundOutcome("failed", failure_text(error))
             except asyncio.CancelledError:
                 if (task := asyncio.current_task()) is not None and task.cancelling():
                     raise  # Requested cancellation: runtime-owned, or external teardown.

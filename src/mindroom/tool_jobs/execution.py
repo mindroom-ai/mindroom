@@ -53,7 +53,8 @@ from mindroom.tool_system.agno_toolkits import ToolResult, tool_value
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
-from mindroom.tool_system.invocation import failure_text, run_tool_call
+from mindroom.tool_system.failure_text import failure_text
+from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion

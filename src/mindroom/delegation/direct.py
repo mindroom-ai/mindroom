@@ -12,6 +12,7 @@ from mindroom.delegation.sessions import subagent_liveness
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.tool_system.failure_text import failure_text
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -84,7 +85,7 @@ async def run_direct_child_turn(
                 error=str(error),
             )
             # What the failed child hands its caller, credentials redacted.
-            reason = redact_sensitive_text(str(error))
+            reason = redact_sensitive_text(failure_text(error))
             receipt = await finish_child_turn(
                 child,
                 config=config,
