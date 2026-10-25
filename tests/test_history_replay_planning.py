@@ -22,6 +22,7 @@ from mindroom.history.policy import (
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
     estimate_prompt_visible_history_tokens,
+    estimate_request_messages_tokens,
     plan_replay_that_fits,
 )
 from mindroom.history.storage import (
@@ -60,6 +61,21 @@ def _viewed_image_message(index: int) -> Message:
         content="The tool call above generated the attached media.",
         images=[Image(id=f"mindroom_viewed_{index}", content=f"image-{index}".encode(), mime_type="image/png")],
     )
+
+
+def test_a_native_route_without_a_checkpoint_estimates_text_as_a_plain_request_does() -> None:
+    """One history gets one estimate: a native route rounds its canonical text the way a plain request does."""
+    messages = [Message(role="user", content="a") for _ in range(4)]
+
+    assert estimate_request_messages_tokens(messages, replay_model=None, native_route="native-route") == 1
+    assert estimate_request_messages_tokens(messages, replay_model=None) == 1
+
+
+def test_an_empty_media_list_adds_nothing_to_a_message_estimate() -> None:
+    """A message estimates by its text and tool calls; an empty media list carries neither."""
+    with_empty_media = Message(role="user", content="abcdefg", images=[], files=[])
+
+    assert estimate_request_messages_tokens([with_empty_media], replay_model=None) == 1
 
 
 @pytest.mark.parametrize("native_route", [None, "native-route"])

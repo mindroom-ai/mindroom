@@ -154,7 +154,7 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
     if floor == "canonical":
         block = {"type": "input_image", "image_url": "data:image/png;base64," + b64encode(buffer.getvalue()).decode()}
         message = Message(role="user", content=[block])
-        expected_tokens = (len(stable_serialize(block)) + (3 if native else 0)) // 4
+        expected_tokens = len(stable_serialize(block)) // 4
     else:
         message = Message(
             role="user",

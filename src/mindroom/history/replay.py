@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.history.message_content import (
     HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS,
     image_content_for_token_estimation,
-    media_payload_snapshot,
-    message_media_entries,
     render_message_content,
 )
 from mindroom.history.request_messages import scope_history_messages
@@ -23,7 +21,7 @@ from mindroom.native_compaction import (
     native_checkpoint_id,
     native_replay_messages,
 )
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_char_tokens, estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -128,14 +126,7 @@ def _estimate_messages_tokens(
         _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
         for message in history_messages
     ]
-    # TODO(simplify): Canonical text counts as total characters // 4 without a native route but as a per-message
-    # ceiling with one, so one history gets two estimates. Use one rounding rule. Operators would see compaction and
-    # replay trimming trigger a few tokens earlier or later.
-    canonical_tokens = (
-        sum(_estimated_message_chars(message) for message in canonical_messages) // 4
-        if native_route is None
-        else sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_messages)
-    )
+    canonical_tokens = estimate_char_tokens(sum(_estimated_message_chars(message) for message in canonical_messages))
     image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
     return max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens + attachment_tokens
 
@@ -204,20 +195,10 @@ def compaction_marker(session: ConversationSession, scope: HistoryScope) -> tupl
 
 
 def _estimated_message_chars(message: Message) -> int:
+    """Count a message's text and tool calls; estimation charges its media separately, by bounded allowances."""
     content_chars = len(render_message_content(message))
     tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
-    return content_chars + tool_call_chars + _estimate_message_media_chars(message)
-
-
-def _estimate_message_media_chars(message: Message) -> int:
-    """Estimate serialized character cost for a message's media payloads."""
-    # TODO(simplify): Estimation strips every non-empty media field before counting characters, so this adds only two
-    # characters per empty media list. Drop the media count. Operators would see estimates move by a few tokens at most.
-    return sum(
-        len(stable_serialize(media_payload_snapshot(media_value)))
-        for _tag, media_value in message_media_entries(message)
-        if media_value is not None
-    )
+    return content_chars + tool_call_chars
 
 
 def _image_fallback_tokens(messages: list[Message]) -> int:
