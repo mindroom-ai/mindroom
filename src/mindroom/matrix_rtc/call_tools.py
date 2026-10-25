@@ -35,6 +35,7 @@ from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.budgets.monitor import budget_model
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import create_scope_session_storage, load_scope_session
@@ -999,7 +1000,7 @@ def _wrap_tool_function(
                     result = await run_tool_call(function, raw_arguments, call_context, middleware=middleware)
             except Exception as error:
                 logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
-                return f"Tool {function.name} failed: {error}"
+                return f"Tool {function.name} failed: {failure_text(error)}"
         return _normalize_tool_result(client_tool_result(result))
 
     return llm.function_tool(_handler, raw_schema=raw_schema)

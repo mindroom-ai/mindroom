@@ -232,7 +232,8 @@
         },
         {
           "role": "tool",
-          "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}"
+          "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+          "tool_name": "call_tool"
         }
       ],
       "tools": [

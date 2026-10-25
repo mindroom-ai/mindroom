@@ -25,6 +25,7 @@ from mindroom.approval.tool_approval import (
     scheduled_call,
 )
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.invocation import run_tool_call
@@ -215,7 +216,7 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
         result = await _execute(live, function, json.loads(arguments_text), call_id=f"scheduled-{task_id}")
     except Exception as error:
         await record_scheduled_call_outcome(task_id, "failed")
-        return f"❌ Scheduled call `{task_id}` failed: {str(error) or 'the tool raised an error'}"
+        return f"❌ Scheduled call `{task_id}` failed: {failure_text(error)}"
     await record_scheduled_call_outcome(task_id, "completed")
     return result
 

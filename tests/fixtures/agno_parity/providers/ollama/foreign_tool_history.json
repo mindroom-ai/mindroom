@@ -193,7 +193,8 @@
         },
         {
           "role": "tool",
-          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}"
+          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
+          "tool_name": "get_weather"
         },
         {
           "role": "assistant",

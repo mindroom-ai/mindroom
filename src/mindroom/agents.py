@@ -33,6 +33,7 @@ from mindroom.delegation.personas import (
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
+from mindroom.failure_text import failure_text
 from mindroom.hooks import HookRegistry
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.llm.provider import DeferredTools, ModelRequest
@@ -1506,7 +1507,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             # One toolkit's construction or adaptation failure must never stop the agent.
             if minimal_mode:
                 raise MinimalModeUnavailableError(
-                    minimal_mode_failure_message(str(exc), agent_name, subagent=delegation_depth > 0),
+                    minimal_mode_failure_message(failure_text(exc), agent_name, subagent=delegation_depth > 0),
                 ) from exc
             logger.warning(
                 "Could not load tool for agent construction",

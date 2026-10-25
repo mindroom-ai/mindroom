@@ -198,11 +198,13 @@
         },
         {
           "role": "tool",
-          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}"
+          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
+          "tool_name": "get_weather"
         },
         {
           "role": "tool",
-          "content": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]"
+          "content": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]",
+          "tool_name": "search_notes"
         }
       ],
       "tools": [

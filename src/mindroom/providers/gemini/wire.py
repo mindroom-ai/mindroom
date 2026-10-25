@@ -28,6 +28,7 @@ from google.genai.types import (
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
+from mindroom.llm.messages import tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from mindroom.llm.media import Audio, File, Image, Video
-    from mindroom.llm.messages import Message
+    from mindroom.llm.messages import Message, ToolResultView
     from mindroom.llm.provider import StopReason, StreamEvent, ToolChoice, ToolSpec
 
 logger = get_logger(__name__)
@@ -148,11 +149,17 @@ def _message_parts(message: Message, role: str) -> list[dict[str, Any]]:
         parts.extend(_function_call_part(call) for call in message.tool_calls)
         return parts
     if _is_tool_result(message):
-        function_response: dict[str, Any] = {"name": message.tool_name, "response": {"result": content}}
-        if call_id := _provider_id(message.tool_call_id):
-            function_response["id"] = call_id
-        return [{"function_response": function_response}]
+        return [{"function_response": _function_response(tool_result_view(message))}]
     return [_text_part(content, message.provider_data)] if isinstance(content, str) else []
+
+
+def _function_response(result: ToolResultView) -> dict[str, Any]:
+    """Return one result as a function response; a failed call's content goes under ``error``, as the API documents."""
+    response = {"error": result.content} if result.is_error else {"result": result.content}
+    function_response: dict[str, Any] = {"name": result.name, "response": response}
+    if call_id := _provider_id(result.call_id):
+        function_response["id"] = call_id
+    return function_response
 
 
 async def _with_media(message: Message, parts: list[dict[str, Any]], route: MediaRoute) -> list[dict[str, Any]]:

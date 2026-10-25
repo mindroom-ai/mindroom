@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import httpx
 
+from mindroom.failure_text import failure_text
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.providers.errors import classify_provider_error, provider_failure
 
@@ -56,7 +57,7 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
         # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.
         message, code, error_type = _error_fields(error.body)
         return classify_provider_error(message or error.message, provider=provider, code=code, error_type=error_type)
-    return ProviderError(str(error) or type(error).__name__, provider=provider)
+    return ProviderError(failure_text(error), provider=provider)
 
 
 def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:

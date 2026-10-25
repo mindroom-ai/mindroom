@@ -1057,6 +1057,39 @@ async def test_rejected_background_start_settles_the_child_as_failed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("background", [False, True])
+async def test_a_child_that_fails_without_error_text_tells_its_parent_what_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    background: bool,
+) -> None:
+    """A child that raises an exception without text, such as a bare TimeoutError, reports the exception's type."""
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        raise TimeoutError
+
+    if background:
+        response = await _drive_background_child(tmp_path, monkeypatch, await tool_job_runtime(tmp_path), run_child)
+    else:
+        paths = _runtime_paths(tmp_path)
+        config = _config(jobs=False)
+        agents = ScriptedAgents({})
+        agents.install(monkeypatch)
+        leader = DelegatingLeader(config, paths, _BACKGROUND_PARENT, agents)
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)):
+            paused = await leader.turn(
+                calls(tool_call("run_subagent", "waiting", agent_name="code", task="Research")),
+                answer("Parent done"),
+            )
+            response = await leader.drive(paused, run_child)
+    result = str(next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting"))
+    assert result.startswith("Delegation to 'code' failed: TimeoutError\n\n")
+    [record] = [json.loads(path.read_text()) for path in tmp_path.rglob("delegations/**/run.json")]
+    assert (record["status"], record["error"]) == ("failed", "TimeoutError")
+
+
+@pytest.mark.asyncio
 async def test_unreadable_background_result_still_runs_the_after_hook(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1084,11 +1117,21 @@ async def test_unreadable_background_result_still_runs_the_after_hook(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cleanup_error", "cleanup_text"),
+    [(OSError("native cleanup unavailable"), "native cleanup unavailable"), (OSError(), "OSError")],
+    ids=["with_text", "without_text"],
+)
 async def test_child_failure_remains_primary_when_native_interruption_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cleanup_error: OSError,
+    cleanup_text: str,
 ) -> None:
-    """Failed native cleanup reports uncertainty without replacing or falsely settling the child."""
+    """Failed native cleanup reports uncertainty without replacing or falsely settling the child.
+
+    A cleanup error without text reports its type.
+    """
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
@@ -1108,8 +1151,7 @@ async def test_child_failure_remains_primary_when_native_interruption_fails(
         raise RuntimeError(msg)
 
     async def interrupt(*_args: object, **_kwargs: object) -> None:
-        msg = "native cleanup unavailable"
-        raise OSError(msg)
+        raise cleanup_error
 
     finish = AsyncMock(side_effect=AssertionError("Unsettled native cleanup cannot be reported as terminal"))
     monkeypatch.setattr(delegation_execution, "interrupt_child", interrupt)
@@ -1133,8 +1175,9 @@ async def test_child_failure_remains_primary_when_native_interruption_fails(
 
     assert outcome.status == "failed"
     assert "primary execution failed" in (outcome.result or "")
-    assert "cleanup" in (outcome.result or "").lower()
-    assert "native cleanup unavailable" in (outcome.result or "")
+    assert (outcome.result or "").endswith(
+        f"Delegation cleanup did not complete; recovery may still be required: {cleanup_text}",
+    )
     finish.assert_not_awaited()
     retained = await load_retained_subagent_turn(child, paths)
     assert retained.status == "running"

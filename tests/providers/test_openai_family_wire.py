@@ -706,6 +706,13 @@ async def test_an_error_body_without_a_message_reports_the_response_text(tmp_pat
     assert (str(info.value), info.value.status_code) == ('{"detail": "Not Found"}', 404)
 
 
+def test_an_sdk_failure_without_text_is_named_by_its_type() -> None:
+    """A failure the SDK raises without text reports its type name, so the reply says what failed."""
+    error = provider_error(RuntimeError(), provider="OpenAI Chat")
+
+    assert (type(error), str(error)) == (ProviderError, "RuntimeError")
+
+
 def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
     """A proxy in front of the endpoint answers 502 with an HTML page, which the SDK keeps as the error body."""
     page = "<html><body>502 Bad Gateway</body></html>"

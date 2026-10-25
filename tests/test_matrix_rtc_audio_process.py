@@ -232,6 +232,10 @@ async def test_child_connects_and_reports_errors() -> None:
         bridge.connect_error = RuntimeError("no sfu")
         channel.send({"type": "Connect", "id": 2, "url": "wss://sfu", "jwt": "j"})
         assert await channel.recv() == {"type": "Error", "id": 2, "message": "no sfu"}
+        # An exception without text is named by its type.
+        bridge.connect_error = TimeoutError()
+        channel.send({"type": "Connect", "id": 3, "url": "wss://sfu", "jwt": "j"})
+        assert await channel.recv() == {"type": "Error", "id": 3, "message": "TimeoutError"}
 
 
 @pytest.mark.asyncio

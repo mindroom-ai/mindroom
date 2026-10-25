@@ -63,6 +63,7 @@ from mindroom.delegation.state import (
     member_call_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.failure_text import failure_text
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
@@ -657,7 +658,7 @@ async def _background_child_outcome(
         return finished(
             "failed",
             f"{primary_error}\n\nDelegation {stage} did not complete; recovery may still be required: "
-            f"{redact_sensitive_text(str(error))}",
+            f"{redact_sensitive_text(failure_text(error))}",
         )
 
     run = partial(
@@ -697,7 +698,7 @@ async def _background_child_outcome(
             raise
         except Exception as error:
             # What the failed child hands its caller, credentials redacted, however its cleanup ends.
-            primary_error = redact_sensitive_text(str(error))
+            primary_error = redact_sensitive_text(failure_text(error))
             try:
                 await interrupt_child(
                     child,
@@ -1310,7 +1311,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     await detach(result=None, error=error)
                     raise
                 # The cause reaches the parent model and the child's record, so credentials in it are redacted.
-                reason = redact_sensitive_text(str(error))
+                reason = redact_sensitive_text(failure_text(error))
                 await interrupt_child(
                     child,
                     config=config,

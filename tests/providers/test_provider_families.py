@@ -240,6 +240,130 @@ async def test_every_family_replays_the_tool_calls_any_provider_stored(family: s
     assert _replayed_tool_turn(family, body) == (['{"city": "Par', "", "{}"] if as_text else [{}, {}, {}], 3)
 
 
+# --- Tool results -----------------------------------------------------------------------------------------------
+
+
+def _answered_tool_turn() -> list[Message]:
+    """A tool loop's next request: calls that succeeded, failed, and were stored without content or error text."""
+    results = {
+        "ok": ("sunny", False),
+        "failed": ("No city", True),
+        "empty": (None, None),
+        "failed_none": (None, True),
+        "failed_blank": ("", True),
+    }
+    return [
+        Message(role="user", content="Weather?"),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {"id": f"call_{outcome}", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+                for outcome in results
+            ],
+        ),
+        *(
+            Message(
+                role="tool",
+                tool_call_id=f"call_{outcome}",
+                tool_name="get_weather",
+                content=content,
+                tool_call_error=failed,
+            )
+            for outcome, (content, failed) in results.items()
+        ),
+    ]
+
+
+_NO_ERROR_TEXT = "The tool call failed without an error message."
+_GEMINI_RESULTS = [
+    {"id": "call_ok", "name": "get_weather", "response": {"result": "sunny"}},
+    {"id": "call_failed", "name": "get_weather", "response": {"error": "No city"}},
+    {"id": "call_empty", "name": "get_weather", "response": {"result": ""}},
+    {"id": "call_failed_none", "name": "get_weather", "response": {"error": _NO_ERROR_TEXT}},
+    {"id": "call_failed_blank", "name": "get_weather", "response": {"error": _NO_ERROR_TEXT}},
+]
+# Chat Completions has no failure or name field.
+_CHAT_RESULTS = [
+    {"role": "tool", "tool_call_id": "call_ok", "content": "sunny"},
+    {"role": "tool", "tool_call_id": "call_failed", "content": "No city"},
+    {"role": "tool", "tool_call_id": "call_empty", "content": ""},
+    {"role": "tool", "tool_call_id": "call_failed_none", "content": _NO_ERROR_TEXT},
+    {"role": "tool", "tool_call_id": "call_failed_blank", "content": _NO_ERROR_TEXT},
+]
+_ENCODED_RESULTS: dict[str, list[dict[str, Any]]] = {
+    "anthropic": [
+        {"type": "tool_result", "tool_use_id": "call_ok", "content": "sunny"},
+        {"type": "tool_result", "tool_use_id": "call_failed", "content": "No city", "is_error": True},
+        {"type": "tool_result", "tool_use_id": "call_empty", "content": ""},
+        # The API rejects a failed result with empty content.
+        {"type": "tool_result", "tool_use_id": "call_failed_none", "content": _NO_ERROR_TEXT, "is_error": True},
+        {"type": "tool_result", "tool_use_id": "call_failed_blank", "content": _NO_ERROR_TEXT, "is_error": True},
+    ],
+    "gemini": _GEMINI_RESULTS,
+    "gemini_vertexai": _GEMINI_RESULTS,
+    # Ollama has no failure field or call ids: a result names the tool that answered, and the SDK drops empty content.
+    "ollama": [
+        {"role": "tool", "content": "sunny", "tool_name": "get_weather"},
+        {"role": "tool", "content": "No city", "tool_name": "get_weather"},
+        {"role": "tool", "tool_name": "get_weather"},
+        {"role": "tool", "content": _NO_ERROR_TEXT, "tool_name": "get_weather"},
+        {"role": "tool", "content": _NO_ERROR_TEXT, "tool_name": "get_weather"},
+    ],
+    # Responses has no failure field, and replays the Chat call ids under its own.
+    "openai_responses": [
+        {"type": "function_call_output", "call_id": "call_00000000", "output": "sunny"},
+        {"type": "function_call_output", "call_id": "call_00000001", "output": "No city"},
+        {"type": "function_call_output", "call_id": "call_00000002", "output": ""},
+        {"type": "function_call_output", "call_id": "call_00000003", "output": _NO_ERROR_TEXT},
+        {"type": "function_call_output", "call_id": "call_00000004", "output": _NO_ERROR_TEXT},
+    ],
+    "openai_chat": _CHAT_RESULTS,
+    "cerebras": _CHAT_RESULTS,
+    "groq": _CHAT_RESULTS,
+}
+
+
+def _encoded_results(family: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every tool result the request sends, as the wire encodes it."""
+    if family == "anthropic":
+        blocks = [block for message in body["messages"] for block in message["content"] if isinstance(block, dict)]
+        # The prompt-cache marker the request adds to the newest result is not part of the result.
+        return [
+            {key: value for key, value in block.items() if key != "cache_control"}
+            for block in blocks
+            if block["type"] == "tool_result"
+        ]
+    if family.startswith("gemini"):
+        parts = [part for content in body["contents"] for part in content["parts"]]
+        return [part["functionResponse"] for part in parts if "functionResponse" in part]
+    if family == "openai_responses":
+        return [item for item in body["input"] if item.get("type") == "function_call_output"]
+    return [message for message in body["messages"] if message["role"] == "tool"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_encodes_a_tool_result_with_its_call_name_content_and_failure(
+    family: str,
+    tmp_path: Path,
+) -> None:
+    """A failed call reads as a failure wherever the API has a field for it, and no result goes unanswered.
+
+    Claude marks it ``is_error`` and Gemini sends it as the response's ``error``; Ollama names the tool that
+    answered. A result stored without content still answers its call with empty content, which the Ollama SDK leaves
+    out of the request, and a failed one says that it failed.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+
+    await complete(
+        pipeline_provider(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=_answered_tool_turn(), tools=[_tool("get_weather")]),
+    )
+
+    assert _encoded_results(family, wire.body()) == _ENCODED_RESULTS[family]
+
+
 # --- The composed pipeline --------------------------------------------------------------------------------------
 
 

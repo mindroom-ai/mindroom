@@ -21,6 +21,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
+from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.types import session_state_snapshot
@@ -33,7 +34,7 @@ from mindroom.tool_jobs.background_after import (
     application_arguments,
     read_background_after,
 )
-from mindroom.tool_jobs.consumption import consume_tool_job, session_state_delta
+from mindroom.tool_jobs.consumption import consume_tool_job, job_failure_text, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.execution_authority import (
@@ -430,7 +431,7 @@ async def _run_managed_call(
             )
             retained = True
             # Every outcome but completion tells the model why, such as the reason an approval was denied.
-            error = None if waited.job.status == "completed" else payload.error or waited.job.result or ""
+            error = None if waited.job.status == "completed" else job_failure_text(value, payload)
         # A released wait's call returned its job handle, which names the job a restart's account points to.
         await record_return(value if error is None else error)
     except JobAccessError as refused:
@@ -494,7 +495,7 @@ async def _run_job_call(
     try:
         returned = await _owned_by_job(lambda: run_tool_call(function, call.arguments, call.context, middleware=inner))
     except Exception as error:
-        return None, str(error)
+        return None, failure_text(error)
     value = read_tool_value(returned)
     return (returned if value is None else value), None
 
@@ -512,9 +513,10 @@ def _saved_outcome(
     except Exception as error:
         # Whatever fails here fails after the call ran, so its lost result must not read as a call that did not
         # take effect.
+        reason = failure_text(error)
         return BackgroundOutcome(
             "failed",
-            f"The call ran, but its result could not be saved ({error}). Its effects stand: do not call it again.",
+            f"The call ran, but its result could not be saved ({reason}). Its effects stand: do not call it again.",
         )
     if failure is not None:
         return BackgroundOutcome("failed", result=failure, result_payload=encoded)

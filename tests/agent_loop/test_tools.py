@@ -98,10 +98,11 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
         max_tool_calls_per_turn=1,
     )
 
-    assert [(m.role, m.tool_call_id, m.tool_name) for m in messages] == [
-        ("tool", "c1", "missing"),
-        ("tool", "c2", "add"),
-        ("tool", "c3", "add"),
+    # Each answer is a failed call, which Claude and Gemini read as a failure.
+    assert [(m.role, m.tool_call_id, m.tool_name, m.tool_call_error) for m in messages] == [
+        ("tool", "c1", "missing", True),
+        ("tool", "c2", "add", True),
+        ("tool", "c3", "add", True),
     ]
     assert messages[0].content == MISSING_TOOL_ERROR_TEXT
     assert str(messages[1].content).startswith("Error while decoding function arguments: ")
@@ -123,15 +124,17 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
     )
 
     assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
-    assert [(m.tool_call_id, m.content, m.tool_call_error, m.tool_args) for m in batch.refused] == [
+    assert [(m.tool_call_id, m.tool_name, m.content, m.tool_call_error, m.tool_args) for m in batch.refused] == [
         (
             "c2",
+            "echo",
             "Tool call limit reached. Tool call echo not executed. Don't try to execute it again.",
             True,
             {"text": "x"},
         ),
         (
             "c3",
+            "add",
             "Tool call limit reached. Tool call add not executed. Don't try to execute it again.",
             True,
             {"a": 3, "b": 4},
