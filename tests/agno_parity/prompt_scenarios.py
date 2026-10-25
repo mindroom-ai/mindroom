@@ -299,7 +299,7 @@ class Scenario:
     turn: Callable[[Path], AgentTurn] | None = None
 
 
-def output_schema_dict(schema: type[BaseModel] | None) -> dict[str, Any] | None:
+def _output_schema_dict(schema: type[BaseModel] | None) -> dict[str, Any] | None:
     """Return a request's output schema as the goldens record it: its class and its JSON schema."""
     if schema is None:
         return None
@@ -314,7 +314,7 @@ def call_dict(call: ModelCall) -> dict[str, Any]:
         "messages": [turn_message(message) for message in call.messages],
         "tools": [tool_definition(tool) for tool in call.tools],
         "tool_choice": call.tool_choice,
-        "output_schema": output_schema_dict(call.output_schema),
+        "output_schema": _output_schema_dict(call.output_schema),
         "deferred_tool_names": call.deferred_tool_names,
     }
 

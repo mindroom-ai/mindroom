@@ -43,9 +43,9 @@ if TYPE_CHECKING:
     from tests.fakes.scripted_model import ScriptedModel
 
 ROOM = "!room:example.org"
-REQUESTER = "@alice:example.org"
+_REQUESTER = "@alice:example.org"
 # The capture's agents and models, as far as the ``code`` agent's resumes reach them.
-CONFIG: dict[str, Any] = {
+_CONFIG: dict[str, Any] = {
     "timezone": "UTC",
     "defaults": {"tools": []},
     "memory": {"backend": "none"},
@@ -63,7 +63,7 @@ CONFIG: dict[str, Any] = {
             "role": "Runs calculations for other agents.",
             "model": "helper",
             "tools": ["calculator"],
-            "access": {"users": [REQUESTER]},
+            "access": {"users": [_REQUESTER]},
         },
     },
     "models": {
@@ -120,7 +120,7 @@ class CodeResume:
             )
 
 
-def load_dump(store: ConversationStore, dump: str) -> None:
+def _load_dump(store: ConversationStore, dump: str) -> None:
     """Write one pre-resume dump into ``store``'s database, as the resume found it."""
     store.path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(store.path)) as connection:
@@ -141,24 +141,24 @@ async def setup_resume(
     A delegation's child gets its own store and audit record, as the capture's had.
     """
     paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(Config.model_validate(CONFIG), paths)
+    config = bind_runtime_paths(Config.model_validate(_CONFIG), paths)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
-        requester_id=REQUESTER,
+        requester_id=_REQUESTER,
         room_id=ROOM,
         thread_id=thread,
         resolved_thread_id=thread,
         session_id=create_session_id(ROOM, thread),
     )
     store = create_session_storage("code", config, paths, identity)
-    load_dump(store, f"agent_code__before_{run_id}")
+    _load_dump(store, f"agent_code__before_{run_id}")
     paused = store.get_run(run_id)
     assert isinstance(paused, RunRecord)
     assert paused.status is RunStatus.paused
     for child in DelegationState.from_metadata(paused.metadata).children:
         child_store = create_session_storage("helper", config, paths, child_execution_identity(child))
-        load_dump(child_store, f"agent_helper__before_{run_id}")
+        _load_dump(child_store, f"agent_helper__before_{run_id}")
         # The child's audit record is on disk beside its store; the capture started it on its frozen clock.
         monkeypatch.setattr(records, "_utc_timestamp", lambda: "2027-01-15T08:26:00+00:00")
         await start_child_record(

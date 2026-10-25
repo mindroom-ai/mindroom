@@ -98,7 +98,7 @@ _AUTHORED["models"]["code"] |= {"display_name": "Code Model", "context_window": 
 _AUTHORED["models"]["leader"]["context_window"] = 100000
 _AUTHORED["tool_approval"] = {"default": "auto_approve", "rules": [{"match": "multiply", "action": "require_approval"}]}
 # The runs whose replies streamed; the rest were blocking.
-STREAMED = {"run-tools", "panel-completed"}
+_STREAMED = {"run-tools", "panel-completed"}
 
 
 def _stored_runs() -> dict[str, AnyRunRecord]:
@@ -113,7 +113,7 @@ def _stored_runs() -> dict[str, AnyRunRecord]:
     return runs
 
 
-RUNS = _stored_runs()
+_RUNS = _stored_runs()
 
 
 def _prepared_history(record: AnyRunRecord) -> PreparedHistoryState:
@@ -171,24 +171,24 @@ def _model(record: AnyRunRecord) -> ScriptedModel:
     return scripted(record.model, *turns)
 
 
-def resumed_model(record: AnyRunRecord) -> ScriptedModel:
+def _resumed_model(record: AnyRunRecord) -> ScriptedModel:
     """Return a model that answers a resumed request as ``record``'s last assistant message did."""
     assert record.model is not None
     last = [message for message in record.messages if message.role == "assistant"][-1]
     return scripted(record.model, answer(str(last.content), last.metrics))
 
 
-def member_runs(run_id: str) -> list[RunRecord]:
+def _member_runs(run_id: str) -> list[RunRecord]:
     """Return the member runs of the team run ``run_id``."""
-    return [run for run in RUNS.values() if isinstance(run, RunRecord) and run.parent_run_id == run_id]
+    return [run for run in _RUNS.values() if isinstance(run, RunRecord) and run.parent_run_id == run_id]
 
 
-async def agent_reply_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str) -> dict[str, Any]:
+async def _agent_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str) -> dict[str, Any]:
     """Replay the agent run ``run_id`` through its reply's entry point and return the metadata it published."""
-    record = RUNS[run_id]
+    record = _RUNS[run_id]
     # MindRoom's interrupted-turn record replaced the failed run's row and keeps no usage, model, or provider. The
     # failed run's own record held what Agno stored for the same failing request when no turn record replaced it.
-    replayed = RUNS["run-native-error"] if run_id == "run-error" else record
+    replayed = _RUNS["run-native-error"] if run_id == "run-error" else record
     paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(_AUTHORED), paths)
     install_model_providers(monkeypatch, {"code": _model(replayed)})
@@ -233,16 +233,16 @@ async def agent_reply_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
         "run_metadata_collector": published,
     }
     with tool_runtime_context(runtime):
-        if run_id in STREAMED:
+        if run_id in _STREAMED:
             _ = [chunk async for chunk in stream_agent_response(**reply)]
         else:
             await ai_response(**reply)
     return published
 
 
-async def team_reply_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str) -> dict[str, Any]:
+async def _team_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str) -> dict[str, Any]:
     """Replay the team run ``run_id`` through its reply's entry point and return the metadata it published."""
-    record = RUNS[run_id]
+    record = _RUNS[run_id]
     assert isinstance(record, TeamRunRecord)
     assert record.team_id is not None
     mode = TeamMode(_AUTHORED["teams"][record.team_id].get("mode", "coordinate"))
@@ -255,13 +255,13 @@ async def team_reply_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
         mode=mode,
     )
     team.models["leader"] = _model(record)
-    for member in member_runs(run_id):
+    for member in _member_runs(run_id):
         assert member.model is not None
         team.models[member.model] = _model(member)
     _prepares(monkeypatch, record)
     published: dict[str, Any] = {}
     ctx = team.ctx(session_id=record.session_id, run_id=run_id)
-    if run_id in STREAMED:
+    if run_id in _STREAMED:
         await team.stream(ctx=ctx, run_metadata_collector=published)
     else:
         await team.respond(ctx=ctx, run_metadata_collector=published)
@@ -273,15 +273,15 @@ async def team_reply_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
     return published
 
 
-async def team_resume_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+async def _team_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Resume ``team-approved`` from its stored pause on its checker's ``multiply`` and return what it published.
 
     The leader and the checker answer their resumed requests as their stored runs' last assistant messages did.
     """
     team = build_team_turn(tmp_path, monkeypatch, _AUTHORED, members=("writer", "checker"), team_name="squad")
-    [checker] = member_runs("team-approved")
-    team.models["leader"] = resumed_model(RUNS["team-approved"])
-    team.models["checker-model"] = resumed_model(checker)
+    [checker] = _member_runs("team-approved")
+    team.models["leader"] = _resumed_model(_RUNS["team-approved"])
+    team.models["checker-model"] = _resumed_model(checker)
     store = team.storage
     store.path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(store.path)) as connection:
@@ -328,8 +328,8 @@ async def published_metadata(run_id: str, tmp_path: Path, monkeypatch: pytest.Mo
         assert isinstance(result, CompletedApprovalRun)
         return result.metadata_content
     if run_id == "team-approved":
-        return await team_resume_metadata(tmp_path, monkeypatch)
-    reply = team_reply_metadata if isinstance(RUNS[run_id], TeamRunRecord) else agent_reply_metadata
+        return await _team_resume(tmp_path, monkeypatch)
+    reply = _team_reply if isinstance(_RUNS[run_id], TeamRunRecord) else _agent_reply
     return await reply(tmp_path, monkeypatch, run_id)
 
 
