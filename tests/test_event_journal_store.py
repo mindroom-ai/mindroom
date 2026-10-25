@@ -134,6 +134,9 @@ _CONTENDED_CLAIM_WAIT_SECONDS = 0.5
 # which is why it is small: an implementation that releases early gets there in
 # microseconds, so no plausible machine turns a real failure into a pass.
 _MUST_NOT_FINISH_SECONDS = 0.25
+# How long an await that must finish on its own is given. Reached only when it is
+# blocked, which is the failure, so a loaded host cannot fail a correct backend.
+_MUST_FINISH_SECONDS = 5.0
 # How long a worker thread waits to be let go. Never reached unless the test is
 # already failing, so it only bounds the damage.
 _WORKER_WAIT_SECONDS = 5.0
@@ -9328,7 +9331,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         await asyncio.gather(*(started.wait() for started in workers_started))
         closing = asyncio.create_task(backend.close())
         try:
-            finished, _ = await asyncio.wait({closing}, timeout=_MUST_NOT_FINISH_SECONDS)
+            finished, _ = await asyncio.wait({closing}, timeout=_MUST_FINISH_SECONDS)
         finally:
             release_workers.set()
             await asyncio.gather(*blockers)
