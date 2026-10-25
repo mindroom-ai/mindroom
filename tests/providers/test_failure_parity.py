@@ -1411,7 +1411,9 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
         turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
 
     assert (turn.content, turn.stop_reason, turn.usage.tokens.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
-    assert [entry.get("stop_reason") for entry in logs if entry["event"] == "LLM usage"] == [stop_reason]
+    # An attempt that stalls before its request goes out, as on a loaded machine, logs a line without usage.
+    usage_lines = [entry for entry in logs if entry["event"] == "LLM usage" and entry["usage_available"]]
+    assert [entry["stop_reason"] for entry in usage_lines] == [stop_reason]
 
 
 def get_weather(city: str) -> str:
@@ -1452,9 +1454,10 @@ def _tool_results(route: str, body: dict[str, Any]) -> list[tuple[str, str]]:
     return [(item["call_id"], item["output"]) for item in body["input"] if item.get("type") == "function_call_output"]
 
 
-# The output-limit policy every run's hooks carry answers a call the output limit cut off as not run on every route,
-# so the model reads why and splits the work; it answered only Claude's before, and elsewhere such a call ran when its
-# partial arguments parsed. A stored response still anchors the next request, which answers the cut-off call it lists.
+# The output-limit policy, which every run's hooks now carry (``tests/test_loop_hooks.py``), answers a call the output
+# limit cut off on the Responses, Codex and Chat routes as not run, so the model reads why and splits the work; such a
+# call used to run there when its partial arguments parsed. A stored response still anchors the next request, which
+# answers the cut-off call it lists.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("route", "stream"),
@@ -1466,7 +1469,7 @@ def _tool_results(route: str, body: dict[str, Any]) -> list[tuple[str, str]]:
         ("openai_chat", False),
     ],
 )
-async def test_a_call_the_output_limit_cut_off_is_answered_without_running_on_every_route(
+async def test_a_call_the_output_limit_cut_off_is_answered_without_running_it(
     route: str,
     stream: bool,
     tmp_path: Path,

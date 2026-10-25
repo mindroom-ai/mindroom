@@ -186,7 +186,6 @@ def _reply(
     *,
     tools: Sequence[str] = (PROBE_TOOL,),
     approval_rules: Sequence[ApprovalRuleConfig] = (),
-    capabilities: Capabilities | None = None,
     plugins: Sequence[object] = (),
     max_tool_calls_per_turn: int | None = None,
     context_window: int | None = None,
@@ -213,7 +212,7 @@ def _reply(
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     if approval_rules:
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
-    model = ScriptedModel([list(turn) for turn in turns], capabilities=capabilities or Capabilities())
+    model = ScriptedModel([list(turn) for turn in turns])
     install_model_providers(monkeypatch, {"default": model})
     if plugins:
         monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: list(plugins))

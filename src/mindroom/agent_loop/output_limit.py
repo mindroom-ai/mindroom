@@ -43,7 +43,7 @@ def output_limit_policy() -> AnswerToolCalls:
             msg = (
                 f"The output limit cut off {cut_off_responses} of this model's responses in this run "
                 "before their tool calls were complete, so the run stopped. Ask for the work in smaller steps, "
-                "or raise the model's max_tokens."
+                "or raise the model's output token limit."
             )
             raise ModelOutputLimitError(msg)
         logger.warning("tool_calls_cut_off_by_output_limit", cut_off_responses=cut_off_responses)
