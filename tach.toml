@@ -64,7 +64,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.embeddings.ollama_embedder"
-depends_on = ["mindroom.embeddings.errors"]
+depends_on = ["mindroom.embeddings.errors", "mindroom.providers.errors"]
 visibility = ["mindroom.embeddings.factory"]
 
 [[modules]]
@@ -89,7 +89,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.embeddings.errors"
-depends_on = []
+depends_on = ["mindroom.llm", "mindroom.providers.openai"]
 
 [[modules]]
 path = "mindroom.embeddings.openai_embedder"
