@@ -15,8 +15,8 @@ import nio
 import pytest
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
@@ -55,7 +55,8 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_hooks import BackgroundToolApprovalDenied, build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.agent_tool_helpers import tool_policy
 from tests.authorization_helpers import (
@@ -81,7 +82,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.execution_authority import JobTool
-    from mindroom.tool_system.invocation import ToolOutcome
 
 _SESSION_ID = "!room:localhost:$resolved-thread"
 
@@ -1591,7 +1591,7 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_ru
 
 @pytest.mark.asyncio
 async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> None:
-    """A declined before-call hook should return a synthetic result and not call the real tool."""
+    """A declined call answers with a failed outcome and never runs; the after-call hooks receive its text."""
     after_seen: list[tuple[bool, object | None, BaseException | None]] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -1614,14 +1614,60 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
     with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
         result = await bridge("read_file", next_func, {"path": "secret.txt"})
 
-    assert next_func.await_count == 0
-    assert result == (
+    declined = (
         "[TOOL CALL DECLINED]\n"
         "Tool: read_file\n"
         "Reason: secret paths are blocked\n\n"
         "Adjust your approach — try a different tool or different arguments."
     )
-    assert after_seen == [(True, result, None)]
+    assert next_func.await_count == 0
+    assert result == ToolOutcome(content=declined, is_error=True)
+    assert after_seen == [(True, declined, None)]
+
+
+@pytest.mark.asyncio
+async def test_a_denied_background_script_call_reaches_the_after_call_hooks_as_a_declined_call(tmp_path: Path) -> None:
+    """The script gets the typed denial; the after-call hooks receive the decline text a plugin's decline gives."""
+    after_seen: list[tuple[bool, object | None, BaseException | None]] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        after_seen.append((ctx.blocked, ctx.result, ctx.error))
+
+    async def deny(_origin: object, _tool_name: str, _arguments: dict[str, object]) -> ToolApprovalDecision:
+        return ToolApprovalDecision(approved=False, reason="Not tonight.")
+
+    origin = BackgroundScriptToolOrigin(
+        run_id="run-1",
+        call_id="call-1",
+        requester_id="@alice:localhost",
+        toolkit_name="files",
+        function_name="read_file",
+    )
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [after])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        origin=origin,
+        approval_gate=deny,
+    )
+
+    next_func = AsyncMock(return_value="should not run")
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert next_func.await_count == 0
+    assert result == BackgroundToolApprovalDenied(reason="Not tonight.")
+    assert after_seen == [
+        (
+            True,
+            "[TOOL CALL DECLINED]\n"
+            "Tool: read_file\n"
+            "Reason: Not tonight.\n\n"
+            "Adjust your approach — try a different tool or different arguments.",
+            None,
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1807,7 +1853,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity=execution_identity,
             hook_registry=bot.hook_registry,
         )
-        echo = prepare_run_tools(build.spec).functions["echo"]
+        echo = build.spec.functions["echo"]
 
         with tool_runtime_context(tool_context), tool_execution_identity(execution_identity):
             result = await execute_tool_call(
@@ -2044,7 +2090,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             hook_registry=registry,
         )
 
-        echo = prepare_run_tools(build.spec).functions["echo"]
+        echo = build.spec.functions["echo"]
         outcome = await execute_tool_call(
             echo,
             {"text": "hello"},

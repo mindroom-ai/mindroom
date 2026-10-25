@@ -58,7 +58,6 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         ),
         history_settings=settings,
         store=None,
-        tool_owners={},
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,

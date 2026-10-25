@@ -24,12 +24,10 @@ import mindroom.workspaces as workspaces_module
 from mindroom import agents as agents_module
 from mindroom import path_confinement, prompts
 from mindroom.agent_loop.build import AgentBuild, prompt_for_turn
-from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import (
     _apply_preload_cap,
     _load_context_files,
     _PreloadChunk,
-    _prune_toolkit_functions,
     _render_tool_execution_environment,
     _trim_chunk_tails,
     agent_build_can_overlap_file_memory,
@@ -183,7 +181,12 @@ def _role(build: AgentBuild) -> str:
 
 def _offered(build: AgentBuild) -> dict[str, ToolFunction]:
     """Return the functions a run of ``build`` offers the model, by name."""
-    return dict(prepare_run_tools(build.spec).functions)
+    return dict(build.spec.functions)
+
+
+def _toolkit_named(name: str, *_args: object, **_kwargs: object) -> Toolkit:
+    """Return a toolkit called ``name`` offering one function of its own, as the registered tool ``name`` would."""
+    return Toolkit(name=name, tools=[Function(name=f"{name}_probe", entrypoint=lambda: None)])
 
 
 def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> AgentBuild:
@@ -191,12 +194,12 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     from tests.conftest import runtime_paths_for  # noqa: PLC0415
 
     execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
+    kwargs.setdefault("supports_native_tool_approval", True)
     return create_agent(
         agent_name,
         config,
         runtime_paths_for(config),
         execution_identity=execution_identity,
-        supports_native_tool_approval=True,
         **kwargs,
     )
 
@@ -484,7 +487,7 @@ def test_agent_role_describes_mixed_dedicated_worker_routing(
     tmp_path: Path,
 ) -> None:
     """The prompt should identify mixed local and dedicated-worker tools."""
-    mock_get_tool_by_name.return_value = MagicMock()
+    mock_get_tool_by_name.side_effect = _toolkit_named
     config = _test_config()
     config.agents["general"].tools = ["shell", "calculator"]
     config.agents["general"].include_default_tools = False
@@ -1084,7 +1087,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         worker_target: object | None = None,
         runtime_config: object | None = None,
         list_mcp_functions: bool = False,
-    ) -> MagicMock:
+    ) -> Toolkit:
         del (
             _runtime_paths,
             credentials_manager,
@@ -1104,9 +1107,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
             raise ImportError(missing_dependency_message)
-        tool = MagicMock()
-        tool.name = name
-        return tool
+        return _toolkit_named(name)
 
     mock_get_tool_by_name.side_effect = _lookup_tool
 
@@ -1146,7 +1147,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         worker_target: object | None = None,
         runtime_config: object | None = None,
         list_mcp_functions: bool = False,
-    ) -> MagicMock:
+    ) -> Toolkit:
         del (
             _runtime_paths,
             credentials_manager,
@@ -1166,9 +1167,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
             raise ValueError(msg)
-        tool = MagicMock()
-        tool.name = name
-        return tool
+        return _toolkit_named(name)
 
     mock_get_tool_by_name.side_effect = _lookup_tool
 
@@ -2458,12 +2457,19 @@ def _run_directory_with_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     return run_directory
 
 
-def _tool_entrypoints(build: AgentBuild) -> dict[str, dict[str, Callable[..., str]]]:
-    """Return what each of the build's toolkits runs for a call, by toolkit and function name."""
-    return {
-        toolkit.name: {function.name: function.entrypoint for function in toolkit.functions}
-        for toolkit in build.spec.toolkits
-    }
+def _agent_offered(tool_name: str, runtime_paths: RuntimePaths, *, file_memory: bool = False) -> AgentBuild:
+    """Build the ``general`` agent offered only the tool ``tool_name``."""
+    config = _test_config()
+    config.agents["general"].tools = [tool_name]
+    config.agents["general"].include_default_tools = False
+    if file_memory:
+        config.agents["general"].memory_backend = "file"
+    return _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+
+
+def _tool_entrypoints(build: AgentBuild) -> dict[str, Callable[..., str]]:
+    """Return what the build runs for each call, by function name."""
+    return {name: function.entrypoint for name, function in build.spec.functions.items()}
 
 
 def test_agent_without_a_workspace_cannot_read_the_run_directory(
@@ -2472,13 +2478,11 @@ def test_agent_without_a_workspace_cannot_read_the_run_directory(
 ) -> None:
     """A shared agent without file memory has no workspace, so its file tools refuse the process working directory."""
     run_directory = _run_directory_with_secret(tmp_path, monkeypatch)
-    config = _test_config()
-    config.agents["general"].tools = ["file", "coding"]
-    config.agents["general"].include_default_tools = False
+    runtime_paths = _runtime_paths(tmp_path / "storage")
 
-    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path / "storage")))
-
-    file_tools, coding = (_tool_entrypoints(agent)[name] for name in ("file_tools", "coding"))
+    # Both toolkits offer `read_file`, so each is checked in an agent offered it alone.
+    agent = _agent_offered("file", runtime_paths)
+    file_tools, coding = _tool_entrypoints(agent), _tool_entrypoints(_agent_offered("coding", runtime_paths))
     results = [
         *(file_tools["read_file"](path) for path in (".env", str(run_directory / ".env"))),
         *(coding["read_file"](path) for path in (".env", str(run_directory / ".env"))),
@@ -2512,14 +2516,10 @@ def test_agent_workspace_file_tools_stay_inside_the_workspace(
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "general")
     workspace.mkdir(parents=True)
     (workspace / "notes.md").write_text("workspace notes\n", encoding="utf-8")
-    config = _test_config()
-    config.agents["general"].memory_backend = "file"
-    config.agents["general"].tools = ["file", "coding"]
-    config.agents["general"].include_default_tools = False
 
-    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
-
-    file_tools, coding = (_tool_entrypoints(agent)[name] for name in ("file_tools", "coding"))
+    agent = _agent_offered("file", runtime_paths, file_memory=True)
+    file_tools = _tool_entrypoints(agent)
+    coding = _tool_entrypoints(_agent_offered("coding", runtime_paths, file_memory=True))
     assert file_tools["read_file"]("notes.md") == "workspace notes\n"
     assert "workspace notes" in coding["read_file"]("notes.md")
     assert coding["write_file"]("draft.md", "draft\n").startswith("Wrote")
@@ -2823,7 +2823,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         worker_target: object | None = None,
         runtime_config: object | None = None,
         list_mcp_functions: bool = False,
-    ) -> MagicMock:
+    ) -> Toolkit:
         del (
             _runtime_paths,
             tool_config_overrides,
@@ -2846,9 +2846,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         if not isinstance(credentials, dict) or "api_key" not in credentials:
             msg = "API key required"
             raise ValueError(msg)
-        tool = MagicMock()
-        tool.name = tool_name
-        return tool
+        return _toolkit_named(tool_name)
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
 
@@ -4011,17 +4009,22 @@ def test_create_agent_disabled_tool_names_omit_resolved_tools(
     assert "memory" not in built_tools
 
 
-def test_tool_function_filter_prunes_resolved_functions() -> None:
+def test_tool_function_filter_prunes_resolved_functions(tmp_path: Path) -> None:
     """Channel policies filter actual functions without dropping a safe toolkit peer."""
-    safe = Function(name="safe", entrypoint=lambda: "safe")
-    unsafe = Function(name="unsafe", entrypoint=lambda: "unsafe")
-    toolkit = Toolkit(name="mixed", tools=[safe, unsafe])
+    config = _test_config()
+    config.agents["general"].tools = ["calculator"]
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    toolkit = Toolkit(
+        name="mixed",
+        tools=[Function(name="safe", entrypoint=lambda: "safe"), Function(name="unsafe", entrypoint=lambda: "unsafe")],
+    )
 
-    filtered = _prune_toolkit_functions(toolkit, lambda function: function.name == "safe")
+    with patch("mindroom.agents.build_agent_toolkit", return_value=toolkit):
+        build = _create_agent_for_test("general", config, tool_function_filter=lambda function: function.name == "safe")
 
-    assert filtered is toolkit
-    assert set(toolkit.functions) == {"safe"}
-    assert toolkit.async_functions == {}
+    assert set(_offered(build)) == {"safe"}
+    # The built toolkit is left as it was built.
+    assert set(toolkit.functions) == {"safe", "unsafe"}
 
 
 def test_native_approval_capability_marks_only_potentially_gated_calls() -> None:
@@ -4085,11 +4088,7 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
         ],
     )
 
-    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config, registered_tool_name="approval-test")
-
-    assert filtered is toolkit
-    assert set(toolkit.functions) == {"safe"}
-    assert toolkit.async_functions == {}
+    assert set(gated_functions(toolkit, config, resumable=False)) == {"safe"}
 
 
 def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
@@ -4103,10 +4102,7 @@ def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
         ],
     )
 
-    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config, registered_tool_name="approval-test")
-
-    assert filtered is toolkit
-    assert set(toolkit.functions) == {"safe"}
+    assert set(gated_functions(toolkit, config, resumable=False)) == {"safe"}
 
 
 def test_native_approval_capability_preserves_tool_authored_confirmation() -> None:
@@ -4179,17 +4175,19 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
     assert (shell.requires_confirmation, shell.approval_type) == (not asks_as_job, expected)
 
 
-def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
+def test_non_resumable_tool_surface_drops_an_empty_toolkit(tmp_path: Path) -> None:
     """A channel that hides every function must not register an unusable toolkit name."""
-    config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
-    toolkit = Toolkit(
-        name="approval-test",
-        tools=[Function(name="dangerous", entrypoint=lambda: None)],
-    )
+    config = _test_config()
+    config.agents["general"].tools = ["calculator"]
+    config.tool_approval = ToolApprovalConfig(default="require_approval")
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    toolkit = Toolkit(name="approval-test", tools=[Function(name="dangerous", entrypoint=lambda: None)])
 
-    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config, registered_tool_name="approval-test")
+    with patch("mindroom.agents.build_agent_toolkit", return_value=toolkit):
+        build = _create_agent_for_test("general", config, supports_native_tool_approval=False)
 
-    assert filtered is None
+    assert _offered(build) == {}
+    assert "`calculator`" not in _role(build)
 
 
 def test_create_agent_tool_filter_applies_to_the_generated_knowledge_function(tmp_path: Path) -> None:

@@ -429,7 +429,7 @@ async def test_newcomer_seen_joining_waits_for_the_router_to_apply_the_join(
             observed_room=_room_seen_by_the_agent(),
         )
 
-    index.apply_member_event(config, paths, "!talent:example.com", _join_event(_NEWCOMER), control_user_id="@r:x")
+    index.apply_member_event(config, "!talent:example.com", _join_event(_NEWCOMER), control_user_id="@r:x")
 
     assert _newcomer_decision(config, index) is _ReplyAuthorizationDecision.ALLOWED
 

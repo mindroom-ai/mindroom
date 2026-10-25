@@ -21,6 +21,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
+from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.types import session_state_snapshot
@@ -33,7 +34,7 @@ from mindroom.tool_jobs.background_after import (
     application_arguments,
     read_background_after,
 )
-from mindroom.tool_jobs.consumption import consume_tool_job, session_state_delta
+from mindroom.tool_jobs.consumption import consume_tool_job, job_failure_text, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.execution_authority import (
@@ -55,7 +56,7 @@ from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.toolkit_connections import connects_per_run
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
@@ -100,23 +101,18 @@ class _JobCallError(Exception):
 
 
 def assembled_job_tools(
-    sources: Iterable[tuple[str, Toolkit, ToolFunction]],
+    sources: Iterable[tuple[Toolkit, ToolFunction]],
     snapshot: Mapping[str, Any],
 ) -> dict[str, JobTool]:
     """Describe each function a MindRoom-assembled toolkit offers the actor, by name.
 
-    ``sources`` holds, for each such function, its authored toolkit name, the concrete toolkit built for the actor,
-    and the function itself; a function the framework generated is not among them. ``snapshot`` is the actor's
-    execution scope and file access, empty for a team.
+    ``sources`` holds, for each such function, the concrete toolkit built for the actor and the function itself,
+    which names its authored toolkit; a function the framework generated is not among them. ``snapshot`` is the
+    actor's execution scope and file access, empty for a team.
     """
     return {
-        function.name: JobTool(
-            function=function,
-            toolkit_name=owner,
-            toolkit=toolkit,
-            authority=toolkit_authority(snapshot, toolkit),
-        )
-        for owner, toolkit, function in sources
+        function.name: JobTool(function=function, toolkit=toolkit, authority=toolkit_authority(snapshot, toolkit))
+        for toolkit, function in sources
     }
 
 
@@ -430,7 +426,7 @@ async def _run_managed_call(
             )
             retained = True
             # Every outcome but completion tells the model why, such as the reason an approval was denied.
-            error = None if waited.job.status == "completed" else payload.error or waited.job.result or ""
+            error = None if waited.job.status == "completed" else job_failure_text(value, payload)
         # A released wait's call returned its job handle, which names the job a restart's account points to.
         await record_return(value if error is None else error)
     except JobAccessError as refused:
@@ -490,12 +486,17 @@ async def _run_job_call(
     function: ToolFunction,
     call: JobCall,
 ) -> tuple[object, str | None]:
-    """Run the job's call through the actor's tool-call policy: what it returned, or the text of what it raised."""
+    """Run the job's call through the actor's tool-call policy: what it returned, or the text of why it failed.
+
+    It fails when it raised, or when the policy answered it with a failed outcome, as for a call a plugin hook declined.
+    """
     try:
         returned = await _owned_by_job(lambda: run_tool_call(function, call.arguments, call.context, middleware=inner))
     except Exception as error:
-        return None, str(error)
+        return None, failure_text(error)
     value = read_tool_value(returned)
+    if isinstance(value, ToolOutcome) and value.is_error:
+        return None, value.content
     return (returned if value is None else value), None
 
 
@@ -512,9 +513,10 @@ def _saved_outcome(
     except Exception as error:
         # Whatever fails here fails after the call ran, so its lost result must not read as a call that did not
         # take effect.
+        reason = failure_text(error)
         return BackgroundOutcome(
             "failed",
-            f"The call ran, but its result could not be saved ({error}). Its effects stand: do not call it again.",
+            f"The call ran, but its result could not be saved ({reason}). Its effects stand: do not call it again.",
         )
     if failure is not None:
         return BackgroundOutcome("failed", result=failure, result_payload=encoded)

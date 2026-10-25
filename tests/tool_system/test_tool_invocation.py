@@ -26,14 +26,13 @@ from mindroom.tool_system.invocation import (
     ToolCall,
     ToolCallContext,
     ToolNext,
-    ToolOutcome,
     client_tool_result,
     current_tool_call,
     execute_tool_call,
     parse_tool_arguments,
     run_tool_call,
 )
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from tests.tool_system import agno_parity_support as support
 
@@ -379,11 +378,14 @@ async def test_a_failing_generator_is_an_error_with_the_exception_text() -> None
 
 @pytest.mark.asyncio
 async def test_raised_exceptions_become_error_outcomes_and_cancellation_propagates() -> None:
-    """Any exception is the model's error text; cancellation is not an outcome."""
+    """Any exception is the model's error text, or its type when it has none; cancellation is not an outcome."""
 
     def fails() -> str:
         msg = "boom"
         raise ValueError(msg)
+
+    async def times_out() -> str:
+        raise TimeoutError
 
     async def cancels() -> str:
         raise asyncio.CancelledError
@@ -391,10 +393,11 @@ async def test_raised_exceptions_become_error_outcomes_and_cancellation_propagat
     def stops() -> str:
         return "switched"
 
-    functions = _functions(fails, cancels, stops)
+    functions = _functions(fails, times_out, cancels, stops)
     stopping = adapt_toolkit(Toolkit(name="control", tools=[stops], stop_after_tool_call_tools=["stops"])).functions[0]
 
     assert await _run(functions["fails"], "{}") == ToolOutcome(content="boom", is_error=True)
+    assert await _run(functions["times_out"], "{}") == ToolOutcome(content="TimeoutError", is_error=True)
     with pytest.raises(asyncio.CancelledError):
         await _run(functions["cancels"], "{}")
     assert await _run(stopping, "{}") == ToolOutcome(content="switched", stop_after_call=True)

@@ -1518,7 +1518,6 @@ async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_p
 
     memberships.apply_member_event(
         config,
-        runtime_paths,
         grant_room_id,
         nio.RoomMemberEvent.from_dict(
             {
@@ -1611,7 +1610,6 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
 
     memberships.apply_member_event(
         config,
-        runtime_paths,
         grant_room_id,
         nio.RoomMemberEvent.from_dict(
             {
@@ -1850,7 +1848,6 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(
 
     memberships.apply_member_event(
         config,
-        runtime_paths,
         grant_room_id,
         nio.RoomMemberEvent.from_dict(
             {
@@ -1924,7 +1921,6 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
     await asyncio.wait_for(bridge.agent_starting.wait(), timeout=1)
     memberships.apply_member_event(
         config,
-        runtime_paths,
         grant_room_id,
         nio.RoomMemberEvent.from_dict(
             {

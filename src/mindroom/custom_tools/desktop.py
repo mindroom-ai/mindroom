@@ -289,8 +289,7 @@ class DesktopTools(Toolkit):
         self._command_sequences = count()
         register_toolkit_functions(
             self,
-            sync_entrypoints={},
-            async_entrypoints={"desktop": self.desktop},
+            entrypoints={"desktop": self.desktop},
             descriptions={"desktop": _DESKTOP_DESCRIPTION},
             parameters={"desktop": _DESKTOP_PARAMETERS},
         )

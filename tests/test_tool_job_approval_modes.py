@@ -255,7 +255,7 @@ class _GatedRun:
     async def turn(self, *, generated: bool = False, **budget: float) -> RunRecord:
         """Run the leader's reply that makes the gated call, its function a generated one when ``generated``."""
         toolkit = _GatedTools(self.effects, self.gate)
-        [function] = gated_functions(toolkit, self.config, approvals_as_jobs=True).values()
+        [function] = gated_functions(toolkit, self.config, authored_as="report_writer", approvals_as_jobs=True).values()
         # Authored under a name of its own, so a card names the authored toolkit, not the one built for it.
         [tool] = toolkit_job_tools(toolkit, authored_name="report_writer").values()
         model = ScriptedModel([calls(tool_call("write_report", "write-1", title="q3", **budget)), answer("done")])
@@ -468,7 +468,7 @@ async def test_a_call_its_policy_approves_waits_like_any_call(tmp_path: Path, mo
     """Only a human decision is bounded: a call the policy approves on its own blocks until it finishes."""
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0, gate=asyncio.Event()) as run:
         reply_toolkit = _GatedTools(run.effects, run.gate)
-        [function] = gated_functions(reply_toolkit, run.config, approvals_as_jobs=True).values()
+        [function] = gated_functions(reply_toolkit, run.config, authored_as="reports", approvals_as_jobs=True).values()
         [tool] = toolkit_job_tools(reply_toolkit, authored_name="reports").values()
         # The function asks as its job, but the policy approves this call, as a script or exemption can.
         run.config.tool_approval = ToolApprovalConfig(default="auto_approve")

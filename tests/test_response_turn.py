@@ -379,31 +379,6 @@ def test_a_denial_is_recorded_with_the_reason_given_or_the_default_note(reason: 
     assert decided.tool_execution.confirmation_note == note
 
 
-def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
-    """A paused call without durable identity must fail closed instead of being silently skipped."""
-    invalid_tool = ToolExecution(tool_name="missing-id", requires_confirmation=True)
-    invalid_requirement = RunRequirement(invalid_tool)
-    valid_tool = ToolExecution(
-        tool_call_id="call-valid",
-        tool_name="dangerous",
-        requires_confirmation=True,
-    )
-
-    paused_record = RunRecord(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        tools=[invalid_tool, valid_tool],
-        requirements=[invalid_requirement],
-    )
-
-    with pytest.raises(RuntimeError, match="missing its exact tool-call ID"):
-        response_turn_module.paused_attempt_from_response(
-            paused_record,
-            toolkit_owners={},
-        )
-
-
 def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
     """One approval decision must never authorize two requirements sharing an ID."""
     requirements = [

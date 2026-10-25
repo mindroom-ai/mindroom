@@ -33,6 +33,7 @@ from mindroom.approval.tool_approval import (
     withdraw_scheduled_call_approval,
 )
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import record_system_usage
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -100,6 +101,9 @@ _deferred_overdue_task_ids: set[str] = set()
 # use its runtime in rooms it can serve (write schedule state and send the trigger); a runner on
 # another bot's client outlives that client when the bot is replaced.
 _runner_owner: ScheduledTaskRunnerOwner | None = None
+# Every started bot's client by user ID. The router restores and runs schedules even in rooms only another
+# bot may write state in, such as a personal room an agent created, so their state writes go through that bot.
+_state_writers: dict[str, nio.AsyncClient] = {}
 
 # Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
 _schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
@@ -337,6 +341,17 @@ def clear_scheduled_task_runner_owner() -> None:
     """Stop starting runners on a router that is shutting down."""
     global _runner_owner
     _runner_owner = None
+
+
+def register_scheduled_task_state_writer(client: nio.AsyncClient) -> None:
+    """Let a started bot write schedule state in rooms where a schedule's own writer lacks the power."""
+    _state_writers[client.user_id] = client
+
+
+def unregister_scheduled_task_state_writer(client: nio.AsyncClient) -> None:
+    """Stop writing schedule state through a bot whose client is closing."""
+    if _state_writers.get(client.user_id) is client:
+        del _state_writers[client.user_id]
 
 
 @dataclass
@@ -1109,15 +1124,26 @@ def _scheduled_task_permission_hint(client: nio.AsyncClient, room_id: str) -> st
     return f"Ensure {account.user_id} is joined with permission to write room state, then retry."
 
 
-async def _put_scheduled_task_state_content(
+def _room_state_writer(room_id: str, *, refused_user_id: str) -> nio.AsyncClient | None:
+    """Return a started bot, other than the refused account, whose power in the room lets it write schedule state."""
+    for writer in _state_writers.values():
+        room = writer.rooms.get(room_id)
+        if (
+            writer.user_id != refused_user_id
+            and room is not None
+            and room.power_levels.can_user_send_state(writer.user_id, _SCHEDULED_TASK_EVENT_TYPE)
+        ):
+            return writer
+    return None
+
+
+async def _write_scheduled_task_state(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
     content: dict[str, typing.Any],
-    matrix_admin: HookMatrixAdmin | None = None,
-) -> None:
-    """Write scheduled-task state, falling back to the admin-capable Matrix path on rejection."""
-    active_write_failure: str | None = None
+) -> str | None:
+    """Write one scheduled-task state event as one account, returning why it failed or None once it landed."""
     try:
         response = await client.room_put_state(
             room_id=room_id,
@@ -1126,11 +1152,21 @@ async def _put_scheduled_task_state_content(
             state_key=task_id,
         )
     except Exception as exc:
-        active_write_failure = f"{type(exc).__name__}: {exc!s}"
-    else:
-        if isinstance(response, nio.RoomPutStateResponse):
-            return
-        active_write_failure = str(response)
+        return f"{type(exc).__name__}: {exc!s}"
+    return None if isinstance(response, nio.RoomPutStateResponse) else str(response)
+
+
+async def _put_scheduled_task_state_content(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    content: dict[str, typing.Any],
+    matrix_admin: HookMatrixAdmin | None = None,
+) -> None:
+    """Write scheduled-task state, falling back on rejection to the admin-capable path, then to a bot that may."""
+    active_write_failure = await _write_scheduled_task_state(client, room_id, task_id, content)
+    if active_write_failure is None:
+        return
 
     if matrix_admin is not None:
         try:
@@ -1151,6 +1187,14 @@ async def _put_scheduled_task_state_content(
             logger.info("scheduled_task_state_persisted_via_admin", room_id=room_id, task_id=task_id)
             return
         active_write_failure = f"{active_write_failure}; privileged fallback failed"
+
+    writer = _room_state_writer(room_id, refused_user_id=client.user_id)
+    if writer is not None:
+        writer_failure = await _write_scheduled_task_state(writer, room_id, task_id, content)
+        if writer_failure is None:
+            logger.info("scheduled_task_state_persisted_via_room_writer", room_id=room_id, task_id=task_id)
+            return
+        active_write_failure = f"{active_write_failure}; {writer.user_id} write failed ({writer_failure})"
 
     msg = (
         f"Failed to persist scheduled task state for task `{task_id}`: {active_write_failure}. "
@@ -1399,7 +1443,7 @@ async def _parse_workflow_schedule(
     except Exception as e:
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
         return _WorkflowParseError(
-            error=f"Error parsing schedule: {e!s}",
+            error=f"Error parsing schedule: {failure_text(e)}",
             suggestion="Try a simpler format like 'Daily at 9am, check my email'",
         )
 
@@ -1559,7 +1603,9 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         with bound_log_context(**current_target.log_context):
             logger.exception("cron_task_failed", task_id=task_id)
             if workflow.room_id:
-                error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+                error_message = (
+                    f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
+                )
                 await scheduling_executor.send_scheduled_failure_notice(
                     client,
                     workflow,
@@ -1696,7 +1742,9 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             if approval_state == "armed":
                 await _withdraw_unsent_scheduled_call(task_id)
             if workflow.room_id:
-                error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+                error_message = (
+                    f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
+                )
                 await scheduling_executor.send_scheduled_failure_notice(
                     client,
                     workflow,

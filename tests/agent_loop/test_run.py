@@ -206,8 +206,13 @@ async def test_a_silent_external_pause_has_empty_content() -> None:
 
 
 def test_paused_content_follows_agno_for_a_pending_confirmation() -> None:
-    confirm = ToolExecution(requires_confirmation=True)
-    silent = ToolExecution(external_execution_required=True, external_execution_silent=True)
+    confirm = ToolExecution(tool_call_id="c1", tool_name="t", requires_confirmation=True)
+    silent = ToolExecution(
+        tool_call_id="c2",
+        tool_name="t",
+        external_execution_required=True,
+        external_execution_silent=True,
+    )
 
     def paused(*tools: ToolExecution) -> RunRecord:
         return RunRecord(run_id="r", status=RunStatus.paused, tools=list(tools))
@@ -215,7 +220,8 @@ def test_paused_content_follows_agno_for_a_pending_confirmation() -> None:
     assert paused_content(paused(confirm)) == "I have tools to execute, but I need confirmation."
     assert paused_content(paused(silent)) == ""
     assert paused_content(paused(confirm, silent)) == "I have tools to execute, but I need confirmation."
-    assert paused_content(paused(ToolExecution(requires_confirmation=True, confirmed=True))) == ""
+    decided = ToolExecution(tool_call_id="c3", tool_name="t", requires_confirmation=True, confirmed=True)
+    assert paused_content(paused(decided)) == ""
     assert paused_content(RunRecord(run_id="r", status=RunStatus.paused)) == ""
 
 
@@ -239,6 +245,32 @@ async def test_a_provider_error_stores_an_error_record_with_the_error_text_and_r
     assert stored["messages"][-1]["metrics"] == {"input_tokens": 5, "total_tokens": 5}
     assert stored["metrics"]["input_tokens"] == 5
     assert "tools" not in stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("store unavailable"), "store unavailable"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_failed_run_records_why_it_failed(error: Exception, text: str) -> None:
+    """A run that raises records the exception's text as its error and content, or its type name when it has none."""
+    records: list[RunRecord] = []
+
+    async def keep(record: RunRecord) -> None:
+        records.append(record)
+
+    async def fail() -> None:
+        raise error
+
+    model = ScriptedModel([[Await(fail)]])
+
+    with pytest.raises(type(error)):
+        async for _ in run_agent(spec(model), _prompt(), ctx=context(), persist=keep, request_template=EMPTY_REQUEST):
+            pass
+
+    [record] = records
+    assert (record.status, record.content, record.error) == (RunStatus.error, text, text)
 
 
 @pytest.mark.asyncio

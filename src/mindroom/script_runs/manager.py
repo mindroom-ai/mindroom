@@ -17,6 +17,7 @@ from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import CONTROL_STATE_PATH_ENV
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import (
     open_directory_within_root,
@@ -1421,8 +1422,7 @@ def _validated_name(name: str | None) -> str | None:
 
 
 def _bounded_error(exc: BaseException) -> str:
-    value = str(exc) or exc.__class__.__name__
-    return value.encode("utf-8")[: 64 * 1024].decode("utf-8", errors="ignore")
+    return failure_text(exc).encode("utf-8")[: 64 * 1024].decode("utf-8", errors="ignore")
 
 
 def _bounded_output(output: str) -> str:

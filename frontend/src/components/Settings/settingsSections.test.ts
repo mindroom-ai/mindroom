@@ -45,6 +45,23 @@ describe("resolveSettingsSections", () => {
     expect(byId.diagnostics).toBeUndefined();
   });
 
+  it("groups personal agent templates with personal rooms", () => {
+    const personal: JsonSchema = {
+      type: "object",
+      properties: {
+        personal_rooms: objectOf("agent"),
+        personal_agents: { type: "object", additionalProperties: objectOf() },
+      },
+    };
+    const section = resolveSettingsSections(personal).find(
+      ({ id }) => id === "personal-rooms",
+    );
+    expect(section?.entries).toEqual([
+      { root: "personal_rooms" },
+      { root: "personal_agents" },
+    ]);
+  });
+
   it("collects unclaimed roots and keys in Other", () => {
     expect(byId.other.entries).toEqual([
       { root: "defaults", keys: ["brand_new_default"] },

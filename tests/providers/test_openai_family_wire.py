@@ -681,6 +681,13 @@ async def test_an_error_body_without_a_message_reports_the_response_text(tmp_pat
     assert (str(info.value), info.value.status_code) == ('{"detail": "Not Found"}', 404)
 
 
+def test_an_sdk_failure_without_text_is_named_by_its_type() -> None:
+    """A failure the SDK raises without text reports its type name, so the reply says what failed."""
+    error = provider_error(RuntimeError(), provider="OpenAI Chat")
+
+    assert (type(error), str(error)) == (ProviderError, "RuntimeError")
+
+
 def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
     """A proxy in front of the endpoint answers 502 with an HTML page, which the SDK keeps as the error body."""
     page = "<html><body>502 Bad Gateway</body></html>"
@@ -832,14 +839,13 @@ _MESSAGE_ITEM = {
 
 @pytest.mark.asyncio
 async def test_a_non_streamed_response_keeps_its_reasoning_summary(tmp_path: Path) -> None:
-    """A helper call on the Responses route reads the reasoning summary; a stored response needs no reasoning copy."""
+    """A helper call on the Responses route reads the reasoning summary."""
     built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(_response(output=[_REASONING_ITEM, _MESSAGE_ITEM])))
 
     turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
 
     assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
     assert turn.message.provider_data["response_id"] == "resp_1"
-    assert "reasoning_output" not in turn.message.provider_data
 
 
 @pytest.mark.asyncio
@@ -1744,11 +1750,7 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
         runtime,
     ).capabilities
 
-    assert (gpt6.native_tool_search, gpt6.native_compaction, gpt6.continues_stored_responses) == (
-        True,
-        True,
-        True,
-    )
+    assert (gpt6.native_tool_search, gpt6.native_compaction) == (True, True)
     assert (gpt5.native_tool_search, gpt5.native_compaction) == (False, False)
     assert stored.native_compaction is False
     assert (proxied.native_tool_search, proxied.native_compaction) == (False, False)

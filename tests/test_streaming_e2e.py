@@ -95,7 +95,9 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
             msg = f"Timed out waiting for {expected_count} streaming deliveries"
             raise AssertionError(msg)
 
-        yield ToolStarted(call=ToolExecution(tool_name="shell", tool_args={"cmd": "echo hello"}).call)
+        yield ToolStarted(
+            call=ToolExecution(tool_call_id="call-shell", tool_name="shell", tool_args={"cmd": "echo hello"}).call,
+        )
         await asyncio.sleep(0.02)
         pump = get_worker_progress_pump()
         assert pump is not None

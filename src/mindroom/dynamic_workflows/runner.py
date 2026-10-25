@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, cast
 
+from mindroom.failure_text import failure_text
+
 _TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
 
 
@@ -32,20 +34,6 @@ class ParticipantOutput:
 
 
 class ParticipantExecutor(Protocol):
-    """Callable that executes one resolved Dynamic Workflow participant."""
-
-    def __call__(
-        self,
-        *,
-        participant: dict[str, object],
-        prompt: str,
-        input_data: dict[str, object],
-        step_outputs: dict[str, object],
-    ) -> ParticipantOutput:
-        """Run one participant with rendered prompt and prior step outputs."""
-
-
-class AsyncParticipantExecutor(Protocol):
     """Async callable that executes one resolved Dynamic Workflow participant."""
 
     def __call__(
@@ -101,53 +89,11 @@ class _DynamicWorkflowExecution:
         return {step.step_id: step.to_json() for step in self.steps}
 
 
-def execute_workflow_spec(
+async def execute_workflow_spec(
     spec: dict[str, object],
     input_data: dict[str, object],
     *,
     participant_executor: ParticipantExecutor | None = None,
-) -> _DynamicWorkflowExecution:
-    """Execute a declarative Dynamic Workflow spec sequentially."""
-    steps: list[_DynamicWorkflowStepResult] = []
-    step_outputs: dict[str, object] = {}
-    participants_by_id = _participants_by_id(spec)
-
-    for raw_step in _workflow_steps(spec):
-        try:
-            result = _execute_workflow_step(
-                raw_step,
-                input_data=input_data,
-                step_outputs=step_outputs,
-                participant_executor=participant_executor,
-                participants_by_id=participants_by_id,
-            )
-        except DynamicWorkflowExecutionError as exc:
-            failed_step = _failed_step(raw_step, str(exc), delegation_id=exc.delegation_id)
-            steps.append(failed_step)
-            return _DynamicWorkflowExecution(
-                status="failed",
-                steps=steps,
-                outputs={},
-                report_markdown=_failed_report_markdown(spec, input_data, steps, str(exc)),
-                error=str(exc),
-            )
-        steps.append(result)
-        step_outputs[result.step_id] = result.content
-
-    outputs = _collect_outputs(spec, step_outputs)
-    return _DynamicWorkflowExecution(
-        status="completed",
-        steps=steps,
-        outputs=outputs,
-        report_markdown=_report_markdown(spec, input_data, steps, outputs),
-    )
-
-
-async def async_execute_workflow_spec(
-    spec: dict[str, object],
-    input_data: dict[str, object],
-    *,
-    participant_executor: AsyncParticipantExecutor | None = None,
 ) -> _DynamicWorkflowExecution:
     """Execute a declarative Dynamic Workflow spec sequentially on the current event loop."""
     steps: list[_DynamicWorkflowStepResult] = []
@@ -156,7 +102,7 @@ async def async_execute_workflow_spec(
 
     for raw_step in _workflow_steps(spec):
         try:
-            result = await _async_execute_workflow_step(
+            result = await _execute_workflow_step(
                 raw_step,
                 input_data=input_data,
                 step_outputs=step_outputs,
@@ -185,7 +131,7 @@ async def async_execute_workflow_spec(
     )
 
 
-def _execute_workflow_step(
+async def _execute_workflow_step(
     step: dict[str, object],
     *,
     input_data: dict[str, object],
@@ -193,42 +139,11 @@ def _execute_workflow_step(
     participant_executor: ParticipantExecutor | None = None,
     participants_by_id: Mapping[str, dict[str, object]] | None = None,
 ) -> _DynamicWorkflowStepResult:
-    """Execute one declarative workflow step."""
-    step_id = _required_text(step, "id")
-    step_type = str(step.get("type", "agent_step"))
-    started_at = _utc_now()
-    output = _execute_step_content(
-        step,
-        step_type=step_type,
-        input_data=input_data,
-        step_outputs=step_outputs,
-        participant_executor=participant_executor,
-        participants_by_id=participants_by_id,
-    )
-    return _DynamicWorkflowStepResult(
-        step_id=step_id,
-        step_type=step_type,
-        status="completed",
-        content=output.content,
-        started_at=started_at,
-        completed_at=_utc_now(),
-        delegation_id=output.delegation_id,
-    )
-
-
-async def _async_execute_workflow_step(
-    step: dict[str, object],
-    *,
-    input_data: dict[str, object],
-    step_outputs: Mapping[str, object],
-    participant_executor: AsyncParticipantExecutor | None = None,
-    participants_by_id: Mapping[str, dict[str, object]] | None = None,
-) -> _DynamicWorkflowStepResult:
     """Execute one declarative workflow step on the current event loop."""
     step_id = _required_text(step, "id")
     step_type = str(step.get("type", "agent_step"))
     started_at = _utc_now()
-    output = await _aexecute_step_content(
+    output = await _execute_step_content(
         step,
         step_type=step_type,
         input_data=input_data,
@@ -247,42 +162,17 @@ async def _async_execute_workflow_step(
     )
 
 
-def _execute_step_content(
+def _rendered_step_content(
     step: dict[str, object],
     *,
     step_type: str,
     input_data: dict[str, object],
     step_outputs: Mapping[str, object],
-    participant_executor: ParticipantExecutor | None,
-    participants_by_id: Mapping[str, dict[str, object]] | None,
 ) -> ParticipantOutput:
+    """Return the content of a step that renders a template rather than running a participant."""
     if step_type == "transform_step":
         template = _step_template(step, ("template", "text"))
         return ParticipantOutput(_render_template(template, input_data=input_data, step_outputs=step_outputs))
-
-    if step_type == "agent_step":
-        step_id = _required_text(step, "id")
-        if participant_executor is None:
-            msg = f"Agent step '{step_id}' requires a participant executor."
-            raise DynamicWorkflowExecutionError(msg)
-        participant_id = _required_text(step, "participant")
-        if participants_by_id is None or participant_id not in participants_by_id:
-            msg = f"Agent step '{step_id}' references unknown participant '{participant_id}'."
-            raise DynamicWorkflowExecutionError(msg)
-        template = _step_template(step, ("prompt", "response_template", "output_template", "template"))
-        prompt = _render_template(template, input_data=input_data, step_outputs=step_outputs)
-        try:
-            return participant_executor(
-                participant=participants_by_id[participant_id],
-                prompt=prompt,
-                input_data=input_data,
-                step_outputs=dict(step_outputs),
-            )
-        except DynamicWorkflowExecutionError:
-            raise
-        except Exception as exc:
-            msg = f"Agent step '{step_id}' participant '{participant_id}' failed: {exc}"
-            raise DynamicWorkflowExecutionError(msg) from exc
 
     if step_type == "report_step":
         body_template = step.get("body_template")
@@ -301,24 +191,17 @@ def _execute_step_content(
     raise DynamicWorkflowExecutionError(msg)
 
 
-async def _aexecute_step_content(
+async def _execute_step_content(
     step: dict[str, object],
     *,
     step_type: str,
     input_data: dict[str, object],
     step_outputs: Mapping[str, object],
-    participant_executor: AsyncParticipantExecutor | None,
+    participant_executor: ParticipantExecutor | None,
     participants_by_id: Mapping[str, dict[str, object]] | None,
 ) -> ParticipantOutput:
     if step_type != "agent_step":
-        return _execute_step_content(
-            step,
-            step_type=step_type,
-            input_data=input_data,
-            step_outputs=step_outputs,
-            participant_executor=None,
-            participants_by_id=participants_by_id,
-        )
+        return _rendered_step_content(step, step_type=step_type, input_data=input_data, step_outputs=step_outputs)
 
     step_id = _required_text(step, "id")
     if participant_executor is None:
@@ -340,7 +223,7 @@ async def _aexecute_step_content(
     except DynamicWorkflowExecutionError:
         raise
     except Exception as exc:
-        msg = f"Agent step '{step_id}' participant '{participant_id}' failed: {exc}"
+        msg = f"Agent step '{step_id}' participant '{participant_id}' failed: {failure_text(exc)}"
         raise DynamicWorkflowExecutionError(msg) from exc
 
 

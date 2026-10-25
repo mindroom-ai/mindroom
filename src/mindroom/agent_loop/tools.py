@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import Message
@@ -20,16 +20,15 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
-from mindroom.tool_system.tool_function import first_of_each_name
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
-    from mindroom.agent_loop.spec import AgentSpec, RunContext
+    from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.provider import ToolSpec
     from mindroom.llm.runs import ToolExecution
-    from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
+    from mindroom.tool_system.invocation import ToolMiddleware
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome, ToolValue
 
 logger = get_logger(__name__)
 
@@ -40,10 +39,9 @@ MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PreparedTools:
-    """The tools one run offers: its functions by name in offer order, and the toolkit instructions for its prompt."""
+    """The tools one run offers: its functions by name in offer order."""
 
     functions: Mapping[str, ToolFunction]
-    instructions: tuple[str, ...]
 
     def specs(self) -> tuple[ToolSpec, ...]:
         """Return the model-facing definitions in the order a request sends them (``sorted_specs``)."""
@@ -55,33 +53,38 @@ def sorted_specs(definitions: Iterable[ToolSpec]) -> tuple[ToolSpec, ...]:
     return tuple(sorted(definitions, key=lambda definition: definition.name))
 
 
-def offered_functions(spec: AgentSpec) -> Iterator[tuple[AdaptedToolkit, ToolFunction]]:
-    """Yield each function a run of ``spec`` offers, in offer order, with the toolkit it belongs to.
+def offered_toolkits(toolkits: Sequence[AdaptedToolkit], *, agent: str) -> tuple[AdaptedToolkit, ...]:
+    """Return ``toolkits``, each offering only the functions a run of ``agent`` offers of it, in the same order.
 
-    The functions are those ``first_of_each_name`` selects over the toolkits; each one it drops is logged.
+    A run offers the first function of each name, so a build resolves its toolkits once: each later function of a
+    taken name is dropped and logged here, and a toolkit whose every function is taken stays, offering none.
     """
+    taken: set[str] = set()
+    offered: list[AdaptedToolkit] = []
+    for toolkit in toolkits:
+        functions: list[ToolFunction] = []
+        for function in toolkit.functions:
+            if function.name in taken:
+                logger.warning("duplicate_tool_name", agent=agent, tool_name=function.name, toolkit=toolkit.name)
+                continue
+            taken.add(function.name)
+            functions.append(function)
+        offered.append(replace(toolkit, functions=tuple(functions)))
+    return tuple(offered)
 
-    def log_dropped(toolkit: AdaptedToolkit, function: ToolFunction) -> None:
-        logger.warning("duplicate_tool_name", agent=spec.id, tool_name=function.name, toolkit=toolkit.name)
 
-    return first_of_each_name(
-        ((toolkit, function) for toolkit in spec.toolkits for function in toolkit.functions),
-        log_dropped,
-    )
+def toolkit_instructions(toolkits: Iterable[AdaptedToolkit]) -> tuple[str, ...]:
+    """Return the instructions of ``toolkits`` the prompt shows, in offer order.
 
-
-def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
-    """Flatten the agent's toolkits into the functions a run offers, as ``offered_functions`` selects them.
-
-    Each toolkit's instructions are kept once per toolkit identity: its name, instructions, and function names.
+    Each toolkit's instructions are kept once per toolkit identity: its name, its instructions, and the functions it
+    was built with, whichever of them a run offers.
     """
-    functions = {function.name: function for _toolkit, function in offered_functions(spec)}
     instructions: dict[tuple[str, str, frozenset[str]], str] = {}
-    for toolkit in spec.toolkits:
+    for toolkit in toolkits:
         if toolkit.instructions is not None:
             key = (toolkit.name, toolkit.instructions, frozenset(function.name for function in toolkit.functions))
             instructions.setdefault(key, toolkit.instructions)
-    return PreparedTools(functions=functions, instructions=tuple(instructions.values()))
+    return tuple(instructions.values())
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -132,34 +135,50 @@ def plan_tool_batch(
     refused: list[Message] = []
     count = calls_so_far
     for tool_call in tool_calls:
-        call_id = tool_call.get("id")
+        call_id = tool_call["id"]
         function_data = tool_call.get("function") or {}
         name = function_data.get("name")
         function = functions.get(name) if isinstance(name, str) else None
         if function is None:
-            messages.append(Message(role="tool", tool_call_id=call_id, tool_name=name, content=MISSING_TOOL_ERROR_TEXT))
+            messages.append(failed_answer(call_id, name, MISSING_TOOL_ERROR_TEXT))
             continue
         arguments = parse_tool_arguments(function_data.get("arguments"), function)
         if isinstance(arguments, ToolArgumentError):
-            messages.append(Message(role="tool", tool_call_id=call_id, tool_name=name, content=arguments.error_text))
+            messages.append(failed_answer(call_id, name, arguments.error_text))
             continue
         if max_tool_calls_per_turn is not None:
             count += 1
             if count > max_tool_calls_per_turn:
-                refused.append(
-                    Message(
-                        role="tool",
-                        content=_LIMIT_ERROR_TEXT.format(name=function.name),
-                        tool_call_id=call_id,
-                        tool_name=function.name,
-                        tool_args=arguments,
-                        tool_call_error=True,
-                    ),
-                )
+                limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
+                refused.append(failed_answer(call_id, function.name, limit_text, tool_args=arguments))
                 continue
         execution = function.planned_execution(call_id, arguments)
         planned.append(PlannedCall(function=function, execution=execution))
     return ToolBatch(planned=tuple(planned), refused=tuple(refused))
+
+
+def failed_answer(
+    call_id: str | None,
+    name: str | None,
+    content: str,
+    *,
+    tool_args: dict[str, Any] | None = None,
+    stop_after_tool_call: bool = False,
+) -> Message:
+    """Return the tool message that answers a call the loop did not run, marked failed so Claude and Gemini read it as one.
+
+    The loop answers this way a call to a tool it does not offer, one whose arguments cannot be decoded, one past the
+    per-turn limit, one the output limit cut off, and one whose approval was denied.
+    """
+    return Message(
+        role="tool",
+        tool_call_id=call_id,
+        tool_name=name,
+        content=content,
+        tool_args=tool_args,
+        tool_call_error=True,
+        stop_after_tool_call=stop_after_tool_call,
+    )
 
 
 async def dispatch_tool_calls(
@@ -199,16 +218,16 @@ def _complete_call(call: PlannedCall, outcome: ToolOutcome, elapsed: float) -> M
     execution.stop_after_call = outcome.stop_after_call
     ended = time.time()
     execution.metrics = ToolCallMetrics(start_time=ended - elapsed, end_time=ended, duration=elapsed)
-    return tool_result_message(execution, media=None if outcome.is_error else outcome)
+    return tool_result_message(execution, media=outcome)
 
 
 def tool_result_message(execution: ToolExecution, media: ToolValue | None = None) -> Message:
     """Return the tool message that answers ``execution`` with its recorded result.
 
-    ``media`` is the successful tool value whose media the message carries; a failed call carries none.
+    ``media`` is the tool value whose media the message carries when the call succeeded; a failed call carries none.
     """
     images = audio = videos = files = None
-    if media is not None:
+    if media is not None and not execution.is_error:
         images, audio, videos, files = (
             list(items) or None for items in (media.images, media.audios, media.videos, media.files)
         )
@@ -253,10 +272,11 @@ __all__ = [
     "PreparedTools",
     "ToolBatch",
     "dispatch_tool_calls",
+    "failed_answer",
     "media_follow_up",
-    "offered_functions",
+    "offered_toolkits",
     "plan_tool_batch",
-    "prepare_run_tools",
     "sorted_specs",
     "tool_result_message",
+    "toolkit_instructions",
 ]

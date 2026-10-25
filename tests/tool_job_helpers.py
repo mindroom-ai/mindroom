@@ -75,9 +75,9 @@ if TYPE_CHECKING:
     from mindroom.participation import ParticipationGate
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution_authority import JobTool
-    from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
+    from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
     from tests.fakes.scripted_model import ScriptStep
 
 
@@ -277,7 +277,7 @@ def toolkit_job_tools(
     functions may become jobs.
     """
     return assembled_job_tools(
-        ((authored_name, toolkit, function) for function in adapt_toolkit(toolkit).functions),
+        ((toolkit, function) for function in adapt_toolkit(toolkit, key=authored_name).functions),
         snapshot or {},
     )
 

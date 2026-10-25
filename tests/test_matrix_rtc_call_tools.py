@@ -19,7 +19,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -162,13 +162,12 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
             name="Helper",
             model=ScriptedModel([]),
             system_message=None,
-            toolkits=tuple(adapt_toolkit(toolkit) for toolkit in toolkits),
+            toolkits=offered_toolkits([adapt_toolkit(toolkit, key=toolkit.name) for toolkit in toolkits], agent=AGENT),
         ),
         prompt=PromptSpec(role=role, instructions=()),
         request_template=ModelRequest(messages=()),
         history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         store=None,
-        tool_owners={},
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,
@@ -184,7 +183,7 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
 
 
 def _functions(build: AgentBuild) -> Mapping[str, ToolFunction]:
-    return prepare_run_tools(build.spec).functions
+    return build.spec.functions
 
 
 def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  # noqa: ANN202
@@ -1560,18 +1559,22 @@ async def test_a_realtime_tool_whose_toolkit_fails_to_connect_answers_with_its_f
     assert connect is not None
     attempts: list[str] = []
 
-    async def failing_once() -> Callable[[], Awaitable[None]] | None:
+    async def failing_twice() -> Callable[[], Awaitable[None]] | None:
         attempts.append("connect")
         if len(attempts) == 1:
             msg = "server unreachable"
             raise ConnectionError(msg)
+        if len(attempts) == 2:
+            raise TimeoutError
         return await connect()
 
-    build = replace(build, spec=replace(build.spec, toolkits=(replace(toolkit, connect=failing_once),)))
+    build = replace(build, spec=replace(build.spec, toolkits=(replace(toolkit, connect=failing_twice),)))
     tooling = await _call_tools_over(build, tmp_path, monkeypatch)
     [tool] = tooling.tools
 
     assert await tool({"value": "a"}) == "Tool lookup failed: server unreachable"
+    # An exception without text still tells the voice model what failed.
+    assert await tool({"value": "a"}) == "Tool lookup failed: TimeoutError"
     assert await tool({"value": "b"}) == "found b"
     assert log == ["server connect"]
     assert tooling.close is not None

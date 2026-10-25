@@ -1495,6 +1495,75 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("schedule", ["once", "cron"])
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("homeserver down"), "homeserver down"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_task_whose_run_raises_reports_why_it_failed(
+    tmp_path: Path,
+    schedule: str,
+    error: Exception,
+    text: str,
+) -> None:
+    """A task whose run raises posts a notice with the exception's text, or its type name when it has none."""
+    client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.homeserver = "https://example.org"
+    client.user_id = "@router:example.org"
+    client.device_id = "TEST_DEVICE"
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type=schedule,
+        execute_at=datetime.now(UTC) - timedelta(seconds=1) if schedule == "once" else None,
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        if schedule == "cron"
+        else None,
+        message="Check the queue",
+        description="Queue check",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    occurrence = RecurringOccurrence(
+        tmp_path / "checkpoint.json",
+        _RecurringCheckpoint("workflow", datetime.now(UTC) - timedelta(seconds=1)),
+    )
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        return _record("task_failing", workflow, status="pending")
+
+    with (
+        patch("mindroom.scheduling.tasks.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=AsyncMock(side_effect=error)),
+        patch("mindroom.scheduling.tasks.plan_recurring_occurrence", return_value=occurrence),
+        patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as failure_notice,
+    ):
+        if schedule == "once":
+            await _run_once_task(
+                client,
+                "task_failing",
+                workflow,
+                Config(),
+                _test_runtime_paths(tmp_path),
+                _conversation_reader(),
+            )
+        else:
+            await _run_cron_task(
+                client,
+                "task_failing",
+                workflow,
+                {},
+                Config(),
+                _test_runtime_paths(tmp_path),
+                _conversation_reader(),
+            )
+
+    failure_notice.assert_awaited_once()
+    assert failure_notice.await_args.args[3].endswith(f"\nTask ID: task_failing\nError: {text}")
+
+
+@pytest.mark.asyncio
 async def test_run_cron_task_keeps_pending_state_after_success(tmp_path: Path) -> None:
     """Recurring tasks should keep their pending state after firing."""
     client = AsyncMock()
@@ -2730,6 +2799,57 @@ async def test_agent_state_write_error_names_the_router_grant() -> None:
     assert str(exc_info.value).endswith(
         "Ask a room admin to raise the power level of @mindroom_router:server in this room from 0 to 50, then retry.",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_level", "agent_writes"),
+    [(100, True), (0, False), (None, False)],
+    ids=["agent-may-write", "agent-under-powered", "agent-not-joined"],
+)
+async def test_restored_task_state_refused_to_the_router_lands_through_a_bot_the_room_lets_write_it(
+    agent_level: int | None,
+    agent_writes: bool,
+) -> None:
+    """A restored runner's router cannot write state in a room only its creating agent administers."""
+    router_client = make_matrix_client_mock(user_id="@mindroom_router:server")
+    router_client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    router_room = _matrix_room("!test:server")
+    router_room.power_levels.defaults.state_default = 50
+    router_client.rooms["!test:server"] = router_room
+    agent_client = make_matrix_client_mock(user_id="@mindroom_general:server")
+    agent_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!test:server",
+    )
+    agent_client.rooms = {}
+    if agent_level is not None:
+        agent_room = _matrix_room("!test:server")
+        agent_room.power_levels.defaults.state_default = 50
+        agent_room.power_levels.users[agent_client.user_id] = agent_level
+        agent_client.rooms["!test:server"] = agent_room
+    scheduling.register_scheduled_task_state_writer(router_client)
+    scheduling.register_scheduled_task_state_writer(agent_client)
+    router_admin = _RecordingScheduleStateAdmin({}, should_succeed=False)
+    record = _record("taskdone", _pending_once_workflow())
+
+    async def save() -> None:
+        await scheduling._save_one_time_task_status(
+            client=router_client,
+            task=record,
+            status="completed",
+            timezone="UTC",
+            matrix_admin=router_admin,
+        )
+
+    if agent_writes:
+        await save()
+        assert agent_client.room_put_state.await_args.kwargs["state_key"] == "taskdone"
+        assert agent_client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
+    else:
+        with pytest.raises(ValueError, match="privileged fallback failed"):
+            await save()
+        agent_client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio

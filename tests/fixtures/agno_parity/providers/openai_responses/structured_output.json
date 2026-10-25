@@ -61,6 +61,7 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
+        "mindroom_system_sha256": "3815e2aa5abe2371e573aad504da599e37991a9b14158ea28b459edc73df188d",
         "response_id": "resp_parity",
         "response_status": "completed"
       },

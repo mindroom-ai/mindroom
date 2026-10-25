@@ -263,10 +263,21 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
         await gateway.wait_for_ops(1)
         yield "Hello"
         await gateway.wait_for_ops(2)
-        yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
+        yield ToolStarted(
+            call=ToolExecution(
+                tool_call_id="call-search_web",
+                tool_name="search_web",
+                tool_args={"q": "mindroom"},
+            ).call,
+        )
         await gateway.wait_for_ops(3)
         yield ToolCompleted(
-            call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok").call,
+            call=ToolExecution(
+                tool_call_id="call-search_web",
+                tool_name="search_web",
+                tool_args={"q": "mindroom"},
+                result="ok",
+            ).call,
         )
         await gateway.wait_for_ops(4)
         yield " Done."

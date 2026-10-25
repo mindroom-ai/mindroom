@@ -407,25 +407,33 @@ async def test_a_direct_delegation_that_fails_hands_over_and_records_its_redacte
 
 
 @pytest.mark.asyncio
-async def test_direct_delegation_records_failure_and_returns_receipt(tmp_path: Path) -> None:
-    """Converting an exception into text without a failed audit record must fail this test."""
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [(RuntimeError("child exploded"), "child exploded"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_direct_delegation_records_failure_and_returns_receipt(
+    tmp_path: Path,
+    error: Exception,
+    reason: str,
+) -> None:
+    """Converting an exception into text without a failed audit record must fail this test.
+
+    An exception without text, such as a bare ``TimeoutError``, reports its type.
+    """
     tools, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
     with (
         tool_runtime_context(context),
-        patch(
-            "mindroom.ai.ai_response",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("child exploded"),
-        ),
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock, side_effect=error),
     ):
         result = await tools.run_subagent(agent_name="child", task="Do the work")
 
     run = _only_run(tmp_path)
     assert run["status"] == "failed"
-    assert run["error"] == "child exploded"
-    assert "Delegation to 'child' failed: child exploded" in result
+    assert run["error"] == reason
+    assert f"Delegation to 'child' failed: {reason}" in result
     assert str(run["record_reference"]) in result
 
 
