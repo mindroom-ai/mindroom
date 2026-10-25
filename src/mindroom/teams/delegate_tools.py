@@ -155,14 +155,11 @@ def _streamed_result(child: RunRecord) -> str:
 
 
 def _blocking_result(child: RunRecord) -> str:
-    """Return the blocking result: the no-response notice only for a run with neither content nor tools.
-
-    A run without text gives its tool results, which for a blank run without tools leaves nothing.
-    """
+    """Return the streamed result, except that a blank run without tools reads empty."""
     content = child.handover_content
-    if content is None and not child.tools:
-        return NO_MEMBER_RESPONSE
-    return content if content is not None and content.strip() else _tool_results(child)
+    if content is not None and not content.strip() and not child.tools:
+        return ""
+    return _streamed_result(child)
 
 
 def _tool_results(child: RunRecord) -> str:
@@ -198,11 +195,11 @@ def collaborate_result_text(
 
 
 def _labeled_result(child: RunRecord) -> str:
-    """Return ``_blocking_result``, but blank text gives all tool results, empty ones too, else ``No Response``."""
+    """Return ``_streamed_result``, but blank text gives all tool results, empty ones too, else ``No Response``."""
     content = child.handover_content
     if content is not None and not content.strip():
         return ",".join(tool.result or "" for tool in child.tools) if child.tools else "No Response"
-    return _blocking_result(child)
+    return _streamed_result(child)
 
 
 def waited_on_member(tool: ToolExecution, member: TeamMember) -> bool:
