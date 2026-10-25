@@ -40,7 +40,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 
 ### Claims
 
-- An edit regenerates only the reply to the latest message of its conversation, when no one other than an agent wrote after it, that reply showed something, and it is not `gone`; any other edit changes no reply.
+- An edit regenerates only the reply to the latest message of its conversation, when no one other than an agent wrote after it, that reply may show something, counting a create Matrix has not acknowledged yet, and it is not `gone`; any other edit changes no reply.
 - An edit of a reply that still streams, or that an approval holds, stops it first as a Stop reaction would, which cancels the approval and expires its cards, and then regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
 - The edit hands the regeneration to its own task and does not wait for its claim, because the claim waits for the conversation lock, which another reply of the agent may hold for as long as that reply runs.
 
@@ -73,8 +73,8 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 
 Edits:
 
-- An edit of a message that no longer waits in the coalescing queue, made before its reply showed anything, changes no reply, and the turn answers the original text; this includes a message still waiting for media or voice before it reaches the queue.
-  An edit regenerates only a reply that showed something, and the message is still answered once.
+- An edit of a message that no longer waits in the coalescing queue, made before its reply recorded anything it may show, changes no reply, and the turn answers the original text; this includes a participation turn still deciding whether to answer, and a message still waiting for media or voice before it reaches the queue.
+  Stopping a reply that shows nothing would post a cancel note where nothing showed, and its regeneration would answer without the participation decision; the message is still answered once.
 - Only a text message is edited in the coalescing queue: an edit of a queued media message's caption changes nothing, and the message is answered with its original caption.
 - An edit applied to a message still in the coalescing queue lives in memory, so a crash before the flush answers the original text.
 - A coalesced turn whose messages come from more than one requester, or carry a delegated speaker, never regenerates, because a regeneration replays every source under the editor's identity and would run messages the editor did not write as theirs.
