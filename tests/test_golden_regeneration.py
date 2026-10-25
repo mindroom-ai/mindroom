@@ -55,7 +55,7 @@ async def test_every_provider_family_regenerates_through_its_own_adapter(
 @pytest.mark.asyncio
 async def test_a_prompt_scenario_regenerates_under_its_own_temporary_root() -> None:
     """A scenario that names its temporary root regenerates byte for byte, with the root normalized away."""
-    path = regenerate_goldens.prompt_scenarios.golden_path("agent_anthropic")
+    path = prompt_scenarios.golden_path("agent_anthropic")
     assert "<TMP>" in path.read_text(encoding="utf-8")
 
     assert render(await regenerate_goldens.regenerated_prompt_golden("agent_anthropic")) == path.read_text(
