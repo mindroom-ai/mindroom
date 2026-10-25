@@ -110,6 +110,7 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling.executor import set_scheduling_hook_registry
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -122,7 +123,6 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.usage.legacy_usage_storage import migrate_usage_storage
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
@@ -3187,7 +3187,7 @@ async def _run_runtime(  # noqa: PLR0915
     """Run the multi-agent bot system until it stops."""
     await migrate_private_storage(runtime_paths)
     await migrate_state_root_records(runtime_paths)
-    await migrate_usage_storage(runtime_paths)
+    await migrate_conversation_storage(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
     storage_path = runtime_paths.storage_root
     orchestrator: _MultiAgentOrchestrator | None = None

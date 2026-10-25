@@ -75,7 +75,7 @@ from mindroom.origins import allowed_client_origins
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
-from mindroom.usage.legacy_usage_storage import migrate_usage_storage
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import lease_configured_primary_worker_manager, shutdown_primary_worker_manager
@@ -519,7 +519,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     runtime_paths = _app_runtime_paths(_app)
     await migrate_private_storage(runtime_paths)
     await migrate_state_root_records(runtime_paths)
-    await migrate_usage_storage(runtime_paths)
+    await migrate_conversation_storage(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
     await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)
     app_state = config_lifecycle.app_state(_app)

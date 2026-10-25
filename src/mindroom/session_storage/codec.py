@@ -1,10 +1,7 @@
 """Run rows to run records and back.
 
-A row's ``run_type`` column says which record its ``run_data`` holds; the JSON keys are the ones
-``mindroom.llm.runs`` reads and writes.
-
-Storage v2 splits a run's stored dict over its ``*_log_runs`` row (``run_columns``) and one message row per message;
-``run_record`` joins them again.
+A run's stored dict (``record.to_dict()``) spreads over its ``*_log_runs`` row (``run_columns``) and one message row per
+message; ``run_record`` joins them again. The JSON keys are the ones ``mindroom.llm.runs`` reads and writes.
 """
 
 from __future__ import annotations
@@ -14,7 +11,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.runs import RunRecord, TeamRunRecord
-from mindroom.session_storage.legacy_tool_results import split_combined_tool_results
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -22,7 +18,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import SessionKind
 
-# The keys of a stored run dict that a storage v2 run row holds in columns of their own, or in rows of other tables:
+# The keys of a stored run dict that a run row holds in columns of their own, or in rows of other tables:
 # messages in the messages table, and a paused team run's members in their own run rows.
 _NOT_IN_RECORD = frozenset(
     {
@@ -41,7 +37,7 @@ _NOT_IN_RECORD = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class RunColumns:
-    """The columns of a storage v2 run row that its stored dict fills, the ids and the messages aside.
+    """The columns of a run row that its stored dict fills, the ids and the messages aside.
 
     ``record`` is the JSON of every other key. ``tools``, ``requirements``, and ``metadata`` are JSON, or None when
     the record has none, so ``[]`` and ``{}`` stay distinct from none.
@@ -81,7 +77,7 @@ def run_record(
     columns: RunColumns,
     messages: list[dict[str, Any]],
 ) -> AnyRunRecord:
-    """Decode a storage v2 run row and its messages' stored dicts, in replay order, into its record.
+    """Decode a run row and its messages' stored dicts, in replay order, into its record.
 
     The row's ids win over any the record JSON holds. A team run decodes without ``member_responses``; the store
     fills them from the member rows.
@@ -108,39 +104,14 @@ def _decoded(text: str | None) -> object:
     return None if text is None else json.loads(text)
 
 
-def run_from_row(run_type: str, run_data: str) -> AnyRunRecord | None:
-    """Decode one run row; a row of any other type than agent or team (Agno's workflow runs) reads as None."""
-    if run_type not in ("agent", "team"):
-        return None
-    data = json.loads(run_data)
-    _drop_tool_schemas(data)
-    run = TeamRunRecord.from_dict(data) if run_type == "team" else RunRecord.from_dict(data)
-    split_combined_tool_results(run)
-    return run
-
-
-def run_type(run: AnyRunRecord) -> SessionKind:
-    """Return the ``run_type`` column value of ``run``'s row."""
+def run_kind(run: AnyRunRecord) -> SessionKind:
+    """Return the ``kind`` of ``run``'s row."""
     return "team" if isinstance(run, TeamRunRecord) else "agent"
-
-
-# LEGACY_COMPAT: Run metadata carrying a copy of every model-visible tool schema.
-# Legacy format: Run rows whose `metadata` holds a `tools_schema` list of tool definitions, written with every run,
-# including member responses embedded in a paused team run.
-# Last legacy release: v2026.10.281; replacement: v2026.10.282 stopped storing tool schemas in run metadata.
-# Handling: Every decoded run row drops the key, from its member responses too, so loaded and replayed runs
-# never hold the schemas and a rewritten row no longer stores them; rows written by current releases omit it.
-# Coverage: tests/session_storage/test_store.py::test_loaded_runs_drop_their_stored_tool_schemas.
-def _drop_tool_schemas(data: dict[str, Any]) -> None:
-    for run in (data, *(data.get("member_responses") or ())):
-        if isinstance(run, dict) and isinstance(metadata := run.get("metadata"), dict):
-            metadata.pop("tools_schema", None)
 
 
 __all__ = [
     "RunColumns",
     "run_columns",
-    "run_from_row",
+    "run_kind",
     "run_record",
-    "run_type",
 ]

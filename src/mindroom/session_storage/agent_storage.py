@@ -1,4 +1,4 @@
-"""Open the conversation store of an agent, a team scope, or the system usage ledger, migrating the database first."""
+"""Open the conversation store of an agent, a team scope, or the system usage ledger, converting the database first."""
 
 from __future__ import annotations
 
@@ -6,12 +6,11 @@ import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from mindroom.history.legacy_compaction_state import migrate_to_summary_rows
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, ConversationStore
-from mindroom.usage.legacy_usage_storage import migrate_usage_database
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,17 +24,16 @@ if TYPE_CHECKING:
 
 
 def create_state_storage(storage_name: str, state_root: Path) -> ConversationStore:
-    """Open the conversation database ``<state_root>/sessions/<storage_name>.db`` with its migrations applied.
+    """Open the conversation database ``<state_root>/sessions/<storage_name>.db``, converted to the current layout.
 
-    Under the recovery lock, in order: a database missing required session columns is archived, an older
-    database gains its usage ledger, then its summary rows, and only then does the conversation store open it.
+    Under the recovery lock, in order: a database missing required session columns is archived, an Agno-layout
+    database converts, a new one gets every table, and only then does the conversation store open it.
     """
     names = TableNames(storage_name)
     db_path = names.database_path(state_root)
     with session_storage_preflight(state_root, names, timeout_seconds=BUSY_TIMEOUT_SECONDS):
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        migrate_usage_database(db_path)
-        migrate_to_summary_rows(db_path, names)
+        migrate_conversation_database(db_path, names)
         return ConversationStore(db_path)
 
 

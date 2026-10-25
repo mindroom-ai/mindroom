@@ -11,7 +11,7 @@ from mindroom.usage.storage import quote_identifier
 if TYPE_CHECKING:
     import sqlite3
 
-    from mindroom.session_storage.schema import TableNames
+    from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 
 
 # LEGACY_COMPAT: Agno 2 session JSON columns encoded twice.
@@ -38,19 +38,19 @@ def decode_session_json(raw_value: object) -> object:
 # Legacy format: Agno 2 sessions stored run history in a single- or double-encoded JSON `runs` blob on the session
 # row, which Agno 3 merged into every read ahead of the run rows; the column exists only on files Agno 2 created.
 # Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote first-class run rows.
-# Handling: When the open-time summary-row migration, which runs only while the database has no summary-row table,
-# finds a sessions table that still has the column, every blob entry with a string run id that has no row yet becomes
-# a run row, the session's rows are renumbered in the order Agno's merge read them, and the blob is cleared, all in
-# one write transaction, so no read has to merge a blob.
+# Handling: When a database's conversion to storage v2 adopts summary rows, which it does only while the database has
+# no summary-row table, and finds a sessions table that still has the column, every blob entry with a string run id
+# that has no row yet becomes a run row, the session's rows are renumbered in the order Agno's merge read them, and the
+# blob is cleared, in the conversion's write transaction, so the runs convert in the order a read gave them.
 # Entries without a string run id are dropped, as no read could address them.
 # Coverage: tests/session_storage/test_legacy_agno2_runs.py and
 # tests/session_storage/test_factories.py::test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order.
-def has_blob_column(connection: sqlite3.Connection, names: TableNames) -> bool:
+def has_blob_column(connection: sqlite3.Connection, names: AgnoTableNames) -> bool:
     """Return whether the sessions table still has the column Agno 2 kept run blobs in, which may hold some."""
     return "runs" in {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}
 
 
-def move_blob_runs_to_rows(connection: sqlite3.Connection, names: TableNames) -> None:
+def move_blob_runs_to_rows(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     """Turn the runs Agno 2 blobs hold into run rows, in the caller's write transaction."""
     sessions = quote_identifier(names.sessions)
     blobs = connection.execute(f"SELECT session_id, runs FROM {sessions} WHERE runs IS NOT NULL").fetchall()  # noqa: S608
@@ -67,14 +67,14 @@ def move_blob_runs_to_rows(connection: sqlite3.Connection, names: TableNames) ->
 # LEGACY_COMPAT: Run rows without a position.
 # Legacy format: Run rows whose ``run_index`` is ``NULL``, which Agno 3 writers before its ``upsert_run`` index backfill
 # stored when a run arrived without one; Agno reads them first in a session.
-# Last legacy release: unversioned external input; no MindRoom release is known to write them, and the current
-# insertion rules give every new row an index.
-# Handling: The open-time summary-row migration renumbers each session holding such a row in the order a read returned
-# its rows, so every run has a place in the conversation log before any response loads it.
+# Last legacy release: unversioned external input; no MindRoom release is known to write them, and the Agno-layout
+# insertion rules gave every new row an index.
+# Handling: The summary-row adoption of a database's conversion to storage v2 renumbers each session holding such a
+# row in the order a read returned its rows, so every run has a place in the conversation log before it converts.
 # Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_rows_without_an_index_are_numbered_in_read_order,
 # tests/test_legacy_compaction_state.py::test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index, and
 # tests/test_archive_migration.py::test_rows_without_an_index_keep_their_place.
-def number_unindexed_runs(connection: sqlite3.Connection, names: TableNames) -> None:
+def number_unindexed_runs(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     """Give every session that holds a row without an index consecutive indexes in its read order."""
     unindexed = connection.execute(
         f"SELECT DISTINCT session_id FROM {quote_identifier(names.runs)} WHERE run_index IS NULL",  # noqa: S608
@@ -83,7 +83,7 @@ def number_unindexed_runs(connection: sqlite3.Connection, names: TableNames) -> 
         renumber_runs(connection, names, session_id, ordered_run_ids(connection, names, session_id))
 
 
-def ordered_run_ids(connection: sqlite3.Connection, names: TableNames, session_id: str) -> list[str]:
+def ordered_run_ids(connection: sqlite3.Connection, names: AgnoTableNames, session_id: str) -> list[str]:
     """Return one session's run rows in the order Agno read them, rows without an index first."""
     return [
         run_id
@@ -95,7 +95,7 @@ def ordered_run_ids(connection: sqlite3.Connection, names: TableNames, session_i
     ]
 
 
-def renumber_runs(connection: sqlite3.Connection, names: TableNames, session_id: str, run_ids: list[str]) -> None:
+def renumber_runs(connection: sqlite3.Connection, names: AgnoTableNames, session_id: str, run_ids: list[str]) -> None:
     """Give one session's run rows consecutive indexes in the order of ``run_ids``."""
     connection.executemany(
         f"UPDATE {quote_identifier(names.runs)} SET run_index = ? WHERE session_id = ? AND run_id = ?",  # noqa: S608
@@ -105,7 +105,7 @@ def renumber_runs(connection: sqlite3.Connection, names: TableNames, session_id:
 
 def insert_run_entry(
     connection: sqlite3.Connection,
-    names: TableNames,
+    names: AgnoTableNames,
     entry: dict[str, Any],
     *,
     session_id: str,

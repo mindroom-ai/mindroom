@@ -10,27 +10,21 @@ import contextvars
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 from mindroom.background_tasks import run_blocking_until_complete
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+    from mindroom.session_storage.store import ConversationStore
 
 _LOCK = threading.Lock()
 # A lane lives while an operation holds it; the next operation on an idle database starts a fresh one.
 _LANES: weakref.WeakValueDictionary[str, ThreadPoolExecutor] = weakref.WeakValueDictionary()
 
 
-class _Store(Protocol):
-    """A conversation store; its lane is its database file's."""
-
-    @property
-    def path(self) -> Path: ...
-
-
-def _lane(store: _Store) -> ThreadPoolExecutor:
+def _lane(store: ConversationStore) -> ThreadPoolExecutor:
     target = str(store.path.resolve())
     with _LOCK:
         lane = _LANES.get(target)
@@ -40,18 +34,18 @@ def _lane(store: _Store) -> ThreadPoolExecutor:
         return lane
 
 
-def _run_in_lane[Store: _Store, Result](
-    open_store: Callable[[], Store],
-    operation: Callable[[Store], Result],
+def _run_in_lane[Result](
+    open_store: Callable[[], ConversationStore],
+    operation: Callable[[ConversationStore], Result],
 ) -> Result:
     store = open_store()
     lane = _lane(store)
     return cast("Result", lane.submit(contextvars.copy_context().run, operation, store).result())
 
 
-async def run_session_storage_operation[Store: _Store, Result](
-    open_store: Callable[[], Store],
-    operation: Callable[[Store], Result],
+async def run_session_storage_operation[Result](
+    open_store: Callable[[], ConversationStore],
+    operation: Callable[[ConversationStore], Result],
 ) -> Result:
     """Open a store and run one synchronous operation on it in its database's lane.
 

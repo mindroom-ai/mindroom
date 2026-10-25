@@ -28,10 +28,16 @@ from mindroom.history.legacy_compaction_state import adopt_summary_rows
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.codec import run_from_row, run_type
+from mindroom.session_storage.codec import run_kind
 from mindroom.session_storage.legacy_agno3_backup import write_conversion_backup
-from mindroom.session_storage.schema import LOG_SESSION_COLUMNS, TableNames, log_schema_sql, schema_sql, table_names
-from mindroom.session_storage.store_next import (
+from mindroom.session_storage.legacy_agno3_schema import (
+    AGNO_SCHEMA_VERSIONS_TABLE,
+    AgnoTableNames,
+    agno_schema_sql,
+    run_from_row,
+)
+from mindroom.session_storage.schema import SESSION_COLUMNS, TableNames, log_schema_sql, table_names
+from mindroom.session_storage.store import (
     BUSY_TIMEOUT_SECONDS,
     connect_conversation_database,
     flag_folded,
@@ -73,7 +79,7 @@ def migrate_conversation_database(path: Path, names: TableNames, *, timeout: flo
             # Asked again under the lock: another opener may have converted the file while this one waited, and backing
             # up the converted file would replace the original's backup.
             if not _is_converted(connection, names):
-                _convert(connection, names, path, descriptors)
+                _convert(connection, AgnoTableNames(names.storage_name), path, descriptors)
         except BaseException:
             connection.rollback()
             raise
@@ -152,7 +158,7 @@ def _leave_wal_mode(connection: sqlite3.Connection, path: Path) -> None:
         raise RuntimeError(msg)
 
 
-def _convert(connection: sqlite3.Connection, names: TableNames, path: Path, descriptors: ExitStack) -> None:
+def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, descriptors: ExitStack) -> None:
     """Convert the database in the caller's write transaction; one without a sessions table only gets the v2 tables."""
     tables = table_names(connection)
     if tables:
@@ -161,7 +167,7 @@ def _convert(connection: sqlite3.Connection, names: TableNames, path: Path, desc
         seed_usage_ledger(connection, names)
         adopt_summary_rows(connection, names)
         # Every Agno table then exists, so each step reads its rows from it.
-        for statement in schema_sql(names):
+        for statement in agno_schema_sql(names):
             connection.execute(statement)
     for statement in log_schema_sql(names):
         connection.execute(statement)
@@ -234,7 +240,7 @@ class _Places:
 
 def _summary_rows(
     connection: sqlite3.Connection,
-    names: TableNames,
+    names: AgnoTableNames,
     session_id: str,
     condition: str = "",
 ) -> Iterator[_SummaryRow]:
@@ -250,7 +256,7 @@ def _summary_rows(
         yield _SummaryRow(*columns, segment=cast("dict[str, Any]", decoded) if isinstance(decoded, dict) else None)
 
 
-def _has_row(connection: sqlite3.Connection, names: TableNames, run_id: str) -> bool:
+def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str) -> bool:
     query = f"SELECT 1 FROM {quote_identifier(names.runs)} WHERE run_id = ?"  # noqa: S608
     return connection.execute(query, (run_id,)).fetchone() is not None
 
@@ -271,7 +277,7 @@ def _has_row(connection: sqlite3.Connection, names: TableNames, run_id: str) -> 
 # tests/storage_oracle/test_migrated.py::test_a_converted_input_shows_its_recording_but_for_named_masks.
 def _convert_runs(
     connection: sqlite3.Connection,
-    names: TableNames,
+    names: AgnoTableNames,
     session_id: str,
     seqs: Iterator[int],
     path: Path,
@@ -338,7 +344,7 @@ def _team_run(parents: Mapping[str, str | None], parent_run_id: str | None) -> s
     return parent_run_id
 
 
-def _embedded_members(connection: sqlite3.Connection, names: TableNames, session_id: str) -> dict[str, RunRecord]:
+def _embedded_members(connection: sqlite3.Connection, names: AgnoTableNames, session_id: str) -> dict[str, RunRecord]:
     """Return the member runs session ``session_id``'s paused team runs embed, by id, as members of their team run."""
     embedded: dict[str, RunRecord] = {}
     for run_id, run_data in connection.execute(
@@ -353,7 +359,7 @@ def _embedded_members(connection: sqlite3.Connection, names: TableNames, session
     return embedded
 
 
-def _fold_owners_without_rows(connection: sqlite3.Connection, names: TableNames, session_id: str) -> list[_Run]:
+def _fold_owners_without_rows(connection: sqlite3.Connection, names: AgnoTableNames, session_id: str) -> list[_Run]:
     """Return a cancelled run for each fold whose running run has no row, each followed by its segments' new members.
 
     Each takes the place right after the latest summary row of its folds, as a fold stores a run without a row now.
@@ -403,7 +409,7 @@ def _write_run(
     data = run.record.to_dict()
     if isinstance(metadata := data.get("metadata"), dict):
         data["metadata"] = _current_delegation_snapshot(path, run.record.run_id, metadata)
-    kind = run_type(run.record)
+    kind = run_kind(run.record)
     upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=run.created_at, updated_at=run.updated_at)
     _convert_messages(connection, names, data)
 
@@ -549,7 +555,7 @@ def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> R
 # Last legacy release: the last release before storage v2; replacement: unreleased, `<s>_log_removed`.
 # Handling: Every row of a stored session is copied, so a late save of a removed run still writes nothing.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_removed_runs_stay_removed.
-def _copy_removed(connection: sqlite3.Connection, names: TableNames) -> None:
+def _copy_removed(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     connection.execute(
         f"INSERT INTO {quote_identifier(names.log_removed)} (run_id, session_id) SELECT run_id, session_id "  # noqa: S608
         f"FROM {quote_identifier(names.removed_runs)} "
@@ -557,28 +563,30 @@ def _copy_removed(connection: sqlite3.Connection, names: TableNames) -> None:
     )
 
 
-# LEGACY_COMPAT: The Agno-layout run, summary-row, and removed-run tables.
-# Legacy format: `<s>_runs` (or `agno_runs`), `<s>_summaries`, and `<s>_removed_runs` with their indexes.
+# LEGACY_COMPAT: The Agno-layout run, summary-row, and removed-run tables, and Agno's own version table.
+# Legacy format: `<s>_runs` (or `agno_runs`), `<s>_summaries`, and `<s>_removed_runs` with their indexes, and
+# `agno_schema_versions`, where Agno recorded the layout version it created each table with.
 # Last legacy release: the last release before storage v2; replacement: unreleased, the `<s>_log_*` tables.
 # Handling: Dropped once copied, in the conversion's transaction; the backup keeps them.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.
-def _drop_agno_tables(connection: sqlite3.Connection, names: TableNames) -> None:
+def _drop_agno_tables(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     for table in (names.runs, names.summaries, names.removed_runs):
         connection.execute(f"DROP TABLE {quote_identifier(table)}")
+    connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(AGNO_SCHEMA_VERSIONS_TABLE)}")
 
 
 # LEGACY_COMPAT: Sessions-table columns only Agno wrote.
 # Legacy format: `workflow_id`, `agent_data`, `team_data`, `workflow_data`, and `summary` on every Agno sessions table,
 # Agno 2's cleared `runs` blob column, and the unused `created_at` index.
 # Last legacy release: the last release before storage v2; replacement: unreleased, the nine columns storage v2 keeps.
-# Handling: Every column outside `LOG_SESSION_COLUMNS` is dropped, and the index, so an older release started on the
+# Handling: Every column outside `SESSION_COLUMNS` is dropped, and the index, so an older release started on the
 # converted file finds its required columns missing and archives the sessions directory instead of writing into it.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.
 def _drop_dead_session_columns(connection: sqlite3.Connection, names: TableNames) -> None:
     sessions = quote_identifier(names.sessions)
     connection.execute(f"DROP INDEX IF EXISTS {quote_identifier(f'idx_{names.sessions}_created_at')}")
     for (column,) in connection.execute("SELECT name FROM pragma_table_info(?)", (names.sessions,)).fetchall():
-        if column not in LOG_SESSION_COLUMNS:
+        if column not in SESSION_COLUMNS:
             connection.execute(f"ALTER TABLE {sessions} DROP COLUMN {quote_identifier(column)}")
 
 

@@ -12,8 +12,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 type SessionKind = Literal["agent", "team"]
-# Why a run save wrote no row: a cut removed the run, or it is folded behind its scope's latest summary row.
-type Refusal = Literal["removed", "frozen"]
 
 
 def session_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
@@ -40,14 +38,15 @@ class ConversationSession:
     """One conversation's session row and the runs a load returns.
 
     ``owner_id`` is the agent or team the session belongs to (the row's ``agent_id`` or ``team_id``).
-    ``runs`` holds, as loaded, the runs after the owner scope's latest summary row, every paused, cancelled, or
-    errored run, and their member runs, in log order. The store's saves leave each run they write here as the store
-    holds it and take a removed run out; a frozen save leaves the session's copy, or its absence, as it was, so the
-    session can keep a run a fresh load no longer returns. A delete handed the session takes the deleted runs out,
-    and a change to its summary rows, such as a compaction chunk, a mid-turn fold, or a cut, leaves ``runs`` and
-    ``summary`` as a load returns them. ``summary`` is the owner scope's latest summary row, derived on load and on
-    those changes and never written back. ``metadata`` is the row's, as loaded and as the store's latest metadata
-    change for this session left it. Only the store assigns these fields.
+    ``runs`` holds, as loaded, every top-level run its scope's latest summary row does not cover, every paused,
+    cancelled, or errored run, and their member runs, in log order. The store's saves leave each run they write here as
+    the store holds it and take a removed run out; a final save leaves the session's copy, or its absence, as it was,
+    so the session can keep a run a fresh load no longer returns. A run metadata patch handed the session replaces its
+    copy of that run, and a delete takes the deleted runs out. A message rewrite or a change to its summary rows, such as a
+    compaction chunk, a mid-turn fold, or a cut, leaves ``runs`` and ``summary`` as a load returns them. ``summary`` is
+    the owner scope's latest summary row, derived on load and on those changes and never written back. ``metadata`` is
+    the row's, as loaded and as the store's latest metadata change for this session left it. Only the store assigns
+    these fields.
     ``session_state`` is the dict the run's tools share and change in place. ``stored_session_state`` is the state the
     store holds for the session as far as this session knows: as loaded, then as the store's latest write of that
     field for this session left it. A run's terminal save writes ``session_state`` back only when the two differ.
@@ -66,7 +65,6 @@ class ConversationSession:
 
 __all__ = [
     "ConversationSession",
-    "Refusal",
     "SessionFields",
     "SessionKind",
     "session_state_snapshot",

@@ -44,6 +44,7 @@ from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.store import seen_event_ids, source_event_ids
 from mindroom.session_storage.types import ConversationSession
 
 if TYPE_CHECKING:
@@ -195,7 +196,7 @@ def run_event_ids(run: AnyRunRecord) -> set[str]:
     """Return every Matrix event id one model-visible run consumed or answered, as redaction matches them."""
     if not is_model_history_visible_run(run):
         return set()
-    return summary_rows.seen_event_ids(run.metadata) | summary_rows.source_event_ids(run.metadata)
+    return seen_event_ids(run.metadata) | source_event_ids(run.metadata)
 
 
 def read_scope_seen_event_ids(
@@ -208,17 +209,12 @@ def read_scope_seen_event_ids(
     Loaded runs carry their own ids, the summary rows supply those of compacted
     history, and session metadata adds ids no stored run carries.
     """
-    seen_event_ids = _read_preserved_scope_seen_event_ids(session.metadata, scope)
-    seen_event_ids |= summary_rows.history_event_ids(
-        storage,
-        session_id=session.session_id,
-        scope_key=scope.key,
-        kind="seen",
-    )
+    seen = _read_preserved_scope_seen_event_ids(session.metadata, scope)
+    seen |= summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
     for run in session.runs:
         if replays_in_scope(run, scope):
-            seen_event_ids.update(summary_rows.seen_event_ids(run.metadata))
-    return seen_event_ids
+            seen.update(seen_event_ids(run.metadata))
+    return seen
 
 
 def _read_scope_history_event_ids(
@@ -235,7 +231,7 @@ def _read_scope_history_event_ids(
     event_ids = summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="all")
     for run in session.runs:
         if run_in_scope(run, scope) and run.parent_run_id is None:
-            event_ids |= summary_rows.seen_event_ids(run.metadata) | summary_rows.source_event_ids(run.metadata)
+            event_ids |= seen_event_ids(run.metadata) | source_event_ids(run.metadata)
     return event_ids
 
 

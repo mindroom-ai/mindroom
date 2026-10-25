@@ -1,4 +1,4 @@
-"""One-time migration of a conversation database into the summary rows of the conversation log."""
+"""The conversion's step that gives an Agno-layout database without summary rows its summary rows."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
-from mindroom.history.summary_rows_schema import owner_scope_key, summary_rows_schema_sql
 from mindroom.session_storage.legacy_agno2_runs import (
     has_blob_column,
     insert_run_entry,
@@ -16,16 +15,20 @@ from mindroom.session_storage.legacy_agno2_runs import (
     ordered_run_ids,
     renumber_runs,
 )
-from mindroom.session_storage.schema import run_log_sql, table_names
-from mindroom.session_storage.store import decoded_mapping, delete_run_subtrees_in_transaction, migrate_database
+from mindroom.session_storage.legacy_agno3_schema import (
+    agno_runs_sql,
+    agno_summary_rows_sql,
+    delete_run_subtrees_in_transaction,
+)
+from mindroom.session_storage.schema import owner_scope_key, table_names
+from mindroom.session_storage.store import decoded_mapping
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Collection
-    from pathlib import Path
 
-    from mindroom.session_storage.schema import TableNames
+    from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 
 # LEGACY_COMPAT: Destructive compaction state without an archive.
 # Legacy format: A v2 ``mindroom_compaction`` scope state holding ``compacted_run_ids``
@@ -33,12 +36,11 @@ if TYPE_CHECKING:
 # audit fields, and a replayed ``session.summary``, written when compaction deleted the runs it
 # summarized, in a database that never got the compaction archive.
 # Last legacy release: v2026.9.314; replacement: v2026.9.315 archived compacted runs, now summary rows.
-# Handling: ``migrate_to_summary_rows`` runs once per conversation database when storage opens, before
-# any response uses it, and is detected by the summary-row tables' absence. The scope owning the
-# summary gets a content-free legacy summary row before every run, holding the summary and its
-# preserved seen ids, which move out of session metadata; stored copies of tombstoned runs are dropped.
-# The retired keys are stripped. Runs deleted by those releases stay lost; ``history/storage.py``
-# owns redaction of the summary.
+# Handling: ``adopt_summary_rows`` runs in a database's conversion to storage v2, before any response uses it,
+# when the summary-row tables are absent. The scope owning the summary gets a content-free legacy summary row
+# before every run, holding the summary and its preserved seen ids, which move out of session metadata; stored
+# copies of tombstoned runs are dropped. The retired keys are stripped. Runs deleted by those releases stay lost;
+# ``history/storage.py`` owns redaction of the summary.
 # Coverage: tests/test_legacy_compaction_state.py.
 _LEGACY_STATE_KEYS = frozenset(
     {"compacted_run_ids", "last_compacted_at", "last_summary_model", "last_compacted_run_count"},
@@ -48,28 +50,22 @@ _SEEN_STATE_VERSION = 1
 _SEEN_STATE_KEYS = frozenset({"seen_event_ids"})
 
 
-def migrate_to_summary_rows(path: Path, names: TableNames) -> None:
-    """Create the summary-row tables once, first giving every stored run a position and adopting older state."""
-    migrate_database(
-        path,
-        needed=lambda connection: _needs_summary_rows(connection, names),
-        apply=lambda connection: _create_summary_rows(connection, names),
-    )
+def adopt_summary_rows(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
+    """Give a database without summary rows its summary-row tables in the caller's write transaction.
 
-
-def adopt_summary_rows(connection: sqlite3.Connection, names: TableNames) -> None:
-    """Give a database without summary rows its summary rows, as ``migrate_to_summary_rows`` does, in the caller's write transaction."""
+    Every stored run first gets a position, and older compaction state becomes summary rows.
+    """
     if _needs_summary_rows(connection, names):
         _create_summary_rows(connection, names)
 
 
-def _create_summary_rows(connection: sqlite3.Connection, names: TableNames) -> None:
-    for statement in run_log_sql(names):
+def _create_summary_rows(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
+    for statement in agno_runs_sql(names):
         connection.execute(statement)
     if has_blob_column(connection, names):
         move_blob_runs_to_rows(connection, names)
     number_unindexed_runs(connection, names)
-    for statement in summary_rows_schema_sql(names.sessions):
+    for statement in agno_summary_rows_sql(names):
         connection.execute(statement)
     if f"{names.sessions}_compactions" in table_names(connection):
         _convert_archive(connection, names)
@@ -77,12 +73,12 @@ def _create_summary_rows(connection: sqlite3.Connection, names: TableNames) -> N
         _adopt_legacy_sessions(connection, names)
 
 
-def _needs_summary_rows(connection: sqlite3.Connection, names: TableNames) -> bool:
+def _needs_summary_rows(connection: sqlite3.Connection, names: AgnoTableNames) -> bool:
     tables = table_names(connection)
     return names.sessions in tables and names.summaries not in tables
 
 
-def _adopt_legacy_sessions(connection: sqlite3.Connection, names: TableNames) -> None:
+def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     sessions = quote_identifier(names.sessions)
     summaries = quote_identifier(names.summaries)
     rows = connection.execute(
@@ -123,9 +119,9 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: TableNames) ->
 # generation's text, and a generation without text ended the summaries before it.
 # Last legacy release: v2026.10.340; replacement: v2026.10.341 keeps every run in the runs table with
 # summary rows beside it.
-# Handling: ``migrate_to_summary_rows`` runs once per conversation database when storage opens, before any
-# response uses it. It drops stored copies of every archived or tombstoned run with their member runs,
-# restores the archived runs ahead of the live ones in archive order, renumbers each session, and turns each
+# Handling: ``adopt_summary_rows`` runs in a database's conversion to storage v2, before any response uses it. It
+# drops stored copies of every archived or tombstoned run with their member runs, restores the archived runs
+# ahead of the live ones in archive order, renumbers each session, and turns each
 # generation into a summary row after its last restored top-level run (legacy generations before every run),
 # with the event ids of its archived runs, then drops both archive tables. Replay and redaction candidates
 # match what the archive gave after its pre-reply reconcile, and so do seen ids, except that metadata seen ids
@@ -135,7 +131,7 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: TableNames) ->
 # ::test_a_legacy_generation_stays_in_force_before_every_run, ::test_retired_generations_keep_their_runs_behind_the_barrier,
 # ::test_stale_copies_of_archived_and_tombstoned_runs_are_dropped, ::test_archived_member_runs_return_with_their_team_run,
 # and ::test_redaction_candidates_keep_what_the_archive_matched.
-def _convert_archive(connection: sqlite3.Connection, names: TableNames) -> None:
+def _convert_archive(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     compactions = quote_identifier(f"{names.sessions}_compactions")
     compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
     archived: dict[str, list[tuple[str, str | None]]] = {}
@@ -159,7 +155,7 @@ def _convert_archive(connection: sqlite3.Connection, names: TableNames) -> None:
     connection.execute(f"DROP TABLE {compactions}")
 
 
-def _insert_generation_rows(connection: sqlite3.Connection, names: TableNames) -> None:
+def _insert_generation_rows(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     compactions = quote_identifier(f"{names.sessions}_compactions")
     compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
     summaries = quote_identifier(names.summaries)
@@ -201,7 +197,7 @@ def _insert_generation_rows(connection: sqlite3.Connection, names: TableNames) -
 
 def _generation_event_ids(
     connection: sqlite3.Connection,
-    names: TableNames,
+    names: AgnoTableNames,
     generation_id: int,
     column: str,
 ) -> list[str]:
