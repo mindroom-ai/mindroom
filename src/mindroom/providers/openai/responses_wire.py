@@ -41,7 +41,13 @@ from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from openai.types.responses import Response, ResponseFunctionToolCall, ResponseStreamEvent, ResponseUsage
+    from openai.types.responses import (
+        Response,
+        ResponseFunctionToolCall,
+        ResponseOutputItem,
+        ResponseStreamEvent,
+        ResponseUsage,
+    )
 
     from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
@@ -411,10 +417,9 @@ class ResponsesTurnParts:
     incomplete_reason: str | None = None
 
 
-def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[Any]) -> None:
-    items = [item.model_dump(exclude_none=True) for item in output_items if item.type in _TOOL_SEARCH_ITEM_TYPES]
-    if items:
-        parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).extend(items)
+def _record_tool_search_item(parts: ResponsesTurnParts, item: ResponseOutputItem) -> None:
+    if item.type in _TOOL_SEARCH_ITEM_TYPES:
+        parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).append(item.model_dump(exclude_none=True))
 
 
 def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
@@ -425,44 +430,6 @@ def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
         "type": "function",
         "function": {"name": item.name, "arguments": item.arguments},
     }
-
-
-def _incomplete_reason(response: Response) -> str | None:
-    return None if response.incomplete_details is None else response.incomplete_details.reason
-
-
-def _read_ended_response(
-    parts: ResponsesTurnParts,
-    response: Response,
-    items: list[dict[str, Any]],
-    *,
-    store: bool | None,
-    portable_replay: bool,
-    native_compaction: NativeCompactionReplay | None,
-) -> None:
-    """Record what a response that ended says about its turn.
-
-    A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
-    status and the incomplete reason. Both record the response id, its storage provenance, and, when unstored, its
-    reasoning; only a completed response's output is recorded for replay.
-    """
-    parts.status = response.status
-    parts.incomplete_reason = _incomplete_reason(response)
-    if response.usage is not None:
-        parts.usage = _usage(response.usage)
-    if response.id:
-        parts.provider_data["response_id"] = response.id
-    if store is False:
-        for output in response.output:
-            if output.type == "reasoning":
-                parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
-    parts.provider_data[_STORED_KEY] = store is not False
-    if response.status != "completed":
-        return
-    parts.provider_data[_PORTABLE_KEY] = portable_replay
-    parts.provider_data[NATIVE_CHECKPOINT_KEY] = native_checkpoint_state(items, native_compaction)
-    if (store is False or portable_replay) and any(item.get("type") == "reasoning" for item in items):
-        parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
 
 
 def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, tool_calls: bool) -> StopReason | None:
@@ -527,7 +494,7 @@ class ResponsesStream:
             self._tool_use["function"]["arguments"] += current.delta
         elif event.type == "response.output_item.done":
             events.extend(self._ready_call())
-            _record_tool_search_items(self.parts, [current.item])
+            _record_tool_search_item(self.parts, current.item)
             if self.store is False or self.portable_replay:
                 self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
         elif event.type in _ENDED_EVENT_TYPES:
@@ -545,18 +512,34 @@ class ResponsesStream:
         return [ToolCallReady(call)]
 
     def _end(self, response: Response) -> None:
+        """Record what the ended response says about its turn.
+
+        A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
+        status and the incomplete reason. Both record the response id, its storage provenance, and, when unstored, its
+        reasoning; only a completed response's output is recorded for replay.
+        """
         self.ended = True
+        parts = self.parts
+        parts.status = response.status
+        parts.incomplete_reason = None if response.incomplete_details is None else response.incomplete_details.reason
+        if response.usage is not None:
+            parts.usage = _usage(response.usage)
+        if response.id:
+            parts.provider_data["response_id"] = response.id
+        if self.store is False:
+            for output in response.output:
+                if output.type == "reasoning":
+                    parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
+        parts.provider_data[_STORED_KEY] = self.store is not False
+        if response.status != "completed":
+            return
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]
-        _read_ended_response(
-            self.parts,
-            response,
-            items,
-            store=self.store,
-            portable_replay=self.portable_replay,
-            native_compaction=self.native_compaction,
-        )
+        parts.provider_data[_PORTABLE_KEY] = self.portable_replay
+        parts.provider_data[NATIVE_CHECKPOINT_KEY] = native_checkpoint_state(items, self.native_compaction)
+        if (self.store is False or self.portable_replay) and any(item.get("type") == "reasoning" for item in items):
+            parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
 
     def finish(self) -> ResponsesTurnParts:
         """Return the finished turn after the response ended."""

@@ -45,6 +45,7 @@ from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.errors import provider_error
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.tool_policy import without_provider_tools
@@ -955,6 +956,44 @@ async def test_native_compaction_replays_without_storage_and_records_its_route(t
         "checkpoint_prefix": False,
     }
     assert turn.message.provider_data["mindroom_response_stored"] is False
+
+
+_UNSTORED_OUTPUT = [
+    {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "opaque"},
+    {"id": "cmp_1", "type": "compaction", "encrypted_content": "checkpoint"},
+    {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "Pack", "annotations": []}],
+    },
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listed", [True, False], ids=["listed-by-the-ended-response", "only-streamed"])
+async def test_an_unstored_response_keeps_its_output_for_replay_without_its_compaction_item(
+    tmp_path: Path,
+    *,
+    listed: bool,
+) -> None:
+    """An unstored reply keeps its output for replay, from the ended response or, when that lists none, its stream.
+
+    The compaction item stays out of that output.
+    """
+    done = [
+        {"type": "response.output_item.done", "sequence_number": 2 + index, "output_index": index, "item": item}
+        for index, item in enumerate(_UNSTORED_OUTPUT)
+    ]
+    ended = _completed(_UNSTORED_OUTPUT if listed else None)
+    reply = _responses_reply(*_text_events("Pack"), *done, ended)
+    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"store": False}}, reply)
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    reasoning, _compaction, message = _UNSTORED_OUTPUT
+    assert turn.message.provider_data[RESPONSE_OUTPUT_KEY] == [reasoning, message]
 
 
 def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path: Path) -> None:
