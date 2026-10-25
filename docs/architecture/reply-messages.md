@@ -41,7 +41,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 ### Claims
 
 - An edit regenerates only the reply to the latest message of its conversation, when no one other than an agent wrote after it, that reply may show something, counting a create Matrix has not acknowledged yet, and it is not `gone`; any other edit changes no reply.
-- An edit of a reply that still streams, or that an approval holds, stops it first as a Stop reaction would, which cancels the approval and expires its cards, and then regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
+- An edit of a reply that still runs, or that an approval holds, stops it first as a Stop reaction would, which cancels the approval and expires its cards, and then regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
 - The edit hands the regeneration to its own task and does not wait for its claim, because the claim waits for the conversation lock, which another reply of the agent may hold for as long as that reply runs.
 
 ### Writes and restarts

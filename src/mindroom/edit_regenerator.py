@@ -168,7 +168,7 @@ class EditRegenerator:
         # edit names.
         turn_record = await self.deps.turn_store.load_turn(original_event_id)
         if turn_record is None:
-            # As for a message still waiting for media or voice before it reaches its turn.
+            # Usually this agent never took the message; it may also still wait for media or voice before its turn.
             logger.info(
                 "edit_not_regenerated",
                 room_id=room.room_id,
