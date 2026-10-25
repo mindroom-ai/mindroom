@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.constants import AGENT_NAME_PATTERN, tracking_dir
 
 if TYPE_CHECKING:
@@ -59,10 +60,20 @@ class PersonalAgentTemplateConfig(BaseModel):
             "defaults to the usual mindroom_<agent key> account"
         ),
     )
-    agent: AgentConfig = Field(description="Agent fields shared by every user's agent")
+    agent: AgentConfig = Field(
+        description=(
+            "Agent fields shared by every user's agent; display_name, role, and instructions accept "
+            "{user}, {username}, and {user_display_name}. Only the owner and administrators may use each agent "
+            "unless access admits others, and the owner is always added to access.users and credential_managers"
+        ),
+    )
     users: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
-        description="Per-user agent field overrides keyed by concrete Matrix user ID; each replaces the template field",
+        description=(
+            "Per-user agent field overrides as YAML, such as model: opus, keyed by concrete Matrix user ID; "
+            "each replaces the template field whole, so a list or object is not merged"
+        ),
+        json_schema_extra=dashboard_hint(key_placeholder="@alice:example.org"),
     )
 
     def agent_name(self, key: str, username: str) -> str:

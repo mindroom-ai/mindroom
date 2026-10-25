@@ -868,6 +868,58 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_as_its_text(tmp_path: Path) -> None:
+    """The caller receives the failed outcome, so the call fails; the observers read its text, as a declined call's.
+
+    The after-call hooks, the tool-call log, and the reply's record of the call each receive the text, as they did
+    when the tool returned it as an ordinary value.
+    """
+    seen: list[tuple[object, BaseException | None, bool]] = []
+    finished: list[object] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after_call(ctx: ToolAfterCallContext) -> None:
+        seen.append((ctx.result, ctx.error, ctx.blocked))
+
+    class _Recorder:
+        async def started(self, tool_name: str, _args: Mapping[str, object]) -> str:
+            return tool_name
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: Mapping[str, object], result: object) -> None:
+            finished.append(result)
+
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [after_call])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    refusal = ToolOutcome(
+        content="❌ Scheduled call `task-1` did not run: its approval was already used.",
+        is_error=True,
+    )
+
+    async def next_func(**_kwargs: object) -> ToolOutcome:
+        return refusal
+
+    with (
+        tool_runtime_context(runtime_context),
+        tool_execution_identity(_execution_identity()),
+        recording_tool_calls(_Recorder()),
+    ):
+        result = await bridge("run_scheduled_call", next_func, {"task_id": "task-1"})
+
+    assert result is refusal
+    assert seen == [(refusal.content, None, False)]
+    assert finished == [refusal.content]
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert record["result"] == refusal.content
+
+
+@pytest.mark.asyncio
 async def test_oauth_required_tool_result_is_recorded_when_debug_enabled(tmp_path: Path) -> None:
     """OAuth-required structured returns should be logged like other successful tool results."""
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)

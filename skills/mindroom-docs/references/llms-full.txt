@@ -6385,6 +6385,7 @@ Spend is the cost of the user's [recorded token usage](https://docs.mindroom.cha
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 `claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
+Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID that uses Chat Completions, such as one with `api: chat_completions`.
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
@@ -8049,6 +8050,7 @@ The SDK retries transient failures automatically without repeating the side effe
 
 Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
 A denied approval raises a non-retryable error with kind `approval_denied`.
+A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
 
 ## Complete Watcher Example
@@ -18042,6 +18044,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `approval_required` | The tool needs confirmation or a configured approval and cannot run through the gateway |
 | `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
+| `tool_declined` | A MindRoom plugin declined the call, so it did not run; `message` gives the plugin's reason |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
 | `duplicate_request` | A call with the same request ID is already running |
@@ -20736,6 +20739,7 @@ notify    at most once per hour
 ```
 
 Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
+Each call to a tool the run does not offer logs a `tool_not_offered` warning, and each call whose arguments cannot be decoded logs an `invalid_tool_arguments` warning with `reason` `decode` or `not_object`; both carry `entity` and `tool_name`, never the arguments.
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
 

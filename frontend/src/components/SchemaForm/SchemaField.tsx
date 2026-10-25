@@ -692,8 +692,12 @@ function MapEditor({
   const references = useReferenceOptions();
   const [draftKey, setDraftKey] = useState("");
   const keyListId = useId();
-  // Hints on a map describe its values, except the one for its keys.
-  const { key_reference: keyReference, ...valueHint } = node.hint;
+  // Hints on a map describe its values, except the ones for its keys.
+  const {
+    key_reference: keyReference,
+    key_placeholder: keyPlaceholder,
+    ...valueHint
+  } = node.hint;
   const valueSchema: JsonSchema = { ...node.values!, "x-mindroom": valueHint };
   const valueNode = classifySchemaNode(valueSchema, root);
   const scalarValues =
@@ -761,7 +765,9 @@ function MapEditor({
       <div className="flex items-center gap-2">
         <Input
           aria-label={`New ${inlineLabel(label)} key`}
-          placeholder="Key"
+          placeholder={
+            keyPlaceholder ? `Key, such as ${keyPlaceholder}` : "Key"
+          }
           value={draftKey}
           list={keySuggestions ? keyListId : undefined}
           onChange={(event) => setDraftKey(event.target.value)}

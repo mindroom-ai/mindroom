@@ -267,7 +267,9 @@ class ClaudeProvider:
                 yield usage
                 yield completed
                 return
-            # Opening the stream runs the SDK's param transform, which walks the whole conversation.
+            # Opening the stream runs the SDK's param transform, which walks the whole conversation. A cancel during
+            # the open drops the unentered manager, which the SDK never sends; the only trace is an unawaited-coroutine
+            # RuntimeWarning.
             manager = await asyncio.to_thread(
                 lambda: client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs),
             )

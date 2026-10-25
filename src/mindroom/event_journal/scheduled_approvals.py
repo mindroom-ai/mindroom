@@ -65,7 +65,8 @@ ScheduledCallRefusal = Literal[
     "arguments",
     "left_room",
 ]
-# Completed means the call returned; a claimed binding with no outcome ended in an unknown state.
+# Completed means the call ran and returned; failed means it raised or the tool-call policy declined it before it ran.
+# A claimed binding with no outcome ended in an unknown state.
 ScheduledCallOutcome = Literal["completed", "failed"]
 # A consumed binding marks the receipt it published as an automatic terminal approval.
 RECEIPT = """EXISTS (

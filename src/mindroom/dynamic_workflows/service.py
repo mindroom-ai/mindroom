@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from functools import partial
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.dynamic_workflows.runner import execute_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 from mindroom.dynamic_workflows.validation import (
@@ -20,6 +22,8 @@ if TYPE_CHECKING:
 
     from mindroom.dynamic_workflows.runner import ParticipantExecutor
     from mindroom.dynamic_workflows.store import DynamicWorkflowStore
+
+_RUN_CANCELLED = "Workflow run was cancelled."
 
 
 class DynamicWorkflowService:
@@ -46,14 +50,24 @@ class DynamicWorkflowService:
         requested_by: str,
         base_url: str | None = None,
     ) -> DynamicWorkflowRun:
-        """Start and complete one workflow run on the current event loop."""
-        prepared = self._prepare_run(
-            workflow_id=workflow_id,
-            scope=scope,
-            owner_id=owner_id,
-            input_data=input_data,
-            requested_by=requested_by,
-            base_url=base_url,
+        """Start and complete one workflow run on the current event loop.
+
+        Store file work runs on threads, and each call finishes before the run continues or handles a
+        cancellation, so the loop stays free and the run's records are written in order.
+        A run cancelled before its final record is written ends cancelled; one cancelled while that record
+        is written keeps it.
+        """
+        prepared = await run_blocking_or_compensate(
+            partial(
+                self._prepare_run,
+                workflow_id=workflow_id,
+                scope=scope,
+                owner_id=owner_id,
+                input_data=input_data,
+                requested_by=requested_by,
+                base_url=base_url,
+            ),
+            self._cancel_admitted_run,
         )
         if isinstance(prepared, DynamicWorkflowRun):
             return prepared
@@ -95,6 +109,11 @@ class DynamicWorkflowService:
             return self._store.fail_workflow_run(run, error=failure_text(exc))
         return run, spec
 
+    def _cancel_admitted_run(self, prepared: tuple[DynamicWorkflowRun, dict[str, object]] | DynamicWorkflowRun) -> None:
+        """End a run its preparation admitted as cancelled; a run the preparation rejected keeps its rejection."""
+        if not isinstance(prepared, DynamicWorkflowRun):
+            self._store.fail_workflow_run(prepared[0], error=_RUN_CANCELLED)
+
     async def _execute_and_persist(
         self,
         run: DynamicWorkflowRun,
@@ -111,19 +130,22 @@ class DynamicWorkflowService:
         )
         try:
             done, _pending = await asyncio.wait({execution_task}, timeout=timeout_seconds)
-            if not done:
-                execution_task.cancel()
-                execution_task.add_done_callback(_discard_late_task_result)
-                return self._store.fail_workflow_run(run, error=_workflow_timeout_message(timeout_seconds))
-            execution = execution_task.result()
+            execution = execution_task.result() if done else None
         except asyncio.CancelledError:
             execution_task.cancel()
             execution_task.add_done_callback(_discard_late_task_result)
-            self._store.fail_workflow_run(run, error="Workflow run was cancelled.")
+            await self._fail(run, _RUN_CANCELLED)
             raise
         except Exception as exc:
-            return self._store.fail_workflow_run(run, error=failure_text(exc))
-        return self._complete_or_fail(run, execution)
+            return await self._fail(run, failure_text(exc))
+        if not done:
+            execution_task.cancel()
+            execution_task.add_done_callback(_discard_late_task_result)
+            return await self._fail(run, _workflow_timeout_message(timeout_seconds))
+        return await run_blocking_until_complete(self._complete_or_fail, run, execution)
+
+    async def _fail(self, run: DynamicWorkflowRun, error: str) -> DynamicWorkflowRun:
+        return await run_blocking_until_complete(partial(self._store.fail_workflow_run, run, error=error))
 
     def _complete_or_fail(self, run: DynamicWorkflowRun, execution: object) -> DynamicWorkflowRun:
         try:
