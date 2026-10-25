@@ -118,6 +118,7 @@ MindRoom's own accounts and the internal `mindroom_user` never get an agent.
 
 The dashboard's Settings page edits `personal_agents` next to Personal rooms.
 Its `personal_rooms.agent` dropdown lists the configured agents and the `personal_agents` templates.
+The Agents page lists every generated agent, read-only, with its owner, Matrix ID, template, and whether it is active, pending, or stopped because its template was removed.
 
 ## Switching From a Single Personal-Room Agent
 

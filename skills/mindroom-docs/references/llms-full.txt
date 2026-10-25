@@ -1016,6 +1016,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Tools** - configured tools (green badge) and tools that need no setup
 - **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
+- **Personal agents** - a read-only list of the agents generated from [`personal_agents`](https://docs.mindroom.chat/personal-agents/) templates, with each owner, Matrix ID, template, and status; edit the templates under Settings → Personal rooms
 
 ### Teams
 
@@ -1151,6 +1152,7 @@ The dashboard uses the backend REST API under `/api/`, with the same authenticat
 | PUT | `/api/config/raw` | Replace raw `config.yaml` text |
 | GET | `/api/config/schema` | Configuration JSON schema used by Settings and More settings |
 | GET | `/api/config/agents` | List agents |
+| GET | `/api/config/personal-agents` | List generated personal agents |
 | POST | `/api/config/agents` | Create agent |
 | PUT | `/api/config/agents/{id}` | Update agent |
 | DELETE | `/api/config/agents/{id}` | Delete agent |
@@ -6385,6 +6387,7 @@ Spend is the cost of the user's [recorded token usage](https://docs.mindroom.cha
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 `claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
+Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID that uses Chat Completions, such as one with `api: chat_completions`.
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
@@ -6981,6 +6984,7 @@ MindRoom's own accounts and the internal `mindroom_user` never get an agent.
 
 The dashboard's Settings page edits `personal_agents` next to Personal rooms.
 Its `personal_rooms.agent` dropdown lists the configured agents and the `personal_agents` templates.
+The Agents page lists every generated agent, read-only, with its owner, Matrix ID, template, and whether it is active, pending, or stopped because its template was removed.
 
 ## Switching From a Single Personal-Room Agent
 
@@ -20738,6 +20742,7 @@ notify    at most once per hour
 ```
 
 Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
+Each call to a tool the run does not offer logs a `tool_not_offered` warning, and each call whose arguments cannot be decoded logs an `invalid_tool_arguments` warning with `reason` `decode` or `not_object`; both carry `entity` and `tool_name`, never the arguments.
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
 

@@ -300,12 +300,11 @@ def _messages_with_capped_context(
     config: Config,
     static_token_budget: int,
     estimate_static_tokens_fn: Callable[[str], int],
-    render_messages_text_fn: Callable[[Sequence[Message]], str],
 ) -> TurnMessages:
     """Return the turn ``with_context`` builds around the newest context-message suffix that fits the static budget."""
 
     def fits(turn: TurnMessages) -> bool:
-        return estimate_static_tokens_fn(render_messages_text_fn(turn.in_request_order())) <= static_token_budget
+        return estimate_static_tokens_fn(render_prepared_messages_text(turn.in_request_order())) <= static_token_budget
 
     full_messages = with_context(context_messages)
     if fits(full_messages):
@@ -360,17 +359,6 @@ def render_prepared_messages_text(messages: Sequence[Message]) -> str:
     return "\n\n".join(str(message.content) for message in messages if message.content)
 
 
-def render_prepared_team_messages_text(messages: Sequence[Message]) -> str:
-    """Render prepared team messages to text, labeling assistant turns, for logs and rough token estimates."""
-    rendered_chunks: list[str] = []
-    for message in messages:
-        if not message.content:
-            continue
-        content = str(message.content)
-        rendered_chunks.append(f"assistant: {content}" if message.role == "assistant" else content)
-    return "\n\n".join(rendered_chunks)
-
-
 def _build_unseen_context_messages(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage],
@@ -390,7 +378,7 @@ def _build_unseen_context_messages(
 ) -> tuple[TurnMessages, list[str]]:
     """Return the canonical turn for unseen thread context plus the current prompt, and the unseen event ids."""
     history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
-    unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
+    unseen_messages, in_progress_event_ids = _get_unseen_messages_for_sender(
         history_before_current or (),
         sender_id=response_sender_id,
         seen_event_ids=seen_event_ids,
@@ -404,7 +392,7 @@ def _build_unseen_context_messages(
         member_display_names=member_display_names,
     )
     # Unseen context keeps only in-progress drafts of this sender, so only their header can apply.
-    if partial_reply_kinds:
+    if in_progress_event_ids:
         context_messages = (
             Message(role="user", content=config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")),
             *context_messages,
@@ -445,7 +433,6 @@ def _build_thread_history_messages(
     missing_sender_label: str | None,
     static_token_budget: int | None,
     estimate_static_tokens_fn: Callable[[str], int],
-    render_messages_text_fn: Callable[[Sequence[Message]], str],
     attachment_context: _ThreadAttachmentContext | None,
 ) -> TurnMessages:
     """Return the canonical turn for fallback full-thread replay."""
@@ -481,7 +468,6 @@ def _build_thread_history_messages(
             config=config,
             static_token_budget=static_token_budget,
             estimate_static_tokens_fn=estimate_static_tokens_fn,
-            render_messages_text_fn=render_messages_text_fn,
         )
     return with_context(context_messages)
 
@@ -558,7 +544,7 @@ def _sanitize_thread_history_for_replay(
     active_event_ids: Collection[str],
 ) -> tuple[ResolvedVisibleMessage, ...]:
     """Apply unseen-context sanitization before fallback full-thread replay."""
-    sanitized, _, _ = _get_unseen_messages_for_sender(
+    sanitized, _ = _get_unseen_messages_for_sender(
         thread_history,
         sender_id=response_sender_id,
         seen_event_ids=set(),
@@ -604,10 +590,9 @@ def _get_unseen_messages_for_sender(
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: Collection[str],
-) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
-    """Filter thread_history to unseen messages for one Matrix sender, leaving out its interrupted drafts."""
+) -> tuple[list[ResolvedVisibleMessage], set[str]]:
+    """Return one sender's unseen messages, without its interrupted drafts, and the ids of its in-progress drafts."""
     unseen: list[ResolvedVisibleMessage] = []
-    partial_reply_kinds: set[_PartialReplyKind] = set()
     in_progress_event_ids: set[str] = set()
     for msg in thread_history:
         event_id = msg.event_id
@@ -629,12 +614,11 @@ def _get_unseen_messages_for_sender(
                 cleaned_body = clean_partial_reply_text(msg.body)
                 if not cleaned_body:
                     continue
-                partial_reply_kinds.add(partial_kind)
                 in_progress_event_ids.add(event_id)
                 unseen.append(replace_visible_message(msg, sender=_IN_PROGRESS_REPLY_LABEL, body=cleaned_body))
                 continue
         unseen.append(msg)
-    return unseen, partial_reply_kinds, in_progress_event_ids
+    return unseen, in_progress_event_ids
 
 
 def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]:
@@ -706,7 +690,6 @@ async def _prepare_execution_context_common(
     config: Config,
     prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str], int],
-    render_messages_text_fn: Callable[[Sequence[Message]], str],
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     fallback_static_token_budget: int | None = None,
     attachment_context: _ThreadAttachmentContext | None = None,
@@ -758,7 +741,7 @@ async def _prepare_execution_context_common(
 
     provisional_messages, _ = turn_messages(seen_event_ids)
     prepared_scope_history = await prepare_scope_history_fn(
-        render_messages_text_fn(provisional_messages.in_request_order()),
+        render_prepared_messages_text(provisional_messages.in_request_order()),
     )
     final_messages, unseen_event_ids = turn_messages(
         await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
@@ -766,7 +749,7 @@ async def _prepare_execution_context_common(
         else set(),
     )
 
-    final_static_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages.in_request_order()))
+    final_static_tokens = estimate_static_tokens_fn(render_prepared_messages_text(final_messages.in_request_order()))
     prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
@@ -804,11 +787,12 @@ async def _prepare_execution_context_common(
             missing_sender_label=render_limits.missing_sender_label,
             static_token_budget=fallback_static_token_budget,
             estimate_static_tokens_fn=estimate_static_tokens_fn,
-            render_messages_text_fn=render_messages_text_fn,
             attachment_context=attachment_context,
             member_display_names=member_display_names,
         )
-        fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages.in_request_order()))
+        fallback_context_tokens = estimate_static_tokens_fn(
+            render_prepared_messages_text(final_messages.in_request_order()),
+        )
         if prepared_history.replay_plan is not None:
             fallback_context_tokens += prepared_history.replay_plan.estimated_tokens
         prepared_history = replace(prepared_history, prepared_context_tokens=fallback_context_tokens)
@@ -898,7 +882,6 @@ async def prepare_agent_execution_context(
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=static_token_estimator.estimate,
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=resolved_runtime_model.context_window,
             replay_window_tokens=compaction_config.replay_window_tokens,
@@ -982,7 +965,6 @@ async def _prepare_bound_team_execution_context(
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
         estimate_static_tokens_fn=static_token_estimator.estimate,
-        render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
         attachment_context=_ThreadAttachmentContext(
             storage_path=runtime_paths.storage_root,

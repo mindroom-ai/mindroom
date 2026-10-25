@@ -360,6 +360,78 @@ async def test_a_returned_iterator_is_drained_like_a_generator() -> None:
     assert await run_tool_call(function, {}, _context(), middleware=()) == "ab"
 
 
+def _letters(closed: list[str]) -> Iterator[str]:
+    try:
+        yield "a"
+        yield "b"
+    finally:
+        closed.append("sync")
+
+
+class _SyncStream:
+    """An iterator that is not a generator and records its close."""
+
+    def __init__(self, closed: list[str]) -> None:
+        self._items = iter(["a", "b"])
+        self._closed = closed
+
+    def __iter__(self) -> _SyncStream:
+        return self
+
+    def __next__(self) -> str:
+        return next(self._items)
+
+    def close(self) -> None:
+        self._closed.append("sync")
+
+
+class _AsyncStream:
+    """An async iterator that is not an async generator and records its close."""
+
+    def __init__(self, closed: list[str]) -> None:
+        self._items = iter(["a", "b"])
+        self._closed = closed
+
+    def __aiter__(self) -> _AsyncStream:
+        return self
+
+    async def __anext__(self) -> str:
+        try:
+            return next(self._items)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def aclose(self) -> None:
+        self._closed.append("async")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("async_tool", "stream"),
+    [(False, _letters), (False, _SyncStream), (True, _letters), (True, _SyncStream), (True, _AsyncStream)],
+    ids=["sync-generator", "sync-iterator", "async-generator", "async-iterator", "async-async-iterator"],
+)
+async def test_custom_iterator_closes_once(*, async_tool: bool, stream: Callable[[list[str]], object]) -> None:
+    """Any iterator a tool returns is drained and closed once; a synchronous one on the call's tracked worker thread."""
+    closed: list[str] = []
+
+    def sync_tool() -> object:
+        return stream(closed)
+
+    async def async_tool_() -> object:
+        return stream(closed)
+
+    [function] = _functions(async_tool_ if async_tool else sync_tool).values()
+    tracker = SyncToolCompletionTracker()
+
+    with track_sync_tool_completion(tracker):
+        outcome = await _run(function, "{}")
+
+    assert outcome == ToolOutcome(content="ab")
+    assert closed == ["async" if stream is _AsyncStream else "sync"]
+    assert (tracker.started_task() is None) is (stream is _AsyncStream)
+
+
 @pytest.mark.asyncio
 async def test_a_failing_generator_is_an_error_with_the_exception_text() -> None:
     """An exception while draining fails the call with the exception's text, as Agno reported it."""

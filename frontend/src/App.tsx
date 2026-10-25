@@ -4,6 +4,7 @@ import { BrowserRouter, useLocation } from "react-router-dom";
 import { useConfigStore } from "@/store/configStore";
 import { AgentList } from "@/components/AgentList/AgentList";
 import { AgentEditor } from "@/components/AgentEditor/AgentEditor";
+import { PersonalAgents } from "@/components/PersonalAgents/PersonalAgents";
 import { TeamList } from "@/components/TeamList/TeamList";
 import { TeamEditor } from "@/components/TeamEditor/TeamEditor";
 import { RoomList } from "@/components/RoomList/RoomList";
@@ -490,20 +491,23 @@ function AppContent() {
               label="Agents"
               className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
             >
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div
-                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedAgentId ? "hidden lg:block" : "block"
-                  }`}
-                >
-                  <AgentList />
-                </div>
-                <div
-                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedAgentId ? "block" : "hidden lg:block"
-                  }`}
-                >
-                  <AgentEditor />
+              <div className="flex h-full flex-col gap-3 sm:gap-4">
+                <PersonalAgents />
+                <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4">
+                  <div
+                    className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                      selectedAgentId ? "hidden lg:block" : "block"
+                    }`}
+                  >
+                    <AgentList />
+                  </div>
+                  <div
+                    className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                      selectedAgentId ? "block" : "hidden lg:block"
+                    }`}
+                  >
+                    <AgentEditor />
+                  </div>
                 </div>
               </div>
             </RoutePanel>

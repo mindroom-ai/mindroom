@@ -4553,8 +4553,8 @@ class TestTeamCompletion:
         ]
 
     @pytest.mark.asyncio
-    async def test_prepare_openai_team_execution_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
-        """OpenAI team prep should recover notice facts and preserve assistant-role rendering."""
+    async def test_prepare_openai_team_execution_scrubs_queued_notices_and_renders_the_messages_as_sent(self) -> None:
+        """OpenAI team prep should recover notice facts and render the leader's messages as they are sent."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
@@ -4669,7 +4669,7 @@ class TestTeamCompletion:
                 execution_identity=_team_identity("general", runtime_paths, session_id="session-openai-team-prep"),
             )
 
-        assert prepared.prompt_text == "assistant: Previous team reply\n\nAnalyze this."
+        assert prepared.prompt_text == "Previous team reply\n\nAnalyze this."
         assert prepared.run_metadata is not None
         assert "tools_schema" not in prepared.run_metadata
         assert prepared.run_metadata["model_params"] == {"temperature": 0.7}

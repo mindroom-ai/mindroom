@@ -110,7 +110,8 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "personal-rooms",
     title: "Personal rooms",
     description: "Private rooms and per-person agents for everyone who joins.",
-    entries: [{ root: "personal_rooms" }, { root: "personal_agents" }],
+    // A template comes first because Personal rooms selects it as its agent.
+    entries: [{ root: "personal_agents" }, { root: "personal_rooms" }],
   },
   {
     id: "room-defaults",
