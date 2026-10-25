@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import inspect
 import json
 from dataclasses import dataclass, field, replace
 from threading import Event
@@ -35,7 +34,7 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
-from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -815,10 +814,6 @@ class ScriptToolBroker:
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
         execution_identity = _validate_resolved_authority(run, context, worker_authority)
         function = _toolkit_function(toolkit, call.grant.function_name)
-        if inspect.isgeneratorfunction(function.entrypoint) or inspect.isasyncgenfunction(function.entrypoint):
-            self._close_rejected_toolkit(toolkit)
-            msg = "Generator tool entrypoints are not supported for background scripts."
-            raise ScriptCapabilityError(msg)
         return _PreparedExecution(
             context=context,
             correlation_id=correlation_id,
@@ -1069,7 +1064,7 @@ async def _close_toolkit(toolkit: Toolkit) -> None:
 
 
 def _strict_json_result(result: object) -> object:
-    normalized = to_json_compatible(result)
+    normalized = to_json_compatible(client_tool_result(result))
     try:
         json.dumps(
             normalized,

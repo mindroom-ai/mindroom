@@ -165,10 +165,13 @@ class UsageReported:
 
     An adapter yields the usage a stream chunk carries before that chunk's output events, so a reply stopped while
     the output is delivered still settles what the provider billed; each partial report replaces the one before.
+    ``sums_attempts`` marks a report a retrying stage forwarded from an attempt reissued after earlier attempts
+    reported usage: from that report on, the request's reports add up more than one attempt.
     """
 
     usage: MessageMetrics
     final: bool = True
+    sums_attempts: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,15 +223,19 @@ class ReportedUsage:
 
     A partial report stands in for its attempt until a final one replaces it, so ``received`` is what the provider
     billed for a stream cut off now, and a retrying stage settles a failed attempt's partial report before retrying.
+    ``sums_attempts`` turns true with the first marked report and stays so, since from then on ``received`` adds up
+    more than one attempt and describes no single request.
     """
 
     settled: MessageMetrics | None = None
     pending: MessageMetrics | None = None
+    sums_attempts: bool = False
 
     def observe(self, event: StreamEvent) -> None:
         """Track one event of the stream."""
         if not isinstance(event, UsageReported):
             return
+        self.sums_attempts = self.sums_attempts or event.sums_attempts
         if event.final:
             self.settled = add_usage(self.settled, event.usage)
             self.pending = None

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +60,8 @@ _RESPONSE_USAGE = {"input_tokens": 42, "output_tokens": 12, "total_tokens": 54}
 _OPENAI_CHAT = {"provider": "openai", "api": "chat_completions", "id": "gpt-6-astra", "api_key": "test-key"}
 _OPENAI_RESPONSES = {"provider": "openai", "api": "responses", "id": "gpt-6-astra", "api_key": "test-key"}
 _CALL = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
+# A new id a Chat turn stores a call under: when its server sent none, or on the ``openai`` dialect one it rewrites.
+_NEW_CHAT_ID = r"call_[0-9a-f]{32}"
 
 
 def _chunk(delta: dict[str, Any] | None = None, *, finish_reason: str | None = None, **extra: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -284,17 +287,67 @@ async def test_a_chat_stream_splits_only_a_think_block_that_opens_the_reply(
 
 
 @pytest.mark.asyncio
-async def test_chat_tool_calls_without_ids_get_generated_ids(tmp_path: Path) -> None:
-    delta = {"tool_calls": [{"index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]}
-    built = _Built(
-        tmp_path,
-        {"provider": "llama_cpp", "id": "qwen"},
-        _chat_reply(_chunk(delta, finish_reason="tool_calls")),
-    )
+@pytest.mark.parametrize(
+    ("server_id", "stored"),
+    [
+        (None, _NEW_CHAT_ID),
+        ("functions.get_weather:0", _NEW_CHAT_ID),
+        (f"call_{'a' * 35}", f"call_{'a' * 35}"),
+        (f"call_{'a' * 36}", _NEW_CHAT_ID),
+    ],
+    ids=["omitted", "unprefixed", "at-40-characters", "past-40-characters"],
+)
+async def test_a_chat_call_keeps_only_a_server_id_that_chat_requests_send_unchanged(
+    tmp_path: Path,
+    server_id: str | None,
+    stored: str,
+) -> None:
+    """On the ``openai`` dialect, a call without an id or with one outside the Chat rule gets a new id that fits it.
+
+    That dialect's requests rewrite an id that is not ``call_`` and at most 40 characters, so the call is stored under
+    one they send unchanged.
+    """
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _tool_call_reply(server_id))
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert len(turn.tool_calls[0]["id"]) == 36
+    assert re.fullmatch(stored, turn.tool_calls[0]["id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "server_id", "stored"),
+    [
+        ("groq", "functions.get_weather:0", re.escape("functions.get_weather:0")),
+        ("cerebras", "functions.get_weather:0", re.escape("functions.get_weather:0")),
+        ("groq", None, _NEW_CHAT_ID),
+    ],
+    ids=["groq", "cerebras", "groq-omitted"],
+)
+async def test_a_groq_or_cerebras_call_keeps_the_id_its_server_sent(
+    tmp_path: Path,
+    route: str,
+    server_id: str | None,
+    stored: str,
+) -> None:
+    """Groq and Cerebras requests send stored ids unchanged, so a call keeps its server's id, even outside the Chat rule.
+
+    Only a call its server sent without an id gets a new one.
+    """
+    built = _Built(tmp_path, _DECISION_ROUTES[route][0], _tool_call_reply(server_id))
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    [call] = turn.tool_calls
+    assert re.fullmatch(stored, call["id"])
+
+
+def _tool_call_reply(server_id: str | None) -> dict[str, Any]:
+    """Return a Chat stream with one ``get_weather`` call under ``server_id``, or no id when it is None."""
+    call: dict[str, Any] = {"index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+    if server_id is not None:
+        call["id"] = server_id
+    return _chat_reply(_chunk({"tool_calls": [call]}, finish_reason="tool_calls"))
 
 
 @pytest.mark.asyncio

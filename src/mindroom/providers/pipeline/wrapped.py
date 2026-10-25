@@ -4,22 +4,34 @@ A stage is a function ``stage(inner, request)`` that returns the request's event
 presents it as a ``ModelProvider`` so stages compose by nesting and callers never see the difference.
 
 Usage invariant across retries: every attempt's ``UsageReported`` is forwarded, and the final
-``TurnCompleted`` message's metrics add the usage of the attempts that failed before it, marked with
-``provider_data["mindroom_aggregate_usage"]``. A partial report stands in for its attempt until a final one
-replaces it, so before a retry a failed attempt's partial report that no final one followed is forwarded
-again as final. The final reports of one request therefore always sum to its finished turn's metrics, and a
-consumer settling a stream that never completed sums them and adds any partial report no final one replaced.
+``TurnCompleted`` message's metrics add the usage of the attempts that failed before it. A partial report stands
+in for its attempt until a final one replaces it, so before a retry a failed attempt's partial report that no final
+one followed is forwarded again as final. The final reports of one request therefore always sum to its finished
+turn's metrics, and a consumer settling a stream that never completed sums them and adds any partial report no
+final one replaced.
+
+Once failed attempts reported usage, one rule marks the usage of each later attempt as summing attempts: its reports
+get ``sums_attempts`` and its finished turn ``provider_data[AGGREGATE_USAGE_KEY]``, so a request that completes
+and one cut off before it finished both store the sum as describing no single request.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError, incomplete_stream_error
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY
-from mindroom.llm.provider import ReasoningDelta, ReportedUsage, StreamProgress, TextDelta, ToolCallReady, TurnCompleted
+from mindroom.llm.provider import (
+    ReasoningDelta,
+    ReportedUsage,
+    StreamProgress,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
 from mindroom.llm.usage import TokenCounts, add_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -126,7 +138,7 @@ async def attempts(
             if committed or (reissue := retry(error)) is None:
                 raise
         if (report := usage.settle()) is not None:
-            yield report
+            yield _with_carried_usage(report, carried)
         if reissue.delay_seconds:
             await asyncio.sleep(reissue.delay_seconds)
         carried = add_usage(carried, usage.settled)
@@ -146,11 +158,19 @@ def _commits_attempt(event: StreamEvent) -> bool:
 
 
 def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:
-    """Add usage reported by failed attempts to a finished turn, marking the sum."""
-    if carried is None or not isinstance(event, TurnCompleted):
+    """Add the failed attempts' usage to a reissued attempt's finished turn, marking its usage as summing attempts.
+
+    The mark goes on the attempt's reports and its finished turn alike, once the failed attempts reported tokens.
+    """
+    if carried is None:
+        return event
+    sums_attempts = carried.tokens != TokenCounts()
+    if isinstance(event, UsageReported):
+        return replace(event, sums_attempts=True) if sums_attempts else event
+    if not isinstance(event, TurnCompleted):
         return event
     message = event.message
-    if carried.tokens != TokenCounts():
+    if sums_attempts:
         message.provider_data = {**(message.provider_data or {}), AGGREGATE_USAGE_KEY: True}
     message.metrics = message.metrics + carried
     return event

@@ -48,7 +48,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
-from mindroom.model_usage import response_context_tokens
+from mindroom.model_usage import message_context_tokens
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.store import persist_to
@@ -558,7 +558,7 @@ def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
     )
 
     assert (
-        response_context_tokens(message, provider="openai", configured_provider="openai", model_id="gpt-6-luna") is None
+        message_context_tokens(message, provider="openai", configured_provider="openai", model_id="gpt-6-luna") is None
     )
 
 

@@ -74,6 +74,7 @@ from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, quote_identifier
 from tests.access_schema_support import with_current_room_member_access
+from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
@@ -908,23 +909,19 @@ async def test_a_turn_that_reads_the_approval_receipt_sends_it_with_its_first_re
         tools=(PROBE_TOOL, "thread_model"),
     )
 
-    with approval_receipt_context("Trusted approval receipt.", run_id="run-1"):
+    with approval_receipt_context(RECEIPT_CALLS, run_id="run-1"):
         await _stream(reply, run_id="run-1")
 
     assert probe.calls == ["a"]
     first, *later = reply.model.requests
-    assert str(first.messages[0].content).endswith("Trusted approval receipt.")
+    assert str(first.messages[0].content).endswith(RECEIPT_TEXT)
     assert first.messages[0].provider_data == {"mindroom_approval_receipt": True}
     assert len(later) == 2
-    assert all(
-        "Trusted approval receipt." not in str(message.content) for request in later for message in request.messages
-    )
+    assert all(RECEIPT_TEXT not in str(message.content) for request in later for message in request.messages)
     session = reply.storage.load_session(SESSION_ID, "agent")
     assert session is not None
     assert len(session.runs) == 2
-    assert all(
-        "Trusted approval receipt." not in str(message.content) for run in session.runs for message in run.messages
-    )
+    assert all(RECEIPT_TEXT not in str(message.content) for run in session.runs for message in run.messages)
 
 
 @pytest.mark.asyncio

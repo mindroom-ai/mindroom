@@ -405,6 +405,9 @@ def test_team_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
     record = TeamRunRecord.from_dict(agno_dict)
 
     assert record.to_dict() == expected
+    # The stored label of the team's members had no reader, so a rewritten row drops it.
+    assert "team_name" in agno_dict
+    assert "team_name" not in record.to_dict()
     assert isinstance(record.member_responses[0], RunRecord)
     assert record.member_responses[0].parent_run_id == "team-run-1"
     # Agno wrote an empty ``member_responses`` list on a team run without members.

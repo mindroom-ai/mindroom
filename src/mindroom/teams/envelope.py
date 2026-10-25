@@ -177,6 +177,9 @@ async def prepare_materialized_team_execution(
 ) -> PreparedTeamExecution:
     """Prepare one built team's turn: its prompt and unseen context, the scope's history, and the run metadata."""
     spec = built.spec
+    leader = spec.leader
+    # ``build_team_spec`` renders the leader prompt, which sizes the static part of every leader request.
+    assert leader.system_message is not None
     ctx = replace(
         ctx,
         transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
@@ -188,9 +191,9 @@ async def prepare_materialized_team_execution(
         ctx,
         scope_context=scope_context,
         member_names=[member.spec.id for member in spec.members],
-        leader_system_message=spec.system_message,
+        leader_system_message=leader.system_message,
         leader_tools=leader_tool_specs(spec),
-        model=spec.model,
+        model=leader.model,
         prompt=message,
         transient_context_messages=(
             (Message(role="user", content=transient_turn_context, add_to_agent_memory=False),)
@@ -236,7 +239,7 @@ async def prepare_materialized_team_execution(
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        model_params=spec.model.model_params,
+        model_params=leader.model.model_params,
         extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
     )
     return PreparedTeamExecution(

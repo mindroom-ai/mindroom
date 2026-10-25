@@ -659,6 +659,13 @@ class TestRevisionReduction:
         assert projected is not None
         assert projected.redacts_event_id == "$m"
 
+    async def test_a_decrypted_redaction_deletes_nothing(self) -> None:
+        """A redaction is never encrypted, so one read out of Megolm plaintext is a sender's claim, not a deletion."""
+        event = parse(redaction("$r", "$m", ts=3_000))
+        event.decrypted = True
+
+        assert _projected_from_event(ROOM, event, self_sender=BOT) is None
+
     async def test_a_redacted_event_this_projection_never_held_deletes_nothing(self) -> None:
         """Only a message can be deleted from a projection, because only a message is in one.
 
