@@ -100,10 +100,9 @@ def _earlier_reasoning_tokens(messages: Sequence[Message], replayed: list[Any]) 
 
 
 def _reasoning_ids(message: Message) -> set[object]:
-    """Return the ids of the reasoning items a stored answer can replay."""
-    data = message.provider_data or {}
-    output = data.get(RESPONSE_OUTPUT_KEY)
-    items = [*(output if isinstance(output, list) else []), data.get("reasoning_output")]
+    """Return the ids of the reasoning items in a stored answer's ordered output, the only reasoning replay sends."""
+    output = (message.provider_data or {}).get(RESPONSE_OUTPUT_KEY)
+    items = output if isinstance(output, list) else []
     return {item.get("id") for item in items if isinstance(item, dict) and item.get("type") == "reasoning"}
 
 
