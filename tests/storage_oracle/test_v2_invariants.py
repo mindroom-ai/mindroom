@@ -167,6 +167,25 @@ class _InvariantBackend(NextBackend):
         if parent_run_id is None and (before is None or (before in _NON_VISIBLE and status not in _NON_VISIBLE)):
             self._place(run_id)
 
+    def _live(self, run_id: str) -> bool:
+        return self.turn is not None and self.turn.record.run_id == run_id
+
+    @override
+    def save_stale(self, session: ConversationSession, record: AnyRunRecord) -> object:
+        # A running turn is the only writer of its row until it ends (spec 3.7), so no late copy lands on it.
+        return "live-turn" if self._live(record.run_id) else super().save_stale(session, record)
+
+    @override
+    def save_interrupted(
+        self,
+        session: ConversationSession,
+        run_id: str,
+        snapshot: InterruptedReplaySnapshot,
+        state: dict[str, object] | None,
+    ) -> object:
+        # Interrupted records are written after their turn ended, and CLI approval recovery continues in a new turn.
+        return "live-turn" if self._live(run_id) else super().save_interrupted(session, run_id, snapshot, state)
+
     def _stored_status(self, run_id: str) -> str | None:
         row = self.stored_runs().get(run_id)
         return None if row is None else row[1]
@@ -442,6 +461,15 @@ def _drive(scenario: Scenario) -> None:
     # A stale save stores a member of a discarded fold owner again, as a new row without the fold's flag.
     scenario=Scenario("team", (Action("fold_first_turn"), Action("discard", index=1), Action("stale_save"))),
 )
+@example(
+    # An approval resume completes after a later turn, so it moves after that turn.
+    scenario=Scenario("agent", (Action("pause"), Action("add"), Action("resume"))),
+)
+@example(
+    # Neither an interrupted record nor a stale copy lands on a running CLI turn's row, which its fold then moves.
+    scenario=Scenario("agent", (Action("checkpoint"), Action("interrupted"), Action("fold"))),
+)
+@example(scenario=Scenario("agent", (Action("cli_delegate"), Action("stale_save", index=3), Action("fold"))))
 @example(scenario=NAMED["team_pause_advanced"])
 @example(scenario=NAMED["linked_covered_run_redacted"])
 @example(scenario=NAMED["discarded_fold_owner_redacted"])
