@@ -26,8 +26,6 @@ from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import tool_definition
 from tests.agno_parity.golden_files import render, sorted_keys
 from tests.agno_parity.knowledge_goldens import (
-    DISTANCE_KEYS,
-    DISTANCE_RELATIVE_TOLERANCE,
     EMBEDDERS_PATH,
     GOLDEN_DIR,
     ROWS_PATH,
@@ -77,17 +75,6 @@ def test_an_embedder_golden_ignores_the_shells_openai_endpoint(tmp_path: Path, m
     assert embedder_case(golden, tmp_path, monkeypatch) == golden
 
 
-def _with_approximate_distances(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Compare distances only as closely as Chroma's float32 arithmetic agrees across machines."""
-    approximate: list[dict[str, Any]] = []
-    for document in documents:
-        meta_data = dict(document["meta_data"])
-        for key in DISTANCE_KEYS:
-            meta_data[key] = pytest.approx(meta_data[key], rel=DISTANCE_RELATIVE_TOLERANCE, abs=0)
-        approximate.append({**document, "meta_data": meta_data})
-    return approximate
-
-
 @pytest.fixture
 def parity_embedder(monkeypatch: pytest.MonkeyPatch) -> ParityEmbedder:
     """Embed refreshes and searches with the goldens' deterministic vectors."""
@@ -124,7 +111,8 @@ async def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: 
         if search["agent"] != "librarian" or "documents" not in search:
             continue
         hits = await proxy.asearch(search["query"], limit=10)
-        assert json.loads(_format_search_hits(hits)) == _with_approximate_distances(search["documents"])
+        documents = search["documents"]
+        assert distances_as_recorded(json.loads(_format_search_hits(hits)), documents) == documents
 
 
 @pytest.mark.asyncio
