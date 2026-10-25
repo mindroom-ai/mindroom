@@ -17,7 +17,6 @@ its own call id reads it there instead of taking it as a parameter.
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
@@ -343,7 +342,7 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
         return await _drain_async(result)
     if isinstance(result, Iterator):
         # An async tool returned a synchronous iterator, which may block between items.
-        return await asyncio.to_thread(_drain_sync, result)
+        return await run_sync_tool_entrypoint(partial(_drain_sync, result))
     return result
 
 

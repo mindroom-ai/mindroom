@@ -360,6 +360,14 @@ async def test_a_returned_iterator_is_drained_like_a_generator() -> None:
     assert await run_tool_call(function, {}, _context(), middleware=()) == "ab"
 
 
+def _letters(closed: list[str]) -> Iterator[str]:
+    try:
+        yield "a"
+        yield "b"
+    finally:
+        closed.append("sync")
+
+
 class _SyncStream:
     """An iterator that is not a generator and records its close."""
 
@@ -399,44 +407,29 @@ class _AsyncStream:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("async_tool", "stream_type", "close"),
-    [(False, _SyncStream, "sync"), (True, _SyncStream, "sync"), (True, _AsyncStream, "async")],
+    ("async_tool", "stream"),
+    [(False, _letters), (False, _SyncStream), (True, _letters), (True, _SyncStream), (True, _AsyncStream)],
+    ids=["sync-generator", "sync-iterator", "async-generator", "async-iterator", "async-async-iterator"],
 )
-async def test_custom_iterator_closes_once(*, async_tool: bool, stream_type: type, close: str) -> None:
-    """A returned iterator that is not a generator is drained and closed exactly once, whichever tool returned it."""
+async def test_custom_iterator_closes_once(*, async_tool: bool, stream: Callable[[list[str]], object]) -> None:
+    """Any iterator a tool returns is drained and closed once; a synchronous one on the call's tracked worker thread."""
     closed: list[str] = []
 
-    def sync_stream() -> object:
-        return stream_type(closed)
+    def sync_tool() -> object:
+        return stream(closed)
 
-    async def async_stream() -> object:
-        return stream_type(closed)
+    async def async_tool_() -> object:
+        return stream(closed)
 
-    [function] = _functions(async_stream if async_tool else sync_stream).values()
+    [function] = _functions(async_tool_ if async_tool else sync_tool).values()
+    tracker = SyncToolCompletionTracker()
 
-    assert await run_tool_call(function, {}, _context(), middleware=()) == "ab"
-    assert closed == [close]
+    with track_sync_tool_completion(tracker):
+        outcome = await _run(function, "{}")
 
-
-@pytest.mark.asyncio
-async def test_a_generator_returned_from_an_async_tool_runs_and_is_drained() -> None:
-    """An async tool that returns a generator gives the model what the generator yields, not the generator's repr."""
-    closed: list[str] = []
-
-    def letters() -> Iterator[str]:
-        try:
-            yield "a"
-            yield "b"
-        finally:
-            closed.append("generator")
-
-    async def stream() -> Iterator[str]:
-        return letters()
-
-    [function] = _functions(stream).values()
-
-    assert await run_tool_call(function, {}, _context(), middleware=()) == "ab"
-    assert closed == ["generator"]
+    assert outcome == ToolOutcome(content="ab")
+    assert closed == ["async" if stream is _AsyncStream else "sync"]
+    assert (tracker.started_task() is None) is (stream is _AsyncStream)
 
 
 @pytest.mark.asyncio
