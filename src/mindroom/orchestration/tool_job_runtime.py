@@ -26,7 +26,6 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_backg
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.publication import JobStatePublisher
 from mindroom.tool_jobs.runtime import (
-    ENDED_JOB_RETENTION,
     TERMINAL_STATUSES,
     BackgroundJob,
     BackgroundOutcome,
@@ -408,8 +407,5 @@ class ToolJobRuntimeCoordinator:
                     finished[key] = False
             return finished[key]
 
-        expired = await self.runtime.expire_ended(
-            before=datetime.now(UTC) - ENDED_JOB_RETENTION,
-            source_finished=source_finished,
-        )
+        expired = await self.runtime.expire_ended(now=datetime.now(UTC), source_finished=source_finished)
         await prune_job_approvals(expired)

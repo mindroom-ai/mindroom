@@ -125,7 +125,7 @@ async def test_native_result_expiry_after_restart_deletes_the_job(tmp_path: Path
         discovered = await restored.list_jobs(owner=job_owner(), depth=0)
         assert len(json.dumps([asdict(job) for job in discovered])) < 8192
         await restored.expire_ended(
-            before=datetime.now(UTC) + timedelta(days=31),
+            now=datetime.now(UTC) + timedelta(days=61),
             source_finished=source_finished,
         )
         assert child.delegation_id not in restored._entries
