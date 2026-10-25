@@ -251,6 +251,7 @@ Matrix sync callback
 | `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `model_capabilities` reads a configured model's route capabilities from its bare adapter |
 | `providers/gemini/` | Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing |
 | `providers/ollama_adapter.py` | Ollama adapter over the native chat API |
+| `providers/ollama_errors.py` | The Ollama SDK's failures as normalized provider errors, shared by the Ollama adapter and the Ollama embedder |
 | `providers/synthetic_adapter.py` | Synthetic provider streaming seeded Lorem Ipsum and shell calls |
 | `providers/model_http_client.py` | The runtime-owned HTTP client the OpenAI and Anthropic SDK clients send their requests through |
 | `providers/prompt_cache_key.py` | Stable prompt-cache routing keys derived from execution identity |

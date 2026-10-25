@@ -128,6 +128,8 @@ def test_transport_error_uses_fixed_message_without_host() -> None:
     """Transport failures never leak the configured host."""
     request = httpx.Request("POST", "http://embeddings.internal.example/v1/embeddings")
     exc = APIConnectionError(request=request)
+    # The SDK raises its connection error from the transport failure.
+    exc.__cause__ = httpx.ConnectError("connection refused", request=request)
     detail = describe_embedder_error(exc)
     assert detail == "embedder endpoint unreachable"
     assert "embeddings.internal.example" not in detail

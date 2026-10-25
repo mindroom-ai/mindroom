@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
 
-from mindroom.embeddings.errors import EmbedderRequestError, describe_embedder_error
+from mindroom.embeddings.errors import embedder_request_error
 from mindroom.embeddings.signatures import ensure_sentence_transformers_dependencies
 from mindroom.tool_system.dependencies import optional_dependency_environment
 
@@ -73,7 +73,8 @@ class _SentenceTransformersEmbedder:
                 try:
                     embedding = encode(text, normalize_embeddings=False)
                 except Exception as exc:
-                    raise EmbedderRequestError(describe_embedder_error(exc)) from exc
+                    # The model runs in this process, with no provider transport to fail, so its failures are final.
+                    raise embedder_request_error(exc, None) from exc
             vectors.append([float(value) for value in embedding.tolist()])
         return vectors
 

@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 
 from ollama import AsyncClient, Client
 
-from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, EmbedderRequestError, describe_embedder_error
+from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, EmbedderRequestError, embedder_request_error
+from mindroom.providers.ollama_errors import provider_error
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 #: The ``dimensions`` every request has asked Ollama for, so vectors in existing indexes keep their width.
 #: Ollama only shortens vectors wider than this; narrower models answer with their own width.
 _REQUESTED_DIMENSIONS = 4096
+_PROVIDER = "ollama"
 
 
 def _vector(response: EmbedResponse) -> list[float]:
@@ -63,7 +65,7 @@ class OllamaEmbedder:
             try:
                 response = self._sync_client().embed(model=self.model, input=text, dimensions=_REQUESTED_DIMENSIONS)
             except Exception as exc:
-                raise EmbedderRequestError(describe_embedder_error(exc)) from exc
+                raise embedder_request_error(exc, provider_error(exc, provider=_PROVIDER)) from exc
             vectors.append(_vector(response))
         return vectors
 
@@ -79,6 +81,6 @@ class OllamaEmbedder:
                     dimensions=_REQUESTED_DIMENSIONS,
                 )
             except Exception as exc:
-                raise EmbedderRequestError(describe_embedder_error(exc)) from exc
+                raise embedder_request_error(exc, provider_error(exc, provider=_PROVIDER)) from exc
             vectors.append(_vector(response))
         return vectors

@@ -254,6 +254,19 @@ def _projected_event(
     return projected
 
 
+def _ingested_kind(parsed: nio.Event, schedule_trigger_sender_is_managed: Callable[[str], bool]) -> EventKind | None:
+    """Return the kind one parsed timeline event is admitted as, or None to settle it without work."""
+    if parsed.decrypted and (isinstance(parsed, nio.RedactionEvent) or "state_key" in parsed.source):
+        # Redactions and state are never encrypted, so a decrypted one is a sender's claim the homeserver never checked.
+        return None
+    kind = _event_kind(parsed)
+    if kind is EventKind.SCHEDULE_TRIGGER and not schedule_trigger_sender_is_managed(parsed.sender):
+        return None
+    if kind is None and isinstance(parsed, nio.RoomMemberEvent):
+        return EventKind.ROOM_LIFECYCLE
+    return kind
+
+
 def ingestion_timeline_views(
     *,
     room_id: str,
@@ -283,11 +296,7 @@ def ingestion_timeline_views(
         # Nio owns ciphertext recovery. Only historical identities need an
         # application tombstone so later decryption cannot revive old work.
         return None
-    kind = _event_kind(parsed)
-    if kind is EventKind.SCHEDULE_TRIGGER and not schedule_trigger_sender_is_managed(parsed.sender):
-        return None
-    if kind is None and isinstance(parsed, nio.RoomMemberEvent):
-        kind = EventKind.ROOM_LIFECYCLE
+    kind = _ingested_kind(parsed, schedule_trigger_sender_is_managed)
     if kind is None:
         return None
     event_class = _event_class_for(provenance, parsed)

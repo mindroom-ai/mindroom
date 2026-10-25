@@ -64,7 +64,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.embeddings.ollama_embedder"
-depends_on = ["mindroom.embeddings.errors"]
+depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama_errors"]
 visibility = ["mindroom.embeddings.factory"]
 
 [[modules]]
@@ -89,7 +89,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.embeddings.errors"
-depends_on = []
+depends_on = ["mindroom.llm", "mindroom.providers.openai"]
 
 [[modules]]
 path = "mindroom.embeddings.openai_embedder"
@@ -7980,11 +7980,17 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
-    "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.ollama_errors",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
+
+# Importing this module loads the Ollama SDK, so only the two Ollama modules, each imported on first use, may import it.
+[[modules]]
+path = "mindroom.providers.ollama_errors"
+depends_on = ["mindroom.providers.errors"]
+visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.providers.ollama_adapter"]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"
