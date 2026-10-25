@@ -50,8 +50,10 @@ class ToolFunction:
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
     ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, tool
-    jobs, and the agent CLI name it by; None for a function generated for the agent, such as the knowledge search,
-    the skill readers, and a team's delegation.
+    jobs, and the agent CLI name it by; for an implied or preset tool that is the tool that brings it in. None for a
+    function generated for the agent, such as the knowledge search, the skill readers, and a team's delegation, and
+    for one adapted alone (``adapt_function``), as the MCP gateway and the script broker adapt the function a call
+    names and name its toolkit beside it.
     """
 
     name: str

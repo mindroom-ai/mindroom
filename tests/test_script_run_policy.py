@@ -104,7 +104,7 @@ def test_launch_and_call_filters_see_the_toolkit_each_function_is_granted_from(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A context's filter reads the toolkit a function is granted from, as an agent's build names it."""
+    """A context's filter reads the authored toolkit of each granted function, not Agno's name for the toolkit."""
     context = _context_for_config(
         tmp_path,
         Config(
@@ -126,6 +126,25 @@ def test_launch_and_call_filters_see_the_toolkit_each_function_is_granted_from(
 
     assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
     assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "echo")) is not None
+
+
+def test_script_filters_see_an_implied_tools_function_under_the_authored_toolkit(tmp_path: Path) -> None:
+    """An implied tool's functions name the authored tool that implies it, as an agent's build offers them."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["matrix_message"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(
+        context,
+        tool_function_filter=lambda function: (function.toolkit, function.name) == ("matrix_message", "get_attachment"),
+    )
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("attachments", "get_attachment"),)
+    assert resolve_current_script_tool(context, ScriptToolGrant("attachments", "get_attachment")) is not None
 
 
 def test_launch_grants_skip_a_refused_function_the_filter_leaves_out(

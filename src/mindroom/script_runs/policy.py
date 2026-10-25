@@ -43,11 +43,13 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 
 def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
     """Resolve the stable registered function surface captured when a script launches."""
-    toolkits = _build_script_toolkits(context, context.config, _visible_script_tool_entries(context, context.config))
+    entries = _visible_script_tool_entries(context, context.config)
+    toolkits = _build_script_toolkits(context, context.config, entries)
     return tuple(
-        ScriptToolGrant(toolkit_name, function_name)
-        for toolkit_name, toolkit in toolkits.items()
-        for function_name in _visible_function_names(context, toolkit_name, toolkit)
+        ScriptToolGrant(entry.name, function_name)
+        for entry in entries
+        if (toolkit := toolkits.get(entry.name)) is not None
+        for function_name in _visible_function_names(context, entry, toolkit)
     )
 
 
@@ -75,7 +77,7 @@ def resolve_current_script_tool(
     toolkit = _build_script_toolkits(context, config, (tool_entry,)).get(grant.toolkit_name)
     if toolkit is None:
         return None
-    if grant.function_name not in _visible_function_names(context, grant.toolkit_name, toolkit):
+    if grant.function_name not in _visible_function_names(context, tool_entry, toolkit):
         if rejected_toolkit_cleanup is not None:
             rejected_toolkit_cleanup(toolkit)
         return None
@@ -143,10 +145,15 @@ def _build_script_toolkits(
     return toolkits
 
 
-def _visible_function_names(context: ToolRuntimeContext, toolkit_name: str, toolkit: Toolkit) -> tuple[str, ...]:
+def _visible_function_names(
+    context: ToolRuntimeContext,
+    tool_entry: EffectiveToolConfig,
+    toolkit: Toolkit,
+) -> tuple[str, ...]:
     # One function per name, the one an agent's run offers.
     if context.tool_function_filter is None:
         return tuple(toolkit.get_async_functions())
-    # Each function names the toolkit it is granted from, as it names the one an agent's build offers it from.
-    functions = adapt_toolkit(toolkit, key=toolkit_name).functions
+    # Each function names its authored toolkit, the one an agent's build offers it from, which for an implied or
+    # preset tool is the tool that brings it in.
+    functions = adapt_toolkit(toolkit, key=tool_entry.authored_name or tool_entry.name).functions
     return tuple(function.name for function in functions if context.tool_function_filter(function))
