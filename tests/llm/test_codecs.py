@@ -90,6 +90,27 @@ def test_media_from_dict_decodes_content_bytes_as_agno_did() -> None:
     assert binary_file.content == PDF_BYTES
 
 
+def test_a_text_file_that_is_not_utf8_reads_back_as_its_bytes() -> None:
+    """A ``text/*`` file whose bytes are not UTF-8 is stored as base64 that says so, and reads back as those bytes."""
+    latin1 = File(id="f", content="café".encode("latin-1"), mime_type="text/plain")
+
+    stored = latin1.to_dict()
+
+    assert File.from_dict(stored).content == "café".encode("latin-1")
+    assert stored == {"id": "f", "mime_type": "text/plain", "content": "Y2Fm6Q==", "content_encoding": "base64"}
+    # UTF-8 text keeps its text form, which reads back as the same bytes.
+    utf8 = File(id="f", content="café".encode(), mime_type="text/plain")
+    assert utf8.to_dict() == {"id": "f", "mime_type": "text/plain", "content": "café"}
+    assert File.from_dict(utf8.to_dict()).content == "café".encode()
+
+
+def test_a_text_file_stored_before_its_encoding_was_recorded_reads_as_before() -> None:
+    """An unmarked ``text/*`` row reads as UTF-8 text, so an earlier non-UTF-8 file still reads as its base64 text."""
+    earlier = File.from_dict({"id": "f", "mime_type": "text/plain", "content": "Y2Fm6Q=="})
+
+    assert earlier.content == b"Y2Fm6Q=="
+
+
 def test_media_from_dict_ignores_agno_only_keys() -> None:
     image = Image.from_dict(
         {"id": "i", "url": "https://example.invalid/i.png", "media_reference": {"storage_key": "k"}},
