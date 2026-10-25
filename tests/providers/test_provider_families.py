@@ -113,7 +113,7 @@ _TRI_STATE_TOOLS = [
     ),
 ]
 _GEMINI_SCHEMA = {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}, "required": []}
-_AGNO_FLAGS = {
+_OPENAI_WIRE_FLAGS = {
     "gated": {
         "strict": True,
         "requires_confirmation": True,
@@ -126,8 +126,8 @@ _AGNO_FLAGS = {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", ["openai_chat", "openai_responses", "cerebras", "gemini", "ollama"])
-async def test_unset_tool_fields_are_omitted_where_agno_omitted_them(family: str, tmp_path: Path) -> None:
-    """``Function.to_dict()`` dropped None values; each wire keeps exactly the fields its Agno adapter sent.
+async def test_each_wire_sends_only_the_tool_fields_it_takes_and_omits_unset_ones(family: str, tmp_path: Path) -> None:
+    """Each wire sends the tool fields it takes, and omits the ones a tool leaves unset.
 
     OpenAI's Chat and Responses wires carry ``strict`` and the approval flags when set; Cerebras and Ollama send
     only name, description, and parameters; Gemini sends an empty description for a tool without one.
@@ -147,7 +147,7 @@ async def test_unset_tool_fields_are_omitted_where_agno_omitted_them(family: str
     kind = {"type": "function"} if family == "openai_responses" else {}
     assert sent["unset"] == {"name": "unset", "parameters": _SCHEMA, **kind}
     expected_flags: dict[str, dict[str, Any]] = (
-        _AGNO_FLAGS if family in {"openai_chat", "openai_responses"} else {"gated": {}, "plain": {}}
+        _OPENAI_WIRE_FLAGS if family in {"openai_chat", "openai_responses"} else {"gated": {}, "plain": {}}
     )
     for name in ("gated", "plain"):
         assert sent[name] == {

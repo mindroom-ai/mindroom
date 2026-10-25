@@ -1659,8 +1659,8 @@ class _DualTools(Toolkit):
         return str(account_id)
 
 
-def test_tool_search_describes_the_async_implementation_agno_runs() -> None:
-    """Agno prefers async implementations in async runs, so search must describe that one."""
+def test_tool_search_describes_the_async_implementation_the_loop_runs() -> None:
+    """The loop runs a toolkit's async implementation when it has one, so search must describe that one."""
     toolkit = _search_toolkit(_deferred(_DualTools(), "Dual"))
 
     match = _tool_payload(toolkit.tool_search("lookup"))["matches"][0]

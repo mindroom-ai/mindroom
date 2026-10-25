@@ -761,7 +761,7 @@ _TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch 
         ),
     ],
 )
-async def test_a_blocking_team_pause_shows_its_runs_records_with_agno_s_paused_notices(
+async def test_a_blocking_team_pause_shows_its_runs_records_with_their_paused_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     show_tool_calls: bool,
@@ -770,7 +770,7 @@ async def test_a_blocking_team_pause_shows_its_runs_records_with_agno_s_paused_n
     consensus_slot: str,
     separators: list[str] | None,
 ) -> None:
-    """A blocking pause renders its runs' records, as the Agno-backed blocking pause did, not its events' document.
+    """A blocking pause renders its runs' records, not its events' document.
 
     Each slot holds its run's text first, the member's and the leader's paused notices included, and then the run's
     tool calls, the member's gated call still pending. The snapshot the resume continues holds the same slots.

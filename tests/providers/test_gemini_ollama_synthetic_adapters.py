@@ -1353,8 +1353,8 @@ def test_gemini_schema_conversion_breaks_cycles_and_leaves_the_input_alone() -> 
     assert schema == original
 
 
-def test_gemini_converts_mcp_tool_schemas_as_agno_did() -> None:
-    """Unions, type lists, dict values, empty objects, and unresolved or untyped properties convert as Agno's did.
+def test_gemini_converts_the_json_schema_shapes_mcp_tools_send() -> None:
+    """Unions, type lists, dict values, empty objects, and unresolved or untyped properties convert for Gemini.
 
     MCP and plugin tools send their own JSON schemas, so any of these can reach a Gemini request.
     """
@@ -1786,8 +1786,11 @@ async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Pat
     ["<think>\n\n</think>Hi there", "Plan first.</think>Hi there"],
     ids=["empty-reasoning", "no-opening-tag"],
 )
-async def test_ollama_keeps_think_tags_agno_did_not_split(content: str, tmp_path: Path) -> None:
-    """Agno's Ollama split only an opening ``<think>`` with reasoning inside; other replies stay as they came."""
+async def test_ollama_leaves_think_tags_without_reasoning_or_an_opening_tag_in_the_content(
+    content: str,
+    tmp_path: Path,
+) -> None:
+    """An Ollama reply splits only at an opening ``<think>`` with reasoning inside; other replies stay as they came."""
     reply = httpx.Response(200, json=_ollama_done(content=content))
 
     _, events = await run_adapter(OLLAMA, _request(stream=False), tmp_path, reply)

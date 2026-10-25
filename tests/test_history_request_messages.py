@@ -103,7 +103,7 @@ def _filter_cases() -> list[Any]:
 
 
 @pytest.mark.parametrize(("golden_name", "selection_name"), _selection_cases())
-def test_selection_matches_agno_get_messages(golden_name: str, selection_name: str) -> None:
+def test_selection_matches_the_history_golden(golden_name: str, selection_name: str) -> None:
     golden = _golden(golden_name)
     selection = golden["get_messages"][selection_name]
     # MindRoom always skips prompt roles; finished stored runs hold none, so Agno's skip_roles changes nothing here.
@@ -132,7 +132,7 @@ def test_selection_matches_agno_get_messages(golden_name: str, selection_name: s
         for name in selections
     ],
 )
-def test_scoped_selection_matches_agno_get_messages(session_key: str, selection_name: str) -> None:
+def test_scoped_selection_matches_the_scoped_selection_golden(session_key: str, selection_name: str) -> None:
     store, session_id = session_key.split(":", 1)
     selection = _SCOPED_SELECTIONS[session_key][selection_name]
     params = selection["params"]
@@ -155,7 +155,7 @@ def test_scoped_selection_matches_agno_get_messages(session_key: str, selection_
 
 
 @pytest.mark.parametrize(("golden_name", "case_name"), _filter_cases())
-def test_filter_tool_calls_matches_agno(golden_name: str, case_name: str) -> None:
+def test_filter_tool_calls_matches_the_history_golden(golden_name: str, case_name: str) -> None:
     golden = _golden(golden_name)
     case = golden["filter_tool_calls"][case_name]
     copies = [
@@ -170,7 +170,7 @@ def test_filter_tool_calls_matches_agno(golden_name: str, case_name: str) -> Non
 
 @pytest.mark.parametrize("golden_path", _HISTORY_GOLDENS, ids=lambda path: path.stem)
 @pytest.mark.parametrize("max_tool_calls", [0, 1, 2])
-def test_replayed_history_limits_tool_calls_as_agno_did(golden_path: Path, max_tool_calls: int) -> None:
+def test_replayed_history_limits_tool_calls_as_the_history_golden_does(golden_path: Path, max_tool_calls: int) -> None:
     golden = _golden(golden_path.name)
     expected = golden["filter_tool_calls"][f"all/max_tool_calls_{max_tool_calls}"]["messages"]
 

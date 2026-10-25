@@ -728,7 +728,7 @@ def test_daily_usage_returns_empty_breakdown_without_retained_runs(
 
 
 @pytest.mark.parametrize("admin", [False, True])
-def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool) -> None:
+def test_daily_and_combined_models_use_the_per_model_metrics_details(tmp_path: Path, admin: bool) -> None:
     paths = _paths(tmp_path)
     config = Config(agents={"code": AgentConfig(display_name="Code")})
     storage = create_state_storage("code", paths.storage_root / "agents" / "code")

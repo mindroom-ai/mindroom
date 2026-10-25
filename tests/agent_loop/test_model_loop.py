@@ -207,7 +207,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 6)
 
 
-async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts() -> None:
+async def test_unknown_tools_and_bad_arguments_answer_the_model_with_error_results() -> None:
     model = ScriptedModel(
         [
             calls(
@@ -316,8 +316,8 @@ async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_i
     assert (denial.tool_call_error, denial.stop_after_tool_call) == (True, True)
 
 
-async def test_a_batch_that_stops_the_run_skips_the_batch_hooks_as_agno_did() -> None:
-    """No later request reads what a batch hook adds after a stopping batch, so Agno fired none there."""
+async def test_a_batch_that_stops_the_run_skips_the_batch_hooks() -> None:
+    """No later request reads what a batch hook adds after a stopping batch, so none fires there."""
     batches: list[list[str | None]] = []
 
     async def after_batch(_messages: list[Message], results: Sequence[Message]) -> None:

@@ -165,10 +165,10 @@ async def _adapter_turn(built: _Built, request: ModelRequest) -> Any:  # noqa: A
 
 
 @pytest.mark.asyncio
-async def test_usage_on_several_chat_chunks_adds_up_as_agno_summed_it(tmp_path: Path) -> None:
+async def test_usage_on_several_chat_chunks_adds_up(tmp_path: Path) -> None:
     """Each chunk's usage adds to the turn's, so every partial report and the final one hold the running sum.
 
-    Agno added every usage-bearing chunk to the assistant message's metrics; a server that repeats its cumulative
+    Every usage-bearing chunk adds to the assistant message's metrics, so a server that repeats its cumulative
     usage on each chunk is counted once per chunk.
     """
     first = {"prompt_tokens": 40, "completion_tokens": 1, "total_tokens": 41}
@@ -254,12 +254,12 @@ async def test_chat_completion_splits_think_tags_and_records_finish_reason(tmp_p
     ],
     ids=["empty-reasoning-kept", "no-opening-tag-split"],
 )
-async def test_chat_completion_splits_think_tags_as_agno_did(
+async def test_chat_completion_splits_at_a_lone_closing_think_tag_and_keeps_empty_reasoning(
     tmp_path: Path,
     content: str,
     expected: tuple[str, str | None],
 ) -> None:
-    """Agno's Chat split at a closing tag alone but kept a reply whose reasoning was empty unchanged."""
+    """A Chat completion splits at a closing tag alone but keeps a reply whose reasoning is empty unchanged."""
     completion = {
         "id": "chatcmpl-1",
         "object": "chat.completion",
@@ -1440,7 +1440,7 @@ def _reasoning_reply(*, stream: bool, summary: bool) -> dict[str, Any]:
         "blocking-with-summary",
     ],
 )
-async def test_authored_reasoning_stores_the_output_text_as_agno_did(
+async def test_authored_reasoning_stores_the_output_text_unless_a_summary_takes_its_place(
     tmp_path: Path,
     *,
     stream: bool,
@@ -1448,10 +1448,10 @@ async def test_authored_reasoning_stores_the_output_text_as_agno_did(
     summary: bool,
     stored: str | None,
 ) -> None:
-    """With ``reasoning`` authored, Agno stored the output text as reasoning unless a summary took its place.
+    """With ``reasoning`` authored, a reply stores its output text as reasoning unless a summary takes its place.
 
-    A stream copied every text delta, after any summary text, unless ``reasoning_summary`` was set; a blocking
-    response stored its summary when it had one and its output text otherwise.
+    A stream copies every text delta, after any summary text, unless ``reasoning_summary`` is set; a blocking
+    response stores its summary when it has one and its output text otherwise.
     """
     built = _Built(
         tmp_path,
