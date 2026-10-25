@@ -183,11 +183,7 @@ def event_goldens() -> list[Path]:
     """Rewrite the OpenAI-compatible API golden and the ``io.mindroom.ai_run`` metadata golden."""
     with tempfile.TemporaryDirectory(prefix="event-golden-") as root:
         compat = openai_compat_golden.regenerated_golden(Path(root))
-    published = {
-        run_id: asyncio.run(_published_run_metadata(run_id))
-        for run_id in ai_run.GOLDEN_RUN_METADATA
-        if run_id not in ai_run.WITHOUT_RECORD
-    }
+    published = {run_id: asyncio.run(_published_run_metadata(run_id)) for run_id in ai_run.GOLDEN_RUN_METADATA}
     goldens = {openai_compat_golden.GOLDEN: compat, ai_run.GOLDEN: ai_run.regenerated_golden(published)}
     return [path for path, golden in goldens.items() if write(path, golden)]
 

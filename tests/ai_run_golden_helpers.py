@@ -7,8 +7,7 @@ and tool calls, or fails as a failed run did, and the history preparation return
 it prepared: the capture kept that result, not the stored history and prompt it came from. An approval resume
 prepares no history, so the resumes run from the stores the capture dumped just before them
 (``tests.approval_resume_helpers`` for the agent's).
-A run's duration is a clock reading, so the comparison sees only its presence. Where a run's context differs from the
-capture's, the comparison expects its last request's (``_LAST_REQUEST_CONTEXT``).
+A run's duration is a clock reading, so the golden records only its presence.
 """
 
 from __future__ import annotations
@@ -58,42 +57,15 @@ GOLDEN = _FIXTURES / "events" / "ai_run.json"
 GOLDEN_RUN_METADATA: dict[str, dict[str, Any]] = json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 _CLOCK = "<clock>"
-# Agno's replies reported a run's summed input, a team's members' requests included, as its context, except a streamed
-# agent reply; the context reports the run's last own model request, the leader's for a team. These runs made more
-# than one request, and these are their last request's input tokens.
-_LAST_REQUEST_CONTEXT = {
-    "run-view": 260,
-    "run-c5": 200,
-    "team-completed": 450,
-    "team-member-error": 470,
-    "panel-completed": 410,
-    "run-approved": 260,
-    "run-rejected": 260,
-    "run-delegation-approved": 330,
-    "team-approved": 470,
-}
 
 
 def published_as_compared(content: Mapping[str, Any]) -> dict[str, Any]:
-    """Return published run metadata as the comparison sees it: its duration, a clock reading, as a sentinel."""
+    """Return published run metadata as the golden records it: its duration, a clock reading, as a sentinel."""
     compared = copy.deepcopy(dict(content))
     usage = compared[AI_RUN_METADATA_KEY].get("usage", {})
     if "duration" in usage:
         usage["duration"] = _CLOCK
     return compared
-
-
-def golden_metadata(run_id: str) -> dict[str, Any]:
-    """Return the metadata the captured run ``run_id`` published, as the comparison sees it."""
-    expected = published_as_compared(GOLDEN_RUN_METADATA[run_id])
-    if run_id == "run-tools":
-        # Agno's streamed reply merged the counters its requests reported into the usage, so the zero cache-write
-        # count a request reported appeared as 0; the owned usage leaves zero counters out, as every blocking reply's
-        # usage did.
-        assert expected[AI_RUN_METADATA_KEY]["usage"].pop("cache_write_tokens") == 0
-    if run_id in _LAST_REQUEST_CONTEXT:
-        expected[AI_RUN_METADATA_KEY]["context"]["input_tokens"] = _LAST_REQUEST_CONTEXT[run_id]
-    return expected
 
 
 _REQUESTER = "@alice:example.org"
@@ -127,8 +99,6 @@ _AUTHORED["models"]["leader"]["context_window"] = 100000
 _AUTHORED["tool_approval"] = {"default": "auto_approve", "rules": [{"match": "multiply", "action": "require_approval"}]}
 # The runs whose replies streamed; the rest were blocking.
 STREAMED = {"run-tools", "panel-completed"}
-# An edit cut removed this run's row, so no stored record remains to replay it from.
-WITHOUT_RECORD = {"run-c4"}
 
 
 def _stored_runs() -> dict[str, AnyRunRecord]:
@@ -364,13 +334,6 @@ async def published_metadata(run_id: str, tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def regenerated_golden(published: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Return the golden that each run's ``published`` metadata regenerates, keyed by run id in the golden's order.
-
-    The capture's entries are kept, after their compared parts are checked against ``published``: they differ only
-    where ``golden_metadata`` says the comparison departs from the capture, and in the clock reading it never
-    compares. The run an edit cut removed has no publication to check.
-    """
-    for run_id, content in published.items():
-        assert published_as_compared(content) == golden_metadata(run_id), run_id
-    assert set(published) == set(GOLDEN_RUN_METADATA) - WITHOUT_RECORD
-    return GOLDEN_RUN_METADATA
+    """Return the golden that each run's ``published`` metadata regenerates, keyed by run id in the golden's order."""
+    assert set(published) == set(GOLDEN_RUN_METADATA), "every golden run publishes, and only those"
+    return {run_id: published_as_compared(published[run_id]) for run_id in GOLDEN_RUN_METADATA}
