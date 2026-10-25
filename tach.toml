@@ -3463,6 +3463,7 @@ depends_on = [
     "mindroom.config.schema_hints",
     "mindroom.config.knowledge_graph",
     "mindroom.config.egress_broker",
+    "mindroom.providers.registry",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -7936,9 +7937,11 @@ depends_on = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.credentials",
+    "mindroom.providers.extra_kwargs",
     "mindroom.providers.gemini",
     "mindroom.providers.names",
     "mindroom.providers.ollama_adapter",
+    "mindroom.providers.ollama_settings",
     "mindroom.providers.openai",
     "mindroom.providers.pipeline",
     "mindroom.providers.synthetic_adapter",
@@ -7985,9 +7988,14 @@ depends_on = [
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.ollama_settings",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
+
+[[modules]]
+path = "mindroom.providers.ollama_settings"
+depends_on = ["mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"

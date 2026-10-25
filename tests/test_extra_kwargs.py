@@ -11,7 +11,7 @@ import httpx
 import pytest
 import yaml
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import render_transient_context
@@ -23,9 +23,9 @@ from mindroom.providers.anthropic.prompt_cache import native_tool_search_support
 from mindroom.providers.anthropic.settings import ClaudeSettings
 from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker, prompt_cache_control
 from mindroom.providers.extra_kwargs import settings_params
-from mindroom.providers.gemini.adapter import GeminiSettings
+from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.ollama_adapter import OllamaSettings
+from mindroom.providers.ollama_settings import OllamaSettings
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
@@ -139,7 +139,7 @@ _ROUTE_SETTINGS: list[tuple[type[Any], dict[str, Any], frozenset[str]]] = [
     ),
     (GeminiSettings, {"temperature": 0.3}, frozenset({"api_key", "client_params", "credentials"})),
     (OllamaSettings, {"options": {"num_ctx": 8192}}, frozenset({"api_key", "client_params"})),
-    (SyntheticSettings, {"seed": 7}, frozenset()),
+    (SyntheticSettings, {"seed": 7}, frozenset({"api_key"})),
 ]
 
 
@@ -829,7 +829,7 @@ def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path
 
     with pytest.raises(
         ValueError,
-        match=r"Unsupported extra_kwargs for provider 'zai': temprature; remove them\. Accepted keys: ",
+        match=r"Unsupported extra_kwargs for provider 'zai': temprature; remove or correct them\. Accepted keys: ",
     ):
         build_openai_provider(
             model_config,
@@ -837,7 +837,7 @@ def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path
         )
 
 
-# --- Retired Agno fields --------------------------------------------------------------------------------------
+# --- Unsupported keys at config load ----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -847,6 +847,7 @@ def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path
         ("synthetic", "retry_with_guidance"),
         ("groq", "cache_response"),
         ("kimi", "modalities"),
+        ("openrouter", "audio"),
         ("openai", "background"),
         ("codex", "temperature"),
         ("openai_codex", "max_output_tokens"),
@@ -854,21 +855,75 @@ def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path
         ("vertexai_claude", "auth_token"),
         ("google", "url_context"),
         ("gemini", "speech_config"),
+        ("ollama", "retries"),
     ],
 )
-def test_a_retired_agno_model_field_fails_at_build_and_says_to_remove_it(
+def test_a_retired_agno_model_field_fails_config_load_and_names_the_model(
     tmp_path: Path,
     provider: str,
     field: str,
 ) -> None:
-    """A field only the provider's Agno model class took loads as authored, then fails at build like any unknown key."""
-    config = Config.model_validate(
-        {"models": {"default": {"provider": provider, "id": "m", "extra_kwargs": {field: True}}}},
+    """A field only the provider's Agno model class took fails config load like any unknown key, before any build."""
+    data = {"models": {"default": {"provider": provider, "id": "m", "extra_kwargs": {field: True}}}}
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+
+    assert str(exc_info.value).startswith(
+        f"models.default: Unsupported extra_kwargs for provider '{provider}': {field}; remove or correct them. "
+        "Accepted keys: ",
     )
 
-    assert config.models["default"].extra_kwargs == {field: True}
-    with pytest.raises(
-        ValueError,
-        match=rf"Unsupported extra_kwargs for provider '{provider}': {field}; remove them\. Accepted keys: ",
-    ):
-        build_model_provider(config, _runtime_paths(tmp_path))
+
+_OPENAI_ENDPOINT_ENV = {"OPENAI_BASE_URL": "http://127.0.0.1:9/v1"}
+
+
+@pytest.mark.parametrize(
+    ("model", "process_env"),
+    [
+        pytest.param({"provider": "openai", "id": "local-model"}, {}, id="openai-chat"),
+        pytest.param({"provider": "openai", "id": "gpt-6-astra"}, {}, id="openai-native-tool-search-responses"),
+        pytest.param({"provider": "openai", "id": "gpt-6-astra"}, _OPENAI_ENDPOINT_ENV, id="openai-env-endpoint-chat"),
+        pytest.param({"provider": "openai", "id": "local-model", "api": "responses"}, {}, id="openai-api-responses"),
+        pytest.param({"provider": "openai", "id": "gpt-6-astra", "api": "chat_completions"}, {}, id="openai-api-chat"),
+        *(
+            pytest.param({"provider": provider, "id": "m"}, {}, id=provider)
+            for provider in (
+                "azure",
+                "openrouter",
+                "deepseek",
+                "zai",
+                "llama_cpp",
+                "kimi",
+                "groq",
+                "cerebras",
+                "codex",
+                "anthropic",
+                "vertexai_claude",
+                "google",
+                "ollama",
+                "synthetic",
+            )
+        ),
+        pytest.param(
+            {"provider": "bedrock_claude", "id": "m", "extra_kwargs": {"aws_access_key": "a", "aws_secret_key": "s"}},
+            {},
+            id="bedrock_claude",
+        ),
+    ],
+)
+def test_config_load_rejects_the_keys_the_model_build_rejects(
+    tmp_path: Path,
+    model: dict[str, Any],
+    process_env: dict[str, str],
+) -> None:
+    """Config load picks the route the build picks, so both name the same unsupported and accepted keys."""
+    runtime_paths = _runtime_paths(tmp_path, **process_env)
+    data = {"models": {"default": {**model, "extra_kwargs": {**model.get("extra_kwargs", {}), "zzz": True}}}}
+
+    with pytest.raises(ConfigRuntimeValidationError) as load_error:
+        Config.validate_with_runtime(data, runtime_paths)
+    with pytest.raises(ValueError, match="Unsupported extra_kwargs") as build_error:
+        build_model_provider(Config.model_validate(data), runtime_paths)
+
+    assert str(load_error.value) == f"models.default: {build_error.value}"

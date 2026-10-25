@@ -4516,8 +4516,8 @@ def test_config_rejects_retired_agno_fields_and_says_to_remove_them(field: str) 
         )
 
     assert sorted(iter_config_validation_messages(exc_info.value)) == [
-        (f"agents → general → {field}", f"Unknown key '{field}'; remove it"),
-        (f"defaults → {field}", f"Unknown key '{field}'; remove it"),
+        (f"agents → general → {field}", f"Unknown key '{field}': remove it or correct its spelling"),
+        (f"defaults → {field}", f"Unknown key '{field}': remove it or correct its spelling"),
     ]
 
 

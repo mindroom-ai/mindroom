@@ -624,7 +624,8 @@ def test_a_retired_knowledge_option_fails_config_load_and_says_to_remove_it(tmp_
             runtime_paths,
         )
 
-    assert "website.knowledge: unknown authored override field(s): knowledge; remove them." in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "website.knowledge: unknown authored override field(s): knowledge; remove or correct them." in message
 
 
 def test_website_tool_factory_uses_mindroom_reader() -> None:

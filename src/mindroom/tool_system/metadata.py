@@ -337,7 +337,7 @@ def validate_authored_tool_entry_overrides(
         unexpected = ", ".join(unexpected_fields)
         allowed = ", ".join(sorted(fields_by_name)) or "none"
         path = _override_path(tool_name, unexpected_fields[0], config_path_prefix=config_path_prefix)
-        msg = f"{path}: unknown authored override field(s): {unexpected}; remove them. Allowed fields: {allowed}."
+        msg = f"{path}: unknown authored override field(s): {unexpected}; remove or correct them. Allowed fields: {allowed}."
         raise ToolConfigOverrideError(msg)
 
     validated: dict[str, object] = {}
