@@ -109,7 +109,7 @@ def _message_content(message: Message) -> str | list[Any] | None:
 def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str]) -> dict[str, Any]:
     values: dict[str, Any] = {
         "role": role_map.get(message.role, message.role),
-        "content": message.content,
+        "content": _message_content(message),
         "name": message.name,
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
@@ -133,7 +133,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
             if (part := chat_file_part(file)) is not None:
                 parts.insert(0, part)
         formatted["content"] = parts
-    if message.content is None:
+    if message.content is None and message.role != "tool":
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
     if wire.route == "openrouter" and reasoning_details:

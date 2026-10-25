@@ -279,7 +279,12 @@ async def execute_tool_call(
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
-        return ToolOutcome(content=str(error), stop_after_call=function.stop_after_call, is_error=True)
+        # Some exceptions, such as ``TimeoutError``, have no text; their type still tells the model what failed.
+        return ToolOutcome(
+            content=str(error) or type(error).__name__,
+            stop_after_call=function.stop_after_call,
+            is_error=True,
+        )
     return ToolOutcome(
         content=value.content,
         images=value.images,

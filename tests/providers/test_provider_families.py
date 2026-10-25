@@ -244,8 +244,14 @@ async def test_every_family_replays_the_tool_calls_any_provider_stored(family: s
 
 
 def _answered_tool_turn() -> list[Message]:
-    """A tool loop's next request: one call succeeded, one failed, and one was stored without content."""
-    results = {"ok": ("sunny", False), "failed": ("No city", True), "empty": (None, None)}
+    """A tool loop's next request: calls that succeeded, failed, and were stored without content or error text."""
+    results = {
+        "ok": ("sunny", False),
+        "failed": ("No city", True),
+        "empty": (None, None),
+        "failed_none": (None, True),
+        "failed_blank": ("", True),
+    }
     return [
         Message(role="user", content="Weather?"),
         Message(
@@ -268,22 +274,30 @@ def _answered_tool_turn() -> list[Message]:
     ]
 
 
+_NO_ERROR_TEXT = "The tool call failed without an error message."
 _GEMINI_RESULTS = [
     {"id": "call_ok", "name": "get_weather", "response": {"result": "sunny"}},
     {"id": "call_failed", "name": "get_weather", "response": {"error": "No city"}},
     {"id": "call_empty", "name": "get_weather", "response": {"result": ""}},
+    {"id": "call_failed_none", "name": "get_weather", "response": {"error": _NO_ERROR_TEXT}},
+    {"id": "call_failed_blank", "name": "get_weather", "response": {"error": _NO_ERROR_TEXT}},
 ]
 # Chat Completions has no failure or name field.
 _CHAT_RESULTS = [
     {"role": "tool", "tool_call_id": "call_ok", "content": "sunny"},
     {"role": "tool", "tool_call_id": "call_failed", "content": "No city"},
     {"role": "tool", "tool_call_id": "call_empty", "content": ""},
+    {"role": "tool", "tool_call_id": "call_failed_none", "content": _NO_ERROR_TEXT},
+    {"role": "tool", "tool_call_id": "call_failed_blank", "content": _NO_ERROR_TEXT},
 ]
 _ENCODED_RESULTS: dict[str, list[dict[str, Any]]] = {
     "anthropic": [
         {"type": "tool_result", "tool_use_id": "call_ok", "content": "sunny"},
         {"type": "tool_result", "tool_use_id": "call_failed", "content": "No city", "is_error": True},
         {"type": "tool_result", "tool_use_id": "call_empty", "content": ""},
+        # The API rejects a failed result with empty content.
+        {"type": "tool_result", "tool_use_id": "call_failed_none", "content": _NO_ERROR_TEXT, "is_error": True},
+        {"type": "tool_result", "tool_use_id": "call_failed_blank", "content": _NO_ERROR_TEXT, "is_error": True},
     ],
     "gemini": _GEMINI_RESULTS,
     "gemini_vertexai": _GEMINI_RESULTS,
@@ -292,12 +306,16 @@ _ENCODED_RESULTS: dict[str, list[dict[str, Any]]] = {
         {"role": "tool", "content": "sunny", "tool_name": "get_weather"},
         {"role": "tool", "content": "No city", "tool_name": "get_weather"},
         {"role": "tool", "tool_name": "get_weather"},
+        {"role": "tool", "content": _NO_ERROR_TEXT, "tool_name": "get_weather"},
+        {"role": "tool", "content": _NO_ERROR_TEXT, "tool_name": "get_weather"},
     ],
     # Responses has no failure field, and replays the Chat call ids under its own.
     "openai_responses": [
         {"type": "function_call_output", "call_id": "call_00000000", "output": "sunny"},
         {"type": "function_call_output", "call_id": "call_00000001", "output": "No city"},
         {"type": "function_call_output", "call_id": "call_00000002", "output": ""},
+        {"type": "function_call_output", "call_id": "call_00000003", "output": _NO_ERROR_TEXT},
+        {"type": "function_call_output", "call_id": "call_00000004", "output": _NO_ERROR_TEXT},
     ],
     "openai_chat": _CHAT_RESULTS,
     "cerebras": _CHAT_RESULTS,
@@ -333,7 +351,7 @@ async def test_every_family_encodes_a_tool_result_with_its_call_name_content_and
 
     Claude marks it ``is_error`` and Gemini sends it as the response's ``error``; Ollama names the tool that
     answered. A result stored without content still answers its call with empty content, which the Ollama SDK leaves
-    out of the request.
+    out of the request, and a failed one says that it failed.
     """
     spec = FAMILIES[family]
     wire = Wire(spec.reply())
