@@ -1086,6 +1086,11 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.session_storage.legacy_agno3_backup"
+depends_on = ["mindroom.path_confinement"]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
+
+[[modules]]
 path = "mindroom.session_storage.store"
 depends_on = [
     "mindroom.history.summary_rows_schema",
@@ -6321,6 +6326,14 @@ expose = [
     "team_background_jobs",
 ]
 from = ["mindroom.agents"]
+
+[[interfaces]]
+expose = [
+    "BACKUP_SUFFIX",
+    "ConversionSpaceError",
+    "write_conversion_backup",
+]
+from = ["mindroom.session_storage.legacy_agno3_backup"]
 
 [[interfaces]]
 expose = [
