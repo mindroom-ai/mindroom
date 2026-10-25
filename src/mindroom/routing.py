@@ -13,7 +13,6 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
-from mindroom.matrix.identity import MatrixID
 from mindroom.providers import registry as provider_registry
 from mindroom.routing_judgment import ResponderSelection, judge_responder
 from mindroom.tool_system.events import body_without_tool_markers
@@ -23,6 +22,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.identity import MatrixID
 
 logger = get_logger(__name__)
 
@@ -137,18 +137,13 @@ async def suggest_responder_for_message(
         if (name := registry.current_entity_name_for_user_id(mid.full_id, include_router=False)) is not None
     ]
 
-    # Resolve Matrix sender IDs to readable names for thread context
+    # Name MindRoom's own senders by entity in thread context; every other sender keeps its Matrix ID.
     resolved_context = None
     if thread_context:
-        resolved_context = []
-        for msg in thread_context:
-            sender = msg.sender
-            if sender.startswith("@") and ":" in sender:
-                sender_name = registry.current_entity_name_for_user_id(sender)
-                # TODO(simplify): A human sender reaches the router as its homeserver domain, so every human on one
-                # server reads as the same speaker. Keep the sender's Matrix ID instead. Models routing would notice.
-                sender = sender_name if sender_name is not None else MatrixID.parse(sender).domain
-            resolved_context.append(replace_visible_message(msg, sender=sender))
+        resolved_context = [
+            replace_visible_message(msg, sender=registry.current_entity_name_for_user_id(msg.sender) or msg.sender)
+            for msg in thread_context
+        ]
 
     selection = await suggest_responder(
         message,
