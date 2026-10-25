@@ -77,7 +77,7 @@ from mindroom.tool_system.tool_access import tool_definition
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from mindroom.topic_generator import generate_room_topic_ai
 from mindroom.voice.handler import _process_transcription
-from tests.agno_parity.golden_files import sorted_keys
+from tests.agno_parity.golden_files import sorted_keys, turn_message
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -301,11 +301,8 @@ class Scenario:
 
 
 def message_dict(message: OwnedMessage) -> dict[str, Any]:
-    """Return a request message as the prompt goldens record it: no volatile keys, transient context marked."""
-    data = {key: value for key, value in message.to_dict().items() if key not in {"id", "created_at", "metrics"}}
-    if not message.add_to_agent_memory:
-        data["add_to_agent_memory"] = False
-    return data
+    """Return a request message as the prompt goldens record it: a turn without its usage, whose timings vary."""
+    return {key: value for key, value in turn_message(message).items() if key != "metrics"}
 
 
 def agno_response_format(

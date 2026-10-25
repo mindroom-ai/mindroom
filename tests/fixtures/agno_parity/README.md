@@ -133,7 +133,7 @@ Each file has these keys:
 - `exported` appears only where MindRoom hands model-visible values to a model outside its own loop: the realtime voice model's instructions and tool schemas, and the Live voice model's system prompt.
 
 The recorder replaces the provider call, so it sees every request hook MindRoom wraps around that call, such as portable tool search, but not the provider's own wire conversion, which the `providers/` goldens pin.
-Messages are `Message.to_dict()` without the volatile `id`, `created_at`, and `metrics` keys, plus `"add_to_agent_memory": false` on transient context messages that are never stored.
+Messages are turns encoded as the provider goldens' `input.messages` are, without the storage identity and flags, and also without `metrics`, whose timings vary between runs.
 `tools` holds each tool's model-visible definition, its `name`, `description`, and `parameters` as `tool_definition` (`tool_system/tool_access.py`) gives them, in the order the request loop passed them to the provider call; how each route formats them, approval flags included, is the provider goldens' to pin.
 `deferred_tool_names` lists, sorted, the tools Claude's wire hook sends with `defer_loading`; below the recorder, that hook also adds the server-side tool search entry and moves the deferred tools after the others, so on that path `tools` is not the wire order.
 It is empty when no tool is natively deferred, including on models whose deferred tools use portable tool search, which appears in `tools` itself.

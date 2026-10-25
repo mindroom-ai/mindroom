@@ -54,14 +54,10 @@
       "messages": [
         {
           "content": "<your_role>\nRoute messages to appropriate agents or teams\n</your_role>",
-          "from_history": false,
-          "stop_after_tool_call": false,
           "role": "system"
         },
         {
           "content": "Previous messages:\n@user:localhost: Can someone summarize the travel policy?\n@mindroom_assistant:localhost: Conference travel needs manager approval two weeks ahead.\n\nDecide which agent or team should respond to this message.\n\nAvailable agents and teams:\n\nassistant:\n  assistant\n  - Answer questions about the team handbook.\n  - Tools: scheduler\n\nresearcher:\n  researcher\n  - Research topics in depth.\n  - Tools: scheduler\n\nlaunch:\n  launch\n  - Plan and announce product launches.\n  - Team of agents: assistant, researcher\n  - Collaboration mode: coordinate\n\nMessage: \"Who can explain the travel policy?\"\n\nChoose the most appropriate agent or team based on their role, tools, and instructions.",
-          "from_history": false,
-          "stop_after_tool_call": false,
           "role": "user"
         }
       ],
