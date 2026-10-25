@@ -178,6 +178,9 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         # The control ends the run after its batch, so no further request is sent.
         assert record.content is None
         assert [item.stop_after_call for item in results] == [True, True]
+        # The second Bash call never ran, so it answers as a failed call, as a call over the limit does.
+        assert [item.is_error for item in results] == [False, True]
+        assert results[1].result == "Bash cancelled before dispatch: continuation requires a rebuilt tool catalog."
         first, second = [await owner.get_call(item["call_id"]) for item in receipts]
         assert first["status"] == ("failed" if raises else "completed")
         assert first["outcome"] == ("switch rejected" if raises else payload)
