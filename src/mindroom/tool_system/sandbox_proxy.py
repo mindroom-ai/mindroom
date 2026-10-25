@@ -998,6 +998,7 @@ def _call_proxy_sync(
             worker_grantable_credentials=manager_context.worker_grantable_credentials,
             cancellation=cancellation,
         )
+        # Deferred: Agno's tool layer, which both modules load, must stay out of the slim tool registry.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
         from mindroom.tool_system.media_transport import (  # noqa: PLC0415
             decode_media_result,
