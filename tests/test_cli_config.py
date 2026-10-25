@@ -1478,7 +1478,10 @@ class TestConfigInit:
         env_content = (tmp_path / ".env").read_text()
         assert "AZURE_OPENAI_API_KEY=your-azure-openai-key-here" in env_content
         assert "AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com" in env_content
-        assert "# AZURE_OPENAI_API_VERSION=2024-10-21" in env_content
+        assert (
+            "# Optional: override the default Azure OpenAI API version.\n# AZURE_OPENAI_API_VERSION=2024-10-21"
+            in env_content
+        )
         assert "\nAZURE_OPENAI_API_VERSION=" not in env_content
         assert "\nOPENAI_API_KEY=" not in env_content
         assert "\nANTHROPIC_API_KEY=" not in env_content
