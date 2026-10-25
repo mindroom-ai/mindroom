@@ -395,9 +395,10 @@ async def _store_interrupted[R: AnyRunRecord](
         if not record.content:
             record.content = reason
     # A failed or cancelled approval resume stores this record over the paused run's row on purpose. Such a resume
-    # ends its approval anyway: its cards expire and the approval is finished. A row kept paused would stay paused for
-    # good, holding back memory auto-flush and knowledge-graph ingestion, which wait on a paused run, and approving it
-    # again would rerun a call this record shows already ran.
+    # ends its approval anyway: its cards expire and the approval is finished. A row kept paused would hold back memory
+    # auto-flush and knowledge-graph ingestion, which wait on a paused run, until its approval window passes
+    # (``finished_runs`` in ``history/session_runs.py``), and approving it again would rerun a call this record shows
+    # already ran.
     if persist is not None:
         await run_coroutine_until_complete(_persist_quietly(persist, record))
 
