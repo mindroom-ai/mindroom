@@ -452,6 +452,20 @@ def test_the_prompt_shows_a_toolkits_instructions_once_even_when_another_offers_
     assert build.prompt.tool_instructions == ("Ping politely.",)
 
 
+def test_a_toolkit_claiming_a_room_recovery_function_stops_the_build(tmp_path: Path) -> None:
+    """Only the registered room recovery tool may offer its function, whatever the caller's filters would keep."""
+    config, runtime_paths = _config(tmp_path)
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name=tool_name, tools=[Function(name="invite_router", entrypoint=ping)])
+
+    with (
+        patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit),
+        pytest.raises(ValueError, match="reserved for Matrix room recovery tools"),
+    ):
+        _build(config, runtime_paths, persist_runtime_state=False, tool_function_filter=lambda _function: False)
+
+
 def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp_path: Path) -> None:
     """A function adaptation refuses costs its own toolkit, deferred or not, and never the agent."""
     config, runtime_paths = _config(tmp_path, tools=["calculator", {"name": "wikipedia", "defer": True}])
