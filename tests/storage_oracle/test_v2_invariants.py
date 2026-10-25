@@ -141,8 +141,10 @@ class _InvariantBackend(NextBackend):
         self.handed_out: dict[int, str] = {}
         self.seq_counter = 1
         self.visible: dict[str, tuple[int, str]] = {}
-        self.folded_rows: dict[tuple[str, str], int] = {}
+        self.folded_rows: dict[tuple[str, str], tuple[int, int, dict[str, Any]]] = {}
+        self.retired_rows: dict[int, tuple[frozenset[str], frozenset[str]]] = {}
         self.row_ids: set[int] = set()
+        self.barrier_ids: set[int] = set()
         super().__init__(root, kind, determinism)
 
     @override
@@ -183,13 +185,17 @@ class _InvariantBackend(NextBackend):
                 kept = self.visible.setdefault(run.run_id, (run.seq, run.status))
                 assert kept == (run.seq, run.status), f"I2: visible run {run.run_id} moved or changed status"
         self.visible = {run_id: kept for run_id, kept in self.visible.items() if run_id in tables.runs}
+        # I8: a cut that deleted a fold row fenced its running run, so the run's late saves write nothing.
+        row_ids = {row.id for row in tables.rows}
+        for row_id, fold in self.folds.items():
+            assert row_id in row_ids or fold.record.run_id in tables.removed, f"I8: fold row {row_id}'s run not fenced"
 
     def _check_messages(self, tables: _Tables) -> None:
         for run_id, rows in tables.messages.items():
-            # I3: a folded message row stays folded, by the same summary, while its run is stored.
-            for message_id, _ord, folded_by, _data in rows:
+            # I3: a folded message row stays as its fold left it, by the same summary, while its run is stored.
+            for message_id, ord_, folded_by, data in rows:
                 if (held := self.folded_rows.get((run_id, message_id))) is not None:
-                    assert folded_by == held, f"I3: message {message_id} of {run_id} was unfolded"
+                    assert (folded_by, ord_, data) == held, f"I3: folded message {message_id} of {run_id} changed"
             # I4: the unfolded rows of a run are exactly the list its last write stored, in order.
             expected = self.expected_view(run_id)
             view = [data for _id, _ord, folded_by, data in rows if folded_by is None]
@@ -198,10 +204,10 @@ class _InvariantBackend(NextBackend):
             if run_id in tables.runs:
                 assert any(row[0] == message_id for row in tables.messages.get(run_id, [])), "I3: a folded row went"
         self.folded_rows = {
-            (run_id, message_id): folded_by
+            (run_id, message_id): (folded_by, ord_, data)
             for run_id, rows in tables.messages.items()
             if run_id in tables.runs
-            for message_id, _ord, folded_by, _data in rows
+            for message_id, ord_, folded_by, data in rows
             if folded_by is not None
         }
         # I5: no record holds a message id twice, a paused team run's named members included.
@@ -213,7 +219,8 @@ class _InvariantBackend(NextBackend):
     def _check_rows(self, tables: _Tables) -> None:
         for scope_key in {row.scope_key for row in tables.rows}:
             rows = tables.scope_rows(scope_key)
-            # I7: through never decreases in id order, barriers included; a new barrier sits at the row before it.
+            # I7: through never decreases in id order, barriers included; a barrier, which no cut deletes, is written
+            # at the row before it, and stays at or above whatever survives before it.
             assert all(left.through <= right.through for left, right in itertools.pairwise(rows)), f"I7: {scope_key}"
             for index, row in enumerate(rows):
                 assert not row.legacy or row.through == 0, "I7: a legacy row sorts after a run"
@@ -231,6 +238,18 @@ class _InvariantBackend(NextBackend):
                 seen = seen_event_ids(run.metadata)
                 assert seen <= covering.seen_event_ids, f"I9: {run.run_id}'s seen ids"
                 assert seen | source_event_ids(run.metadata) <= covering.event_ids, f"I9: {run.run_id}'s event ids"
+        barriers = {row.id for row in tables.rows if row.summary is None}
+        assert self.barrier_ids <= barriers, "I7: a barrier was deleted"
+        self.barrier_ids = barriers
+        # I9: a row behind its scope's latest barrier is retired, so its event sets never change again.
+        for row in tables.rows:
+            if (held := self.retired_rows.get(row.id)) is not None:
+                assert (row.event_ids, row.seen_event_ids) == held, f"I9: retired row {row.id}'s event sets changed"
+        self.retired_rows = {
+            row.id: (row.event_ids, row.seen_event_ids)
+            for row in tables.rows
+            if any(barrier.id > row.id for barrier in tables.scope_rows(row.scope_key) if barrier.summary is None)
+        }
         for row in tables.rows:
             # I10: a fold row keeps the running run's live metadata at its fold as its provenance.
             fold = self.folds.get(row.id)
@@ -303,6 +322,38 @@ def _drive(scenario: Scenario) -> None:
 @example(scenario=NAMED["discarded_fold_owner_redacted"])
 @example(scenario=NAMED["interrupted_voice_playout"])
 @example(scenario=NAMED["archive_legacy_in_force_redacted"])
+@example(
+    # A legacy summary in force retires at the third row; redacting the paused turn before it then cuts the second row
+    # and keeps the barrier, whose through now sits above the row left before it.
+    scenario=Scenario(
+        "agent",
+        (
+            Action("legacy", index=2),
+            Action("pause"),
+            Action("add"),
+            Action("compact"),
+            Action("add"),
+            Action("compact"),
+            Action("redact", index=7),
+            Action("redact", index=3),
+        ),
+    ),
+)
+@example(
+    # A reply linked to a run the barrier retired joins no row.
+    scenario=Scenario(
+        "agent",
+        (
+            Action("legacy", index=2),
+            Action("add"),
+            Action("compact"),
+            Action("add"),
+            Action("compact"),
+            Action("redact", index=5),
+            Action("link", index=0),
+        ),
+    ),
+)
 def test_the_v2_invariants_hold_after_every_action(scenario: Scenario) -> None:
     """I1 to I11 hold after every action of a generated conversation."""
     _drive(scenario)
