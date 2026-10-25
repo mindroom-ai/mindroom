@@ -81,7 +81,7 @@ def authorized_tool_call(owner: ToolExecutionIdentity, call: JobCall) -> Iterato
 
 @contextmanager
 def enclosing_grant() -> Iterator[None]:
-    """Run a call without a grant of its own, such as a function the framework generated, inside owned work.
+    """Run a call without a grant of its own, such as a function MindRoom builds for each run, inside owned work.
 
     It runs under its enclosing call's grant, which is then checked with that call's own arguments; a call with a
     grant of its own is bound by ``authorized_tool_call`` where it is admitted.

@@ -106,8 +106,8 @@ def assembled_job_tools(
     """Describe each function a MindRoom-assembled toolkit offers the actor, by name.
 
     ``sources`` holds, for each such function, its authored toolkit name, the concrete toolkit built for the actor,
-    and the function itself; a function the framework generated is not among them. ``snapshot`` is the actor's
-    execution scope and file access, empty for a team.
+    and the function itself; the knowledge search, skill, and team delegation functions MindRoom builds for each run
+    are not among them. ``snapshot`` is the actor's execution scope and file access, empty for a team.
     """
     return {
         function.name: JobTool(
@@ -259,7 +259,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
             raise ValueError(_UNASKABLE)
         job_checkpoint()
         check_current_execution_authority()
-        return await _run_here(call_next, call.arguments, generated=job_call is None)
+        return await _run_here(call_next, call.arguments, built_per_run=job_call is None)
     mode = wait_mode(job_call.tool, depth=actor.depth, context=scope.context)
     if job_approval and mode != "managed":
         raise ValueError(_UNASKABLE)
@@ -275,7 +275,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
         if mode != "managed" or call.function.external_execution:
             # A native call keeps its arguments, so a stray wait budget fails instead of running silently.
             arguments = call.arguments if mode == "native" else application_arguments(call.arguments)
-            return await _run_here(call_next, arguments, generated=False)
+            return await _run_here(call_next, arguments, built_per_run=False)
     return await _run_managed_call(
         inner,
         call.function,
@@ -305,14 +305,15 @@ def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int) -> float | N
     return background_after
 
 
-async def _run_here(call_next: ToolNext, arguments: dict[str, Any], *, generated: bool) -> object:
+async def _run_here(call_next: ToolNext, arguments: dict[str, Any], *, built_per_run: bool) -> object:
     """Run a call in this task; inside a managed job, the job owns its synchronous leaf.
 
-    ``generated`` says the framework generated the function, which then runs there under its enclosing call's grant.
+    ``built_per_run`` says MindRoom built the function for this run, as it builds knowledge search, skill, and team
+    delegation functions; inside a job, such a function runs under its enclosing call's grant.
     """
     if not job_owns_execution():
         return await call_next(arguments)
-    with enclosing_grant() if generated else nullcontext():
+    with enclosing_grant() if built_per_run else nullcontext():
         return await _owned_by_job(lambda: call_next(arguments))
 
 

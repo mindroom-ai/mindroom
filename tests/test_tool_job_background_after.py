@@ -468,7 +468,7 @@ def test_wait_mode_classifies_every_call_from_current_policy(
 ) -> None:
     """One classifier decides definition projection and execution for each kind of assembled function.
 
-    A function the framework generated is never classified; ``test_tool_job_sdk_functions.py`` covers it.
+    A function MindRoom builds for each run is never classified; ``test_tool_job_sdk_functions.py`` covers it.
     """
     paths = _runtime_paths(tmp_path)
     config = Config(

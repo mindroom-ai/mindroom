@@ -387,8 +387,8 @@ async def run_job_turn(
     """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
 
     ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
-    reply does. ``generated`` are functions the framework offers beside the actor's assembled ones, which never
-    become jobs. ``participation`` gates the reply as an agent's turn does, deciding after the job definitions
+    reply does. ``generated`` are functions built for the run beside the actor's assembled ones, as MindRoom builds
+    knowledge search, skill, and team delegation functions, which never become jobs. ``participation`` gates the reply as an agent's turn does, deciding after the job definitions
     project.
     """
     spec, hooks, session, persist = _job_turn(
