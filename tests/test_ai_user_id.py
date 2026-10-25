@@ -1719,6 +1719,46 @@ class TestUserIdPassthrough:
         assert payload["usage"]["output_tokens"] == 60
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
+    async def test_a_reply_that_fails_after_its_model_answered_shows_that_answer_s_context(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        streaming: bool,
+    ) -> None:
+        """A reply whose next request fails, such as on a rate limit after a tool round, shows its last answer's context."""
+        config, runtime_paths = _bound(
+            tmp_path,
+            Config(
+                agents={"general": AgentConfig(display_name="General")},
+                models={"default": ModelConfig(provider="openai", id="test-model", context_window=100_000)},
+            ),
+        )
+        model = _scripted_like(
+            config,
+            runtime_paths,
+            [
+                calls(tool_call("run_shell_command", "call-1", cmd="pwd"), metrics=usage(500, 60)),
+                [raising(ProviderError("provider failed", provider="Synthetic"))],
+            ],
+        )
+        install_model_providers(monkeypatch, {"default": model})
+        run_metadata: dict[str, Any] = {}
+
+        await _respond(
+            make_turn_context("general", session_id="session1"),
+            config,
+            runtime_paths,
+            streaming=streaming,
+            run_metadata_collector=run_metadata,
+        )
+
+        payload = run_metadata[AI_RUN_METADATA_KEY]
+        assert payload["status"] == "error"
+        assert payload["context"] == {"input_tokens": 500, "window_tokens": 100_000}
+
+    @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
     async def test_ai_response_collects_tool_trace_when_tool_calls_hidden(
         self,
