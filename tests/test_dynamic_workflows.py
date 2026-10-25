@@ -1535,6 +1535,63 @@ async def test_service_records_a_cancellation_only_after_the_write_under_way(
     assert json.loads(run_file.read_text(encoding="utf-8"))["error"] == "Workflow run was cancelled."
 
 
+@pytest.mark.parametrize(
+    ("window", "rejection"),
+    [("start_workflow_run", None), ("load_workflow_revision", None), ("load_workflow_revision", "Not allowed.")],
+)
+@pytest.mark.asyncio
+async def test_service_records_a_run_cancelled_while_it_is_prepared_as_cancelled(
+    tmp_path: Path,
+    window: str,
+    rejection: str | None,
+) -> None:
+    """A run cancelled while it is being prepared ends cancelled, unless its preparation already rejected it."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(spec=_workflow_spec(), scope="agent", owner_id="general", created_by="general")
+    loop = asyncio.get_running_loop()
+    preparation_waiting = asyncio.Event()
+    release_preparation = threading.Event()
+    executions: list[object] = []
+    original = getattr(DynamicWorkflowStore, window)
+
+    def waiting(*args: object, **kwargs: object) -> object:
+        loop.call_soon_threadsafe(preparation_waiting.set)
+        release_preparation.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    async def executor(**kwargs: object) -> ParticipantOutput:
+        executions.append(kwargs)
+        return ParticipantOutput("written")
+
+    def reject(_spec: dict[str, object]) -> None:
+        if rejection is not None:
+            raise DynamicWorkflowError(rejection)
+
+    service = DynamicWorkflowService(store, participant_executor=executor, spec_validator=reject)
+    with patch.object(DynamicWorkflowStore, window, waiting):
+        running = asyncio.create_task(
+            service.run_workflow(
+                workflow_id="competitor-research-report",
+                scope="agent",
+                owner_id="general",
+                input_data={"topic": "pricing"},
+                requested_by="general",
+            ),
+        )
+        await preparation_waiting.wait()
+        running.cancel()
+        release_preparation.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    [run_file] = (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob(
+        "*.json",
+    )
+    run_data = json.loads(run_file.read_text(encoding="utf-8"))
+    assert (run_data["status"], run_data["error"]) == ("failed", rejection or "Workflow run was cancelled.")
+    assert executions == []
+
+
 def test_validate_workflow_spec_rejects_missing_step_id(tmp_path: Path) -> None:
     """Workflow specs should reject malformed step entries before they are persisted."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")

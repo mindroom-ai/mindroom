@@ -7,7 +7,7 @@ from contextlib import suppress
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.dynamic_workflows.runner import execute_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 from mindroom.dynamic_workflows.validation import (
@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
     from mindroom.dynamic_workflows.runner import ParticipantExecutor
     from mindroom.dynamic_workflows.store import DynamicWorkflowStore
+
+_RUN_CANCELLED = "Workflow run was cancelled."
 
 
 class DynamicWorkflowService:
@@ -51,10 +53,11 @@ class DynamicWorkflowService:
         """Start and complete one workflow run on the current event loop.
 
         Store file work runs on threads, and each call finishes before the run continues or handles a
-        cancellation, so the loop stays free and the run's records are written in order.
+        cancellation, so the loop stays free, the run's records are written in order, and a cancelled run
+        ends cancelled.
         """
-        prepared = await run_blocking_until_complete(
-            partial(
+        preparing = asyncio.create_task(
+            asyncio.to_thread(
                 self._prepare_run,
                 workflow_id=workflow_id,
                 scope=scope,
@@ -64,6 +67,13 @@ class DynamicWorkflowService:
                 base_url=base_url,
             ),
         )
+        try:
+            prepared = await wait_for_future_until_complete(preparing)
+        except asyncio.CancelledError:
+            # Preparation has finished by now, so a run it started and admitted ends cancelled.
+            if preparing.exception() is None and not isinstance(started := preparing.result(), DynamicWorkflowRun):
+                await self._fail(started[0], _RUN_CANCELLED)
+            raise
         if isinstance(prepared, DynamicWorkflowRun):
             return prepared
 
@@ -128,7 +138,7 @@ class DynamicWorkflowService:
         except asyncio.CancelledError:
             execution_task.cancel()
             execution_task.add_done_callback(_discard_late_task_result)
-            await self._fail(run, "Workflow run was cancelled.")
+            await self._fail(run, _RUN_CANCELLED)
             raise
         except Exception as exc:
             return await self._fail(run, failure_text(exc))
