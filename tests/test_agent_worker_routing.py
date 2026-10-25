@@ -69,6 +69,8 @@ def _create_routing_agent(
         include_interactive_questions=False,
         persist_runtime_state=False,
         supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
 
@@ -333,6 +335,8 @@ async def test_room_context_tool_uses_primary_matrix_client(
         include_interactive_questions=False,
         persist_runtime_state=False,
         supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
     )
     with tool_runtime_context(context):
         result = await run_offered(agent, "list_schedules")

@@ -35,6 +35,7 @@ from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
+    always_owned,
     call_job_tool,
     completed_delegation_job,
     job_actor,
@@ -108,11 +109,21 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                     execution_identity=owner,
                     persist_runtime_state=False,
                     tool_function_filter=lambda function: function.name != "job",
+                    knowledge=None,
+                    active_model_name=None,
                 )
                 assert build.spec.functions["job"].toolkit == "job"
             else:
                 with pytest.raises(ValueError, match="reserved"):
-                    create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
+                    create_agent(
+                        "leader",
+                        config,
+                        paths,
+                        execution_identity=owner,
+                        persist_runtime_state=False,
+                        knowledge=None,
+                        active_model_name=None,
+                    )
     finally:
         await runtime.shutdown()
 
@@ -175,7 +186,15 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     try:
-        build = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
+        build = create_agent(
+            "leader",
+            config,
+            paths,
+            execution_identity=owner,
+            persist_runtime_state=False,
+            knowledge=None,
+            active_model_name=None,
+        )
         names = [function.name for toolkit in build.spec.toolkits for function in toolkit.functions]
         assert names.count("job") == 1
         assert build.tool_jobs is not None
@@ -329,7 +348,7 @@ async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
         await runtime.release_wait("ordinary", waited.claim)
         model = ScriptedModel([calls(tool_call("job", "wait", action="wait", job_id="ordinary")), answer("done")])
 
-        @owned_tool_execution()
+        @owned_tool_execution(enabled=always_owned)
         async def run() -> RunRecord:
             set_consumption_storage(storage_factory)
             return await run_job_turn(
@@ -645,7 +664,7 @@ async def _collect_in_a_run(
     tools = JobTools(paths, owner)
     actor = job_actor(*toolkit_job_tools(tools, authored_name="job").values())
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def run() -> RunRecord:
         set_consumption_storage(storage_factory)
         return await run_job_turn(actor, model, "collect", session_id=context.session_id, store=storage)

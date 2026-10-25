@@ -70,7 +70,7 @@ MindRoom forms a team without any `teams:` entry when:
 Tagging exactly one agent gets a reply from that agent alone.
 Threads where two or more people have posted never form a team from earlier thread context; tag the agents again in the current message (see [Multi-Human Thread Protection](threads.md#multi-human-thread-protection)).
 
-If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available in this room.`
+If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available to you in this room.`
 For teams formed from thread context or a DM room, unavailable agents are left out, and if only one remains it answers alone.
 
 The `default` model picks the mode for each ad hoc team from the request: `coordinate` when the agents have different subtasks, `collaborate` for opinions or brainstorming, and `collaborate` when the choice fails.

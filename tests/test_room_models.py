@@ -390,6 +390,8 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             resolved_thread_id=None,
             session_id=None,
         ),
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     assert members.builds[0].spec.model.identity.id == "large-model"
 
@@ -414,6 +416,8 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             resolved_thread_id=thread_id,
             session_id=f"{ROOM_ID}:{thread_id}",
         ),
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     assert thread_members.builds[0].spec.model.identity.id == "default-model"
 

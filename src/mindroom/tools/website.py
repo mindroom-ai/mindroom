@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     icon="FaGlobe",
     icon_color="text-blue-600",
     dependencies=["httpx", "beautifulsoup4"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/website",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#website",
     function_names=("read_url",),
 )
 def website_tools() -> type[WebsiteTools]:

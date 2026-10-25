@@ -9,11 +9,9 @@
       },
       {
         "content": "What should I pack for Paris tomorrow?",
-        "from_history": true,
         "role": "user"
       },
       {
-        "from_history": true,
         "provider_data": {
           "id": "chatcmpl-foreign",
           "mindroom_model": {
@@ -35,7 +33,6 @@
       },
       {
         "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
-        "from_history": true,
         "role": "tool",
         "tool_args": {
           "city": "Paris",
@@ -47,7 +44,6 @@
       },
       {
         "content": "Pack a light rain jacket and comfortable shoes.",
-        "from_history": true,
         "provider_data": {
           "id": "chatcmpl-foreign-2",
           "mindroom_model": {
@@ -67,12 +63,13 @@
       "id": "claude-sonnet-5-5",
       "provider": "anthropic"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -96,9 +93,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -118,19 +117,14 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [],
-        "urls": []
-      },
       "content": "Add a warm layer.",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -145,8 +139,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "end_turn"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -160,7 +153,7 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": "end_turn"
+    "stop_reason": "end"
   },
   "request": {
     "body": {

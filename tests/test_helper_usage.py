@@ -162,7 +162,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     helper_results: list[object] = []
 
     async def add(self: CalculatorTools, a: float, b: float) -> str:
-        helper = create_agent("helper", config, paths, identity)
+        helper = create_agent("helper", config, paths, identity, knowledge=None, active_model_name=None)
         helper_results.append(await _run_room_agent_turn(helper_context, helper, "Sample task."))
         if outcome == "cancel":
             raise asyncio.CancelledError
@@ -280,6 +280,9 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     prior_presentation_state=paused.response_presentation_state,
                     prior_tool_trace=paused.tool_trace,
                     progress=None,
+                    member_model_names=None,
+                    show_tool_calls=True,
+                    tool_trace_collector=[],
                 )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
         execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)

@@ -185,6 +185,10 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
@@ -240,6 +244,10 @@ async def test_a_child_with_an_authored_persona_is_judged_by_its_grant(
         runtime_paths=paths,
         depth=0,
         budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
     child.persona = SubagentPersona(source_kind=source_kind, source_name="analyst", system_prompt="Analyze.")
 
@@ -466,6 +474,8 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=identity,
+            refresh_scheduler=None,
+            active_model_names=None,
         )
         built = build_team_spec(
             members=members,
@@ -548,6 +558,8 @@ async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=identity,
+            refresh_scheduler=None,
+            active_model_names=None,
         )
         hooks = {
             build.spec.id: _team_member(

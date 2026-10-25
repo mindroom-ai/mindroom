@@ -433,6 +433,8 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         identity,
         history_storage=storage,
         supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
     )
     offered = initial.spec.functions
     original_names = set(offered)

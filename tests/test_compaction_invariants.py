@@ -363,7 +363,7 @@ async def test_chunk_progress_survives_interruption_and_restart(
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     interrupted = storage.load_session("session-1", "agent")
@@ -427,6 +427,7 @@ async def test_generate_compaction_summary_sends_the_prompt_and_input_as_one_req
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
         timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        on_usage=None,
     )
 
     assert summary == "recorded summary"
@@ -458,6 +459,7 @@ async def test_generate_compaction_summary_refuses_a_summary_that_did_not_finish
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            on_usage=None,
         )
 
 
@@ -470,6 +472,7 @@ async def test_generate_compaction_summary_accepts_a_finished_summary(stop_reaso
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
         timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        on_usage=None,
     )
 
     assert summary == "durable summary ended cleanly."
@@ -1010,6 +1013,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            on_usage=None,
         )
 
 
@@ -1111,7 +1115,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -1175,7 +1179,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -1391,7 +1395,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -1455,7 +1459,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert len(attempts) == 1
@@ -1516,7 +1520,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -1579,7 +1583,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is None
@@ -1730,7 +1734,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None

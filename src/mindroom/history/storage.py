@@ -145,17 +145,12 @@ def _with_scope_state(
     return session_metadata
 
 
-def add_pending_force_compaction_scope(
-    session_state: dict[str, object] | None,
-    scope: HistoryScope,
-) -> dict[str, object]:
+def add_pending_force_compaction_scope(session_state: dict[str, object], scope: HistoryScope) -> None:
     """Record a next-run compaction request inside the tools' shared ``session_state``."""
-    next_session_state = session_state if session_state is not None else {}
-    scope_keys = _pending_scope_keys(next_session_state)
+    scope_keys = _pending_scope_keys(session_state)
     if scope.key not in scope_keys:
         scope_keys.append(scope.key)
-    next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = scope_keys
-    return next_session_state
+    session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = scope_keys
 
 
 def consume_pending_force_compaction_scope(session: ConversationSession, scope: HistoryScope) -> bool:

@@ -16,10 +16,9 @@ from mindroom.delegation.records import (
     DelegationRecordLocator,
     DelegationRecordOwner,
 )
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -60,10 +59,10 @@ async def start_child_record(
     config: Config,
     runtime_paths: RuntimePaths,
     caller_execution_identity: ToolExecutionIdentity | None,
-    parent_delegation_id: str | None = None,
+    parent_delegation_id: str | None,
 ) -> DelegationRecordLocator:
     """Start an audit projection and return its locator to the lifecycle owner."""
-    child_identity = _child_identity(child)
+    child_identity = child_execution_identity(child)
     handle = await DelegationRecordOwner(config, runtime_paths).start(
         DelegationMetadata(
             caller_agent_name=child.caller_agent_name,
@@ -154,8 +153,8 @@ async def record_child_response(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    decisions: Mapping[str, bool] | None = None,
-    denial_reasons: Mapping[str, str | None] | None = None,
+    decisions: Mapping[str, bool] | None,
+    denial_reasons: Mapping[str, str | None] | None,
 ) -> dict[str, object] | None:
     """Record one snapshot of the child's run, which its lifecycle owner checked, and return its usage."""
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
@@ -282,20 +281,6 @@ async def finish_child_record(
     )
     receipt = handle.to_receipt()
     return f"{receipt}\nSubagent ID: {child.subagent_id}" if child.subagent_id is not None else receipt
-
-
-# TODO(simplify): This repeats lifecycle.child_execution_identity's check with its own error type and text. Take
-# the identity from that one check. Nobody would notice: only the error for a mismatch no prepared child has changes.
-def _child_identity(child: DelegationChild) -> ToolExecutionIdentity:
-    identity = parse_tool_execution_identity_payload(
-        child.execution_identity,
-        strict=True,
-        error_prefix="Delegation child execution identity",
-    )
-    if identity is None or identity.agent_name != child.child_agent_name or identity.session_id != child.session_id:
-        msg = "Delegation child execution identity does not match its retained run"
-        raise ValueError(msg)
-    return identity
 
 
 def _record_locator(child: DelegationChild) -> DelegationRecordLocator:

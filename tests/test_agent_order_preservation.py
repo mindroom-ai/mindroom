@@ -291,9 +291,12 @@ class TestIntegrationWithTeamFormation:
             tagged_agents=tagged_agents,
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=None,
             runtime_paths=runtime_paths,
             config=mock_config,
+            is_dm_room=False,
+            is_thread=False,
+            available_responders_in_room=tagged_agents,
+            materializable_agent_names=None,
         )
 
         # Agents should be in the same order as tagged

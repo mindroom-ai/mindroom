@@ -121,6 +121,7 @@ See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-worke
 
 With `workers.backend: kubernetes`, the primary runtime creates a worker Deployment and Service per worker on demand and routes tool calls to it.
 Idle workers scale to zero, keeping agent data and worker caches.
+The default image includes the `kubernetes` package this needs; a custom image built without all extras must install `mindroom[kubernetes]` in the primary runtime.
 Each worker keeps its own caches and virtualenvs under `workers.kubernetes.storageSubpathPrefix`.
 [Worker scopes](sandbox-proxy.md#worker-scopes) describes which workspaces each worker mounts, and [Credential leases](sandbox-proxy.md#credential-leases) describes how tool settings reach workers.
 `google_vertex_adc` tools must run in the primary runtime, because workers receive no Google application default credentials.
