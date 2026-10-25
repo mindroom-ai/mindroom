@@ -37,6 +37,7 @@ from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
+from tests.providers.golden_support import responses_events
 from tests.providers.openai_family_support import provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
@@ -116,28 +117,15 @@ def _streamed(
     portable_replay: bool = False,
     native_compaction: NativeCompactionReplay | None = None,
 ) -> ResponsesTurnParts:
-    """Return the finished turn of ``response`` streamed as the API streams it: each output item, then its end."""
+    """Return the finished turn of ``response`` streamed as the API streams it (``responses_events``)."""
     stream = ResponsesStream(
         provider="OpenAI Responses",
         store=store,
         portable_replay=portable_replay,
         native_compaction=native_compaction,
     )
-    events: list[dict[str, Any]] = []
-    for index, item in enumerate(response.output):
-        done = item.model_dump(mode="json", exclude_none=True)
-        added = {**done, "arguments": ""} if done["type"] == "function_call" else done
-        events.append({"type": "response.output_item.added", "output_index": index, "item": added})
-        if done["type"] == "function_call":
-            events.append({"type": "response.function_call_arguments.delta", "delta": done["arguments"]})
-        if done["type"] == "message":
-            events.extend({"type": "response.output_text.delta", "delta": part["text"]} for part in done["content"])
-        events.append({"type": "response.output_item.done", "output_index": index, "item": done})
-    ended = "response.completed" if response.status == "completed" else "response.incomplete"
-    events.append({"type": ended, "response": response.model_dump(mode="json")})
-    for number, event in enumerate(events):
-        common = {"sequence_number": number, "item_id": "item", "output_index": 0, "content_index": 0, "logprobs": []}
-        stream.add(_STREAM_EVENT.validate_python({**common, **event}))
+    for event in responses_events(response.model_dump(mode="json", exclude_none=True)):
+        stream.add(_STREAM_EVENT.validate_python(event))
     assert stream.ended
     return stream.finish()
 

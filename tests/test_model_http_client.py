@@ -8,7 +8,7 @@ import json
 import os
 import socket
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
@@ -25,6 +25,8 @@ from mindroom.orchestrator import _finish_runtime_shutdown
 from mindroom.providers.model_http_client import aclose_model_http_client, closing_model_connections
 from mindroom.providers.registry import build_model_provider
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.providers.anthropic_family_support import claude_message
+from tests.providers.golden_support import claude_stream_events, responses_events, sse_response
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -54,40 +56,14 @@ _RESPONSE = {
     "tools": [],
     "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
 }
-_RESPONSES_STREAM = [{"type": "response.completed", "sequence_number": 0, "response": _RESPONSE}]
-_CLAUDE_MESSAGE = {
-    "id": "msg_1",
-    "type": "message",
-    "role": "assistant",
-    "model": "test-model",
-    "content": [],
-    "stop_reason": None,
-    "stop_sequence": None,
-    "usage": {"input_tokens": 1, "output_tokens": 1},
-}
-_CLAUDE_STREAM = [
-    {"type": "message_start", "message": _CLAUDE_MESSAGE},
-    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
-    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
-    {"type": "content_block_stop", "index": 0},
-    {
-        "type": "message_delta",
-        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-        "usage": {"output_tokens": 1},
-    },
-    {"type": "message_stop"},
-]
+_RESPONSES_STREAM = responses_events(_RESPONSE)
+_CLAUDE_STREAM = claude_stream_events(claude_message([{"type": "text", "text": "ok"}]))
 _EMPTY_PAGE = {"object": "list", "data": [], "has_more": False, "first_id": None, "last_id": None}
 _REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")])
 
 
-def _sse(events: list[dict[str, Any]]) -> bytes:
-    """Return ``events`` as a server-sent event body, each named by its type."""
-    return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events).encode()
-
-
 class _ModelsServer:
-    """A keep-alive server that answers chat and message requests with a finished reply, anything else empty."""
+    """A keep-alive server that answers Responses and Messages requests with a streamed reply, anything else empty."""
 
     def __init__(self) -> None:
         self.url = ""
@@ -107,7 +83,7 @@ class _ModelsServer:
                 path = request_line.split(" ")[1]
                 if path.endswith(("/responses", "/messages")):
                     stream = _RESPONSES_STREAM if path.endswith("/responses") else _CLAUDE_STREAM
-                    content_type, body = "text/event-stream", _sse(stream)
+                    content_type, body = "text/event-stream", sse_response(stream, named=True).content
                 else:
                     content_type, body = "application/json", json.dumps(_EMPTY_PAGE).encode()
                 status = f"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\n\r\n"

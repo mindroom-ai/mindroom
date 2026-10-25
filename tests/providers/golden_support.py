@@ -208,14 +208,14 @@ def ndjson_response(
 
 
 def streamed_reply(reply: dict[str, Any]) -> httpx.Response:
-    """Return the stream a route sends for one finished reply body, as every request now streams.
+    """Return the stream a route sends for one finished reply body.
 
     ``reply`` is a Chat completion, a Responses response, a Claude message, a Gemini response, or Ollama's done chunk.
     """
     if "choices" in reply:
         return sse_response([*_chat_chunks(reply), "[DONE]"])
     if reply.get("object") == "response":
-        return sse_response(_responses_events(reply), named=True)
+        return sse_response(responses_events(reply), named=True)
     if reply.get("type") == "message":
         return sse_response(claude_stream_events(reply), named=True)
     if "candidates" in reply or "promptFeedback" in reply:
@@ -239,7 +239,8 @@ def _chat_chunks(completion: dict[str, Any]) -> list[dict[str, Any]]:
     return chunks
 
 
-def _responses_events(response: dict[str, Any]) -> list[dict[str, Any]]:
+def responses_events(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the events the Responses API streams for ``response``: its start, each output item, then its end."""
     events: list[dict[str, Any]] = [
         {"type": "response.created", "response": {**response, "output": [], "status": "in_progress", "usage": None}},
     ]

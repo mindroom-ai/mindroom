@@ -615,6 +615,16 @@ async def test_a_context_window_error_inside_a_stream_is_typed(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_a_stream_error_event_whose_error_is_text_reads_as_that_text(tmp_path: Path) -> None:
+    """An error event that carries its error as a bare string is classified by the string, not the SDK's placeholder."""
+    error = "This model's maximum context length is 131072 tokens."
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _chat_reply({"data": {"error": error}}))
+
+    with pytest.raises(ContextWindowExceeded, match="maximum context length"):
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+
+@pytest.mark.asyncio
 async def test_an_error_body_without_a_message_reports_the_response_text(tmp_path: Path) -> None:
     """Servers that answer outside the OpenAI error shape still surface what they said."""
     built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply({"detail": "Not Found"}, status=404))
@@ -1343,30 +1353,15 @@ async def test_a_response_stores_only_the_reasoning_summary_it_returns_as_reason
     summary: bool,
     stored: str | None,
 ) -> None:
-    """Authored ``reasoning`` settings never make the output text a reply's stored reasoning."""
+    """Authored ``reasoning`` settings never make the output text a reply's reasoning, streamed or stored."""
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs}, _reasoning_reply(summary=summary))
-
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
-
-    assert (turn.content, turn.message.reasoning_content) == (_PACK, stored)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("summary", [False, True], ids=["without-summary", "with-summary"])
-async def test_the_stored_copy_of_the_output_text_never_streams_as_reasoning(
-    tmp_path: Path,
-    *,
-    summary: bool,
-) -> None:
-    """With ``reasoning`` authored, only a reasoning summary streams as reasoning; the text's stored copy does not."""
-    config = {**_OPENAI_RESPONSES, "extra_kwargs": {"reasoning": {"effort": "low"}}}
-    built = _Built(tmp_path, config, _reasoning_reply(summary=summary))
 
     events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
 
-    expected = [TextDelta(_PACK)]
     deltas = [event for event in events if isinstance(event, (ReasoningDelta, TextDelta))]
-    assert deltas == ([ReasoningDelta("Think. "), *expected] if summary else expected)
+    assert deltas == [*([ReasoningDelta("Think. ")] if summary else []), TextDelta(_PACK)]
+    [turn] = [event for event in events if isinstance(event, TurnCompleted)]
+    assert (turn.message.content, turn.message.reasoning_content) == (_PACK, stored)
 
 
 @pytest.mark.asyncio
