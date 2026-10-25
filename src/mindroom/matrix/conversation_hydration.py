@@ -195,7 +195,8 @@ def _redaction_target(event: nio.Event) -> str | None:
     deletes nothing and has to be read past forever after.
     """
     if isinstance(event, nio.RedactionEvent):
-        return event.redacts
+        # A redaction is never encrypted, so a decrypted one is a sender's claim the homeserver never checked.
+        return None if event.decrypted else event.redacts
     if event.source.get("type") != "m.room.message":
         return None
     return event.event_id if _is_redacted(event.source) else None

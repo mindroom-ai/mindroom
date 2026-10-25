@@ -137,13 +137,7 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
     ]
     # Member events are tagged with the member and its run; the leader's own tool events are not wrapped.
     writer_events = _member_events(events, "writer")
-    assert [type(event).__name__ for event in writer_events] == [
-        "RequestCompleted",
-        "ToolStarted",
-        "ToolCompleted",
-        "TextDelta",
-        "RequestCompleted",
-    ]
+    assert [type(event).__name__ for event in writer_events] == ["ToolStarted", "ToolCompleted", "TextDelta"]
     assert all(event.run_id == member.run_id for event in events if isinstance(event, MemberEvent))
     completed = next(event for event in writer_events if isinstance(event, ToolCompleted))
     assert completed.call.tool_name == "add"

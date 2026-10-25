@@ -19,7 +19,6 @@ from mindroom.llm.errors import (
 from mindroom.llm.events import (
     ReasoningDelta,
     ReportedCall,
-    RequestCompleted,
     RunFinished,
     ToolCompleted,
     ToolStarted,
@@ -283,6 +282,20 @@ def test_run_metrics_sum_keeps_the_cost_only_one_run_reported() -> None:
     assert (unpriced + priced).cost == 0.25
 
 
+@pytest.mark.parametrize("costs", [(0.0, 2), (-0.0, -0.0), (None, 0.25), (0.25, None), (None, None)])
+def test_a_cost_sums_by_one_rule_in_requests_runs_models_and_teams(costs: tuple[float | None, float | None]) -> None:
+    """Retried requests, run totals, per-model entries, and team turns add two reported costs alike, to the same value."""
+    reports = [MessageMetrics(cost=cost) for cost in costs]
+    run = RunMetrics()
+    for report in reports:
+        run.add(report, model_id="m", provider="P")
+    [entry] = (run.details or {})["model"]
+    team = RunMetrics(cost=costs[0]) + RunMetrics(cost=costs[1])
+
+    request_sum = (reports[0] + reports[1]).cost
+    assert [repr(run.cost), repr(entry.cost), repr(team.cost)] == [repr(request_sum)] * 3
+
+
 def test_token_counts_add_and_subtract_every_counter() -> None:
     first = TokenCounts(input_tokens=10, output_tokens=2, cache_read_tokens=4, audio_output_tokens=1)
     second = TokenCounts(input_tokens=3, reasoning_tokens=5, audio_total_tokens=7)
@@ -489,7 +502,6 @@ def test_run_events_are_frozen_values() -> None:
         ReasoningDelta("why"),
         ToolStarted(tool.call),
         ToolCompleted(tool.call),
-        RequestCompleted(MessageMetrics(tokens=TokenCounts(output_tokens=1))),
         RunFinished(record),
     ]
 
@@ -498,10 +510,9 @@ def test_run_events_are_frozen_values() -> None:
         "ReasoningDelta",
         "ToolStarted",
         "ToolCompleted",
-        "RequestCompleted",
         "RunFinished",
     ]
-    assert events[5].record is record  # type: ignore[union-attr]
+    assert events[4].record is record  # type: ignore[union-attr]
     with pytest.raises(FrozenInstanceError):
         events[0].text = "changed"  # type: ignore[misc]
 

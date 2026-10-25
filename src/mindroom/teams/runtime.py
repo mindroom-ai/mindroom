@@ -29,7 +29,7 @@ from mindroom.agent_loop.run import (
 )
 from mindroom.agent_loop.tools import prepare_run_tools, sorted_specs
 from mindroom.history.request_messages import build_resume_request
-from mindroom.llm.events import RequestCompleted, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
@@ -65,7 +65,7 @@ class MemberEvent:
     member_id: str
     member_name: str
     run_id: str
-    event: TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
+    event: TextDelta | ReasoningDelta | ToolStarted | ToolCompleted
 
 
 type TeamRunEvent = RunEvent | MemberEvent

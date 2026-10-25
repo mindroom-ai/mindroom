@@ -20,12 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI, OpenAI
 
-from mindroom.embeddings.errors import (
-    EMBEDDER_EMPTY_VECTOR_DETAIL,
-    EmbedderRequestError,
-    describe_embedder_error,
-    embedder_retry_after_seconds,
-)
+from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, EmbedderRequestError, openai_embedder_error
 from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 
@@ -44,11 +39,9 @@ _MAX_TEXTS_PER_REQUEST = 100
 
 def _classified_request_error(exc: Exception, health_recorder: EmbedderHealthRecorder) -> EmbedderRequestError:
     """Record and return the classified failure for one provider exception."""
-    detail = describe_embedder_error(exc)
-    health_recorder.record(detail)
-    # The classified error replaces the provider exception, so carry the
-    # provider's own backoff hint across the boundary before it is discarded.
-    return EmbedderRequestError(detail, retry_after_seconds=embedder_retry_after_seconds(exc))
+    error = openai_embedder_error(exc)
+    health_recorder.record(str(error))
+    return error
 
 
 def _validated_embeddings(

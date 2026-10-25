@@ -15,7 +15,7 @@ from mem0 import AsyncMemory
 from mem0.llms.openai import OpenAILLM
 from ollama import ChatResponse as OllamaChatResponse
 from ollama import Message as OllamaMessage
-from openai import AuthenticationError
+from openai import AuthenticationError, InternalServerError
 from openai.types.chat import ChatCompletion
 from structlog.testing import capture_logs
 
@@ -24,7 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.memory import _MemoryLLMConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
-from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.errors import EmbedderRequestError, embedder_failure_is_transient, openai_embedder_error
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory import (
@@ -249,6 +249,44 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
         assert "Memory added" not in str(logs)
     finally:
         capture_embedder_health_recorder().record(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("classified", [False, True], ids=["raw_sdk_error", "embedder_error"])
+async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(
+    storage_path: Path,
+    config: Config,
+    classified: bool,
+) -> None:
+    """A failed Mem0 write raises the classified error with its retry flag and hint, and without the raw error."""
+    config.memory.backend = "mem0"
+    request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+    response = httpx.Response(503, request=request, headers={"retry-after": "3"}, json={"error": {"message": "busy"}})
+    raw_error = InternalServerError("busy", response=response, body=None)
+
+    class FailingMemory:
+        async def add(self, *_args: object, **_kwargs: object) -> None:
+            # Mem0's own model calls raise the raw SDK error; MindRoom's embedder raises the classified one.
+            if classified:
+                raise openai_embedder_error(raw_error) from raw_error
+            raise raw_error
+
+    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
+        return FailingMemory()
+
+    try:
+        with (
+            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+            pytest.raises(EmbedderRequestError) as excinfo,
+        ):
+            await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+    finally:
+        capture_embedder_health_recorder().record(None)
+
+    assert str(excinfo.value) == "embedder request failed (HTTP 503)"
+    assert embedder_failure_is_transient(excinfo.value)
+    assert excinfo.value.retry_after_seconds == 3.0
+    assert excinfo.value.__cause__ is None
 
 
 @pytest.mark.asyncio
