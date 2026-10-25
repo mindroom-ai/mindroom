@@ -509,7 +509,7 @@ def _openai_turn_context(
     entity_label: str,
     *,
     session_id: str | None,
-    execution_identity: ToolExecutionIdentity | None,
+    execution_identity: ToolExecutionIdentity,
     model_name: str | None = None,
 ) -> ResponseTurnContext:
     """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
@@ -521,7 +521,7 @@ def _openai_turn_context(
         reply_to_event_id=None,
         room_id=None,
         thread_id=None,
-        requester_id=execution_identity.requester_id if execution_identity is not None else None,
+        requester_id=execution_identity.requester_id,
         matrix_run_metadata=None,
         active_model_name=model_name,
     )
@@ -977,7 +977,7 @@ def _build_team(
     team_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
+    execution_identity: ToolExecutionIdentity,
     scope_context: ScopeSessionContext | None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
@@ -1024,7 +1024,7 @@ async def _prepare_openai_team_execution(
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     team_model_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity,
 ) -> PreparedTeamExecution:
     """Prepare one OpenAI-compatible team turn: the scope summary, the replayed history, then the turn."""
     return await prepare_materialized_team_execution(
@@ -1051,7 +1051,7 @@ async def _prepare_team_turn(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     team_models: TeamTurnModelSelection,
     *,
-    execution_identity: ToolExecutionIdentity | None,
+    execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     stream: bool,
 ) -> tuple[ScopeSessionContext | None, BuiltTeam, PreparedTeamExecution] | JSONResponse:
