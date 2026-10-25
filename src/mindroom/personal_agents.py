@@ -60,6 +60,12 @@ def _activate_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: Pe
         _write_personal_agent_roster(runtime_paths, roster)
 
 
+def personal_agent_user_id(entry: PersonalAgentRosterEntry, runtime_paths: RuntimePaths) -> str:
+    """Return the Matrix ID of one roster entry's agent account, registered or still pending."""
+    localpart = entry.matrix_username or agent_username_localpart(entry.agent_name, runtime_paths)
+    return MatrixID.from_username(localpart, runtime_matrix_domain(runtime_paths)).full_id
+
+
 def is_mindroom_account_id(user_id: str, runtime_paths: RuntimePaths) -> bool:
     """Whether a Matrix ID is an account MindRoom manages, including agents the live config does not have yet."""
     domain = runtime_matrix_domain(runtime_paths)
@@ -67,12 +73,7 @@ def is_mindroom_account_id(user_id: str, runtime_paths: RuntimePaths) -> bool:
     if any(matrix_account_user_id(account, domain) == user_id for account in accounts):
         return True
     return any(
-        MatrixID.from_username(
-            entry.matrix_username or agent_username_localpart(entry.agent_name, runtime_paths),
-            domain,
-        ).full_id
-        == user_id
-        for entry in read_personal_agent_roster(runtime_paths)
+        personal_agent_user_id(entry, runtime_paths) == user_id for entry in read_personal_agent_roster(runtime_paths)
     )
 
 
