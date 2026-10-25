@@ -300,9 +300,9 @@ class ConversationStore:
     ) -> bool:
         """Set ``changes``' top-level keys in stored run ``run_id``'s metadata and keep the rest, a final run's too.
 
-        A visible top-level run's event ids also join the summary row that covers it (``_join_covering_row``).
-        Returns whether the run is stored. ``session``, when given, then holds a changed copy of the run in a new
-        list; loaded runs are shared, so none changes in place.
+        A visible top-level run's event ids also join the event sets of the summary row that covers it, so redacting a
+        reply linked after that summary still cuts it. Returns whether the run is stored. ``session``, when given, then
+        holds a changed copy of the run in a new list; loaded runs are shared, so none changes in place.
         """
         runs = quote_identifier(self.names.log_runs)
         with self.transaction(write=True) as connection:
@@ -500,7 +500,7 @@ def _adopt_log(session: ConversationSession, loaded: _Load | None) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _Saved:
-    """One full save: its outcome, the timestamps its usage snapshot takes, and for a written run its move and read-back."""
+    """One full save: its outcome, the timestamps its usage takes, and a written run's move and read-back copy."""
 
     run_id: str
     outcome: SaveOutcome
@@ -685,6 +685,18 @@ def next_seq(connection: sqlite3.Connection, names: TableNames) -> int:
     return seq
 
 
+def is_removed(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    run_id: str,
+    parent_run_id: str | None,
+) -> bool:
+    """Return whether a cut removed run ``run_id``, or its team run ``parent_run_id``, from session ``session_id``."""
+    removed = f"SELECT 1 FROM {quote_identifier(names.log_removed)} WHERE session_id = ? AND run_id IN (?, ?)"  # noqa: S608
+    return connection.execute(removed, (session_id, run_id, parent_run_id)).fetchone() is not None
+
+
 def _write_run(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -727,18 +739,6 @@ def _write_run(
     return _Saved(run_id, "written", created_at, now, moved, written)
 
 
-def is_removed(
-    connection: sqlite3.Connection,
-    names: TableNames,
-    session_id: str,
-    run_id: str,
-    parent_run_id: str | None,
-) -> bool:
-    """Return whether a cut removed run ``run_id``, or its team run ``parent_run_id``, from session ``session_id``."""
-    removed = f"SELECT 1 FROM {quote_identifier(names.log_removed)} WHERE session_id = ? AND run_id IN (?, ?)"  # noqa: S608
-    return connection.execute(removed, (session_id, run_id, parent_run_id)).fetchone() is not None
-
-
 def _upsert_run(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -750,7 +750,7 @@ def _upsert_run(
     created_at: int,
     updated_at: int,
 ) -> None:
-    """Insert the row of the run whose stored dict is ``data``, or update every column but its ids and ``created_at``.
+    """Upsert the row of the run whose stored dict is ``data``, keeping a stored row's ``session_id`` and ``created_at``.
 
     An update rather than a replace, which would cascade the run's message rows away.
     """
@@ -859,7 +859,7 @@ def _decoded_runs(
     condition: str,
     parameters: tuple[object, ...],
 ) -> list[AnyRunRecord]:
-    """Decode the runs whose rows meet ``condition`` with their unfolded message rows, in order.
+    """Decode the runs whose rows meet ``condition``, each with its unfolded message rows in ``ord`` order.
 
     Each call parses its own copy of the JSON.
     """
