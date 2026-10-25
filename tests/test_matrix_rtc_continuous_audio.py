@@ -240,17 +240,24 @@ async def test_live_input_paces_buffered_real_frames_without_duplicates() -> Non
     for value in (11, 22, 33, 44):
         microphone.frames.put_nowait(frame(value))
     subscribe(room, "alice", microphone)
+    loop = asyncio.get_running_loop()
     received = []
+    slots = []
     delivered_at = []
     try:
         async with asyncio.timeout(2):
             while len(received) < 4:
+                slot = audio._next_frame_at
                 item = await anext(audio)
                 if any(item.data):
                     received.append(item.data.tobytes())
-                    delivered_at.append(asyncio.get_running_loop().time())
+                    slots.append(slot)
+                    delivered_at.append(loop.time())
         assert received == [frame(value).data.tobytes() for value in (11, 22, 33, 44)]
-        assert all(after - before >= 0.045 for before, after in pairwise(delivered_at))
+        # A late wakeup only delays its frame, and the next slot stays on the cadence, so the gap between two
+        # deliveries can be shorter than a frame; what the backlog cannot do is leave before its slot.
+        assert all(delivered >= slot for slot, delivered in zip(slots, delivered_at, strict=True))
+        assert all(after >= before + 0.05 for before, after in pairwise(slots))
     finally:
         await audio.aclose()
 
