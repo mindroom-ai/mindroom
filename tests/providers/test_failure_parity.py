@@ -1,10 +1,9 @@
-"""Failure-path parity: how each provider route fails, pinned row by row against what the Agno-backed runtime did.
+"""Failure paths: how each provider route fails, pinned row by row.
 
 Each row scripts the wire's answer to every request of one route and stream mode, sends one request through the
 route's real adapter inside the production pipeline, and pins how many HTTP requests it makes before it fails
 (the SDK's own retries included), the normalized error it ends with, and how the error reply the user reads begins.
-The rows were measured against the Agno-backed runtime (Agno 3.0.9 with MindRoom's stream retry hook) with the same
-wires; a comment names each case that deliberately sends the request a different number of times.
+A comment gives the reason for each case whose number of requests its error type alone does not decide.
 Error replies follow the typed error: a rate limit reads as one, any other transient failure as temporary
 unavailability, and a request that no longer fits the context window says so.
 """
@@ -402,10 +401,8 @@ _STALLED = 2
 
 
 # An early end, a stream that ends before the provider finished the turn, is retried like a dropped connection on
-# every route until the attempt committed. Only on Responses did the Agno-backed runtime do the same; on Claude,
-# Gemini, and Ollama it accepted what had arrived as the finished reply after one request, an empty one when nothing
-# had. A Chat stream has no early end: its end finishes the turn, since OpenAI-compatible servers may omit the finish
-# reason, as on the Agno-backed runtime.
+# every route until the attempt committed, instead of accepting what had arrived as the finished reply. A Chat stream
+# has no early end: its end finishes the turn, since OpenAI-compatible servers may omit the finish reason.
 def _early_ends(before_output: Reply, after_output: Reply) -> list[_Case]:
     """Return the early end before any output and the early end after visible output of one route's wire."""
     return [
@@ -551,7 +548,7 @@ _CLAUDE_CASES = [
         UNAVAILABLE,
         _PIPELINE,
     ),
-    # A deterministic error event is final; the Agno-backed runtime retried every event after the 200 status.
+    # A deterministic error event is final, though it arrives after the 200 status.
     _Case(
         "event_invalid_request_error",
         _claude_stream(_claude_error("invalid_request_error", "Bad block")),
@@ -605,7 +602,7 @@ _CLAUDE_CASES = [
         UNAVAILABLE,
         _PIPELINE,
     ),
-    # A retry would run the web search again, so the failure is final; the Agno-backed runtime retried it.
+    # A retry would run the web search again, so the failure is final.
     _Case(
         "event_after_web_search",
         _claude_stream(*_claude_block(0, _CLAUDE_WEB_SEARCH), _claude_error("api_error")),
@@ -613,7 +610,7 @@ _CLAUDE_CASES = [
         UNAVAILABLE,
         1,
     ),
-    # A stall after a server tool that acts or costs started is final too; the Agno-backed runtime retried it once.
+    # A stall after a server tool that acts or costs started is final too.
     _Case(
         "stall_after_web_search",
         _then_silent(_claude_stream(*_claude_block(0, _CLAUDE_WEB_SEARCH))),
@@ -724,8 +721,7 @@ _OPENAI_HTTP_CASES = [
         1,
         1,
     ),
-    # A word of the auth family names the credentials beside an underscore and in British spelling, as the
-    # Agno-backed runtime's reply read them.
+    # A word of the auth family names the credentials beside an underscore and in British spelling.
     _Case(
         "http_403_invalid_auth",
         _openai_status(403, "invalid_auth: the access token was revoked", "invalid_request_error"),
@@ -793,8 +789,8 @@ _OPENAI_HTTP_CASES = [
     ),
     _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _SDK_AND_PIPELINE, _SDK, code="timeout"),
 ]
-# Until visible text or a complete tool call arrives, a Chat stream keeps its retry budget; the Agno-backed runtime
-# stopped retrying at the opening empty-text chunk, so its streamed failures were final after one request.
+# Until visible text or a complete tool call arrives, a Chat stream keeps its retry budget, so an opening empty-text
+# chunk does not make a failure final.
 _TOOL_ARGUMENTS = _chat_chunk(
     {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "f", "arguments": '{"ci'}}]},
 )
@@ -828,8 +824,7 @@ _CHAT_CASES = [
         UNAVAILABLE,
         _PIPELINE,
     ),
-    # An api_error or rate_limit_error event is transient whatever its wording; the Agno-backed runtime treated
-    # these as final on OpenAI-compatible routes.
+    # An api_error or rate_limit_error event is transient whatever its wording.
     _Case(
         "event_api_error_other_wording",
         _chat_error(message="Unexpected upstream failure", type="api_error"),
@@ -867,8 +862,8 @@ _CHAT_CASES = [
         1,
     ),
     _Case("reset_before_output", _chat_stream(drop=True), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
-    # Gateways such as OpenRouter answer a failed upstream with HTTP 200 and an error body; the Agno-backed runtime
-    # raised it as a 502.
+    # Gateways such as OpenRouter answer a failed upstream with HTTP 200 and an error body, which fails as the
+    # status the body names.
     _Case(
         "http_200_error_body",
         _json(200, {"error": {"message": "Provider returned error", "code": 502}, "user_id": "u"}),
@@ -968,8 +963,7 @@ _RESPONSES_CASES = [
     ),
     # The stream ends before response.completed.
     *_early_ends(_responses_stream(), _responses_stream(_response_text(_PARTIAL))),
-    # A retry would run the hosted tool again, so a failure after it started is final, a stall included; the
-    # Agno-backed runtime retried a stall once.
+    # A retry would run the hosted tool again, so a failure after it started is final, a stall included.
     *(
         _Case(
             f"{failure}_after_{tool}",
@@ -985,8 +979,7 @@ _RESPONSES_CASES = [
             ("stall", _then_silent(_responses_stream(started)), STREAM_STALLED),
         )
     ),
-    # Rerunning a tool search or a compaction repeats no work, so their items keep the retry budget; the Agno-backed
-    # runtime ended the request at once when an error event followed one.
+    # Rerunning a tool search or a compaction repeats no work, so their items keep the retry budget.
     *(
         _Case(f"{failure}_after_{name}", reply, ProviderUnavailable, UNAVAILABLE, requests, code=code)
         for name, started in (("tool_search", _TOOL_SEARCH_STARTED), ("compaction", _COMPACTION_STARTED))
@@ -1131,7 +1124,7 @@ _GEMINI_CASES = [
     # The stream ends before a candidate carries its finish reason.
     *_early_ends(_gemini_stream(_gemini_chunk({"text": ""})), _gemini_stream(_gemini_chunk({"text": _PARTIAL}))),
     # A retry would run Google Search grounding or code execution again, so a failure after either is final, a
-    # stall included; the Agno-backed runtime retried a stall.
+    # stall included.
     *(
         _Case(f"{failure}_after_{tool}", reply, ProviderUnavailable, UNAVAILABLE, 1, code=code)
         for tool, chunk in (
@@ -1163,8 +1156,7 @@ _GEMINI_CASES = [
     ),
 ]
 
-# The Agno-backed runtime never retried an Ollama request: Agno's Ollama adapter let the SDK's errors escape
-# unclassified. Ollama now retries transient failures as every other route does.
+# Ollama retries transient failures as every other route does.
 _OLLAMA_CASES = [
     _Case(
         "http_500",
@@ -1267,9 +1259,9 @@ _LLAMA_CPP_CASES = [
     ),
 ]
 
-# Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini failed exactly as their family's direct route did on the
-# Agno-backed runtime, so they run every row of that family; the other OpenAI-compatible Chat routes run the shared
-# Chat rows, and llama.cpp its own context-size wording too.
+# Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini fail exactly as their family's direct route does, so they
+# run every row of that family; the other OpenAI-compatible Chat routes run the shared Chat rows, and llama.cpp its
+# own context-size wording too.
 ROWS = [
     *_rows("anthropic", _CLAUDE_CASES),
     *_rows("vertexai_claude", _CLAUDE_CASES),
@@ -1378,9 +1370,8 @@ def _incomplete(reason: str, *, stream: bool, cut_off_call: bool) -> Reply:
     return _responses_stream(_response_text(_PARTIAL), *(call_events if cut_off_call else []), ended)
 
 
-# A response that ended incomplete ends the turn with its stop reason after one request, streamed or blocking, as a
-# blocking one did on the Agno-backed runtime; that runtime failed a streamed one as an incomplete stream instead.
-# The turn keeps a call the response ended in the middle of, as a blocking response and a Chat reply did there.
+# A response that ended incomplete ends the turn with its stop reason after one request, streamed or blocking, and
+# the turn keeps a call the response ended in the middle of.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("reason", "stop_reason", "cut_off_call"),
@@ -1470,14 +1461,14 @@ def _expire_cli_login(route: str, root: Path) -> None:
 @pytest.mark.parametrize(
     ("route", "stream", "refresh_reply", "error", "message", "refreshes"),
     [
-        # A refresh that fails on the network is the provider's transient failure, retried as the Agno-backed
-        # runtime retried it; Kimi's blocking requests get no stream retries, and Codex always streams.
+        # A refresh that fails on the network is the provider's transient failure and is retried; Kimi's blocking
+        # requests get no stream retries, and Codex always streams.
         ("codex", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("codex", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("kimi", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("kimi", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, 1),
         # A login server that is down or throttling answers with its status, which the shared classifier reads as for
-        # any provider response, as the Agno-backed runtime reported and retried it.
+        # any provider response.
         ("codex", True, httpx.Response(503, text="upstream down"), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("codex", False, httpx.Response(502, text="bad gateway"), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("kimi", True, httpx.Response(429, text="slow down"), RateLimited, RATE_LIMITED, _PIPELINE),
@@ -1565,7 +1556,7 @@ _WHOLE_REPLIES: dict[str, dict[str, Any]] = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", _WHOLE_REPLIES)
 async def test_a_blocking_reply_slower_than_the_idle_limit_is_waited_for(route: str, tmp_path: Path) -> None:
-    """Only a stream has an idle limit: a blocking request waits for a slow reply, as the Agno-backed runtime did."""
+    """Only a stream has an idle limit: a blocking request waits for a slow reply."""
     sent: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
