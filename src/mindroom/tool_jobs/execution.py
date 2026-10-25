@@ -56,7 +56,7 @@ from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.toolkit_connections import connects_per_run
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
@@ -486,12 +486,17 @@ async def _run_job_call(
     function: ToolFunction,
     call: JobCall,
 ) -> tuple[object, str | None]:
-    """Run the job's call through the actor's tool-call policy: what it returned, or the text of what it raised."""
+    """Run the job's call through the actor's tool-call policy: what it returned, or the text of why it failed.
+
+    It fails when it raised, or when the policy answered it with a failed outcome, as for a call a plugin hook declined.
+    """
     try:
         returned = await _owned_by_job(lambda: run_tool_call(function, call.arguments, call.context, middleware=inner))
     except Exception as error:
         return None, failure_text(error)
     value = read_tool_value(returned)
+    if isinstance(value, ToolOutcome) and value.is_error:
+        return None, value.content
     return (returned if value is None else value), None
 
 

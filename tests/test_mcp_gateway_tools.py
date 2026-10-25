@@ -460,6 +460,38 @@ def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> No
 
 
 @pytest.mark.asyncio
+async def test_search_describes_each_function_as_its_schema_does(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function described only by its docstring is listed with the description its schema carries."""
+
+    def add(a: float, b: float) -> float:
+        """Add two numbers."""
+        return a + b
+
+    def negate(a: float) -> float:
+        """Negate a number."""
+        return -a
+
+    toolkit = Toolkit(name="calculator", tools=[add, negate])
+    assert [function.description for function in toolkit.get_async_functions().values()] == [None, None]
+    _replace_calculator(monkeypatch, toolkit)
+
+    result = await gateway.search_tools(context, toolkit="calculator")
+
+    assert "error" not in result
+    assert [(item["function"], item["description"]) for item in result["results"]] == [
+        ("add", "Add two numbers."),
+        ("negate", "Negate a number."),
+    ]
+    for item in result["results"]:
+        schema = await gateway.get_tool(context, toolkit="calculator", function=item["function"])
+        assert "error" not in schema
+        assert schema["description"] == item["description"]
+
+
+@pytest.mark.asyncio
 async def test_gateway_calls_share_the_detached_session(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -508,7 +540,7 @@ async def test_authored_confirmation_never_runs_body(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Authored confirmation never runs body."""
+    """An authored confirmation hides the function from search and never runs its body."""
 
     def account() -> str:
         pytest.fail("Approval-required body ran")
@@ -516,6 +548,7 @@ async def test_authored_confirmation_never_runs_body(
     toolkit = Toolkit(name="calculator", tools=[account])
     toolkit.functions["account"].requires_confirmation = True
     _replace_calculator(monkeypatch, toolkit)
+    assert await gateway.search_tools(context, toolkit="calculator") == {"results": []}
     result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
     assert "result" not in result
     assert "error" in result
@@ -952,10 +985,19 @@ async def test_search_total_size_includes_unicode_and_escaped_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Search total size includes unicode and escaped text."""
+
+    def body() -> str:
+        return "unused"
+
     toolkit = Toolkit(name="calculator", auto_register=False)
     for index in range(10):
         name = f"tool_{index}" + "界" * 100
-        toolkit.functions[name] = Function(name=name, description="\u0001" * 256, skip_entrypoint_processing=True)
+        toolkit.functions[name] = Function(
+            name=name,
+            description="\u0001" * 256,
+            entrypoint=body,
+            skip_entrypoint_processing=True,
+        )
     _replace_calculator(monkeypatch, toolkit)
     result = await gateway.search_tools(context, toolkit="calculator", limit=10)
     assert "results" in result

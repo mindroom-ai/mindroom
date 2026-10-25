@@ -26,14 +26,13 @@ from mindroom.tool_system.invocation import (
     ToolCall,
     ToolCallContext,
     ToolNext,
-    ToolOutcome,
     client_tool_result,
     current_tool_call,
     execute_tool_call,
     parse_tool_arguments,
     run_tool_call,
 )
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from tests.tool_system import agno_parity_support as support
 

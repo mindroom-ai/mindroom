@@ -23,7 +23,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to, write_with_session_state
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from mindroom.tool_system.invocation import ToolOutcome
+from mindroom.tool_system.tool_function import ToolOutcome
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:

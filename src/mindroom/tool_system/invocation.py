@@ -35,7 +35,7 @@ from mindroom.tool_system.agno_toolkits import (
 )
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
-from mindroom.tool_system.tool_function import ToolValue, media_reference
+from mindroom.tool_system.tool_function import ToolOutcome, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
 if TYPE_CHECKING:
@@ -95,14 +95,6 @@ class ToolCall:
     function: ToolFunction
     arguments: dict[str, Any]
     context: ToolCallContext
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ToolOutcome(ToolValue):
-    """What one tool call produced: the text the model reads (the error text on failure) and the tool's media."""
-
-    stop_after_call: bool = False
-    is_error: bool = False
 
 
 type ToolNext = Callable[[dict[str, Any]], Awaitable[object]]
@@ -297,9 +289,9 @@ async def execute_tool_call(
     """Run one tool call as ``run_tool_call`` does and return what the model should read.
 
     Any exception other than cancellation becomes a failed outcome whose content is its ``failure_text``, and the call
-    fails too when it returned a failed outcome, as minimal mode's Bash does when its shell call failed. The run
-    stops after the call when the function always stops it, or when this call returned an outcome that does, as
-    minimal mode's Bash does after a control tool it ran.
+    fails too when it returned a failed outcome, as the tool-call policy answers a call a plugin hook declined and
+    minimal mode's Bash answers when its shell call failed. The run stops after the call when the function always
+    stops it, or when this call returned an outcome that does, as minimal mode's Bash does after a control tool it ran.
     """
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
@@ -382,7 +374,6 @@ __all__ = [
     "ToolCallContext",
     "ToolMiddleware",
     "ToolNext",
-    "ToolOutcome",
     "client_tool_result",
     "current_tool_call",
     "execute_tool_call",
