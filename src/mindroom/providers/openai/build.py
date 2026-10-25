@@ -522,10 +522,6 @@ def _build_responses(
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
-        # TODO(simplify): a store-false route, Codex's default, sends no previous_response_id yet claims to continue
-        # stored responses, so its receipt becomes a system message after the last response instead of joining the
-        # prompt. Derive this from `store is not False`. Models on store-false routes would see the receipt move.
-        continues_stored_responses=True,
         provider_default_sampling=_provider_default_sampling(model_id),
     )
     wire = ResponsesWire(

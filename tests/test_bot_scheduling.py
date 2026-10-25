@@ -524,6 +524,7 @@ class TestBotTaskRestoration:
                     mock_client,
                     bot._conversation_reader,
                 )
+                assert scheduling._state_writers == {agent_user.user_id: mock_client}
                 # Now have the bot join its configured rooms
                 await bot.join_configured_rooms()
 
@@ -577,8 +578,9 @@ class TestBotTaskRestoration:
                 mock_restore.return_value = 0  # No tasks restored
 
                 await bot.start()
-                # Only the router offers its runtime to new scheduled-task runners.
+                # Only the router offers its runtime to new scheduled-task runners, but every bot may write state.
                 assert scheduling._runner_owner is None
+                assert scheduling._state_writers == {agent_user.user_id: mock_client}
                 # Now have the bot join its configured rooms
                 await bot.join_configured_rooms()
 

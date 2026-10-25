@@ -18,8 +18,13 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
+from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.event_journal.opening import record_opened_event_journal
+from mindroom.personal_agents import _append_personal_agent_roster_entry
+from tests.conftest import test_runtime_paths
+from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 VALID_CONFIG: dict[str, Any] = {
     "models": {"default": {"provider": "ollama", "id": "test-model"}},
@@ -137,6 +142,42 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
     )
     reloaded = load_config(disabled_paths)
     assert reloaded.resolve_entity("research").available_tools == defaults.get("tools", ["scheduler"])
+
+
+@pytest.mark.parametrize("writer", ["persist", "structured", "raw"])
+def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+) -> None:
+    """A save that validated before a user's pending agent took one of its names is refused without writing the file."""
+    paths = test_runtime_paths(tmp_path)
+    _write_config(paths.config_path, PERSONAL_AGENTS_BASE)
+    api_app = _make_api_app(paths)
+    assert config_lifecycle.load_config_into_app(paths, api_app) is True
+    saved = paths.config_path.read_bytes()
+    payload = copy.deepcopy(PERSONAL_AGENTS_BASE)
+    payload["agents"] = {"mind_alice_smith": {"display_name": "Authored", "model": "default"}}
+    validate = Config.validate_with_runtime
+
+    def validate_then_reserve(data: object, runtime_paths: constants.RuntimePaths, **kwargs: bool) -> Config:
+        config = validate(data, runtime_paths, **kwargs)
+        # Alice's provisioning reserves the same name between this save's validation and its write.
+        if not read_personal_agent_roster(runtime_paths):
+            _append_personal_agent_roster_entry(runtime_paths, personal_agent_entry(pending=True))
+        return config
+
+    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_then_reserve))
+    request = _request_for(api_app)
+    writers = {
+        "persist": lambda: config_lifecycle.validate_and_persist_config_payload(payload, paths),
+        "structured": lambda: config_lifecycle.replace_committed_config(request, payload, error_prefix="Save failed"),
+        "raw": lambda: config_lifecycle.replace_raw_config_source(request, yaml.dump(payload), error_prefix="Save"),
+    }
+    with pytest.raises((ConfigRuntimeValidationError, HTTPException), match=r"agents\.mind_alice_smith collides"):
+        writers[writer]()
+
+    assert paths.config_path.read_bytes() == saved
 
 
 class TestLoadAndValidationFailure:

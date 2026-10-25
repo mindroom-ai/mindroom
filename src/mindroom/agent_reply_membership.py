@@ -98,6 +98,8 @@ class AgentReplyMembershipIndex:
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._snapshot = _AgentReplyMembershipSnapshot()
+        # Set and replaced by each publication, so a waiter wakes for the first one after it began waiting.
+        self._published = asyncio.Event()
         self._desired_signature: _AgentReplyMembershipPolicySignature | None = None
         # Invalidations and unready marks advance this, so a refresh that queried Matrix before one never publishes.
         self._epoch = 0
@@ -112,6 +114,16 @@ class AgentReplyMembershipIndex:
     def snapshot(self) -> _AgentReplyMembershipSnapshot:
         """Return the current immutable snapshot."""
         return self._snapshot
+
+    def _publish(self, snapshot: _AgentReplyMembershipSnapshot) -> None:
+        """Replace the snapshot and wake every check waiting for the next one."""
+        self._snapshot = snapshot
+        self._published.set()
+        self._published = asyncio.Event()
+
+    async def wait_for_publication(self) -> None:
+        """Wait until the next snapshot is published."""
+        await self._published.wait()
 
     def needs_refresh(self, config: Config) -> bool:
         """Return whether room-backed grants need an authoritative rebuild."""
@@ -252,10 +264,12 @@ class AgentReplyMembershipIndex:
             if requires_current_rooms
             else ()
         )
-        self._snapshot = _AgentReplyMembershipSnapshot(
-            policy_signature=signature,
-            rooms=(*grant_rooms, *current_rooms),
-            refresh_required=bool(room_keys) or requires_current_rooms,
+        self._publish(
+            _AgentReplyMembershipSnapshot(
+                policy_signature=signature,
+                rooms=(*grant_rooms, *current_rooms),
+                refresh_required=bool(room_keys) or requires_current_rooms,
+            ),
         )
         logger.info(
             "agent_reply_memberships_invalidated",
@@ -303,14 +317,16 @@ class AgentReplyMembershipIndex:
         ]
         if not matching_rooms:
             updated_rooms.append(_GrantRoomMembership(room_key=None, room_id=room_id, ready=False))
-        self._snapshot = replace(
-            self._snapshot,
-            rooms=tuple(updated_rooms),
-            refresh_required=True,
-            possible_joined_room_ids=(
-                None
-                if self._snapshot.possible_joined_room_ids is None
-                else self._snapshot.possible_joined_room_ids | {room_id}
+        self._publish(
+            replace(
+                self._snapshot,
+                rooms=tuple(updated_rooms),
+                refresh_required=True,
+                possible_joined_room_ids=(
+                    None
+                    if self._snapshot.possible_joined_room_ids is None
+                    else self._snapshot.possible_joined_room_ids | {room_id}
+                ),
             ),
         )
         logged_rooms = matching_rooms or (updated_rooms[-1],)
@@ -359,7 +375,7 @@ class AgentReplyMembershipIndex:
             if self._desired_signature != signature or self._epoch != expected_epoch:
                 return
             candidate = _replay_refresh_transitions(candidate, self._snapshot, config, transitions)
-            self._snapshot = candidate
+            self._publish(candidate)
             for room in candidate.rooms:
                 if room.ready and room.room_key is not None:
                     logger.info(
@@ -394,7 +410,8 @@ class AgentReplyMembershipIndex:
         applied = _snapshot_after_transition(snapshot, config, transition)
         if applied is None:
             return False
-        self._snapshot, changed_room_keys = applied
+        snapshot, changed_room_keys = applied
+        self._publish(snapshot)
         for room_key in changed_room_keys:
             logger.info(
                 "agent_reply_grant_room_membership_transition",

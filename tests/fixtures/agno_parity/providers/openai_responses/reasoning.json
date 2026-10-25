@@ -38,6 +38,7 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
+        "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
         "response_id": "resp_parity"
       },
       "reasoning_content": "Rain is likely, so pack for wet weather.",

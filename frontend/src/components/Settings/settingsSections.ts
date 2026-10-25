@@ -109,8 +109,8 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "personal-rooms",
     title: "Personal rooms",
-    description: "One private room per person, owned by a selected agent.",
-    entries: [{ root: "personal_rooms" }],
+    description: "Private rooms and per-person agents for everyone who joins.",
+    entries: [{ root: "personal_rooms" }, { root: "personal_agents" }],
   },
   {
     id: "room-defaults",
