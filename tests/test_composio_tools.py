@@ -11,7 +11,6 @@ from composio_agno import ComposioToolSet
 
 from mindroom.agents import _reject_matrix_room_runtime_tool_function_collisions
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tools.composio import composio_tools
 
@@ -74,7 +73,7 @@ def offline_composio(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def _assert_registered_actions(tool: Toolkit) -> None:
     """Exercise the same Toolkit protocol agent assembly consumes."""
     assert isinstance(tool, Toolkit)
-    _reject_matrix_room_runtime_tool_function_collisions("composio", adapt_toolkit(tool))
+    _reject_matrix_room_runtime_tool_function_collisions("composio", tool)
     assert set(tool.get_functions()) == {"github_get_a_repository", "github_get_the_authenticated_user"}
     function = tool.get_functions()["github_get_a_repository"]
     assert function.entrypoint is not None
