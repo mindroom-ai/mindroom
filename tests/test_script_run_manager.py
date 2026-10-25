@@ -41,7 +41,7 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path, worke
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     import os
@@ -618,8 +618,7 @@ async def test_shutdown_fence_drains_admitted_launch_and_rejects_racing_launch(
         monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
 
     admitted_launch = asyncio.create_task(manager.run(_context(tmp_path, mode=mode), source="print('ok')\n"))
-    # Reaching the launch takes store writes, which a loaded host can slow past a second.
-    await asyncio.wait_for(launch_entered.wait(), timeout=10)
+    await asyncio.wait_for(launch_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     fence = asyncio.create_task(manager.begin_shutdown())
     await asyncio.sleep(0)
 

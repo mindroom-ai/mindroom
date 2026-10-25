@@ -61,7 +61,12 @@ from tests.browser_egress_helpers import (
     socks5_connect,
 )
 from tests.browser_lifecycle_helpers import LifecycleBrowser
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    test_runtime_paths,
+)
 from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
@@ -73,10 +78,6 @@ if TYPE_CHECKING:
     from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
-# Bounds a wait for the fake Playwright adapter to reach a startup or teardown phase, which the browser call under
-# test reaches on its own. No production timer races it, so it sits far above that call on a loaded host and below
-# pytest's 60-second timeout.
-_PHASE_WAIT_SECONDS = 10.0
 # A load the relay or egress proxy refuses keeps Chromium's error and says the destination may not be allowed.
 _PROXY_FAILURE_HINTED = r"ERR_SOCKS_CONNECTION_FAILED[\s\S]*outbound access to its host or port may not be allowed"
 DESKTOP_MEDIA = EncryptedDesktopMedia(
@@ -1491,7 +1492,7 @@ async def test_computer_browser_owns_destination_proxy_lifetime(
     opening = asyncio.create_task(tool.browser("start"))
     try:
         if outcome == "cancel_launch":
-            await asyncio.wait_for(adapter.reached.wait(), _PHASE_WAIT_SECONDS)
+            await asyncio.wait_for(adapter.reached.wait(), SETTLE_TIMEOUT_SECONDS)
             opening.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await opening
@@ -2995,7 +2996,7 @@ async def test_worker_cancelled_startup_releases_partial_resources(
     task = asyncio.create_task(
         runtime.run_browser_call("binding", lambda _: BrowserSession(execute, browser.aclose), [], {}),
     )
-    await asyncio.wait_for(adapter.reached.wait(), timeout=_PHASE_WAIT_SECONDS)
+    await asyncio.wait_for(adapter.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     task.cancel()
     if phase == "driver_start":
         await asyncio.sleep(0)
@@ -3141,7 +3142,7 @@ async def test_repeated_start_cancellation_keeps_cleanup_owned_until_runtime_clo
     task = asyncio.create_task(
         runtime.run_browser_call("binding", lambda _: BrowserSession(execute, close_browser), [], {}),
     )
-    await asyncio.wait_for(adapter.reached.wait(), timeout=_PHASE_WAIT_SECONDS)
+    await asyncio.wait_for(adapter.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     task.cancel()
     await asyncio.sleep(0)
     task.cancel()
@@ -3197,7 +3198,7 @@ async def test_established_browser_teardown_survives_repeated_cancellation(
     else:
         operation = runtime.run_browser_call("replacement", factory, [], {"action": "status"})
     task = asyncio.create_task(operation)
-    await asyncio.wait_for(adapters[0].reached.wait(), timeout=_PHASE_WAIT_SECONDS)
+    await asyncio.wait_for(adapters[0].reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     try:
         for _ in range(3):
             task.cancel()
@@ -3235,7 +3236,7 @@ async def test_cancelled_profile_stop_blocks_replacement_until_resources_exit(
     await browser.browser("start")
     old.pause_at = phase
     stopping = asyncio.create_task(browser.browser("stop"))
-    await asyncio.wait_for(old.reached.wait(), timeout=_PHASE_WAIT_SECONDS)
+    await asyncio.wait_for(old.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     restarting = asyncio.create_task(browser.browser("start"))
     try:
         for _ in range(3):
@@ -3321,7 +3322,7 @@ async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replaceme
         old.checkpoint = checkpoint
         old.pause_at = phase
         restarting = asyncio.create_task(browser.browser("start"))
-        await asyncio.wait_for(old.reached.wait(), timeout=_PHASE_WAIT_SECONDS)
+        await asyncio.wait_for(old.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         replacement = asyncio.create_task(browser.browser("start"))
         try:
             for _ in range(3):

@@ -68,6 +68,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     FakeOutbox,
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -108,12 +109,10 @@ pytestmark = pytest.mark.asyncio
 _ROOM_ID = "!room:localhost"
 _AGENT_USER_ID = "@agent:localhost"
 _SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
-# How long an await that must finish on its own is given. Reached only when it is blocked, which is the
-# failure, so a loaded host cannot fail a correct implementation.
-_MUST_FINISH_SECONDS = 10.0
-# The cleanup window an orderly shutdown drain gives work that finishes on its own. The terminal publication's
-# journal writes and the recovery proof can take over 0.4 s on a loaded host, and the drain returns once they
-# finish.
+# The drain timer the orderly shutdown tests set, not a hang bound: it sets both the wait for the response to finish
+# and the cleanup window after the cancel. The terminal publication's journal writes and the recovery proof can take
+# over 0.4 s on a loaded host. The drain returns as soon as that work finishes, except in the repeated-cancel test,
+# whose publication waits for the cancel sent after the first window and so spends that whole window on every run.
 _SHUTDOWN_DRAIN_WINDOW_SECONDS = 2.0
 
 
@@ -2157,11 +2156,11 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
     ordinary_reads = tuple(asyncio.create_task(backend.read(block_ordinary_read)) for _ in range(ordinary_capacity))
     proof: asyncio.Task[bool] | None = None
     try:
-        assert await asyncio.to_thread(ordinary_started.wait, _MUST_FINISH_SECONDS), (
+        assert await asyncio.to_thread(ordinary_started.wait, SETTLE_TIMEOUT_SECONDS), (
             "ordinary journal reads did not saturate"
         )
         proof = asyncio.create_task(bot._response_recovery_ready(turn))
-        ready = await asyncio.wait_for(asyncio.shield(proof), timeout=_MUST_FINISH_SECONDS)
+        ready = await asyncio.wait_for(asyncio.shield(proof), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         release_ordinary.set()
         await asyncio.gather(*ordinary_reads)

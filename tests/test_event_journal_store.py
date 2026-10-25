@@ -81,7 +81,7 @@ from mindroom.interactive_models import InteractivePrompt
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
-from tests.conftest import postgres_journal_schema_url
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, postgres_journal_schema_url
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import pause_shown_reply, paused_for_approval, reply_shown_for_approval
@@ -134,9 +134,6 @@ _CONTENDED_CLAIM_WAIT_SECONDS = 0.5
 # which is why it is small: an implementation that releases early gets there in
 # microseconds, so no plausible machine turns a real failure into a pass.
 _MUST_NOT_FINISH_SECONDS = 0.25
-# How long an await that must finish on its own is given. Reached only when it is
-# blocked, which is the failure, so a loaded host cannot fail a correct backend.
-_MUST_FINISH_SECONDS = 5.0
 # How long a worker thread waits to be let go. Never reached unless the test is
 # already failing, so it only bounds the damage.
 _WORKER_WAIT_SECONDS = 5.0
@@ -9331,7 +9328,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         await asyncio.gather(*(started.wait() for started in workers_started))
         closing = asyncio.create_task(backend.close())
         try:
-            finished, _ = await asyncio.wait({closing}, timeout=_MUST_FINISH_SECONDS)
+            finished, _ = await asyncio.wait({closing}, timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
             release_workers.set()
             await asyncio.gather(*blockers)

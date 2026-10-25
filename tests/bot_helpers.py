@@ -49,6 +49,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
@@ -226,14 +227,13 @@ async def _run_orchestrator_start_until_ready(
     ):
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
-            # Startup finishes on its own; the bound only turns a hang into a failure before pytest's timeout.
-            await asyncio.wait_for(ready.wait(), timeout=10.0)
+            await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             if wait_for_startup_maintenance:
                 maintenance_task = orchestrator._startup_maintenance.task
                 assert maintenance_task is not None
                 await maintenance_task
             await orchestrator.stop()
-            await asyncio.wait_for(runtime_task, timeout=10.0)
+            await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
             if not runtime_task.done():
                 runtime_task.cancel()

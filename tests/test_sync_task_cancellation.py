@@ -86,6 +86,7 @@ from tests.bot_helpers import make_test_agent_bot
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     install_personal_room_shutdown_mock,
@@ -2799,17 +2800,16 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
-            # Startup writes the event journal before it starts the sync loops, which a loaded host can slow past a second.
-            await asyncio.wait_for(sync_tasks_started.wait(), timeout=10.0)
+            await asyncio.wait_for(sync_tasks_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert set(orchestrator._sync_tasks) == {"router", "general"}
-            await asyncio.wait_for(orchestrator._runtime_ready_event.wait(), timeout=10.0)
+            await asyncio.wait_for(orchestrator._runtime_ready_event.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             await asyncio.wait(orchestrator._sync_tasks.values())
             # Startup is over and the first generation has exited; give an early exit time to show.
             await asyncio.wait({runtime_task}, timeout=0.1)
             assert not runtime_task.done()
 
             await orchestrator.stop()
-            await asyncio.wait_for(runtime_task, timeout=10.0)
+            await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
             if not runtime_task.done():
                 runtime_task.cancel()

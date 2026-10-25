@@ -4633,7 +4633,7 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(
 
     await runtime.start()
     _stored_run(store, runtime_paths)
-    await asyncio.wait_for(recovered.wait(), timeout=10.0)
+    await asyncio.wait_for(recovered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
     await runtime.shutdown()
 
