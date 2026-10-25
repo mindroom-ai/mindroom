@@ -109,7 +109,7 @@ def _message_content(message: Message) -> str | list[Any] | None:
 def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str]) -> dict[str, Any]:
     values: dict[str, Any] = {
         "role": role_map.get(message.role, message.role),
-        "content": _message_content(message),
+        "content": message.content,
         "name": message.name,
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
