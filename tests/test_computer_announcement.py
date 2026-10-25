@@ -122,6 +122,8 @@ async def _call(
     toolkit: Toolkit,
     function_name: str,
     middleware: Sequence[ToolMiddleware | None],
+    *,
+    failed: bool = False,
     **arguments: object,
 ) -> object:
     """Run one call of the toolkit through the loop's tool executor and the given middleware chain."""
@@ -132,7 +134,7 @@ async def _call(
         ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
         middleware=[item for item in middleware if item is not None],
     )
-    assert not outcome.is_error, outcome.content
+    assert outcome.is_error is failed, outcome.content
     return outcome.content
 
 
@@ -333,6 +335,7 @@ async def test_announcement_runs_inside_the_tool_hook_policy(
             toolkit,
             "browser_control",
             [bridge, _middleware(toolkit, "browser", config, runtime_paths)],
+            failed=True,
             action="open",
         )
 

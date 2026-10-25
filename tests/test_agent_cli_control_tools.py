@@ -294,7 +294,8 @@ async def test_hidden_delegation_uses_native_child_owner(
             ),
         )
     receipt = await owner.get_call(str(call_id))
-    assert receipt["status"] == "completed", receipt
+    # A refused delegation answers as a failed call.
+    assert receipt["status"] == ("completed" if allowed else "failed"), receipt
     assert len(children) == int(allowed)
     if allowed:
         assert receipt["outcome"].startswith("child done\n\nDelegation")
@@ -413,7 +414,8 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
 
     assert asked == [str(call_id)]
     assert [child.task for child in children] == (["a task nobody approved"] if approved else [])
-    assert receipt["status"] == "completed", receipt
+    # The requester's denial answers as a failed call.
+    assert receipt["status"] == ("completed" if approved else "failed"), receipt
     await owner.close()
 
 

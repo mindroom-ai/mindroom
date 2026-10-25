@@ -59,13 +59,12 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
-from mindroom.tool_system.invocation import ToolOutcome
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
 from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
 from tests.conftest import install_model_providers, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer

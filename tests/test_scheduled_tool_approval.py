@@ -40,6 +40,14 @@ from mindroom.event_journal import (
     approval_arguments_digest,
     scheduled_call_run_id,
 )
+from mindroom.hooks import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    HookRegistry,
+    ToolAfterCallContext,
+    ToolBeforeCallContext,
+    hook,
+)
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
@@ -64,6 +72,7 @@ from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
     handle_card_response_for_test,
@@ -78,6 +87,7 @@ from tests.reply_span_helpers import paused_for_approval
 from tests.scheduling_helpers import joined_member_state
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
+from tests.test_tool_hooks import _plugin
 from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
@@ -1985,6 +1995,52 @@ async def test_live_function_runs_once_under_the_runs_tool_call_policy(
         assert isinstance(repeat, str)
         assert "already used" in repeat
         assert len(runs) == 1
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_decline_text(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The runner's own caller and its after-call hooks receive the decline's text, never the policy's failed outcome."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    observed: list[tuple[str, object, bool]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        if ctx.tool_name == "post_slack_message":
+            ctx.decline("Slack is paused")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def observe(ctx: ToolAfterCallContext) -> None:
+        observed.append((ctx.tool_name, ctx.result, ctx.blocked))
+
+    policy = build_tool_hook_middleware(
+        HookRegistry.from_plugins([_plugin("policy", [decline, observe])]),
+        _AGENT,
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
+    agent = _live_agent(runs, middleware=(policy,))
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, agent)
+
+        declined = (
+            "[TOOL CALL DECLINED]\n"
+            "Tool: post_slack_message\n"
+            "Reason: Slack is paused\n\n"
+            "Adjust your approach — try a different tool or different arguments."
+        )
+        assert result == declined
+        assert runs == []
+        assert observed == [("post_slack_message", declined, True), ("run_scheduled_call", declined, False)]
     finally:
         await manager.shutdown()
 

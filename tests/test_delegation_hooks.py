@@ -193,6 +193,13 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
         assert "TOOL CALL DECLINED" in observed.result
         assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
         assert child.requests == []
+        # The parent reads the decline as a failed call, which Claude and Gemini mark as one.
+        [declined] = [message for message in parent.requests[-1].messages if message.role == "tool"]
+        assert (declined.tool_call_id, declined.content, declined.tool_call_error) == (
+            "delegate",
+            observed.result,
+            True,
+        )
     elif outcome == "approved":
         assert "Child done" in observed.result
     else:

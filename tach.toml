@@ -5482,6 +5482,7 @@ depends_on = [
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_calls",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
 ]
 
