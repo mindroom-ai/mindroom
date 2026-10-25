@@ -29,6 +29,7 @@ from mindroom.llm.errors import MALFORMED_TOOL_CALL, ModelSafeguardRefusal, Prov
 from mindroom.llm.media import Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
+from mindroom.providers import names
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.gemini.adapter import GeminiProvider
@@ -297,6 +298,17 @@ def test_config_accepts_exactly_the_providers_the_registry_builds() -> None:
     claude_routes = frozenset(get_args(ClaudeRouteKind.__value__))
 
     assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"google", "ollama", "synthetic"} == PROVIDER_ROUTES
+
+
+def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_accepts() -> None:
+    """The dashboard tests pin its provider list to this fixture, so the dashboard offers no provider config rejects."""
+    fixture_path = (
+        Path(__file__).resolve().parents[2] / "frontend" / "src" / "test" / "fixtures" / "modelProviders.json"
+    )
+
+    assert json.loads(fixture_path.read_text(encoding="utf-8")) == sorted(
+        PROVIDER_ROUTES | set(names._PROVIDER_ALIASES),
+    )
 
 
 def test_the_model_in_use_is_logged_with_its_effective_id(runtime_paths: RuntimePaths) -> None:
