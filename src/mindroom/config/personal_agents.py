@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
-from mindroom.constants import tracking_dir
+from mindroom.constants import AGENT_NAME_PATTERN, tracking_dir
 from mindroom.durable_write import write_json_file_durable
 
 if TYPE_CHECKING:
@@ -24,8 +24,6 @@ if TYPE_CHECKING:
 
 _USERNAME_PLACEHOLDER = "{username}"
 _PLACEHOLDER_PATTERN = re.compile(r"\{(user|username|user_display_name)\}")
-# Keep synchronized with config.main._AGENT_NAME_PATTERN; this module cannot import config.main.
-_AGENT_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_]+")
 _MATRIX_LOCALPART_PATTERN = re.compile(r"[a-z0-9._=/-]+")
 _MAX_USERNAME_LENGTH = 40
 _MAX_DISPLAY_NAME_LENGTH = 100
@@ -68,9 +66,15 @@ class PersonalAgentTemplateConfig(BaseModel):
         description="Per-user agent field overrides keyed by concrete Matrix user ID; each replaces the template field",
     )
 
-    def name_pattern(self, key: str) -> str:
-        """Return the agent key pattern, defaulting to '<template key>_{username}'."""
-        return _name_pattern(self.name, key)
+    def agent_name(self, key: str, username: str) -> str:
+        """Render the agent key for one `{username}`, by default '<template key>_<username>'."""
+        return _name_pattern(self.name, key).replace(_USERNAME_PLACEHOLDER, username)
+
+    def rendered_matrix_username(self, username: str) -> str | None:
+        """Render the custom Matrix localpart for one `{username}`, or None for the usual account."""
+        if self.matrix_username is None:
+            return None
+        return self.matrix_username.replace(_USERNAME_PLACEHOLDER, username)
 
     @field_validator("name")
     @classmethod
@@ -80,7 +84,7 @@ class PersonalAgentTemplateConfig(BaseModel):
         if value.count(_USERNAME_PLACEHOLDER) != 1:
             msg = f"name must contain {_USERNAME_PLACEHOLDER} exactly once"
             raise ValueError(msg)
-        if not _AGENT_NAME_PATTERN.fullmatch(value.replace(_USERNAME_PLACEHOLDER, "x")):
+        if not AGENT_NAME_PATTERN.fullmatch(value.replace(_USERNAME_PLACEHOLDER, "x")):
             msg = "name must render to letters, digits, and underscores only"
             raise ValueError(msg)
         return value

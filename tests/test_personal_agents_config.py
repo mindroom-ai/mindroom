@@ -179,10 +179,11 @@ def test_template_accepts_custom_names_and_name_pattern() -> None:
     template = PersonalAgentTemplateConfig.model_validate(
         {"name": "{username}_mind", "matrix_username": "{username}.mind", "agent": {"display_name": "Mind"}},
     )
-    assert template.name_pattern("mind") == "{username}_mind"
-    assert PersonalAgentTemplateConfig.model_validate({"agent": {"display_name": "Mind"}}).name_pattern("mind") == (
-        "mind_{username}"
-    )
+    assert template.agent_name("mind", "alice") == "alice_mind"
+    assert template.rendered_matrix_username("alice") == "alice.mind"
+    default = PersonalAgentTemplateConfig.model_validate({"agent": {"display_name": "Mind"}})
+    assert default.agent_name("mind", "alice") == "mind_alice"
+    assert default.rendered_matrix_username("alice") is None
 
 
 def test_template_rejects_private_and_self_config_agent() -> None:

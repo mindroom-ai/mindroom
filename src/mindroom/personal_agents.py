@@ -18,12 +18,11 @@ from mindroom.config.personal_agents import (
     personal_agent_username,
     read_personal_agent_roster,
 )
-from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
+from mindroom.constants import RESERVED_ENTITY_NAMES, runtime_matrix_homeserver
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import (
-    INTERNAL_USER_AGENT_NAME,
     ManagedAccountProvisioningRequest,
     create_agent_user,
     preflight_managed_account_provisioning,
@@ -34,24 +33,7 @@ from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
-    from mindroom.config.personal_agents import PersonalAgentTemplateConfig
     from mindroom.constants import RuntimePaths
-
-_USERNAME_PLACEHOLDER = "{username}"
-# Keep synchronized with config.main._RESERVED_ENTITY_NAMES.
-_RESERVED_NAMES = frozenset({ROUTER_AGENT_NAME, INTERNAL_USER_AGENT_NAME, "_shared"})
-
-
-def _matrix_username(
-    template_config: PersonalAgentTemplateConfig,
-    username: str,
-    runtime_paths: RuntimePaths,
-) -> str | None:
-    """Render a custom Matrix username, or None for the usual mindroom_<agent key> account."""
-    if template_config.matrix_username is None:
-        return None
-    rendered = template_config.matrix_username.replace(_USERNAME_PLACEHOLDER, username)
-    return namespaced_username_localpart(rendered, runtime_paths)
 
 
 def is_mindroom_account_id(user_id: str, runtime_paths: RuntimePaths) -> bool:
@@ -100,7 +82,7 @@ def _new_roster_entry(
         *config.agents,
         *config.teams,
         *config.personal_agents,
-        *_RESERVED_NAMES,
+        *RESERVED_ENTITY_NAMES,
         *(entry.agent_name for entry in roster),
     }
     slug = personal_agent_username(user_id)
@@ -108,8 +90,9 @@ def _new_roster_entry(
     # Someone on another server must not claim a local person's plain name first.
     local = user_id.partition(":")[2] == runtime_matrix_domain(runtime_paths)
     for username in (slug, hashed) if local else (hashed,):
-        agent_name = template_config.name_pattern(template).replace(_USERNAME_PLACEHOLDER, username)
-        matrix_username = _matrix_username(template_config, username, runtime_paths)
+        agent_name = template_config.agent_name(template, username)
+        rendered = template_config.rendered_matrix_username(username)
+        matrix_username = None if rendered is None else namespaced_username_localpart(rendered, runtime_paths)
         if agent_name in taken_names or _localpart_taken(agent_name, matrix_username, runtime_paths):
             continue
         return PersonalAgentRosterEntry(
