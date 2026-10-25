@@ -548,7 +548,7 @@ async def _complete_approved_child_tools(
 ) -> None:
     """Publish each resumed tool's result, read from its exact approved attempt, in the parent's live trace."""
     for pending_tool in pending_tools:
-        call_id = str(pending_tool["tool_call_id"])
+        call_id = ToolExecution.from_dict(pending_tool).tool_call_id
         source = tool_sources[call_id]
         response = await read_child_run(source.child, config, runtime_paths)
         for tool in (response.tools or ()) if response is not None else ():

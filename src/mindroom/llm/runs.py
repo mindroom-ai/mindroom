@@ -105,7 +105,9 @@ class ToolExecution:
         # Ollama's calls so, since Ollama sends no call ids; the ``unknown`` placeholder that ``RunRequirement``
         # reads for a requirement stored without its tool execution was written back so too.
         # Last legacy release: v2026.4.35, the last release on Agno 2.4.7; v2026.4.36 moved to Agno 2.5.13, which
-        # gives an id-less call a uuid4 id. The placeholder is unversioned external input.
+        # gives an id-less call a uuid4 id. For the ``unknown`` placeholder, v2026.10.512, whose typed model wrote it
+        # back with a null id; the next release writes its derived id. The requirements it stands in for, stored
+        # without a tool execution, are unversioned external input.
         # Handling: the execution reads with an id derived from its stored keys and values, so every read of its
         # row gives the same id and its readers need no missing-id case; two entries storing exactly the same keys
         # and values share it. A row written back stores that id, and every other key reads as stored.

@@ -545,17 +545,18 @@ def paused_attempt_from_response(
         raise RuntimeError(msg)
     delegation = DelegationState.from_metadata(record.metadata)
     if delegation.pending_tools:
+        pending_tools = [ToolExecution.from_dict(tool) for tool in delegation.pending_tools]
         if delegation.pending_child_id is not None:
             # A source that recorded no toolkit leaves its call unowned, as a missing key does.
             toolkit_owners = {
-                (source.child.child_agent_name, str(tool["tool_name"])): source.toolkit_name
-                for tool in delegation.pending_tools
-                if (source := delegation.pending_tool_sources.get(str(tool["tool_call_id"]))) is not None
+                (source.child.child_agent_name, tool.tool_name): source.toolkit_name
+                for tool in pending_tools
+                if (source := delegation.pending_tool_sources.get(tool.tool_call_id)) is not None
                 and source.toolkit_name is not None
             }
         paused = _paused_attempt_from_pause(
             toolkit_owners=toolkit_owners,
-            tools=[ToolExecution.from_dict(tool) for tool in delegation.pending_tools],
+            tools=pending_tools,
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
             session_id=record.session_id,
             run_id=record.run_id,

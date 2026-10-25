@@ -278,7 +278,7 @@ def drive_team_delegations(
     return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
-def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str | None]:
+def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str]:
     """Return the slot that shows the call ``requirement`` waits on and the call's id there, by ``pending_call_slot``."""
     member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
     if member_id is None:

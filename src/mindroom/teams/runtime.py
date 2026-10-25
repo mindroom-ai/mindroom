@@ -237,9 +237,9 @@ class TeamDecisions:
     external_results: Mapping[TeamCallKey, str]
     consumed: set[TeamCallKey] = field(default_factory=set, init=False)
 
-    def take(self, member_id: str | None, call_ids: set[str | None]) -> _Decided:
+    def take(self, member_id: str | None, call_ids: set[str]) -> _Decided:
         """Return the decisions on ``member_id``'s calls among ``call_ids`` (None names the leader's own)."""
-        keys = {(member_id, call_id) for call_id in call_ids if call_id is not None}
+        keys = {(member_id, call_id) for call_id in call_ids}
         self.consumed |= keys
         return _Decided(
             approved=tuple(call for key, call in self.approved.items() if key in keys),
@@ -327,7 +327,7 @@ def _answer_delegations(
     # earlier, or a member completed in an earlier chained resume, never reaches the leader. Hand the leader every
     # member's result. Models would notice (#3075).
     text = "\n".join(["Member results after human-in-the-loop resolution:", *results])
-    answered: set[str | None] = set()
+    answered: set[str] = set()
     for tool in record.tools or ():
         if any(waited_on_member(tool, member) for member in resumed):
             tool.result = text

@@ -102,7 +102,7 @@ async def _collect_agent_continuation(
     """
     finished = TerminalRecord(RunRecord)
     saw_content_delta = False
-    completed_ids: set[str | None] = set()
+    completed_ids: set[str] = set()
     await presentation.publish(progress)
     async with closing_async_stream(events):
         async for event in events:
