@@ -213,9 +213,8 @@ class ResumeRunner:
             plan=self._replay_plan,
             user_id=self.user_id,
             hooks=self._hooks,
-            # TODO(simplify): A failed or cancelled resume stores its terminal row over the paused run, so its approval
-            # can no longer be retried. Keep the paused row until the resume completes or pauses again. Users and
-            # stored data would notice: a failed approval stays answerable (#3075).
+            # A failed or cancelled resume stores its terminal row over the paused run on purpose: the resume ends its
+            # approval anyway (``_store_interrupted`` in ``agent_loop/run.py``).
             persist=persist_into(None, self.storage),
             request_template=with_native_history(build.request_template, native),
             model_name=self.model_name,

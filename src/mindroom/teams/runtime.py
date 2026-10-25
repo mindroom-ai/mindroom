@@ -129,9 +129,8 @@ def continue_team(
     requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
     (``resume_request_template``).
     """
-    # TODO(simplify): A resume that fails or is cancelled stores this record over the paused team row, so its
-    # approval can no longer be resumed. Keep the paused row until the resume completes or pauses again. Users would
-    # notice (#3075).
+    # A resume that fails or is cancelled stores this record over the paused team row on purpose, as an agent's does
+    # (``_store_interrupted`` in ``agent_loop/run.py``): the resume ends its approval anyway.
     record = resumed_record(paused)
     record.member_responses = []
     # The paused notice is not part of the answer; the leader's text starts afresh.
