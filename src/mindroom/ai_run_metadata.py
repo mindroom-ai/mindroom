@@ -9,7 +9,7 @@ from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunStatus
-from mindroom.model_usage import ResponseContext, response_context, uncached_input_tokens_from_counts
+from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -74,7 +74,7 @@ class _ReplyUsage:
         return wire
 
 
-def _build_context_payload(context: ResponseContext | None, model_config: ModelConfig | None) -> dict[str, Any] | None:
+def _build_context_payload(context: ContextTokens | None, model_config: ModelConfig | None) -> dict[str, Any] | None:
     if context is None or model_config is None or model_config.context_window is None:
         return None
     context_window = model_config.context_window
@@ -149,14 +149,14 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
-def _reply_context(
+def _reply_context_tokens(
     run: AnyRunRecord | None,
     prepared_history: PreparedHistoryState | None,
     *,
     provider: str | None,
     configured_provider: str | None,
     model_id: str | None,
-) -> ResponseContext | None:
+) -> ContextTokens | None:
     """Return the context the run's last own model request reported, else the pre-flight estimate of its history.
 
     The estimate stands in when the run holds no request its model answered, and when the last one reported no usage
@@ -165,7 +165,7 @@ def _reply_context(
     newest_first = reversed(run.messages) if run is not None else ()
     last = next((message for message in newest_first if is_own_model_message(message)), None)
     if last is not None:
-        reported = response_context(
+        reported = message_context_tokens(
             last,
             provider=provider,
             configured_provider=configured_provider,
@@ -174,7 +174,7 @@ def _reply_context(
         if reported is not None:
             return reported
     estimate = prepared_history.prepared_context_tokens if prepared_history is not None else None
-    return None if estimate is None else ResponseContext(estimate)
+    return None if estimate is None else ContextTokens(estimate)
 
 
 def _uncached_input_tokens(
@@ -274,7 +274,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     )
     if cost is not None:
         payload["cost"] = {"usd": format_cost_usd(cost)}
-    context = _reply_context(
+    context = _reply_context_tokens(
         context_run,
         prepared_history,
         provider=provider,

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class ResponseContext:
+class ContextTokens:
     """A request context's size in tokens and its cache reads and writes: one response's report, or an estimate.
 
     A cache counter is None when the provider did not report it, and always for an estimate. A zero cache counter
@@ -97,18 +97,18 @@ def uncached_input_tokens_from_counts(
     return max(0, input_tokens - (cache_read_tokens or 0))
 
 
-def response_context(
+def message_context_tokens(
     message: Message,
     *,
     provider: str | None,
     configured_provider: str | None,
     model_id: str | None,
-) -> ResponseContext | None:
+) -> ContextTokens | None:
     """Return the request context one response reported, or None when its usage is absent or sums retried attempts."""
     if isinstance(message.provider_data, dict) and message.provider_data.get("mindroom_aggregate_usage") is True:
         # The counters sum several retried attempts, so they describe no single request's context.
         return None
-    return usage_context(
+    return metrics_context_tokens(
         message.metrics,
         provider=provider,
         configured_provider=configured_provider,
@@ -116,13 +116,13 @@ def response_context(
     )
 
 
-def usage_context(
+def metrics_context_tokens(
     metrics: MessageMetrics,
     *,
     provider: str | None,
     configured_provider: str | None,
     model_id: str | None,
-) -> ResponseContext | None:
+) -> ContextTokens | None:
     """Return the request context one request's usage reports, or None when it reported no usage.
 
     A Claude response's ``context_usage`` holds its final iteration's counters, each one reported, a zero one too:
@@ -150,7 +150,7 @@ def usage_context(
     # A zero size means the provider reported nothing.
     if not tokens:
         return None
-    return ResponseContext(tokens, cache_read_tokens, cache_write_tokens)
+    return ContextTokens(tokens, cache_read_tokens, cache_write_tokens)
 
 
 def _count(counts: Mapping[str, object], key: str) -> int | None:

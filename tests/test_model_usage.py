@@ -5,31 +5,31 @@ from __future__ import annotations
 
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.model_usage import ResponseContext, response_context, uncached_input_tokens_from_counts
+from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
 
 
 def _assistant(metrics: MessageMetrics) -> Message:
     return Message(role="assistant", content="ok", metrics=metrics)
 
 
-def test_response_context_adds_cache_tokens_only_where_reported_outside_input() -> None:
+def test_message_context_tokens_add_cache_tokens_only_where_reported_outside_input() -> None:
     anthropic = _assistant(
         MessageMetrics(tokens=TokenCounts(input_tokens=10, cache_read_tokens=90, cache_write_tokens=5)),
     )
     openai = _assistant(MessageMetrics(tokens=TokenCounts(input_tokens=100, cache_read_tokens=90)))
 
-    assert response_context(
+    assert message_context_tokens(
         anthropic,
         provider="Anthropic",
         configured_provider="anthropic",
         model_id="m",
-    ) == ResponseContext(105, cache_read_tokens=90, cache_write_tokens=5)
-    assert response_context(
+    ) == ContextTokens(105, cache_read_tokens=90, cache_write_tokens=5)
+    assert message_context_tokens(
         openai,
         provider="OpenAI",
         configured_provider="openai",
         model_id="m",
-    ) == ResponseContext(100, cache_read_tokens=90)
+    ) == ContextTokens(100, cache_read_tokens=90)
 
 
 def test_native_final_iteration_context_wins_over_billed_counters() -> None:
@@ -40,17 +40,17 @@ def test_native_final_iteration_context_wins_over_billed_counters() -> None:
         ),
     )
 
-    assert response_context(
+    assert message_context_tokens(
         message,
         provider="Anthropic",
         configured_provider="anthropic",
         model_id="m",
-    ) == ResponseContext(100, cache_read_tokens=60, cache_write_tokens=0)
+    ) == ContextTokens(100, cache_read_tokens=60, cache_write_tokens=0)
 
 
-def test_response_without_reported_usage_has_no_context() -> None:
+def test_response_without_reported_usage_has_no_context_tokens() -> None:
     assert (
-        response_context(
+        message_context_tokens(
             _assistant(MessageMetrics()),
             provider="OpenAI",
             configured_provider="openai",

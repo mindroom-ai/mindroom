@@ -19,7 +19,7 @@ from mindroom.constants import llm_request_log_dir
 from mindroom.llm.provider import ReportedUsage, TurnCompleted
 from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
-from mindroom.model_usage import usage_context
+from mindroom.model_usage import metrics_context_tokens
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -141,7 +141,7 @@ def _log_usage(
         counts = usage.tokens
         # The context fields describe what the request held, which after a Claude native compaction is only the final
         # iteration; the counters bill every iteration.
-        held = usage_context(
+        held = metrics_context_tokens(
             usage,
             provider=identity.provider,
             configured_provider=log.configured_provider,
