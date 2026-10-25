@@ -67,10 +67,12 @@ class RunContext:
     ``session`` is the session the run belongs to, whose id the run's record and tool calls carry and whose
     ``session_state`` every tool call of the run shares and may change in place: the stored session, which the store
     writes back, or an ``UnstoredSession`` for a run no store keeps. ``parent_run_id`` names the run that started
-    this one, as a team run starts its member runs. ``metadata`` is stored on the run record. ``history_scope`` is the
-    stored conversation a team run and its member runs belong to, which tools that address history by scope read;
-    None for an agent's own run, whose scope is its agent's. ``model_name`` is the configured model the run resolved,
-    which its tool calls carry; a team's member runs carry the leader's.
+    this one, as a team run starts its member runs. ``metadata`` is the turn's run metadata, which the run's tool calls
+    read; a team run stores it on its record, and an agent run stores only what ``run_agent`` is given, so a member
+    run stores none of its team's. ``history_scope`` is the stored conversation a team run and its member runs belong
+    to, which tools that address history by scope read; None for an agent's own run, whose scope is its agent's.
+    ``model_name`` is the configured model the run resolved, which its tool calls carry; a team's member runs carry
+    the leader's.
     """
 
     run_id: str

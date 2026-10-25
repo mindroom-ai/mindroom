@@ -16,7 +16,7 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
 from mindroom.agent_loop.tools import PreparedTools
@@ -72,9 +72,12 @@ def run_agent(
     persist: Persist[RunRecord] | None,
     request_template: ModelRequest,
     hooks: LoopHooks = NO_HOOKS,
+    metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[RunEvent]:
     """Run one agent turn: the spec's system message, then ``run_input`` as the history subsystem built it.
 
+    ``metadata`` is stored on the run's record; the run's tool calls read ``ctx.metadata``, which a team's member runs
+    share with the team run while their records store none of it.
     The returned stream yields the loop's events and finally ``RunFinished`` with the ``COMPLETED`` or ``PAUSED``
     record, after ``persist`` stored it. Cancellation stores a ``CANCELLED`` record and re-raises; closing the stream
     before it finished stores one before ``aclose`` returns; any other exception stores an ``ERROR`` record whose
@@ -90,7 +93,7 @@ def run_agent(
         model=identity.id,
         model_provider=identity.provider,
         metrics=RunMetrics(),
-        metadata=ctx.metadata,
+        metadata=metadata,
         agent_id=spec.id,
         agent_display_name=spec.name,
     )
