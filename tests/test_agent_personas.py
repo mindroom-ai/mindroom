@@ -15,7 +15,7 @@ from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
-from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -251,6 +251,18 @@ def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: P
 
     with pytest.raises(PersonaError, match=r"'file\.save_file' is not available to you"):
         _child(runtime, ["file.read_file", "file.save_file"])
+
+
+def test_persona_names_a_function_its_caller_offers_but_cannot_pause_for(tmp_path: Path) -> None:
+    """A named function only approval hiding removes, for a caller that cannot resume a paused run, stops nothing."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    runtime.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="save_file", action="require_approval")],
+    )
+
+    build = _child(runtime, ["file.read_file", "file.save_file"], supports_native_tool_approval=False)
+
+    assert _function_names(build) == ["read_file"]
 
 
 @pytest.mark.parametrize(

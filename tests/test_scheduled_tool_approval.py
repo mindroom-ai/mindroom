@@ -1071,10 +1071,11 @@ class _SlackTools(Toolkit):
 class _LiveRun:
     """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy.
 
-    ``toolkits`` pairs each toolkit with the authored toolkit the run offers its functions from.
+    ``toolkits`` pairs each toolkit with the authored toolkit the run offers its functions from, or None for a toolkit
+    generated for the agent.
     """
 
-    toolkits: tuple[tuple[Toolkit, str], ...]
+    toolkits: tuple[tuple[Toolkit, str | None], ...]
     middleware: tuple[ToolMiddleware, ...] = ()
 
     async def call(self, function_name: str, /, **arguments: object) -> object:
@@ -2599,6 +2600,30 @@ async def test_scheduler_functions_are_never_scheduled_calls() -> None:
                     execute_at="2030-01-02T09:00:00-05:00",
                     description="Run the runner",
                 )
+
+
+@pytest.mark.asyncio
+async def test_a_function_generated_for_the_agent_is_never_a_scheduled_call() -> None:
+    """A function no configured toolkit offers, such as the knowledge search, names no toolkit a stored call could."""
+    context = _tool_context(_gated_config())
+
+    def search_knowledge_base(query: str) -> str:
+        """Search the knowledge base."""
+        return query
+
+    run = _LiveRun(((Toolkit(name="search_knowledge_base", tools=[search_knowledge_base]), None),))
+    with (
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(RuntimeError, match="not one of this agent's tools"),
+    ):
+        await run.call(
+            "schedule_tool_call",
+            tool_name="search_knowledge_base",
+            arguments_json='{"query": "handbook"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Search later",
+        )
 
 
 def test_outside_an_agent_run_no_call_can_be_stored() -> None:
