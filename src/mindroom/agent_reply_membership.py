@@ -470,7 +470,7 @@ def _replay_refresh_transitions(
     transitions: list[_LiveTransition],
 ) -> _AgentReplyMembershipSnapshot:
     """Return a refreshed candidate after the live transitions recorded while it queried Matrix."""
-    answered = {(room.room_key, room.room_id): room.raw_joined_user_ids for room in candidate.rooms}
+    answered = {(room.room_key, room.room_id): room for room in candidate.rooms}
     for transition in transitions:
         applied = _snapshot_after_transition(candidate, config, transition)
         if applied is not None:
@@ -487,7 +487,14 @@ def _replay_refresh_transitions(
     rooms: list[_GrantRoomMembership] = []
     for room in candidate.rooms:
         key = (room.room_key, room.room_id)
-        if not room.ready or room.raw_joined_user_ids <= answered[key]:
+        answer = answered.get(key)
+        if answer is None or not answer.ready:
+            # Replay never makes a row ready, so a row Matrix did not answer ready stays as it is.
+            rooms.append(room)
+        elif not room.ready:
+            # Only the control client's own departure makes an answered row unready.
+            rooms.append(_unready_room(room.room_key, room.room_id, reason="control_client_departed"))
+        elif room.raw_joined_user_ids <= answer.raw_joined_user_ids:
             rooms.append(room)
         elif key in published_ready_rooms:
             rooms.append(published_ready_rooms[key])
