@@ -534,7 +534,7 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
             or DelegationPendingTool(
                 child=child,
                 tool_call_id=str(tool.tool_call_id),
-                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, str(tool.tool_name))),
+                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, tool.tool_name)),
             ),
         )
         state.pending_requirements.append(RunRequirement(projected).to_dict())
@@ -1016,7 +1016,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # Bind this exact parent call and its presentation before resolving the target.
     tool = requirement.tool_execution
     tool_name = tool.tool_name
-    if not tool.tool_call_id or not tool_name:
+    if not tool.tool_call_id:
         msg = "Delegation requirement has no exact tool-call identity"
         raise RuntimeError(msg)
     requirement_key = delegation_card_id(requirement.member_agent_id, tool.tool_call_id)

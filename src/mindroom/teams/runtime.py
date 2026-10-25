@@ -184,7 +184,7 @@ def team_paused_content(record: TeamRunRecord) -> str:
     The only externally executed calls are the silent delegation calls, so a pause on delegations alone has no text.
     """
     parts = [
-        f"- {r.member_display_name or 'team'}: {r.tool_execution.tool_name or 'unknown'} requires confirmation"
+        f"- {r.member_display_name or 'team'}: {r.tool_execution.tool_name} requires confirmation"
         for r in record.requirements or ()
         if r.needs_confirmation
     ]

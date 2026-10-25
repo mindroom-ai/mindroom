@@ -17,7 +17,7 @@ class ReportedCall:
     """One tool call as its tool event reports it, fixed when the event is made; a run's record keeps the call itself."""
 
     tool_call_id: str | None
-    tool_name: str | None
+    tool_name: str
     tool_args: dict[str, Any] | None
     result: str | None = None
     is_error: bool | None = None

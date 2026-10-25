@@ -54,11 +54,11 @@ _STORED_TOOL_KEYS = {"is_error": "tool_call_error", "stop_after_call": "stop_aft
 class ToolExecution:
     """One tool call the model requested, with its outcome or pause state."""
 
-    # TODO(simplify): The call's id and name are optional though every writer sets them, so readers guard both. Make
-    # them required, the legacy requirement reader supplying values. Stored data would notice: a tool execution read
-    # without an id, such as that reader's placeholder, writes an id back instead of null.
+    # TODO(simplify): The call's id is optional though every writer sets it, so readers guard it. Make it required,
+    # the legacy requirement reader supplying a value. Stored data would notice: a tool execution read without an id,
+    # such as that reader's placeholder, writes an id back instead of null.
     tool_call_id: str | None = None
-    tool_name: str | None = None
+    tool_name: str
     tool_args: dict[str, Any] | None = None
     is_error: bool | None = None
     result: str | None = None

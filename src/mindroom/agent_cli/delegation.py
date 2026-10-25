@@ -30,9 +30,9 @@ def approval_calls_for_cli_pause(paused: PausedAttempt, agent_name: str) -> tupl
     return tuple(
         ApprovalCall(
             tool_call_id=str(tool.tool_call_id),
-            tool_name=str(tool.tool_name),
+            tool_name=tool.tool_name,
             invoking_agent=invoking_agent,
-            toolkit_name=paused.toolkit_owners.get((invoking_agent, str(tool.tool_name))),
+            toolkit_name=paused.toolkit_owners.get((invoking_agent, tool.tool_name)),
             arguments_digest=approval_arguments_digest(tool.tool_args),
             expires_at_ns=0,
         )

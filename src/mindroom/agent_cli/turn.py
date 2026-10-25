@@ -639,7 +639,7 @@ class LiveTurnTools(TurnToolBridge):
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
             for tool in result.tools:
                 child_toolkit = result.toolkit_owners.get(
-                    (result.approval_agent_name or self.catalog.runtime_context.agent_name, str(tool.tool_name)),
+                    (result.approval_agent_name or self.catalog.runtime_context.agent_name, tool.tool_name),
                 )
                 child_toolkits[str(tool.tool_call_id)] = child_toolkit
                 emit_cli_run_event(ToolStarted(tool.call), parent=parent, toolkit_name=child_toolkit)

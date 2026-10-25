@@ -165,13 +165,12 @@ class StreamingToolTracker:
                 pending_tool = self.pending_tools[pos]
                 if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
                     return pos
-        tool_name = call.tool_name or "tool"
         for pos in range(len(self.pending_tools) - 1, -1, -1):
             pending_tool = self.pending_tools[pos]
             if (
                 pending_tool.scope_key == scope_key
                 and pending_tool.tool_call_id is None
-                and pending_tool.tool_name == tool_name
+                and pending_tool.tool_name == call.tool_name
             ):
                 return pos
         return None
@@ -814,7 +813,7 @@ def format_tool_started_event(
     origin: ToolCallOrigin | None = None,
 ) -> tuple[str, ToolTraceEntry]:
     """Format a tool-call start into display text and trace metadata."""
-    text, trace = _format_tool_started(call.tool_name or "tool", _tool_args(call), tool_index=tool_index)
+    text, trace = _format_tool_started(call.tool_name, _tool_args(call), tool_index=tool_index)
     return text, _identified(trace, call, origin)
 
 
@@ -825,7 +824,7 @@ def format_tool_completed_event(
     origin: ToolCallOrigin | None = None,
 ) -> tuple[str, ToolTraceEntry]:
     """Format a tool-call completion into display text and trace metadata."""
-    text, trace = format_tool_combined(call.tool_name or "tool", _tool_args(call), call.result, tool_index=tool_index)
+    text, trace = format_tool_combined(call.tool_name, _tool_args(call), call.result, tool_index=tool_index)
     return text, _identified(trace, call, origin)
 
 

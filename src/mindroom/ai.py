@@ -461,9 +461,8 @@ def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool) ->
     if show_tool_calls and record.tools:
         tool_sections: list[str] = []
         for tool_index, tool in enumerate(record.tools, start=1):
-            tool_name = tool.tool_name or "tool"
             tool_args = tool.tool_args or {}
-            combined, _ = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
+            combined, _ = format_tool_combined(tool.tool_name, tool_args, tool.result, tool_index=tool_index)
             tool_sections.append(combined.strip())
         if tool_sections:
             response_parts.append("\n\n".join(tool_sections))
@@ -478,9 +477,8 @@ def _extract_tool_trace(record: AnyRunRecord) -> list[ToolTraceEntry]:
 
     trace: list[ToolTraceEntry] = []
     for tool in record.tools:
-        tool_name = tool.tool_name or "tool"
         tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-        _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
+        _, trace_entry = format_tool_combined(tool.tool_name, tool_args, tool.result)
         trace.append(trace_entry)
     return trace
 
