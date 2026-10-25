@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -81,7 +81,7 @@ def zoom_tools() -> type[ZoomTools]:
             client_id: str | None = None,
             client_secret: str | None = None,
             timeout: int = 30,
-            **kwargs: Any,  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
+            **kwargs: object,
         ) -> None:
             # AGNO_COMPAT: ZoomTools offers its OAuth access token to the model as a tool.
             # Reason: get_access_token returns the Server-to-Server bearer token for the whole Zoom account,
