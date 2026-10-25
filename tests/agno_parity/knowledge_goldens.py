@@ -3,8 +3,8 @@
 `tests/fixtures/agno_parity/README.md` (Knowledge goldens) describes the files.
 `tests/test_knowledge_goldens.py` compares what these functions compute with the goldens, and
 `tests.agno_parity.regenerate_goldens` rewrites `embedders.json` and `search.json` through the same functions.
-`rows.json` holds the Chroma rows Agno wrote, so it stays a read-only input: its `input` describes the bases every
-search runs over, and its rows are the collection the legacy-read test searches.
+`rows.json` holds the Chroma rows Agno wrote, so it stays a read-only input: its authored `input` holds the config
+and source files every refresh and search runs on, and its rows are the collection the legacy-read test searches.
 """
 
 from __future__ import annotations
@@ -318,7 +318,8 @@ async def _search_tool_output(knowledge: AgentKnowledge, query: str) -> str:
 async def regenerated_search(root: Path, embedder: ParityEmbedder) -> dict[str, Any]:
     """Return the search golden the owned search tool regenerates over the golden bases refreshed under ``root``.
 
-    Each search is the tool call of its agent: the documents it found, or the text it answered with, as its golden
+    The agents and their bases are ``rows.json``'s authored ``input``, which the refresh also reads. Each search is
+    the tool call of its agent: the documents it found, or the text it answered with, as its golden
     records. A search the golden marks ``embedding_fails`` runs with its query embedding failing. Distances that
     differ from the golden's only by Chroma's arithmetic keep the golden's value, so every machine regenerates the
     same file.
@@ -340,4 +341,4 @@ async def regenerated_search(root: Path, embedder: ParityEmbedder) -> dict[str, 
         authored = {key: search[key] for key in ("agent", "embedding_fails", "query") if key in search}
         searches.append({**authored, **found})
     embedder.failing = False
-    return sorted_keys({**golden, "searches": searches})
+    return sorted_keys({"searches": searches})
