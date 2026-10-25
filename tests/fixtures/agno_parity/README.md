@@ -20,7 +20,8 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 - `input.tool_jobs` installs `install_tool_job_execution` as agent construction does, and the harness answers the per-turn job checks (a background job runtime, execution resources, and which functions are managed calls), because `Function.from_dict` cannot carry the assembled toolkit those checks read.
 - `input.provider_tools_disabled` sends the request inside `without_provider_tools()`, as participation decisions and judgments do.
 - Goldens call Agno's `aresponse_stream`, the run loop's entry point, and stop after the first request completes.
-  The `output_limit_stop`, `structured_output`, `structured_output_nested`, and `tool_choice_none` scenarios were captured through `aresponse`, Agno's non-streaming path, except on Codex; since every owned request streams, they hold the streamed request the owned adapter sends and the same reply as a stream, with the parsed reply regenerated from it.
+  The `output_limit_stop`, `structured_output`, `structured_output_nested`, and `tool_choice_none` scenarios were captured through `aresponse`, Agno's non-streaming path, except on Codex; the owned adapters stream them, so they hold the streamed request the owned adapter sends and the same reply as a stream, with the parsed reply regenerated from it.
+  Groq's `structured_output` and `structured_output_nested` are the exception and keep their whole request and reply, because Groq does not stream structured output.
 - Every SDK request is answered at the httpx transport layer with `response_raw`, so the SDK clients production builds (MindRoom's pooled client, Agno's shared client, SDK-built clients) are unchanged.
 - Each golden must produce exactly one provider request.
 

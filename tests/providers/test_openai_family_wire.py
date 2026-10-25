@@ -349,6 +349,34 @@ async def test_a_groq_or_cerebras_call_keeps_the_id_its_server_sent(
     assert re.fullmatch(stored, call["id"])
 
 
+class _Packing(BaseModel):
+    item: str
+
+
+@pytest.mark.asyncio
+async def test_a_groq_request_for_structured_output_reads_the_whole_reply(tmp_path: Path) -> None:
+    """Groq does not stream structured output, so a request for it asks for the whole reply instead of a stream."""
+    completion = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "openai/gpt-oss-120b",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": '{"item": "coat"}'}, "finish_reason": "stop"},
+        ],
+        "usage": {**_USAGE, "queue_time": 0.011},
+    }
+    built = _Built(tmp_path, _DECISION_ROUTES["groq"][0], _json_reply(completion))
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], output_schema=_Packing))
+
+    body = built.body()
+    assert ("stream" in body, body["response_format"]) == (False, {"type": "json_object"})
+    assert (turn.content, turn.stop_reason) == ('{"item": "coat"}', "end")
+    tokens = turn.usage.tokens
+    assert (tokens.input_tokens, tokens.output_tokens, turn.usage.provider_metrics) == (42, 12, {"queue_time": 0.011})
+
+
 def _tool_call_reply(server_id: str | None) -> dict[str, Any]:
     """Return a Chat stream with one ``get_weather`` call under ``server_id``, or no id when it is None."""
     call: dict[str, Any] = {"index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from openai.types import CompletionUsage
-    from openai.types.chat import ChatCompletionChunk
+    from openai.types.chat import ChatCompletion, ChatCompletionChunk
     from pydantic import BaseModel
 
     from mindroom.llm.messages import Message
@@ -53,6 +53,9 @@ type _SDKEndpoint = Literal["chat", "responses"]
 
 # Groq Compound runs hosted tools on its own, which a decision that must not run tools cannot allow.
 _GROQ_COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compound-beta", "compound-beta-mini"})
+# Groq does not stream structured output (https://console.groq.com/docs/structured-outputs), so its requests for
+# structured output ask for the whole reply.
+_WHOLE_STRUCTURED_REPLY_DIALECTS: frozenset[ChatDialect] = frozenset({"groq"})
 # Cerebras rejects parallel tool calls on this model.
 _CEREBRAS_SERIAL_TOOL_MODEL = "llama-4-scout-17b-16e-instruct"
 _SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
@@ -401,7 +404,7 @@ def chat_request_kwargs(
     settings: ChatSettings,
     wire: ChatWire,
 ) -> dict[str, Any]:
-    """Return the ``chat.completions.create`` keyword arguments for one streamed request.
+    """Return the ``chat.completions.create`` keyword arguments for one request, streamed unless the dialect cannot.
 
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
@@ -417,9 +420,10 @@ def chat_request_kwargs(
     )
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire)
     params = {"model": model_id, "messages": _chat_messages(messages, wire, settings), **disable_tool_selection(params)}
-    params["stream"] = True
-    if wire.dialect == "openai":
-        params["stream_options"] = {"include_usage": True}
+    if output_schema is None or wire.dialect not in _WHOLE_STRUCTURED_REPLY_DIALECTS:
+        params["stream"] = True
+        if wire.dialect == "openai":
+            params["stream_options"] = {"include_usage": True}
     return sdk_call_kwargs(params, "chat")
 
 
@@ -498,8 +502,8 @@ def _completed_tool_calls(calls: list[dict[str, Any]], dialect: ChatDialect) -> 
     return calls
 
 
-def _reply_metadata(reply: ChatCompletionChunk) -> dict[str, Any]:
-    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply chunk carried."""
+def _reply_metadata(reply: ChatCompletion | ChatCompletionChunk) -> dict[str, Any]:
+    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply or reply chunk carried."""
     data: dict[str, Any] = {}
     if reply.id:
         data["id"] = reply.id
@@ -524,7 +528,7 @@ def _usage_metrics(usage: CompletionUsage, wire: ChatWire) -> MessageMetrics:
 
 @dataclass(slots=True)
 class ChatStream:
-    """Fold streamed Chat Completions chunks into deltas and one finished turn.
+    """Fold streamed Chat Completions chunks, or a whole reply, into deltas and one finished turn.
 
     The ``openai`` dialect also moves reasoning a model writes inline as a leading ``<think>`` block out of the
     reply text (``ThinkTagSplitter``), as servers without a reasoning parser send it.
@@ -555,7 +559,18 @@ class ChatStream:
                     events.extend(self._add_reasoning(_extra(delta)))
         return events
 
-    def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
+    def add_reply(self, reply: ChatCompletion) -> list[StreamEvent]:
+        """Fold the whole reply to a request the dialect does not stream, and return its text.
+
+        Only a request for structured output goes unstreamed, and it offers no tools, so its reply carries only text.
+        """
+        if reply.usage is not None:
+            self.parts.usage = _usage_metrics(reply.usage, self.wire)
+        choice = reply.choices[0]
+        self.parts.finish_reason = choice.finish_reason
+        return self._add_content(reply, choice.message.content)
+
+    def _add_content(self, chunk: ChatCompletion | ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
         # Cerebras skips empty content deltas; the other dialects keep them, with their reply metadata.
         if content is None or (not content and self.wire.dialect == "cerebras"):
             return []
