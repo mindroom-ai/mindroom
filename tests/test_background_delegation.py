@@ -966,7 +966,10 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Losing access while the parent waits on its background child ends the call, not the parent's reply."""
+    """Losing access while the parent waits on its background child fails the call, not the parent's reply.
+
+    The call answers as failed, as an ordinary job's call does when its wait is refused.
+    """
     allowed = True
     runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
     child = _BlockingChild()
@@ -979,8 +982,9 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(
 
     response = await _drive_background_child(tmp_path, monkeypatch, runtime, child, while_waiting=revoke)
     assert response.status is RunStatus.completed
-    result = next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting")
-    assert "not available" in str(result)
+    [answered] = [message for message in response.messages or () if message.tool_call_id == "waiting"]
+    assert answered.content == "Tool job is not available in this conversation."
+    assert answered.tool_call_error is True
     state = DelegationState.from_metadata(response.metadata)
     assert state.children == []
     assert all(hook.after_called for hook in state.hooks.values())

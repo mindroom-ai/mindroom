@@ -796,8 +796,8 @@ async def _await_background_child(
         if not background.has_job(child.delegation_id):
             # No job owns the child yet, so it settles as an ordinary child failure.
             raise
-        # Revoked access or a closed runtime ends this wait; the parent's call reports it.
-        settled = await settle(str(error), False)
+        # Revoked access or a closed runtime ends this wait; the parent's call fails with it, as an ordinary job's does.
+        settled = await settle(str(error), True)
         await record_return(str(error))
         return settled
     except BaseException:
