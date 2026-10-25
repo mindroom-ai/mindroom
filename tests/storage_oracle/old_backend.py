@@ -16,9 +16,7 @@ from typing import TYPE_CHECKING, override
 
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
 from mindroom.constants import (
-    MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
@@ -39,16 +37,19 @@ from mindroom.history.storage import (
     set_force_compaction,
 )
 from mindroom.history.summary_rows import Segment
-from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelIdentity
-from mindroom.llm.runs import RunStatus
-from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_state_storage, save_compaction_usage
 from mindroom.session_storage.codec import run_type
 from mindroom.session_storage.schema import schema_sql
 from mindroom.session_storage.store import _WrittenRow
 from mindroom.session_storage.types import session_state_snapshot
-from tests.storage_oracle.backend import REQUESTER_ID, SESSION_ID, Driver, FoldBasisView
+from tests.storage_oracle.backend import (
+    REQUESTER_ID,
+    SESSION_ID,
+    SUMMARY_MODEL,
+    SUMMARY_USAGE,
+    Driver,
+    FoldBasisView,
+)
 from tests.storage_oracle.observe import AGNO_LAYOUT_READERS, observe
 
 if TYPE_CHECKING:
@@ -62,8 +63,6 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
     from tests.storage_oracle.backend import FoldInput
 
-SUMMARY_MODEL = ModelIdentity(id="oracle-summary-model", provider="oracle", provider_name="oracle")
-_SUMMARY_USAGE = MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
 # The archive layout every release since #2351 created beside the sessions table.
 _ARCHIVE_DDL = (
     "CREATE TABLE {s}_compactions (id INTEGER PRIMARY KEY, "
@@ -206,7 +205,7 @@ class OldBackend(Driver):
             session_id=session.session_id,
             requester_id=REQUESTER_ID,
             model=SUMMARY_MODEL,
-            usage=_SUMMARY_USAGE,
+            usage=SUMMARY_USAGE,
             initial_session=None,
         )
 
@@ -361,7 +360,7 @@ class OldBackend(Driver):
                 (SESSION_ID, self.scope.key, summary, legacy, json.dumps(legacy_event_ids), self.determinism.now),
             ).lastrowid
             for run_id in archived:
-                run = self._archived_run(run_id)
+                run = self.archived_run(run_id)
                 connection.execute(
                     f'INSERT INTO "{sessions}_compacted_runs" (compaction_id, session_id, run_id, run_type, '  # noqa: S608
                     "event_ids, seen_event_ids, run_data) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -376,24 +375,9 @@ class OldBackend(Driver):
                     ),
                 )
 
-    def _archived_run(self, run_id: str) -> AnyRunRecord:
-        record = self._record(run_id)
-        record.status = RunStatus.completed
-        record.content = f"answer {run_id}"
-        record.messages = [
-            Message(role="user", content=f"question {run_id}", id=f"{run_id}.u", created_at=self.determinism.now),
-            Message(role="assistant", content=f"answer {run_id}", id=f"{run_id}.a", created_at=self.determinism.now),
-        ]
-        record.metadata = {
-            MATRIX_EVENT_ID_METADATA_KEY: f"${run_id}",
-            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: [f"${run_id}"],
-            "room_id": "!room:example.org",
-        }
-        return record
-
     @override
     def observe(self) -> dict[str, object]:
         return observe(self.store, SESSION_ID, self.scope, readers=AGNO_LAYOUT_READERS, run_ids=self.known_run_ids())
 
 
-__all__ = ["SUMMARY_MODEL", "OldBackend"]
+__all__ = ["OldBackend"]

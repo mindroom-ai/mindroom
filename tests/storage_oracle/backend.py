@@ -31,6 +31,7 @@ from mindroom.history.storage import first_scope_session, read_scope_state
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.schema import TableNames
@@ -53,6 +54,9 @@ ROOM_ID = "!room:example.org"
 REQUESTER_ID = "@user:example.org"
 _OWNERS: dict[ScenarioKind, str] = {"agent": "code", "team": "squad"}
 _MEMBERS = ("alpha", "beta")
+# The model every compaction summary reports, and the counters it returns.
+SUMMARY_MODEL = ModelIdentity(id="oracle-summary-model", provider="oracle", provider_name="oracle")
+SUMMARY_USAGE = MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
 # The response turn id a run's live queued-message notice names.
 _NOTICE_TURN_KEY = "mindroom_queued_message_notice_response_turn_id"
 # Events the legacy openings' summaries and archived runs hold, as ``Driver.seed_legacy`` documents them.
@@ -385,6 +389,22 @@ class Driver(ABC):
         if self.kind == "team" and member_of is None:
             return TeamRunRecord(team_id=self.owner, **common)  # type: ignore[arg-type]
         return RunRecord(agent_id=agent_id or self.owner, parent_run_id=member_of, **common)  # type: ignore[arg-type]
+
+    def archived_run(self, run_id: str) -> AnyRunRecord:
+        """Return the completed run ``run_id`` an archive opening holds, as ``seed_legacy`` documents it."""
+        record = self._record(run_id)
+        record.status = RunStatus.completed
+        record.content = f"answer {run_id}"
+        record.messages = [
+            Message(role="user", content=f"question {run_id}", id=f"{run_id}.u", created_at=self.determinism.now),
+            Message(role="assistant", content=f"answer {run_id}", id=f"{run_id}.a", created_at=self.determinism.now),
+        ]
+        record.metadata = {
+            MATRIX_EVENT_ID_METADATA_KEY: f"${run_id}",
+            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: [f"${run_id}"],
+            "room_id": ROOM_ID,
+        }
+        return record
 
     def _begin_turn(self) -> ConversationSession:
         """Prepare a reply: redaction cleanup, the session it loads or starts from, and its scope state."""

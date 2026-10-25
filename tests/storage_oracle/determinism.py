@@ -18,14 +18,14 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from mindroom.history import legacy_compaction_state, summary_rows
+from mindroom.history import legacy_compaction_state, summary_rows, summary_rows_next
 from mindroom.history import storage as history_storage
 from mindroom.llm import messages, runs
-from mindroom.session_storage import agent_storage, legacy_agno2_runs, preflight, store, types
+from mindroom.session_storage import agent_storage, legacy_agno2_runs, preflight, store, store_next, types
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
 # The first action's clock; each later action runs ``STEP_SECONDS`` later.
@@ -50,6 +50,15 @@ class Determinism:
     def time(self) -> float:
         """Return the clock, as ``time.time()`` does."""
         return float(self.now)
+
+    @contextmanager
+    def ids_repeated(self) -> Iterator[None]:
+        """Run a block whose ids the code after it gets again, as a second store doing the same thing would."""
+        counters = dict(self._counters)
+        try:
+            yield
+        finally:
+            self._counters = counters
 
     def uuid4(self, tag: int) -> uuid.UUID:
         """Return the next id of counter ``tag`` in this step."""
@@ -76,20 +85,20 @@ def _time_module(determinism: Determinism) -> SimpleNamespace:
 # Modules that call ``uuid4`` by that name, each with its own counter.
 _UUID_MODULES: tuple[ModuleType, ...] = (messages, runs, agent_storage, preflight)
 # Modules that call ``time()`` imported from ``time``.
-_TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, types)
+_TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, store_next, summary_rows_next, types)
 # Modules that call ``time.time()`` on the imported module.
 _TIME_MODULE_MODULES: tuple[ModuleType, ...] = (summary_rows, agent_storage, legacy_compaction_state, legacy_agno2_runs)
 # Modules that call ``datetime.now``.
 _DATETIME_MODULES: tuple[ModuleType, ...] = (runs, history_storage)
 
 
-def _connect_without_fsync(path: Path, *, timeout: float = store.BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
-    connection = _connect(path, timeout=timeout)
-    connection.execute("PRAGMA synchronous = OFF")
-    return connection
+def _without_fsync(connect: Callable[..., sqlite3.Connection]) -> Callable[..., sqlite3.Connection]:
+    def connect_without_fsync(path: Path, *, timeout: float = store.BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
+        connection = connect(path, timeout=timeout)
+        connection.execute("PRAGMA synchronous = OFF")
+        return connection
 
-
-_connect = store.connect_conversation_database
+    return connect_without_fsync
 
 
 @contextmanager
@@ -111,5 +120,7 @@ def deterministic(*, time_modules: Sequence[ModuleType] = ()) -> Iterator[Determ
             stack.enter_context(patch.object(module, "time", time_module))
         for module in _DATETIME_MODULES:
             stack.enter_context(patch.object(module, "datetime", fixed_datetime))
-        stack.enter_context(patch.object(store, "connect_conversation_database", _connect_without_fsync))
+        for module in (store, store_next):
+            connect = module.connect_conversation_database
+            stack.enter_context(patch.object(module, "connect_conversation_database", _without_fsync(connect)))
         yield determinism
