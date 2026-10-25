@@ -42,6 +42,7 @@ from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from tests.agno_parity.golden_files import sorted_keys
 from tests.agno_parity.knowledge_vectors import parity_vector
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -125,8 +126,10 @@ def embedder_case(case: dict[str, Any], root: Path, monkeypatch: pytest.MonkeyPa
     """Return one embedder case with what each of its calls sent: its HTTP requests, or its local model calls.
 
     Each call builds the authored embedder afresh and embeds its texts for its purpose, asynchronously when the
-    Agno-era method it stands for was asynchronous.
+    Agno-era method it stands for was asynchronous. Provider endpoints and credentials are hidden from the
+    environment, so an SDK fallback such as ``OPENAI_BASE_URL`` cannot reach a recorded request.
     """
+    hide_provider_environment(monkeypatch)
     runtime_paths = test_runtime_paths(root)
     config = bind_runtime_paths(
         Config.model_validate({"models": {}, "memory": {"embedder": case["embedder"]}}),

@@ -69,6 +69,14 @@ def test_embedders_send_the_request_bodies_agno_sent(
     assert embedder_case(golden, tmp_path, monkeypatch) == golden
 
 
+def test_an_embedder_golden_ignores_the_shells_openai_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A developer's ``OPENAI_BASE_URL``, such as a local model server's, reaches neither the case nor its regeneration."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    golden = EMBEDDER_GOLDENS["openai_default_dimensions"]
+
+    assert embedder_case(golden, tmp_path, monkeypatch) == golden
+
+
 def _with_approximate_distances(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Compare distances only as closely as Chroma's float32 arithmetic agrees across machines."""
     approximate: list[dict[str, Any]] = []
