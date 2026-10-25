@@ -1171,6 +1171,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         await persist(state)
     hook_state = state.hooks[requirement.id]
     if hook_state.blocked_result is not None:
+        # A plugin hook declined the call, which answers as a failed call.
+        tool.is_error = True
         blocked_result = resolve_result(hook_state.blocked_result)
         await after_delegation(
             hook_state,
