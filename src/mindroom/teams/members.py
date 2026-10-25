@@ -420,7 +420,6 @@ def build_team_spec(
         )
         team_id = scope.scope_id if scope is not None else team_display_name
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
-    leader_toolkits = () if jobs is None else (jobs.controls,)
     team_members = tuple(
         _team_member(
             build,
@@ -431,8 +430,13 @@ def build_team_spec(
         )
         for build in members.builds
     )
-    prepared = prepare_run_tools(
-        AgentSpec(id=team_id, name=team_display_name, model=model, system_message=None, toolkits=leader_toolkits),
+    leader = AgentSpec(
+        id=team_id,
+        name=team_display_name,
+        model=model,
+        system_message=None,
+        toolkits=() if jobs is None else (jobs.controls,),
+        max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
     )
     additional_context = appended_context(
         render_date_context(config.timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
@@ -441,23 +445,13 @@ def build_team_spec(
     system_message = render_leader_system_message(
         team_members,
         mode,
-        tool_instructions=prepared.instructions,
+        tool_instructions=prepare_run_tools(leader).instructions,
         # The delegation tool is always offered, so every leader request offers tools.
         model_note=model_note_for(model.capabilities, offers_tools=True),
         additional_context=additional_context,
     )
-    spec = TeamSpec(
-        id=team_id,
-        name=team_display_name,
-        mode=mode,
-        model=model,
-        system_message=system_message,
-        toolkits=leader_toolkits,
-        max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
-        members=team_members,
-    )
     return BuiltTeam(
-        spec=spec,
+        spec=TeamSpec(leader=replace(leader, system_message=system_message), mode=mode, members=team_members),
         history_settings=team_view.history_settings,
         leader_middleware=() if jobs is None else jobs.middleware,
         leader_jobs=None if jobs is None else jobs.actor,

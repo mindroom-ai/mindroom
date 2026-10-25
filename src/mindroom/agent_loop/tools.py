@@ -23,7 +23,7 @@ from mindroom.tool_system.invocation import (
 from mindroom.tool_system.tool_function import first_of_each_name
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.provider import ToolSpec
@@ -46,8 +46,13 @@ class PreparedTools:
     instructions: tuple[str, ...]
 
     def specs(self) -> tuple[ToolSpec, ...]:
-        """Return the model-facing definitions sorted by name, a stable order for prompt caches."""
-        return tuple(sorted((function.definition() for function in self.functions.values()), key=lambda s: s.name))
+        """Return the model-facing definitions in the order a request sends them (``sorted_specs``)."""
+        return sorted_specs(function.definition() for function in self.functions.values())
+
+
+def sorted_specs(definitions: Iterable[ToolSpec]) -> tuple[ToolSpec, ...]:
+    """Return ``definitions`` sorted by name, the order a request sends them in, which is stable for prompt caches."""
+    return tuple(sorted(definitions, key=lambda definition: definition.name))
 
 
 def offered_functions(spec: AgentSpec) -> Iterator[tuple[AdaptedToolkit, ToolFunction]]:
@@ -252,5 +257,6 @@ __all__ = [
     "offered_functions",
     "plan_tool_batch",
     "prepare_run_tools",
+    "sorted_specs",
     "tool_result_message",
 ]

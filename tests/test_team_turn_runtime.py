@@ -35,7 +35,7 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -771,6 +771,48 @@ async def test_a_resume_runs_each_member_on_the_model_its_pause_pinned(
     assert ProbeToolkit.calls == ["dangerous"]
     assert len(team.models["checker-model"].requests) == 1
     assert team.models["writer-model"].requests == []
+
+
+class _LeaderRoute:
+    """A native-history route that replays its own checkpoints whatever the request asks for."""
+
+    replay = NativeCompactionReplay(route="leader-route", threshold=None)
+
+    def native_compaction_settings(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str,
+        allow_authored: bool,
+    ) -> NativeCompactionReplay:
+        del threshold, history_generation, allow_authored
+        return self.replay
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_restores_the_leader_s_native_history_from_the_leader_s_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed leader requests carry the native history the leader's route restores, not a member's."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel(
+        [answer("The checker touched it.", usage(50, 5))],
+        native_history_route=_LeaderRoute(),
+    )
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    [leader_request] = team.models["default"].requests
+    assert leader_request.native_compaction == _LeaderRoute.replay
+    [member_request] = team.models["checker-model"].requests
+    assert member_request.native_compaction is None
 
 
 @pytest.mark.asyncio

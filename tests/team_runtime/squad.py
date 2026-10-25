@@ -122,16 +122,14 @@ def team_spec(
     toolkits: Sequence[AdaptedToolkit] = (),
 ) -> TeamSpec:
     """Return a team of ``members`` led by ``model``, with the leader prompt ``system`` and no call budget."""
-    return TeamSpec(
+    leader = AgentSpec(
         id=team_id,
         name=name,
-        mode=mode,
         model=model,
         system_message=Message(role="system", content=system),
         toolkits=tuple(toolkits),
-        max_tool_calls_per_turn=None,
-        members=tuple(members),
     )
+    return TeamSpec(leader=leader, mode=mode, members=tuple(members))
 
 
 def built_team(spec: TeamSpec) -> BuiltTeam:

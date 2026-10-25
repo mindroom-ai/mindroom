@@ -110,7 +110,7 @@ def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
         {key: value for key, value in asdict(tool).items() if value is not None}
         for tool in leader_tool_specs(built.spec)
     ]
-    system_content = built.spec.system_message.content
+    system_content = built.spec.leader.system_message.content
     assert isinstance(system_content, str)
     return estimate_text_tokens(prompt) + estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
 
@@ -123,7 +123,11 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
     """The ad hoc team's scope is prepared once, sized by the leader's prompt."""
     config, runtime_paths = _pair_config(tmp_path)
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
-    estimator = build_static_token_estimator(built.spec.system_message, leader_tool_specs(built.spec), frozenset())
+    estimator = build_static_token_estimator(
+        built.spec.leader.system_message,
+        leader_tool_specs(built.spec),
+        frozenset(),
+    )
     expected_static_prompt_tokens = _expected_static_tokens(built, "Current prompt")
 
     scope_context = load_bound_scope_session(
@@ -146,7 +150,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
     ):
         prepared_scope_history = await prepare_bound_scope_history(
             member_names=["zeta", "alpha"],
-            model=built.spec.model,
+            model=built.spec.leader.model,
             runtime_paths=runtime_paths,
             config=config,
             history_settings=built.history_settings,
@@ -164,7 +168,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
     assert mock_finalize.call_count == 1
     assert mock_prepare.await_count == 1
     assert mock_prepare.await_args.kwargs["scope_context"].scope == HistoryScope("team", "team_alpha+zeta")
-    assert mock_prepare.await_args.kwargs["model"] is built.spec.model
+    assert mock_prepare.await_args.kwargs["model"] is built.spec.leader.model
     assert estimator.estimate("Current prompt") == expected_static_prompt_tokens
     assert (
         mock_prepare.await_args.kwargs["resolved_inputs"].execution_plan.static_prompt_tokens
@@ -220,11 +224,11 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
         async for _event in events:
             pass
 
-    assert sized["system_message"] is built.spec.system_message
+    assert sized["system_message"] is built.spec.leader.system_message
     offered = [tool.name for tool in leader.requests[0].tools]
     assert [tool.name for tool in sized["tools"]] == offered
     assert "delegate_task_to_member" in offered
-    assert set(offered) > {function.name for kit in built.spec.toolkits for function in kit.functions}
+    assert set(offered) > {function.name for kit in built.spec.leader.toolkits for function in kit.functions}
 
 
 def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
@@ -251,12 +255,12 @@ def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
     )
     ad_hoc = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
 
-    assert (configured.spec.id, configured.spec.max_tool_calls_per_turn) == ("pair", 3)
+    assert (configured.spec.leader.id, configured.spec.leader.max_tool_calls_per_turn) == ("pair", 3)
     assert [(member.spec.id, member.spec.name) for member in configured.spec.members] == [
         ("zeta", "Zeta"),
         ("alpha", "Alpha"),
     ]
-    assert ad_hoc.spec.max_tool_calls_per_turn == config.defaults.max_tool_calls_per_turn
+    assert ad_hoc.spec.leader.max_tool_calls_per_turn == config.defaults.max_tool_calls_per_turn
 
 
 _PAST_2_ONLY = ["past-2 team question", "past-2 team answer"]

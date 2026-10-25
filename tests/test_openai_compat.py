@@ -4348,7 +4348,10 @@ class TestTeamCompletion:
             members=[("general", "GeneralAgent", member)],
             team_id="super_team",
         )
-        spec = replace(built.spec, toolkits=(toolkit(remember, name="memory_probe"),))
+        spec = replace(
+            built.spec,
+            leader=replace(built.spec.leader, toolkits=(toolkit(remember, name="memory_probe"),)),
+        )
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
@@ -4395,8 +4398,8 @@ class TestTeamCompletion:
             answer("I will split the work."),
             members=[("general", "GeneralAgent", member)],
         )
-        leader = replace(built.spec.model, capabilities=Capabilities(claude_family=True))
-        team = replace(built, spec=replace(built.spec, model=leader))
+        leader = replace(built.spec.leader.model, capabilities=Capabilities(claude_family=True))
+        team = replace(built, spec=replace(built.spec, leader=replace(built.spec.leader, model=leader)))
 
         with patch("mindroom.api.openai_compat._build_team", return_value=team):
             response = team_app_client.post(
@@ -4477,7 +4480,7 @@ class TestTeamCompletion:
         runtime_paths = _runtime_paths()
         built = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
         leader = ScriptedModel([], model_params={"temperature": 0.7})
-        built = replace(built, spec=replace(built.spec, model=leader))
+        built = replace(built, spec=replace(built.spec, leader=replace(built.spec.leader, model=leader)))
         prior_response_id = "prior-openai-team-response"
 
         def notice(marker: object) -> Message:
@@ -4644,7 +4647,7 @@ class TestTeamCompletion:
             models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
         )
 
-        assert (built.spec.id, built.spec.mode) == ("coord_team", expected)
+        assert (built.spec.leader.id, built.spec.mode) == ("coord_team", expected)
         assert [member.spec.id for member in built.spec.members] == ["general"]
 
     def test_build_team_openai_compat_does_not_require_persisted_matrix_accounts(

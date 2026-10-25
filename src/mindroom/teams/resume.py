@@ -430,7 +430,7 @@ async def continue_paused_team_run(
             configured_team_name=team_name,
         )
         toolkit_owners = tool_owners_by_agent(*members.builds)
-        native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
+        native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)
         presentation = TeamStreamPresentation.restore(
             config_names=member_names,
             show_tool_calls=show_tool_calls,
