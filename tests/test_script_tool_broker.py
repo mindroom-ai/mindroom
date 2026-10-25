@@ -114,10 +114,12 @@ async def _cancel_cleanup_owner(
     return replacement[0]
 
 
-def _hook_registry(events: list[str]) -> HookRegistry:
+def _hook_registry(events: list[str], *, decline: str | None = None) -> HookRegistry:
     @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(_context: ToolBeforeCallContext) -> None:
+    async def before(context: ToolBeforeCallContext) -> None:
         events.append("tool:before_call")
+        if decline is not None:
+            context.decline(decline)
 
     @hook(EVENT_TOOL_AFTER_CALL)
     async def after(_context: ToolAfterCallContext) -> None:
@@ -296,10 +298,11 @@ def _broker(
     run_id: str = "run-1",
     authorized: bool = True,
     admission_open: bool = True,
+    decline: str | None = None,
 ) -> tuple[ScriptToolBroker, str]:
     context = _context(
         tmp_path,
-        hook_registry=_hook_registry(events),
+        hook_registry=_hook_registry(events, decline=decline),
         require_approval=require_approval,
         log_tool_calls=log_tool_calls,
         preapprove_script_tool=preapprove_script_tool,
@@ -569,6 +572,27 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3.0}'
+    assert events == ["tool:before_call", "tool:after_call"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_a_plugin_hook_declines_fails_with_the_decline(tmp_path: Path) -> None:
+    """A call a before-call hook declines never runs and fails, as a denied one does, with the decline's text."""
+    events: list[str] = []
+    broker, token = _broker(tmp_path, events=events, decline="Calculations are paused")
+
+    receipt = await _call_through_gateway(broker, _request(call_id="declined"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.result is None
+    assert receipt.error == {
+        "kind": "tool_failure",
+        "message": "[TOOL CALL DECLINED]\n"
+        "Tool: add\n"
+        "Reason: Calculations are paused\n\n"
+        "Adjust your approach — try a different tool or different arguments.",
+        "retryable": False,
+    }
     assert events == ["tool:before_call", "tool:after_call"]
 
 
