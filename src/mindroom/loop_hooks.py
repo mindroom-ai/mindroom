@@ -161,7 +161,6 @@ def _loop_hooks(
     on; the run hears of the ended jobs of ``job_notices_for`` after each batch; ``skill_review_capture`` records the
     run's final request.
     """
-    capabilities = model.capabilities
     before_request: list[BeforeRequestHook] = []
     if job_definitions is not None:
         before_request.append(job_definitions_hook(job_definitions))
@@ -184,11 +183,11 @@ def _loop_hooks(
             turn_recorder=turn.turn_recorder,
         ),
     )
-    before_request.append(approval_receipt_hook(capabilities))
+    before_request.append(approval_receipt_hook)
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     return LoopHooks(
         before_request=tuple(before_request),
-        answer_tool_calls=output_limit_answers(capabilities),
+        answer_tool_calls=output_limit_answers(model.capabilities),
         rewrite_tool_calls=resolve_call_tool_calls if deferred_tools.portable else None,
         tool_middleware=tool_middleware,
         after_tool_batch=(

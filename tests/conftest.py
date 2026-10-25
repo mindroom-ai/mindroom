@@ -3171,8 +3171,9 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a router registered as the scheduled-task runner owner from leaking into later tests."""
+    """Keep a router registered as the scheduled-task runner owner, or a bot as a state writer, from leaking."""
     monkeypatch.setattr(scheduling_module, "_runner_owner", None)
+    monkeypatch.setattr(scheduling_module, "_state_writers", {})
 
 
 @pytest.fixture(autouse=True)

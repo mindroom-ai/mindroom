@@ -28,6 +28,7 @@ from mindroom.providers.openai.responses_wire import (
     request_store,
     responses_request_kwargs,
     responses_stop_reason,
+    system_text_digest,
     usage_report,
 )
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -148,6 +149,7 @@ class ResponsesAdapter:
         first_token: float | None = None
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         store = request_store(self.wire, request)
+        system_digest = system_text_digest(request.messages)
         # TODO(simplify): With `reasoning` authored, the reply text is also stored as its reasoning (streamed only
         # without `reasoning_summary`, blocking only without a returned summary). Store only returned reasoning
         # summaries. Stored data and anything that replays or shows reasoning.
@@ -159,6 +161,7 @@ class ResponsesAdapter:
                     store=store,
                     portable_replay=request.portable_replay,
                     native_compaction=request.native_compaction,
+                    system_digest=system_digest,
                     text_as_reasoning=self.settings.reasoning is not None and self.settings.reasoning_summary is None,
                 )
                 events = self._streamed(client, kwargs, accumulator)
@@ -178,6 +181,7 @@ class ResponsesAdapter:
                     store=store,
                     portable_replay=request.portable_replay,
                     native_compaction=request.native_compaction,
+                    system_digest=system_digest,
                     text_as_reasoning=self.settings.reasoning is not None,
                 )
                 first_token = time.monotonic()

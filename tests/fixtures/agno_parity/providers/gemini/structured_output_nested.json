@@ -17,8 +17,7 @@
       "id": "gemini-3.8-flash",
       "provider": "google"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "$defs": {
           "CronSchedule": {
@@ -194,9 +193,9 @@
         "title": "ScheduledWorkflow",
         "type": "object"
       },
-      "model": "mindroom.scheduling.tasks:ScheduledWorkflow",
-      "type": "pydantic"
+      "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
+    "portable_replay": null,
     "stream": false,
     "tool_choice": null,
     "tools": []
@@ -204,22 +203,20 @@
   "parsed": {
     "message": {
       "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gemini-3.8-flash",
           "provider": "Google"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {

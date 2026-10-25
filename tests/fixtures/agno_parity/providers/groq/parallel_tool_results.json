@@ -9,11 +9,9 @@
       },
       {
         "content": "What should I pack for Paris tomorrow?",
-        "from_history": true,
         "role": "user"
       },
       {
-        "from_history": true,
         "metrics": {
           "input_tokens": 42,
           "output_tokens": 12,
@@ -32,7 +30,6 @@
           }
         },
         "role": "assistant",
-        "stop_after_tool_call": false,
         "tool_calls": [
           {
             "function": {
@@ -54,7 +51,6 @@
       },
       {
         "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
-        "from_history": true,
         "role": "tool",
         "tool_args": {
           "city": "Paris",
@@ -66,7 +62,6 @@
       },
       {
         "content": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]",
-        "from_history": true,
         "role": "tool",
         "tool_args": {
           "query": "Paris packing list"
@@ -81,12 +76,13 @@
       "id": "openai/gpt-oss-120b",
       "provider": "groq"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
     "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -110,9 +106,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -132,22 +130,21 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "openai/gpt-oss-120b",
           "provider": "Groq"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -160,7 +157,7 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {

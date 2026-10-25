@@ -11,9 +11,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.llm.messages import Message
-from tests.agno_parity.prompt_scenarios import SCENARIOS, call_dict, load_golden, normalize
-from tests.providers.golden_support import ordered_json
-from tests.team_runtime.parity_support import run_team_scenario
+from tests.agno_parity.golden_files import render
+from tests.agno_parity.prompt_scenarios import golden_path, load_golden, record_scenario, regenerated_golden
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,22 +24,16 @@ GOLDENS = ["team_coordinate", "team_collaborate"]
 @pytest.mark.parametrize("name", GOLDENS)
 async def test_the_production_team_turn_sends_every_golden_request(name: str, tmp_path: Path) -> None:
     """Every request of the team turn equals the golden's byte for byte, through the owned provider layer."""
-    golden = load_golden(name)
+    run = await record_scenario(name, tmp_path)
 
-    run = await run_team_scenario(name, tmp_path)
-
-    assert SCENARIOS[name].description == golden["description"]
-    assert normalize(run.input, tmp_path) == golden["input"]
+    regenerated = regenerated_golden(name, run, tmp_path)
+    assert regenerated == load_golden(name)
+    assert render(regenerated) == golden_path(name).read_text(encoding="utf-8")
     assert run.calls
     assert all(isinstance(message, Message) for call in run.calls for message in call.messages)
-    requests = normalize([call_dict(call) for call in run.calls], tmp_path)
-    assert requests == golden["requests"]
-    assert ordered_json(requests) == ordered_json(golden["requests"])
     # The leader's prompt is built once per turn and sent with both of its requests.
     leader_requests = [
-        call
-        for call in run.calls
-        if any(tool["function"]["name"].startswith("delegate_task_to_") for tool in call.tools or ())
+        call for call in run.calls if any(tool.name.startswith("delegate_task_to_") for tool in call.tools)
     ]
     assert len(leader_requests) == 2
     assert len({request.messages[0].content for request in leader_requests}) == 1

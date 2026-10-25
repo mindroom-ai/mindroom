@@ -13,8 +13,8 @@ class PersonalRoomsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent: str = Field(
-        description="Agent that owns and answers in personal rooms",
-        json_schema_extra=dashboard_hint(reference="agent"),
+        description="Agent, or personal_agents template, that owns and answers in personal rooms",
+        json_schema_extra=dashboard_hint(reference="personal_room_agent"),
     )
     onboarding_rooms: list[str] = Field(
         min_length=1,

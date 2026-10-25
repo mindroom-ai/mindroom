@@ -25,6 +25,7 @@ personal_rooms:
 ```
 
 The router watches the onboarding rooms, so the selected agent does not need to join them.
+To give each user their own agent instead of one shared agent, see [Personal Agents](personal-agents.md).
 The human must still be allowed to use the agent under its access rules; listing the onboarding rooms in `access.members_of_rooms`, as above, grants that (see [Responder access](authorization.md#responder-access)).
 
 ## Configuration
@@ -33,7 +34,7 @@ The human must still be allowed to use the agent under its access rules; listing
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `agent` | string | Required | Configured agent that owns and answers in personal rooms. |
+| `agent` | string | Required | Configured agent, or a [`personal_agents`](personal-agents.md) template, that owns and answers in personal rooms; a template gives each user their own agent. |
 | `onboarding_rooms` | list of strings | Required | Nonempty list of configured rooms whose human joins trigger onboarding. |
 | `commands` | list of strings | `[]` | Exact self-onboarding commands accepted in onboarding rooms; each starts with `!` and contains no whitespace or arguments. |
 | `alias_prefix` | string | `"personal"` | Room alias prefix matching `[a-z0-9_-]{1,40}`, followed by a hash of the user ID and the installation namespace. |

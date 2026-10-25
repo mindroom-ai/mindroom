@@ -70,6 +70,7 @@ const ROOT: JsonSchema = {
 const REFERENCES: ReferenceOptions = {
   model: ["sonnet", "haiku"],
   agent: ["helper"],
+  personal_room_agent: ["helper"],
   room: ["lobby"],
   tool: ["shell"],
 };

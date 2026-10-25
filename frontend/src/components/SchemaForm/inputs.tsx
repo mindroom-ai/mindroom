@@ -308,7 +308,9 @@ export function ScalarInput({
     node.kind === "enum"
       ? node.options.map(String)
       : node.kind === "string" &&
-          (reference === "model" || reference === "agent")
+          (reference === "model" ||
+            reference === "agent" ||
+            reference === "personal_room_agent")
         ? references[reference]
         : null;
 
