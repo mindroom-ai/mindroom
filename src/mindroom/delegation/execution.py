@@ -102,6 +102,7 @@ from mindroom.tool_system.output_files import (
     prepare_tool_output_file,
 )
 from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
 )
@@ -576,8 +577,8 @@ def _prepare_delegation_output(
     identity: ToolExecutionIdentity,
     raw_path: object,
     tool_name: str,
-) -> ToolOutputFileRequest | dict[str, object] | None:
-    """Resolve the caller's output policy without scaffolding or reconciling its workspace."""
+) -> ToolOutputFileRequest | str | None:
+    """Resolve the caller's output policy without scaffolding or reconciling its workspace, or say why it is refused."""
     storage = resolve_agent_storage(caller, config, runtime_paths, execution_identity=identity)
     workspace = resolve_agent_workspace_from_state_path(
         caller,
@@ -588,9 +589,7 @@ def _prepare_delegation_output(
     )
     if workspace is None:
         if normalize_output_path_argument(raw_path) is not None:
-            return {
-                "mindroom_tool_output": {"status": "error", "error": "Output redirection requires an agent workspace."},
-            }
+            return "Output redirection requires an agent workspace."
         return None
     policy = ToolOutputFilePolicy.from_runtime(
         workspace.root,
@@ -600,9 +599,16 @@ def _prepare_delegation_output(
     return prepare_tool_output_file(policy, tool_name=tool_name, output_path=raw_path)
 
 
-def _finalize_delegation_output(result: str, request: ToolOutputFileRequest | None) -> str:
-    """Apply the shared file policy once and keep the native result text-serializable."""
-    formatted = finalize_tool_output_file(request, result) if request is not None else result
+def _finalize_delegation_output(result: str, request: ToolOutputFileRequest | None, *, failed: bool) -> str:
+    """Apply the shared file policy once and keep the native result text-serializable.
+
+    A ``failed`` result goes through the policy as a failed answer, which no file receives, as for any other tool.
+    """
+    if request is None:
+        return result
+    formatted = finalize_tool_output_file(request, ToolOutcome(content=result, is_error=True) if failed else result)
+    if isinstance(formatted, ToolOutcome):
+        return formatted.content
     return formatted if isinstance(formatted, str) else json.dumps(formatted)
 
 
@@ -647,7 +653,10 @@ async def _background_child_outcome(
     """Keep child execution, approvals, liveness and settlement owned by its background job."""
 
     def finished(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:
-        return delegation_outcome(status, _finalize_delegation_output(text, output_request))
+        return delegation_outcome(
+            status,
+            _finalize_delegation_output(text, output_request, failed=status != "completed"),
+        )
 
     def failed_unsettled(primary_error: str, stage: str, error: Exception) -> BackgroundOutcome:
         logger.warning(
@@ -1101,8 +1110,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             args.get(OUTPUT_PATH_ARGUMENT),
             tool_name=tool_name,
         )
-        if isinstance(prepared_output, dict):
-            authorization = json.dumps(prepared_output)
+        if isinstance(prepared_output, str):
+            authorization = prepared_output
         else:
             output_request = prepared_output
     if isinstance(authorization, str):
@@ -1320,9 +1329,10 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         # Completed and failed children both close the parent call and its after hook.
         receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
+    failed = child.status != "completed"
     result = resolve_result(
-        _finalize_delegation_output(_child_result_text(child, receipt), output_request),
-        failed=child.status != "completed",
+        _finalize_delegation_output(_child_result_text(child, receipt), output_request, failed=failed),
+        failed=failed,
     )
     await after_delegation(
         hook_state,

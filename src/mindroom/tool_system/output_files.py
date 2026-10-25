@@ -610,29 +610,21 @@ def _docstring_with_output_path(original_doc: str | None) -> str:
     return f"{base}\n\n{output_arg_doc}"
 
 
-def _output_request(
-    policy: ToolOutputFilePolicy,
-    *,
-    tool_name: str,
-    output_path: object,
-) -> ToolOutputFileRequest | str:
-    """Validate before tool execution, without creating files or directories; return why a path is refused."""
-    normalized = normalize_output_path_argument(output_path)
-    validated = _validate_output_path(policy, normalized) if normalized is not None else None
-    if isinstance(validated, str):
-        return validated
-    return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
-
-
 def prepare_tool_output_file(
     policy: ToolOutputFilePolicy,
     *,
     tool_name: str,
     output_path: object = None,
-) -> ToolOutputFileRequest | dict[str, object]:
-    """Validate before tool execution, without creating files or directories; a refused path is an error receipt."""
-    request = _output_request(policy, tool_name=tool_name, output_path=output_path)
-    return _error_receipt(request) if isinstance(request, str) else request
+) -> ToolOutputFileRequest | str:
+    """Validate before tool execution, without creating files or directories, or return why the path is refused.
+
+    A call whose path is refused never runs and fails with that text, as a call that raised does.
+    """
+    normalized = normalize_output_path_argument(output_path)
+    validated = _validate_output_path(policy, normalized) if normalized is not None else None
+    if isinstance(validated, str):
+        return validated
+    return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
 
 
 def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
@@ -660,9 +652,8 @@ def _wrap_entrypoint(
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
 
         async def async_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            request = _output_request(policy, tool_name=tool_name, output_path=mindroom_output_path)
+            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
             if isinstance(request, str):
-                # The tool never runs; the call fails with why, as a call that raised does.
                 return ToolOutcome(content=request, is_error=True)
             token = _active_output_request.set(request)
             try:
@@ -675,9 +666,8 @@ def _wrap_entrypoint(
     else:
 
         def sync_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            request = _output_request(policy, tool_name=tool_name, output_path=mindroom_output_path)
+            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
             if isinstance(request, str):
-                # The tool never runs; the call fails with why, as a call that raised does.
                 return ToolOutcome(content=request, is_error=True)
             token = _active_output_request.set(request)
             try:
