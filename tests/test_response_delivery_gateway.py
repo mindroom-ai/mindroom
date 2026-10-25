@@ -108,6 +108,13 @@ pytestmark = pytest.mark.asyncio
 _ROOM_ID = "!room:localhost"
 _AGENT_USER_ID = "@agent:localhost"
 _SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
+# How long an await that must finish on its own is given. Reached only when it is blocked, which is the
+# failure, so a loaded host cannot fail a correct implementation.
+_MUST_FINISH_SECONDS = 10.0
+# The cleanup window an orderly shutdown drain gives work that finishes on its own. The terminal publication's
+# journal writes and the recovery proof can take over 0.4 s on a loaded host, and the drain returns once they
+# finish.
+_SHUTDOWN_DRAIN_WINDOW_SECONDS = 2.0
 
 
 def _failed_delivery() -> MatrixDeliveryFailure:
@@ -2150,9 +2157,11 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
     ordinary_reads = tuple(asyncio.create_task(backend.read(block_ordinary_read)) for _ in range(ordinary_capacity))
     proof: asyncio.Task[bool] | None = None
     try:
-        assert await asyncio.to_thread(ordinary_started.wait, 10), "ordinary journal reads did not saturate"
+        assert await asyncio.to_thread(ordinary_started.wait, _MUST_FINISH_SECONDS), (
+            "ordinary journal reads did not saturate"
+        )
         proof = asyncio.create_task(bot._response_recovery_ready(turn))
-        ready = await asyncio.wait_for(asyncio.shield(proof), timeout=1)
+        ready = await asyncio.wait_for(asyncio.shield(proof), timeout=_MUST_FINISH_SECONDS)
     finally:
         release_ordinary.set()
         await asyncio.gather(*ordinary_reads)
@@ -3013,7 +3022,7 @@ class TestTurnDeliverySerialization:
 
         assert (
             await runner.drain_inbox_responses(
-                cancel_after_seconds=0.1,
+                cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
             is True
@@ -3116,9 +3125,8 @@ class TestTurnDeliverySerialization:
             await publication_started.wait()
             assert (
                 await runner.drain_inbox_responses(
-                    # Exercise repeated cancellation without imposing a database deadline: the cleanup window
-                    # must outlast the publication's writes on a loaded host, which can take over 0.4 s.
-                    cancel_after_seconds=2.0,
+                    # Exercise repeated cancellation without imposing a database deadline.
+                    cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                 )
                 is True
@@ -3208,7 +3216,7 @@ class TestTurnDeliverySerialization:
 
         assert (
             await runner.drain_inbox_responses(
-                cancel_after_seconds=0.1,
+                cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
             is True
