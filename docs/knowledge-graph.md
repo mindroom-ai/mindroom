@@ -107,7 +107,7 @@ graph_entity("Project Atlas")
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
-A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or, when there is none under that name yet, the entity named exactly as asked or by another of its configured names.
+A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or, when there is none under that name yet, the entity named exactly as asked, by another name its `knowledge_graph.aliases` entry lists, or by an agent's Matrix ID.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
 An agent reaches only its own graph; a [private agent](configuration/agents.md#private-instances) has one graph per requester.
 
@@ -121,7 +121,7 @@ agents:
 ```
 
 `agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `false`) lets an agent with a graph correct it; setting it on an agent without `knowledge_graph` is a config error.
-Its lookups then show each fact's and entity's id, `graph_entity` also takes an id and lists the other entities found under the name it was given, such as a duplicate extracted under an alias, as `Other entities under this name`, and the tool gains four functions:
+Its lookups then show each fact's and entity's id, `graph_entity` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given or under the entity's other names in `knowledge_graph.aliases` and its Matrix IDs, and the tool gains four functions:
 
 ```python
 delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing

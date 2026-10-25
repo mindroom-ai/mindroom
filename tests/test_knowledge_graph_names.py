@@ -175,6 +175,8 @@ def test_an_agent_key_links_an_entry_in_any_letter_case_and_the_agent_keeps_its_
     lookout = KnownEntity("Lookout", "agent", ("Scout", "Scout Bot", "@mindroom_scout:example.test", "mindroom_scout"))
     assert names.speaker(None, {}, "scout") == lookout
     assert names.canonical("scout bot") == "Lookout"
+    # An agent's key, display name, and username often name something else too, so a lookup tries only its Matrix ID.
+    assert names.aliases_of("lookout") == ("@mindroom_scout:example.test",)
 
 
 def test_a_username_an_entry_or_agent_is_named_gets_its_server() -> None:
