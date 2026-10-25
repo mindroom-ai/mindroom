@@ -357,11 +357,11 @@ def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
     """Return the outermost step of a member's tool-call policy, which runs the rest under the member's own identity.
 
     The turn's tool runtime context names the configured team, or for an ad hoc team the agent whose account posts
-    the reply. Tools that act for the running agent, such as ``todo``'s default
-    assignee and workspace templates or ``claude_agent``'s sessions and model, and the policy's plugin tool hooks
-    read it from that context, so each call runs its policy and reaches its entrypoint with the member's name and the
-    model it runs on. The member still answers through the turn's Matrix account, so its context keeps that account
-    as the recipient, and the hooks keep the turn's Matrix bindings.
+    the reply. Tools that act for the running agent, such as ``todo``'s default assignee and workspace templates or
+    ``claude_agent``'s sessions and model, and the policy's plugin tool hooks read it from that context, so each
+    call runs its policy and reaches its entrypoint with the member's name and the model it runs on. The member
+    still answers through the turn's Matrix account, so its context keeps that account as the recipient, and the
+    hooks keep the turn's Matrix bindings.
     """
 
     async def run_as_member(call: ToolCall, call_next: ToolNext) -> object:
