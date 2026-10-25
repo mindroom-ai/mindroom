@@ -3,13 +3,21 @@
 These fixtures pin what MindRoom sent and stored while Agno 3.0.9 ran it, so the owned runtime can prove it changes no persisted data and no model-visible bytes (`docs/dev/2026-10-20-replace-agno-design.md`).
 The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime; the owned code's parity tests read them.
 The scripts still run from the history trees that hold Agno's provider layer (`tests/agno_parity/capture_providers.py` at `b1d5c30b1`, `tests/agno_parity/capture_prompts.py` at `58bbd84fb`), and a rerun reproduces the goldens those commits stored, which is how the send order of request bodies and prompt requests was recorded.
-The tool goldens are the exception: `tests.agno_parity.regenerate_tool_goldens` rewrites them from the owned toolkit adapter, so a deliberate tool change regenerates them instead of editing them by hand.
-A deliberate change to model-visible bytes, a provider request, or the `io.mindroom.ai_run` metadata edits its golden by hand in the same commit; the storage, run, history, and codec goldens hold data Agno wrote and never change.
+
+## Regenerating the goldens
+
+`.venv/bin/python -m tests.agno_parity.regenerate_goldens`, run from the repository root with every extra installed, rewrites every golden that owned code produces from the scenarios and inputs the goldens hold, and lists the files it rewrote.
+It covers the provider, prompt, tool, and event goldens and the knowledge embedder and search goldens, each through the support functions its parity tests compare with, so an unchanged golden regenerates byte for byte.
+A deliberate change to model-visible bytes, a provider request, a tool, or the `io.mindroom.ai_run` metadata reruns it and commits the rewritten goldens with the change, so a reviewer reads the change as a golden diff.
+Nothing reaches a provider: replies come from each golden's canned response or a scripted model, provider credentials are hidden from the environment, and every network connection is refused.
+To rebase a branch whose goldens conflict, take either side of each conflicting golden, rerun the command at the rebased head, and review the regenerated diff.
+The storage, run, history, and codec goldens and `knowledge/rows.json` hold data Agno wrote, so they are read-only inputs and never change.
 
 ## Provider wire goldens (`providers/`)
 
 `providers/<family>/<scenario>.json` holds one provider request and its parsed reply, captured from the Agno-backed provider layer before its removal.
-The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay every golden through the request pipeline; a deliberate wire change updates the golden in the same commit.
+The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay every golden through the request pipeline and compare the golden the replay regenerates with the file, byte for byte.
+`input` and `response_raw` are the scenario as authored, and a regeneration rewrites `request` and `parsed`.
 
 ### How the goldens were captured
 
@@ -51,7 +59,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 
 - Files are pretty-printed with sorted keys, except `request.body`, which keeps the key order the SDK sent; capture runs from that same key-sorted input, so a key order the body takes from the input is the sorted one.
 - The parity tests compare each request body's serialized text, so a reordered key fails parity, because chat templates and prompt caches see key order.
-- `cerebras` bodies list `messages` before `model`, edited by hand: the OpenAI SDK, which now sends them, puts `messages` first, where the Cerebras SDK put `model` first.
+- `cerebras` bodies list `messages` before `model`, as the OpenAI SDK that now sends them does, where the Cerebras SDK the capture used put `model` first.
 - Agno closed the Cerebras structured-output schema in place, so the capture recorded the closed schema as its input; `cerebras/structured_output` and `cerebras/structured_output_nested` hold the schema Agno received.
 - Request headers are dropped when they carry credentials (`authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, AWS `x-amz-*` signing headers) or SDK, platform, and transport details (`x-stainless-*`, `amz-sdk-*`, `user-agent`, `x-goog-api-client`, `host`, `content-length`, `accept-encoding`, `connection`); every other header, such as `anthropic-beta`, `anthropic-version`, `chatgpt-account-id`, and the Codex session headers, is kept.
 - `id` and `created_at` are dropped from `parsed.message`, and the wall-clock `duration` and `time_to_first_token` from `parsed.metrics`.
@@ -115,7 +123,7 @@ Skipped where the route has nothing to pin:
 
 `prompts/<scenario>.json` holds every model request one scenario sent under Agno 3.0.9, as the provider adapter receives it from the request loop.
 `tests/agno_parity/prompt_scenarios.py` builds each scenario through the production builders (`ai.stream_agent_response`, `teams.envelope.team_response_stream`, `matrix_rtc.call_tools.build_call_tools`, and each helper's call site) and records the requests the owned path sends.
-`tests/agent_loop/test_prompt_parity.py` compares every request of each helper, Matrix reply, and voice-call scenario with its golden, and `tests/team_runtime/test_prompt_parity.py` compares the team goldens.
+`tests/agent_loop/test_prompt_parity.py` compares the golden each helper, Matrix reply, and voice-call scenario regenerates with its file, byte for byte, and `tests/team_runtime/test_prompt_parity.py` compares the team goldens.
 Requests MindRoom sends through its own provider layer are recorded where the provider adapter receives them, below the request pipeline.
 
 Each file has these keys:
@@ -149,7 +157,7 @@ Structured-output helpers run on each of the three structured-output paths: on `
 
 `tools/schemas.json`, `tools/schemas_all_enabled.json`, and `tools/arguments.json` were captured from Agno 3.0.9's tool preparation and tool-call handling.
 `tests/tool_system/test_agno_toolkits.py` compares every adapted toolkit with the two schema files, and `tests/tool_system/test_tool_invocation.py` runs every argument case through the owned tool-call execution.
-After a deliberate change to a tool's functions, schema, flags, or instructions, run `.venv/bin/python -m tests.agno_parity.regenerate_tool_goldens` from the repository root with every extra installed and commit the rewritten files with the change; it builds and normalizes the entries through the same support functions the tests compare with, so an unchanged tool reproduces its entry byte for byte.
+A regeneration builds and normalizes the entries through the same support functions the tests compare with, so an unchanged tool reproduces its entry byte for byte.
 All three are pretty JSON.
 The schema files list tools in sorted order and keep every other key in the order providers receive it, such as `parameters` as `type`, `properties`, `required`, with properties in signature order; the test compares serialized bytes, so a reordered key fails parity.
 `arguments.json` has sorted keys and is compared by value.
@@ -211,7 +219,7 @@ Decoding errors embed the message of Python's `ast.literal_eval`, and probes tha
 A capture script, deleted with Agno's runtime, wrote `storage/`, `runs/`, `history/`, and `events/`.
 Every scenario ran MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions.
 Only the provider was replaced, by the synthetic provider answering from a script.
-Never edit these files by hand.
+The `storage/`, `runs/`, and `history/` files hold data Agno wrote and are never rewritten; the `events/` files hold what MindRoom published and regenerate from owned code.
 `tests/session_storage/test_store_goldens.py` proves the owned store reads and writes every `storage/` file as Agno did.
 
 ### Scenarios
@@ -247,7 +255,7 @@ Every run with a provider request also has its usage row in `<table>_usage`.
   Agno's builder passes `num_history_runs` as `last_n_runs`, `num_history_messages` as `limit`, `[system_message_role]` as `skip_roles` only for a role other than `user`, `assistant`, or `tool`, and the member's id as `agent_id` only for a team member.
 - `events/ai_run.json`: the `io.mindroom.ai_run` Matrix metadata of every run that published one, keyed by run id; a turn stopped by cancelling its task and a turn paused for approval publish none, and a resumed run's entry is the metadata its resume published.
   `tests/test_ai_run_metadata_goldens.py` replays every new run through the reply entry point that published it, with scripted models that answer as the stored run's assistant messages did and a history preparation that returns what the run's metadata says it prepared, except `run-c4`, whose row an edit cut removed.
-  The approval resumes publish theirs from the pre-resume dumps: the team's in that test, the agent's in `tests/test_approval_resume.py`.
+  The approval resumes publish theirs from the pre-resume dumps (`tests/ai_run_golden_helpers.py`, `tests/approval_resume_helpers.py`).
   Agno's streamed reply put a zero `cache_write_tokens` that a request reported into the usage of `run-tools`, which the owned usage leaves out like every zero counter; the test pins that one difference.
   The capture also recorded two turns that Agno's own run cancellation ended with their reply still running, which Stop never caused because it cancels the reply's task first; that file was dropped, so no golden holds a cancelled run's metadata.
 - `events/openai_compat.json`: each `/v1/chat/completions` request with its status and body, parsed JSON when blocking and the raw lines of the SSE stream when streaming.
@@ -278,6 +286,7 @@ The `run-error` record holds the previous turn's answer followed by `(turn faile
 
 `knowledge/embedders.json`, `knowledge/rows.json`, and `knowledge/search.json` were captured from the Agno-backed knowledge path, and the owned knowledge code's parity tests in `tests/test_knowledge_goldens.py` read them.
 All three are pretty JSON with sorted keys and are compared by value.
+`embedders.json` and `search.json` regenerate from owned code (`tests/agno_parity/knowledge_goldens.py`); `rows.json` holds the Chroma rows Agno wrote, which owned refreshes must still write and the owned read path must still search.
 
 ### `knowledge/embedders.json`
 
@@ -298,9 +307,9 @@ Normalization:
 
 ### `knowledge/search.json`
 
-Each search sends one query through Agno's `search_knowledge_base` tool for an agent of `input.config`: `librarian` searches one base, `researcher` two, and `archivist` an empty one; the last search fails its query embedding.
+Each search sends one query through the `search_knowledge_base` tool for an agent of `input.config`, over the bases of `rows.json`'s `input` as an owned refresh writes them: `librarian` searches one base, `researcher` two, and `archivist` an empty one; the last search fails its query embedding.
 A search records `documents`, the tool's JSON result parsed, or `text` for `No documents found` and the error text.
-Agno renders each document from an unordered set and Chroma returns metadata in hash order, so the result's key order varies between processes; its values and its layout (`indent=2`, `ensure_ascii=False`) do not.
+The tool lays its result out with `indent=2` and `ensure_ascii=False`, each document's keys as `name`, `meta_data`, `content`.
 `content_hash` in each document's `meta_data` becomes `<sha256>`.
 
 ## Codec goldens (`codecs.json`)

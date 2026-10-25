@@ -77,6 +77,7 @@ from mindroom.tool_system.skills import agent_workspace_skills_root
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from mindroom.topic_generator import generate_room_topic_ai
 from mindroom.voice.handler import _process_transcription
+from tests.agno_parity.golden_files import sorted_keys
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -1494,6 +1495,43 @@ SCENARIOS: dict[str, Scenario] = {
 }
 
 
+def golden_path(name: str) -> Path:
+    """Return the file of one prompt golden."""
+    return FIXTURE_DIR / f"{name}.json"
+
+
 def load_golden(name: str) -> dict[str, Any]:
     """Return one prompt golden."""
-    return json.loads((FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    return json.loads(golden_path(name).read_text(encoding="utf-8"))
+
+
+@dataclass(frozen=True)
+class RecordedScenario:
+    """What one scenario ran and handed out, and every request it sent, grouped by model in build order."""
+
+    output: ScenarioOutput
+    calls: list[ModelCall]
+
+
+async def record_scenario(name: str, root: Path) -> RecordedScenario:
+    """Run one scenario under ``root`` against the recording provider."""
+    scenario = SCENARIOS[name]
+    recorder = Recorder(responder=scenario.responder)
+    with recorder.installed():
+        output = await scenario.run(root)
+    return RecordedScenario(output, recorder.ordered_calls())
+
+
+def regenerated_golden(name: str, recorded: RecordedScenario, root: Path) -> dict[str, Any]:
+    """Return the prompt golden ``recorded`` regenerates, normalized for its scenario's temporary ``root``.
+
+    The keys of the file and its ``input`` are sorted; ``requests`` and ``exported`` keep the order they were
+    received in, because providers and models receive those values as serialized bytes.
+    """
+    golden: dict[str, Any] = {"description": SCENARIOS[name].description}
+    if recorded.output.exported is not None:
+        golden["exported"] = normalize(recorded.output.exported, root)
+    golden["input"] = sorted_keys(normalize(recorded.output.input, root))
+    golden["requests"] = normalize([call_dict(call) for call in recorded.calls], root)
+    golden["scenario"] = name
+    return golden

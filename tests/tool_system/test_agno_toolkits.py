@@ -15,7 +15,6 @@ from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameters
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
-from tests.agno_parity import regenerate_tool_goldens
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
@@ -60,7 +59,7 @@ def golden_runtime(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Conf
 def test_the_tool_goldens_cover_every_registered_tool(golden_runtime: tuple[Path, Config, RuntimePaths]) -> None:
     """A registered tool without a golden fails here, as does a golden of a tool no longer registered.
 
-    Only the tools no offline build can produce are left out, the ones the regeneration module skips; a tool has an
+    Only the tools no offline build can produce are left out; a tool has an
     all-enabled golden exactly when it has switches to turn on.
     """
     root, _config, _runtime_paths = golden_runtime
@@ -68,7 +67,7 @@ def test_the_tool_goldens_cover_every_registered_tool(golden_runtime: tuple[Path
         registered = set(BUILTIN_TOOL_METADATA)
         switched = {tool_name for tool_name in SCHEMAS if support.all_enabled_overrides(tool_name)}
 
-    assert set(SCHEMAS) == registered - regenerate_tool_goldens.UNBUILDABLE
+    assert set(SCHEMAS) == registered - support.UNBUILDABLE
     assert set(ALL_ENABLED_SCHEMAS) == switched
 
 

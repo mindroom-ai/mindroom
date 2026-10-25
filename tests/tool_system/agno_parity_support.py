@@ -5,7 +5,7 @@ The capture used this same setup: one agent of a config shaped like `mindroom co
 for tools that need settings, offline replacements for SDK clients that contact their service while constructing, and
 a hidden host environment that refuses network connections.
 The parity tests compare what they build with the goldens through `golden_entry` and `argument_outcome`, and
-`tests.agno_parity.regenerate_tool_goldens` rewrites the goldens through the same two functions.
+`tests.agno_parity.regenerate_goldens` rewrites the goldens through the same two functions.
 """
 
 from __future__ import annotations
@@ -53,6 +53,9 @@ SCHEMAS_PATH = FIXTURE_DIR / "schemas.json"
 ALL_ENABLED_SCHEMAS_PATH = FIXTURE_DIR / "schemas_all_enabled.json"
 ARGUMENTS_PATH = FIXTURE_DIR / "arguments.json"
 
+# Registered tools no offline build can produce: their functions come from the Apify Actor builds and the Composio
+# action catalog, which only those services return.
+UNBUILDABLE = frozenset({"apify", "composio"})
 AGENT_NAME = "golden"
 # Tools are built for one agent of a config shaped like `mindroom config init` output: file memory gives the agent a
 # workspace, so output-file wrapping applies; delegation and the knowledge graph enable the tools that need them.
