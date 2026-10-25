@@ -14,7 +14,11 @@ from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPT
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings
 from mindroom.providers.credentials import dashboard_api_key
-from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
+from mindroom.providers.extra_kwargs import (
+    reject_malformed_client_settings,
+    reject_unsupported_extra_kwargs,
+    settings_keys,
+)
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.names import provider_route
 from mindroom.providers.ollama.settings import OllamaSettings
@@ -169,18 +173,17 @@ def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: Runtim
 def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -> None:
     """Raise ``ValueError`` for an ``extra_kwargs`` key the route that serves ``model_config`` does not accept.
 
-    Config load calls this so such a key fails before any model is built; it reads only the routes' key tables,
-    so no provider SDK loads. A provider no route serves is left to ``build_model_provider``.
+    Config load calls this so such a key, a ``client_params`` that is not a mapping, or an endpoint that is not a
+    string fails before any model is built; it reads only the routes' key tables, so no provider SDK loads.
     """
+    reject_malformed_client_settings(model_config.extra_kwargs)
     provider = provider_route(model_config.provider)
     if provider in OPENAI_FAMILY_PROVIDERS:
         allowed = openai_accepted_extra_kwargs(model_config, runtime_paths)
     elif provider in _CLAUDE_PROVIDERS:
         allowed = settings_keys(ClaudeSettings, CLAUDE_ACCEPTED_KEYS[cast("ClaudeRouteKind", provider)])
-    elif provider in _SETTINGS_KEYS:
-        allowed = _SETTINGS_KEYS[provider]
     else:
-        return
+        allowed = _SETTINGS_KEYS[provider]
     reject_unsupported_extra_kwargs(model_config.extra_kwargs, allowed, provider=model_config.provider)
 
 

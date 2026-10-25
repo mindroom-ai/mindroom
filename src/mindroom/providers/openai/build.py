@@ -8,7 +8,6 @@ first request.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -29,7 +28,7 @@ from mindroom.model_defaults import (
 )
 from mindroom.providers.credentials import uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, provider_failure
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_keys
+from mindroom.providers.extra_kwargs import reject_malformed_client_settings, settings_from_extra_kwargs, settings_keys
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
@@ -59,7 +58,7 @@ from mindroom.providers.prompt_cache_key import derive_agent_prompt_cache_key, d
 from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     import httpx
     from openai import AsyncOpenAI
@@ -216,28 +215,9 @@ def _provider_default_sampling(model_id: str) -> bool:
     )
 
 
-def _authored_base_url(client_params: object, base_url: object) -> str | None:
-    """Return the endpoint a config sets; ``client_params`` wins over ``base_url``, as over every client option.
-
-    Config load reads the endpoint to pick the ``openai`` route's API, so a wrongly typed value raises
-    ``ValueError`` naming its key instead of failing on the first string or mapping operation.
-    """
-    match client_params:
-        case {"base_url": nested} if nested:
-            return _authored_string("client_params.base_url", nested)
-        case Mapping() | None:
-            return _authored_string("base_url", base_url)
-        case _:
-            msg = f"extra_kwargs.client_params must be a mapping, not {type(client_params).__name__}"
-            raise ValueError(msg)
-
-
-def _authored_string(key: str, value: object) -> str | None:
-    """Return one authored ``extra_kwargs`` string, raising ``ValueError`` naming ``key`` when it is not one."""
-    if value is None or isinstance(value, str):
-        return value
-    msg = f"extra_kwargs.{key} must be a string, not {type(value).__name__}"
-    raise ValueError(msg)
+def _authored_base_url(client_params: Mapping[str, Any] | None, base_url: str | None) -> str | None:
+    """Return the endpoint a config sets; ``client_params`` wins over ``base_url``, as over every client option."""
+    return (client_params or {}).get("base_url") or base_url
 
 
 def _client_options(
@@ -598,6 +578,8 @@ def _responses_route(model_config: ModelConfig, runtime_paths: RuntimePaths) -> 
     if route_key != "openai":
         return None
     extra_kwargs = model_config.extra_kwargs or {}
+    # This reads authored values before any settings parse, at config load and when the model is built.
+    reject_malformed_client_settings(extra_kwargs)
     base_url = _route_base_url("openai", extra_kwargs.get("client_params"), extra_kwargs.get("base_url"), runtime_paths)
     if model_config.api == "responses" or (
         model_config.api is None and openai_native_tool_search_supported("openai", model_config.id, base_url=base_url)

@@ -458,11 +458,11 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 Each provider accepts only the keys in the table below.
 A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
 
-- `base_url` sends requests to a custom endpoint, such as an OpenAI-compatible server.
+- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
 - `request_params` holds request body fields that MindRoom merges over its own.
 - `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).
-- `client_params` passes options to the provider's API client.
+- `client_params`, a mapping, passes options to the provider's API client; its `base_url`, when set, must be a string.
 
 | Provider | Accepted keys |
 |----------|---------------|

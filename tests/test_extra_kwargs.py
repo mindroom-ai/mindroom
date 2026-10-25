@@ -875,26 +875,40 @@ def test_a_retired_agno_model_field_fails_config_load_and_names_the_model(
     )
 
 
+_NOT_A_MAPPING = "extra_kwargs.client_params must be a mapping, not str"
+_NESTED_NOT_A_STRING = "extra_kwargs.client_params.base_url must be a string, not int"
+
+
 @pytest.mark.parametrize(
-    ("extra_kwargs", "error"),
+    ("provider", "extra_kwargs", "error"),
     [
-        ({"client_params": "http://127.0.0.1:9/v1"}, "extra_kwargs.client_params must be a mapping, not str"),
-        ({"base_url": 9}, "extra_kwargs.base_url must be a string, not int"),
-        ({"client_params": {"base_url": 9}}, "extra_kwargs.client_params.base_url must be a string, not int"),
+        ("openai", {"client_params": "http://127.0.0.1:9/v1"}, _NOT_A_MAPPING),
+        ("openai", {"base_url": 9}, "extra_kwargs.base_url must be a string, not int"),
+        ("openai", {"client_params": {"base_url": 9}}, _NESTED_NOT_A_STRING),
+        ("openai", {"client_params": {"base_url": 0}, "base_url": "http://127.0.0.1:9/v1"}, _NESTED_NOT_A_STRING),
+        ("groq", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("codex", {"client_params": {"base_url": 9}}, _NESTED_NOT_A_STRING),
+        ("anthropic", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("google", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("ollama", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
     ],
 )
-def test_a_wrongly_typed_openai_endpoint_fails_config_load_and_names_the_model_and_key(
+def test_a_wrongly_typed_client_setting_fails_config_load_and_build_naming_the_model_and_key(
     tmp_path: Path,
+    provider: str,
     extra_kwargs: dict[str, Any],
     error: str,
 ) -> None:
-    """Config load reads an ``openai`` model's endpoint to pick its API, so a wrongly typed one is a config error."""
-    data = {"models": {"default": {"provider": "openai", "id": "gpt-6-astra", "extra_kwargs": extra_kwargs}}}
+    """Every adapter merges ``client_params`` into its SDK client and reads its endpoint from these keys."""
+    runtime_paths = _runtime_paths(tmp_path)
+    data = {"models": {"default": {"provider": provider, "id": "gpt-6-astra", "extra_kwargs": extra_kwargs}}}
 
-    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
-        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+    with pytest.raises(ConfigRuntimeValidationError) as load_error:
+        Config.validate_with_runtime(data, runtime_paths)
+    with pytest.raises(ValueError, match="must be a") as build_error:
+        build_model_provider(Config.model_validate(data), runtime_paths)
 
-    assert str(exc_info.value) == f"models.default: {error}"
+    assert (str(load_error.value), str(build_error.value)) == (f"models.default: {error}", error)
 
 
 _OPENAI_ENDPOINT_ENV = {"OPENAI_BASE_URL": "http://127.0.0.1:9/v1"}

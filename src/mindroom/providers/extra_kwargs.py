@@ -8,6 +8,7 @@ again when the model is built.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import fields
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
@@ -15,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.redaction import redact_sensitive_data
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping
+    from collections.abc import Collection, Iterable
 
     from _typeshed import DataclassInstance
 
@@ -58,6 +59,26 @@ def reject_unsupported_extra_kwargs(
         raise ValueError(msg)
 
 
+def reject_malformed_client_settings(extra_kwargs: Mapping[str, Any] | None) -> None:
+    """Raise ``ValueError`` naming the key when ``client_params`` is not a mapping or an endpoint is not a string.
+
+    Every adapter merges ``client_params`` into its SDK client options, and the OpenAI-family routes pick their
+    endpoint, and the ``openai`` route its API, from ``client_params.base_url`` and ``base_url``.
+    """
+    values = extra_kwargs or {}
+    client_params = values.get("client_params")
+    if client_params is not None and not isinstance(client_params, Mapping):
+        msg = f"extra_kwargs.client_params must be a mapping, not {type(client_params).__name__}"
+        raise ValueError(msg)
+    for key, value in (
+        ("client_params.base_url", (client_params or {}).get("base_url")),
+        ("base_url", values.get("base_url")),
+    ):
+        if value is not None and not isinstance(value, str):
+            msg = f"extra_kwargs.{key} must be a string, not {type(value).__name__}"
+            raise ValueError(msg)
+
+
 def settings_from_extra_kwargs[T: DataclassInstance](
     settings_type: type[T],
     extra_kwargs: Mapping[str, Any] | None,
@@ -72,6 +93,7 @@ def settings_from_extra_kwargs[T: DataclassInstance](
     """
     values = dict(extra_kwargs or {})
     reject_unsupported_extra_kwargs(values, settings_keys(settings_type, accepted), provider=provider)
+    reject_malformed_client_settings(values)
     return settings_type(**{key: _copied(value) for key, value in values.items()})
 
 
@@ -99,6 +121,7 @@ def settings_params(settings: DataclassInstance) -> dict[str, Any]:
 
 __all__ = [
     "SECRET",
+    "reject_malformed_client_settings",
     "reject_unsupported_extra_kwargs",
     "settings_from_extra_kwargs",
     "settings_keys",
