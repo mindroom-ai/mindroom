@@ -81,9 +81,6 @@
                 "media_type": "application/pdf",
                 "data": "JVBERi0xLjQKJSVFT0YK"
               },
-              "citations": {
-                "enabled": true
-              },
               "cache_control": {
                 "type": "ephemeral",
                 "ttl": "1h"

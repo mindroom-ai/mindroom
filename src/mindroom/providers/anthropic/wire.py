@@ -157,22 +157,20 @@ def format_claude_messages(
     messages: Sequence[Message],
     *,
     append_trailing_user_message: bool,
-    citations: bool,
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
     System messages are extracted, each its own system text. Consecutive same-role turns merge into one, dropping
     the earlier assistant turn's thinking: the API verifies an assistant message's thinking sequence against one
     original response. A conversation that ends with an assistant turn gets a trailing ``continue`` user turn when
-    the model rejects prefill. Documents ask for citations unless ``citations`` is False, as a request with
-    structured output must be: the API rejects citations beside an output format.
+    the model rejects prefill. Documents ask for no citations, which no MindRoom reply shows.
     """
     turns: list[dict[str, Any]] = []
     for message in messages:
         if message.role == "system":
             continue
         if message.role == "user":
-            content = _user_blocks(message, citations=citations)
+            content = _user_blocks(message)
         elif message.role == "assistant":
             content = _assistant_blocks(message)
             if not content:
@@ -208,11 +206,11 @@ def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
-def _user_blocks(message: Message, *, citations: bool) -> list[Any]:
+def _user_blocks(message: Message) -> list[Any]:
     content = message.content or ""
     blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
     media = [_image_block(image) for image in message.images or ()]
-    media += [_document_block(file, citations=citations) for file in message.files or ()]
+    media += [_document_block(file) for file in message.files or ()]
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
     return blocks + [block for block in media if block is not None]
 
@@ -325,7 +323,7 @@ def _image_block(image: Image) -> dict[str, Any] | None:
     }
 
 
-def _document_block(file: File, *, citations: bool) -> dict[str, Any] | None:
+def _document_block(file: File) -> dict[str, Any] | None:
     if file.url is not None:
         # Only a document ``inline_url_media`` left remote reaches here.
         source: dict[str, Any] = {"type": "url", "url": file.url}
@@ -347,10 +345,7 @@ def _document_block(file: File, *, citations: bool) -> dict[str, Any] | None:
             source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
         else:
             source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
-    block: dict[str, Any] = {"type": "document", "source": source}
-    if citations:
-        block["citations"] = {"enabled": True}
-    return block
+    return {"type": "document", "source": source}
 
 
 def _serialized_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:

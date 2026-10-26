@@ -398,7 +398,6 @@ class ClaudeProvider:
         conversation = format_claude_messages(
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
-            citations=output_format is None,
         )
         # Vertex rejects the tool-level strict field.
         strict_allowed = self.route != "vertexai_claude"

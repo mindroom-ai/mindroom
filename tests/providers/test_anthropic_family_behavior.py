@@ -614,8 +614,8 @@ async def test_authored_output_config_and_stop_sequences_reach_the_request(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("structured", [False, True], ids=["plain", "structured-output"])
-async def test_documents_ask_for_citations_except_under_structured_output(tmp_path: Path, *, structured: bool) -> None:
-    """The API rejects citations beside an output format, so a structured answer sends its documents without them."""
+async def test_documents_ask_for_no_citations(tmp_path: Path, *, structured: bool) -> None:
+    """No MindRoom reply shows citations, so a document never asks for them, with or without structured output."""
     wire = Wire(sse_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
     provider = route_provider("anthropic", tmp_path, wire)
     document = File(content=b"Paris is in France.", mime_type="text/plain")
@@ -626,9 +626,7 @@ async def test_documents_ask_for_citations_except_under_structured_output(tmp_pa
 
     body = wire.body()
     (block,) = [block for block in body["messages"][-1]["content"] if block["type"] == "document"]
-    assert ("citations" in block, "output_config" in body) == (not structured, structured)
-    if not structured:
-        assert block["citations"] == {"enabled": True}
+    assert ("citations" in block, "output_config" in body) == (False, structured)
 
 
 @pytest.mark.asyncio

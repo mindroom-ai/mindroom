@@ -96,7 +96,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `image_input`, `file_input`, `audio_input` | A 1x1 PNG, a tiny PDF, or an empty WAV on the prompt; routes that omit a kind pin the media-fallback note instead. |
 | `reasoning`, `reasoning_replay` | A reasoning or thinking reply, then that turn replayed. |
 | `reasoning_tool_call`, `reasoning_tool_results` | A reasoning reply that calls a tool, then the tool loop continued with its result, so signed thinking, reasoning content, and thought signatures replay inside one turn. |
-| `claude_citations`, `claude_citations_replay` | A text document with citations, then the cited turn replayed. |
+| `claude_citations`, `claude_citations_replay` | A text document, which the request sends without asking for citations, and a reply that still carries them, as turns earlier releases stored do; then that turn replayed without them. |
 | `claude_server_tool_blocks`, `claude_server_tool_blocks_replay` | Native tool-search server blocks with a deferred tool call, then the turn replayed with its result. |
 | `responses_continuation` | A stored response continued with `previous_response_id`. |
 | `responses_explicit_replay` | On Responses routes, `reasoning_tool_call` runs under portable replay and this golden replays its items and result explicitly. |
