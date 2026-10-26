@@ -23,7 +23,7 @@ from mindroom.providers.assistant_turn import ThinkTagSplitter
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import chat_call_id, reformat_tool_call_ids
-from mindroom.providers.tool_policy import disable_tool_selection, provider_tools_disabled
+from mindroom.providers.tool_policy import disable_tool_selection, disables_tools
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -349,7 +349,14 @@ def _add_tools(
         params["parallel_tool_calls"] = settings.parallel_tool_calls
 
 
-def _add_route_params(params: dict[str, Any], *, model_id: str, settings: ChatSettings, wire: ChatWire) -> None:
+def _add_route_params(
+    params: dict[str, Any],
+    *,
+    model_id: str,
+    settings: ChatSettings,
+    wire: ChatWire,
+    tool_choice: ToolChoice | None,
+) -> None:
     """Apply authored request parameters, then the route's own rules on top of them."""
     params.update(settings.request_params or {})
     if wire.route == "openrouter" and settings.models:
@@ -358,7 +365,7 @@ def _add_route_params(params: dict[str, Any], *, model_id: str, settings: ChatSe
         _deepseek_thinking(params, settings, model_id)
     if wire.route == "kimi" and settings.prompt_cache_key:
         params.setdefault("prompt_cache_key", settings.prompt_cache_key)
-    if provider_tools_disabled():
+    if disables_tools(tool_choice):
         _reject_native_search(params, model_id, wire)
 
 
@@ -418,8 +425,12 @@ def chat_request_kwargs(
         settings=settings,
         wire=wire,
     )
-    _add_route_params(params, model_id=model_id, settings=settings, wire=wire)
-    params = {"model": model_id, "messages": _chat_messages(messages, wire, settings), **disable_tool_selection(params)}
+    _add_route_params(params, model_id=model_id, settings=settings, wire=wire, tool_choice=tool_choice)
+    params = {
+        "model": model_id,
+        "messages": _chat_messages(messages, wire, settings),
+        **disable_tool_selection(params, tool_choice),
+    }
     if output_schema is None or wire.dialect not in _WHOLE_STRUCTURED_REPLY_DIALECTS:
         params["stream"] = True
         if wire.dialect == "openai":

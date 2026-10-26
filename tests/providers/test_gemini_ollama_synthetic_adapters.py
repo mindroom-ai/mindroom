@@ -42,7 +42,6 @@ from mindroom.providers.gemini import files as gemini_files
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
-from mindroom.providers.tool_policy import without_provider_tools
 from tests.providers.gemini_ollama_support import (
     build_adapter,
     gemini_sse,
@@ -411,13 +410,12 @@ async def test_gemini_decision_requests_keep_schemas_but_disable_function_callin
     tmp_path: Path,
 ) -> None:
     """A participation decision keeps declarations, sets mode NONE, and asks for JSON where Gemini accepts it."""
-    with without_provider_tools():
-        request, _ = await run_adapter(
-            config,
-            _request(tools=[WEATHER], tool_choice="none"),
-            tmp_path,
-            gemini_sse(_gemini_chunk({"text": "{}"})),
-        )
+    request, _ = await run_adapter(
+        config,
+        _request(tools=[WEATHER], tool_choice="none"),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "{}"})),
+    )
 
     body = request["body"]
     assert [declaration["name"] for declaration in body["tools"][0]["functionDeclarations"]] == ["get_weather"]
@@ -436,8 +434,12 @@ async def test_gemini_decision_requests_drop_authored_native_tools(tmp_path: Pat
     }
     config = _config(GEMINI, generation_config=copy.deepcopy(authored))
 
-    with without_provider_tools():
-        request, _ = await run_adapter(config, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "{}"})))
+    request, _ = await run_adapter(
+        config,
+        _request(tool_choice="none"),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "{}"})),
+    )
 
     body = request["body"]
     assert body["tools"] == [{"functionDeclarations": [{"name": "read_status", "description": "Read status"}]}]
@@ -460,10 +462,10 @@ async def test_gemini_decision_requests_fail_on_tools_they_cannot_inspect(
     tmp_path: Path,
 ) -> None:
     """Cached content and raw body overrides can carry native tools, so a decision refuses to send them."""
-    with without_provider_tools(), pytest.raises(ValueError, match=error):
+    with pytest.raises(ValueError, match=error):
         await run_adapter(
             _config(GEMINI, **extra_kwargs),
-            _request(),
+            _request(tool_choice="none"),
             tmp_path,
             gemini_sse(_gemini_chunk({"text": "{}"})),
         )
@@ -478,7 +480,7 @@ async def test_gemini_decision_requests_fail_on_client_body_overrides(tmp_path: 
         config = _config(GEMINI, client_params={"http_options": http_options})
         adapter = gemini_adapter.build_provider(ModelConfig(**config), runtime_paths_for(tmp_path))
 
-        with without_provider_tools(), pytest.raises(ValueError, match="body overrides"):
+        with pytest.raises(ValueError, match="body overrides"):
             [event async for event in adapter.stream(_request(tools=[WEATHER], tool_choice="none"))]
 
     assert sent == []
@@ -491,13 +493,12 @@ async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[s
 
     The Agno path sent the same body: no tools, no function-calling config, and JSON output on both routes.
     """
-    with without_provider_tools():
-        request, _ = await run_adapter(
-            _config(config, search=True),
-            _request(tools=[WEATHER], tool_choice="none"),
-            tmp_path,
-            gemini_sse(_gemini_chunk({"text": "{}"})),
-        )
+    request, _ = await run_adapter(
+        _config(config, search=True),
+        _request(tools=[WEATHER], tool_choice="none"),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "{}"})),
+    )
 
     body = request["body"]
     assert "tools" not in body
@@ -963,11 +964,38 @@ async def test_gemini_inlines_local_media_and_uploads_what_is_too_large(
 
 
 @pytest.mark.asyncio
-async def test_gemini_uploads_local_audio_and_video_once_and_reuses_the_active_upload(
+async def test_gemini_inlines_small_local_audio_and_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local audio and video up to the inline limit are inlined like other media, with no Files API upload."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"mp4-clip")
+    message = Message(
+        role="user",
+        content="Summarize",
+        audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")],
+        videos=[Video(filepath=str(video_path))],
+    )
+    server = _MediaServer()
+
+    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert server.uploads == []
+    assert _user_parts(server) == [
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"mp4-clip").decode(), "mimeType": "video/mp4"}},
+        {"text": "Summarize"},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"OggS-voice").decode(), "mimeType": "audio/ogg"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_uploads_large_local_audio_and_video_once_and_reuses_the_active_upload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Local audio and video go through the Files API whatever their size, and the same content is uploaded once."""
+    """Local audio and video too large to inline go through the Files API, and the same content is uploaded once."""
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"OggS-voice")
     video_path = tmp_path / "clip.mp4"
@@ -1001,6 +1029,8 @@ async def test_gemini_uses_the_upload_a_concurrent_request_made_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Team members sending the same attachment at once share one upload instead of failing on the name clash."""
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"OggS-voice")
     message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
@@ -1018,6 +1048,8 @@ async def test_gemini_upload_the_files_api_cannot_process_is_an_invalid_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed upload raises before the model request, so the media fallback can note the missing media."""
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"OggS-voice")
     message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
@@ -1036,6 +1068,8 @@ async def test_gemini_file_that_vanishes_before_its_upload_is_an_invalid_request
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A file deleted after its upload name was computed is unsendable media, which is never retried."""
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"OggS-voice")
     content_name = gemini_files._content_name
@@ -1068,6 +1102,8 @@ async def test_gemini_upload_transport_failure_is_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A timeout or reset while uploading is the provider's transient failure, not unsendable media."""
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"OggS-voice")
     message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
@@ -1095,6 +1131,8 @@ async def test_gemini_files_api_failures_are_provider_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Files API failure other than a missing file or a name clash fails the request as the provider's error."""
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"OggS-voice")
     message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
@@ -1521,13 +1559,12 @@ async def test_ollama_tools_are_sorted_and_leave_out_empty_descriptions(tmp_path
 @pytest.mark.asyncio
 async def test_ollama_decision_requests_send_no_tools(tmp_path: Path) -> None:
     """Ollama has no tool_choice, so a participation decision leaves the tools out."""
-    with without_provider_tools():
-        request, _ = await run_adapter(
-            OLLAMA,
-            _request(tools=[WEATHER], tool_choice="none"),
-            tmp_path,
-            ollama_ndjson(_ollama_done()),
-        )
+    request, _ = await run_adapter(
+        OLLAMA,
+        _request(tools=[WEATHER], tool_choice="none"),
+        tmp_path,
+        ollama_ndjson(_ollama_done()),
+    )
 
     assert request["body"]["tools"] == []
 

@@ -19,7 +19,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, NativeCompactionReplay, RequestOverrides
 from mindroom.participation import ParticipationDecision, ParticipationGate
 from mindroom.participation_hook import parse_decision, participation_hook
-from mindroom.providers.tool_policy import provider_tools_disabled
+from mindroom.providers.tool_policy import disables_tools
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 
@@ -52,7 +52,7 @@ class _PolicyAwareModel(ScriptedModel):
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Yield the scripted turn after noting the task's tool policy."""
-        self.tools_disabled.append(provider_tools_disabled())
+        self.tools_disabled.append(disables_tools(request.tool_choice))
         async for event in super().stream(request):
             yield event
 

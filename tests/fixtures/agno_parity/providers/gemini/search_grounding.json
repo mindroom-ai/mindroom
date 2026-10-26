@@ -84,10 +84,10 @@
       "role": "assistant"
     },
     "metrics": {
-      "input_tokens": 42,
+      "input_tokens": 138,
       "output_tokens": 21,
       "reasoning_tokens": 9,
-      "total_tokens": 63
+      "total_tokens": 159
     },
     "stop_reason": "end"
   },

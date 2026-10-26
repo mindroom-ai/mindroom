@@ -196,7 +196,7 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
             {"x-api-key": "k", "anthropic-version": "2023-06-01"},
         ),
         ("openai", None, "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
-        ("gemini", None, "https://generativelanguage.googleapis.com/v1beta/models?key=k", {}),
+        ("gemini", None, "https://generativelanguage.googleapis.com/v1beta/models", {"x-goog-api-key": "k"}),
         ("groq", None, "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
         ("openai", "https://proxy.example/v1/", "https://proxy.example/v1/models", {"Authorization": "Bearer k"}),
     ],

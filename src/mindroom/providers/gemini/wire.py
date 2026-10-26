@@ -245,22 +245,16 @@ async def _local_part(
     kind: str,
     route: MediaRoute,
     mime_type: Callable[[bytes], str],
-    *,
-    always_upload: bool = False,
 ) -> dict[str, Any] | None:
     """Inline a local file up to the inline limit, or reference its Files API upload where the route has one.
 
     ``mime_type`` gets the file's bytes, or only its header when the file is uploaded.
     """
     file_path = Path(path)
-    # TODO(simplify): local audio and video always go through the Files API where there is one, even when small
-    # enough to inline. Inline them up to the limit like other media and drop ``always_upload``. Operators would
-    # see fewer Files API uploads; models get the same media.
-    inline_limit = 0 if always_upload and route.upload is not None else _INLINE_MEDIA_LIMIT_BYTES
-    size, data = await asyncio.to_thread(_read_local_media, file_path, kind, route.provider, inline_limit)
+    size, data = await asyncio.to_thread(_read_local_media, file_path, kind, route.provider, _INLINE_MEDIA_LIMIT_BYTES)
     if not size:
         return None
-    if size <= inline_limit:
+    if size <= _INLINE_MEDIA_LIMIT_BYTES:
         return _inline(data, mime_type(data))
     if route.upload is None:
         msg = f"The {kind} attachment is too large to send inline to Vertex AI"
@@ -301,7 +295,7 @@ async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:
         data, _ = await _downloaded(audio.url, "audio", route)
         return _inline(data, mime_type)
     if audio.filepath is not None:
-        return await _local_part(audio.filepath, "audio", route, lambda _: mime_type, always_upload=True)
+        return await _local_part(audio.filepath, "audio", route, lambda _: mime_type)
     return _inline(audio.content, mime_type) if audio.content else None
 
 
@@ -310,7 +304,7 @@ async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     if video.url is not None:
         return _file_uri(video.url, mime_type)
     if video.filepath is not None:
-        return await _local_part(video.filepath, "video", route, lambda _: mime_type, always_upload=True)
+        return await _local_part(video.filepath, "video", route, lambda _: mime_type)
     return _inline(video.content, mime_type) if video.content else None
 
 
@@ -530,7 +524,8 @@ def _usage_metrics(usage: GenerateContentResponseUsageMetadata) -> MessageMetric
     """Return the usage of one reply; thinking counts as output, as Google bills it."""
     reasoning_tokens = usage.thoughts_token_count or 0
     counts = TokenCounts(
-        input_tokens=usage.prompt_token_count or 0,
+        # The prompt a hosted tool adds, such as fetched URL context or search results, counts as input too.
+        input_tokens=(usage.prompt_token_count or 0) + (usage.tool_use_prompt_token_count or 0),
         output_tokens=(usage.candidates_token_count or 0) + reasoning_tokens,
         reasoning_tokens=reasoning_tokens,
         cache_read_tokens=usage.cached_content_token_count or 0,

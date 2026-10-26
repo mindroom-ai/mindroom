@@ -45,7 +45,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
-from mindroom.providers.anthropic.wire import supports_prefill
+from mindroom.providers.anthropic.wire import supports_prefill, supports_structured_outputs
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.system_prompt import render_session_context
 from tests.providers.anthropic_family_support import (
@@ -553,6 +553,25 @@ async def test_an_assistant_turn_with_nothing_to_replay_is_left_out(tmp_path: Pa
 def test_prefill_support_reads_the_model_behind_route_decorated_ids(model_id: str, *, prefill: bool) -> None:
     """Bedrock's region prefix and version suffix, Vertex's snapshot, and a gateway's provider path hide no model."""
     assert supports_prefill(model_id) is prefill
+
+
+@pytest.mark.parametrize(
+    ("model_id", "structured"),
+    [
+        ("anthropic/claude-3-5-haiku-20241022", False),
+        ("us.anthropic.claude-3-7-sonnet-20250219-v1:0", False),
+        ("claude-sonnet-4@20250514", False),
+        ("anthropic/claude-opus-4-6", True),
+        ("claude-sonnet-5-5", True),
+    ],
+)
+def test_structured_output_support_reads_the_model_behind_route_decorated_ids(
+    model_id: str,
+    *,
+    structured: bool,
+) -> None:
+    """A gateway path, Bedrock region, or Vertex snapshot does not make an older Claude model count as supporting it."""
+    assert supports_structured_outputs(model_id) is structured
 
 
 @pytest.mark.asyncio

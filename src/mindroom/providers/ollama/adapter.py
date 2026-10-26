@@ -39,7 +39,7 @@ from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings
 from mindroom.providers.remote_media import download_media
-from mindroom.providers.tool_policy import provider_tools_disabled
+from mindroom.providers.tool_policy import disables_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
@@ -149,13 +149,11 @@ class OllamaProvider:
             options["temperature"] = request.overrides.temperature
         authored = {"format": settings.format, "options": options or None, "keep_alive": settings.keep_alive}
         kwargs: dict[str, Any] = {key: value for key, value in authored.items() if value is not None}
-        # TODO(simplify): ``tool_choice: "none"`` still sends the tools, so the model can call them; only a decision
-        # request drops them. Drop the tools whenever ``tool_choice`` is "none". Models would notice (#3075).
         if tools := _format_tools(request.tools):
             kwargs["tools"] = tools
         kwargs.update(settings.request_params or {})
-        if provider_tools_disabled():
-            # Ollama has no tool_choice, so a decision request carries no tools at all.
+        if disables_tools(request.tool_choice):
+            # Ollama has no tool_choice, so a request that allows no tool use carries no tools at all.
             kwargs.pop("tools", None)
         if request.output_schema is not None and "format" not in kwargs:
             kwargs["format"] = request.output_schema.model_json_schema()

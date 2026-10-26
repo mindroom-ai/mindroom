@@ -50,7 +50,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.registry import build_model_provider
-from mindroom.providers.tool_policy import provider_tools_disabled
+from mindroom.providers.tool_policy import disables_tools
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
@@ -135,7 +135,7 @@ class _ScriptedModel:
         contents = [message.get_content_string() for message in request.messages]
         self.received.append(request)
         self.requests.append(contents)
-        self.provider_tools_blocked.append(provider_tools_disabled())
+        self.provider_tools_blocked.append(disables_tools(request.tool_choice))
         self.log_contexts.append(structlog.contextvars.get_contextvars())
         self.request_log_contexts.append(current_llm_request_log_context())
         if self.release is not None and len(self.requests) > self.released_requests:

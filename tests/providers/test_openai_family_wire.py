@@ -7,6 +7,7 @@ import base64
 import json
 import re
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -48,7 +49,6 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.tool_policy import without_provider_tools
 from tests.providers.golden_support import PacedBytes, encoded_response
 from tests.providers.openai_family_support import (
     golden_provider,
@@ -1209,12 +1209,11 @@ async def _regular_and_decision_bodies(
     model_config: dict[str, Any],
     request: ModelRequest,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Send ``request`` once as a reply and once as a decision, returning both wire bodies."""
+    """Send ``request`` once as a reply and once as a decision (``tool_choice`` "none"), returning both wire bodies."""
     reply_kind = "responses" if model_config.get("api") == "responses" else "text"
     built = _Built(tmp_path, model_config, _decision_reply(reply_kind))
     await _turn(built, request)
-    with without_provider_tools():
-        await _turn(built, request)
+    await _turn(built, replace(request, tool_choice="none"))
     return built.body(0), built.body(1)
 
 
@@ -1335,8 +1334,8 @@ async def test_decisions_fail_before_sending_on_routes_whose_hosted_search_alway
 ) -> None:
     built = _Built(tmp_path, model_config, _chat_reply())
 
-    with without_provider_tools(), pytest.raises(ValueError, match=error):
-        await _turn(built, ModelRequest(messages=[_user()], tools=[_DECISION_TOOL]))
+    with pytest.raises(ValueError, match=error):
+        await _turn(built, ModelRequest(messages=[_user()], tools=[_DECISION_TOOL], tool_choice="none"))
 
     assert built.requests == []
 

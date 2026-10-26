@@ -22,7 +22,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "provider_tools_disabled": true,
     "tool_choice": "none",
     "tools": [
       {

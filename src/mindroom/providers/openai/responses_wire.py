@@ -398,7 +398,10 @@ def responses_request_kwargs(
     # ``store`` in request_params already became the route's storage setting.
     params.update({key: value for key, value in (settings.request_params or {}).items() if key != "store"})
     _add_replay_policy(params, request)
-    params = disable_tool_selection(request_params_with_deferred_tool_search(params, request.deferred_tools.names))
+    params = disable_tool_selection(
+        request_params_with_deferred_tool_search(params, request.deferred_tools.names),
+        request.tool_choice,
+    )
     if wire.route == "codex":
         _codex_params(params, settings, wire)
     formatted_input = responses_input(

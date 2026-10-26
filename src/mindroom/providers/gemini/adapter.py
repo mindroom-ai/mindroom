@@ -42,7 +42,7 @@ from mindroom.providers.gemini.wire import (
     tool_config,
     without_tool_selection,
 )
-from mindroom.providers.tool_policy import provider_tools_disabled
+from mindroom.providers.tool_policy import disables_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator
@@ -182,7 +182,7 @@ class GeminiProvider:
         if overrides.caller_retries:
             # The SDK retries only as ``http_options.retry_options`` authors it; one attempt overrides that here.
             config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
-        if provider_tools_disabled():
+        if disables_tools(request.tool_choice):
             return self._decision_config(config)
         return config
 

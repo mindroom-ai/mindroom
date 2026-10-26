@@ -34,7 +34,6 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 - `input.deferred_tool_search` installs the native or portable deferred tool search exactly as `agents.py` does, and `input.portable_replay` calls `configure_portable_replay` as history replay planning does.
 - `input.native_compaction` calls `configure_native_compaction` with its threshold and history generation, as history planning does when it enables native compaction.
 - `input.tool_jobs` installs `install_tool_job_execution` as agent construction does, and the harness answers the per-turn job checks (a background job runtime, execution resources, and which functions are managed calls), because `Function.from_dict` cannot carry the assembled toolkit those checks read.
-- `input.provider_tools_disabled` sends the request inside `without_provider_tools()`, as participation decisions and judgments do.
 - Goldens call Agno's `aresponse_stream`, the run loop's entry point, and stop after the first request completes.
   The `output_limit_stop`, `structured_output`, `structured_output_nested`, and `tool_choice_none` scenarios were captured through `aresponse`, Agno's non-streaming path, except on Codex; the owned adapters stream them, so they hold the streamed request the owned adapter sends and the same reply as a stream, with the parsed reply regenerated from it.
   Groq's `structured_output` and `structured_output_nested` are the exception and keep their whole request and reply, because Groq does not stream structured output.
@@ -53,7 +52,6 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | `input.output_schema` | `null`, or the request's output schema as `{"model": "module:Class", "json_schema": ...}`; the route renders it as its structured-output support asks, and replay fails when the class's JSON schema no longer equals `json_schema`. |
 | `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
 | `input.portable_replay` | `null`, or the `configure_portable_replay` setting for Responses models. |
-| `input.provider_tools_disabled` | Present only as `true`, for a request sent inside `without_provider_tools()`. |
 | `input.tool_jobs` | Present only as `{"managed": [...]}`, the functions a turn that can start tool jobs offers as managed calls. |
 | `input.native_compaction` | Present only as `{"threshold", "history_generation"}`, the arguments of `configure_native_compaction`. |
 | `request` | `method`, `url`, the stable `headers`, and the JSON `body` of the SDK request. |
@@ -111,7 +109,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `approval_gated_tools` | A function the approval policy gates and a `run_subagent` stand-in marked for external execution, both through `apply_tool_approval_capability`, beside an ungated function; the gating stays with the functions, so their definitions go out like the ungated one's, and the reply calls the gated one. |
 | `tool_job_wait_parameter` | A turn whose calls can become tool jobs: the managed function gains the optional `background_after` parameter, the other function keeps its schema, and the reply passes `background_after`. |
 | `native_compaction`, `native_compaction_replay` | Native compaction with a 60,000-token trigger: the request's `context_management`, a reply that carries a compaction checkpoint, then the checkpoint and its tail replayed in place of the turns before it. |
-| `tool_choice_none` | A decision request: `tool_choice` `"none"` with provider tools disabled and the tools still defined. |
+| `tool_choice_none` | A decision request: `tool_choice` `"none"`, which allows no tool use, with the tools still defined. |
 | `search_grounding` | Google Search grounding (`search: true`) on `gemini-3.1-pro-preview`, on Vertex AI at the `global` location: the search tool goes out in place of the two offered function tools, and the streamed reply carries grounding metadata, which the owned message does not keep, plus tool-use prompt tokens in its usage. |
 
 Skipped where the route has nothing to pin:
