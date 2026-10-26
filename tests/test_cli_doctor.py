@@ -370,6 +370,30 @@ def test_doctor_never_sends_a_shared_key_to_a_custom_endpoint(
     assert f"{env_key} not checked for gateway, which calls {endpoint}" in " ".join(capsys.readouterr().out.split())
 
 
+@pytest.mark.parametrize(
+    ("provider", "url"),
+    [
+        ("google", "https://generativelanguage.googleapis.com/v1beta/models?key=shared"),
+        ("anthropic", "https://api.anthropic.com/v1/models"),
+    ],
+)
+def test_doctor_checks_a_shared_key_at_the_provider_s_own_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    url: str,
+) -> None:
+    """A model without a custom endpoint gets the shared key checked at its provider's API."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    (tmp_path / ".env").write_text(f"{env_key_for_provider(provider)}=shared\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent = _record_key_checks(monkeypatch)
+    config = Config(models={"default": ModelConfig(provider=provider, id="m")}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert [sent_url for sent_url, _headers in sent] == [url]
+
+
 def test_doctor_never_sends_the_environment_key_where_a_stored_key_goes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
