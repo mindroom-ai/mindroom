@@ -24,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
+from mindroom.execution_preparation import _get_unseen_messages_for_sender
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
@@ -1668,6 +1669,210 @@ class TestStreamingProgressIsTransport:
 
         assert await bodies(alice) == ["Thinking..."]
         assert await revisions(alice) == ["$answer"]
+
+
+@dataclass
+class ParentFirstWalk(FakeClient):
+    """A homeserver whose recursive walk sends each reply before its own edits.
+
+    Tuwunel pages a recursive relation walk this way: newest first between
+    messages, but a reply's edits come back after the reply, or on no page at
+    all. Only the order inside one message changes here.
+    """
+
+    def _ordered_relations(
+        self,
+        event_id: str,
+        direction: nio.MessageDirection,
+    ) -> Iterator[dict[str, Any]]:
+        """Return stored relations newest message first, each reply ahead of its edits."""
+        del direction
+        sources = self.relations.get(event_id, [])
+        timestamps = {source["event_id"]: source["origin_server_ts"] for source in sources}
+
+        def position(source: dict[str, Any]) -> tuple[int, bool, int]:
+            relation = source["content"].get("m.relates_to") or {}
+            target = relation.get("event_id") if relation.get("rel_type") == "m.replace" else None
+            message_ts = source["origin_server_ts"] if target is None else timestamps[target]
+            return (message_ts, target is None, source["origin_server_ts"])
+
+        return iter(sorted(sources, key=position, reverse=True))
+
+
+def streamed_reply_client(*endings: dict[str, Any], client_type: type[FakeClient] = FakeClient) -> FakeClient:
+    """Return a thread whose recursive walk holds a placeholder reply but not how it ended.
+
+    The reply's own edit lookup does hold its endings, which is what Tuwunel
+    answers: its recursive walk misses edits that its direct lookup returns.
+    """
+    placeholder = stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000, thread_id="$root")
+    return client_type(
+        events={"$root": raw("$root", "the question"), "$answer": placeholder},
+        relations={"$root": [placeholder], "$answer": list(endings)},
+    )
+
+
+def completed_ending(event_id: str = "$ending", *, target: str = "$answer", ts: int = 2_100) -> dict[str, Any]:
+    """Return the edit that ends a streamed reply."""
+    return stream_raw(event_id, "the whole answer", STREAM_STATUS_COMPLETED, ts=ts, replaces=target)
+
+
+class TestEditsTheThreadWalkMissed:
+    """A reply a thread walk leaves mid-stream still gets the ending the server holds.
+
+    A recursive relation walk can miss edits: Tuwunel's paging drops edits of
+    a reply whose parent fell on an earlier page, and sends the rest after the
+    reply. A reply installed at its placeholder is a missing message rather
+    than a stale one, because prompts drop a placeholder as nothing to read,
+    and the walk's marker keeps it that way for the whole membership.
+    """
+
+    async def test_a_reply_whose_ending_the_walk_missed_shows_the_ending(self, alice: PrincipalStore) -> None:
+        """The reply's own edit lookup answers what the recursive walk left out."""
+        client = streamed_reply_client(completed_ending())
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert await revisions(alice, "$root") == ["$root", "$ending"]
+        # The walk, and one edit lookup for the reply it left mid-stream.
+        assert client.relation_calls == 2
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_long_ending_the_walk_missed_is_read_from_its_attachment(self, alice: PrincipalStore) -> None:
+        """An ending too long for one event is found the same way, and its attachment is what is read."""
+        whole = "the whole answer, far too long for a single Matrix event"
+        preview = {
+            "msgtype": "m.file",
+            "body": "the whole an [Message continues in attached file]",
+            "url": "mxc://s/ending",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+        }
+        ending = {
+            "event_id": "$ending",
+            "sender": BOT,
+            "origin_server_ts": 2_100,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": f"* {preview['body']}",
+                "m.new_content": preview,
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$answer"},
+            },
+        }
+        client = streamed_reply_client(ending)
+        client.sidecars["mxc://s/ending"] = json.dumps(
+            build_edit_event_content(
+                event_id="$answer",
+                new_content={"msgtype": "m.text", "body": whole},
+                new_text=whole,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+            ),
+        )
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+
+        page = await reader.read_strict(room_id=ROOM, thread_id="$root", limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["the question", whole]
+        assert [message.revision_event_id for message in page.messages] == ["$root", "$ending"]
+
+    @pytest.mark.parametrize("reader_sender", [ALICE, BOT], ids=["another_participant", "its_author"])
+    async def test_a_prompt_reads_the_ending_the_walk_missed(
+        self,
+        alice: PrincipalStore,
+        reader_sender: str,
+    ) -> None:
+        """A model is shown the reply, not nothing.
+
+        A placeholder is dropped from prompts as a message with nothing to read
+        in it, so a reply stuck there disappears from the conversation a model
+        answers for anyone reading the thread, its author included.
+        """
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, streamed_reply_client(completed_ending())))
+
+        page = await reader.read_strict(room_id=ROOM, thread_id="$root", limit=10)
+        unseen, _ = _get_unseen_messages_for_sender(
+            projected_thread_history(page, complete=True).messages,
+            sender_id=reader_sender,
+            seen_event_ids=set(),
+            current_event_id=None,
+            active_event_ids=set(),
+        )
+
+        assert [(message.event_id, message.body) for message in unseen] == [
+            ("$root", "the question"),
+            ("$answer", "the whole answer"),
+        ]
+
+    async def test_the_last_reply_a_bounded_walk_admits_keeps_the_ending_sent_after_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The window closes right after a message is admitted, which is before its edits on this server."""
+        client = streamed_reply_client(completed_ending(), client_type=ParentFirstWalk)
+        newer = raw("$newer", "a newer question", ts=3_000, thread_id="$root")
+        client.relations["$root"] = [newer, *client.relations["$root"], completed_ending()]
+
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer", "a newer question"]
+
+    async def test_a_reply_the_walk_read_whole_costs_no_lookup(self, alice: PrincipalStore) -> None:
+        """A server whose recursive walk is right pays nothing for the guard."""
+        client = streamed_reply_client(completed_ending())
+        client.relations["$root"].append(completed_ending())
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert client.relation_calls == 1
+
+    async def test_a_stream_that_never_ended_costs_one_lookup_and_keeps_its_placeholder(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reply cut off before its ending is looked up once and stays what the server holds."""
+        progress = stream_raw("$progress", "half an ans", STREAM_STATUS_STREAMING, ts=2_050, replaces="$answer")
+        client = streamed_reply_client(progress)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "Thinking..."]
+        assert client.relation_calls == 2
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_edit_lookups_stop_at_the_request_ceiling(self, alice: PrincipalStore) -> None:
+        """Lookups run newest reply first and stop at the ceiling, leaving the thread incomplete."""
+        placeholders = [
+            stream_raw(
+                f"$answer{index}",
+                "Thinking...",
+                STREAM_STATUS_PENDING,
+                ts=2_000 + index * 100,
+                thread_id="$root",
+            )
+            for index in range(3)
+        ]
+        client = FakeClient(
+            events={"$root": raw("$root", "the question")},
+            relations={
+                "$root": placeholders,
+                **{
+                    f"$answer{index}": [
+                        completed_ending(f"$ending{index}", target=f"$answer{index}", ts=2_050 + index * 100),
+                    ]
+                    for index in range(3)
+                },
+            },
+        )
+
+        await hydrator(alice, client, max_requests=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "Thinking...", "the whole answer", "the whole answer"]
+        assert client.relation_calls == 3
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
 
 def _projected(source: dict[str, Any]) -> ProjectedEvent:

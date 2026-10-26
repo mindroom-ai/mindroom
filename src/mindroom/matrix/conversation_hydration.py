@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -68,7 +69,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, without_sidecar_reference
-from mindroom.matrix.transport_progress import is_transport_progress_revision
+from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_stream
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -119,10 +120,11 @@ _MAX_FETCHED_EVENTS = 20_000
 # event ceiling made a room that returns one event per page stop after two
 # pages while reporting that it had read twenty thousand events.
 #
-# This one is the room walk's alone. A thread is a single
-# `room_get_event_relations` call whose pagination happens inside nio, which
-# yields events rather than pages, so there is no request for this side of the
-# code to count. See `_fetch_relations`.
+# A thread walk is a single `room_get_event_relations` call whose pagination
+# happens inside nio, which yields events rather than pages, so there is no
+# request in it to count. In a thread this bounds the per-message edit lookups
+# that follow the walk instead, each of which is at least one request. See
+# `_fetch_stream_endings`.
 _MAX_MESSAGES_REQUESTS = 400
 
 # Membership can move while a walk is in flight, refusing its install. Retrying
@@ -936,11 +938,13 @@ class ConversationHydrator:
         than its logical message count, and all of it used to be accumulated in
         one list and written in one projection transaction.
 
-        The request ceiling has no counterpart. nio paginates inside each
-        ``room_get_event_relations`` call and yields events, not pages, so
-        there is nothing here to count. The walk is one such call. A walk that
-        is not complete, because it stopped at a bound or met an unreadable
-        relation, may add one edits-only call for the root.
+        The request ceiling has no counterpart in the walk itself. nio
+        paginates inside each ``room_get_event_relations`` call and yields
+        events, not pages, so there is nothing there to count. The walk is one
+        such call. A walk that is not complete, because it stopped at a bound
+        or met an unreadable relation, may add one edits-only call for the
+        root, and each message the walk left mid-stream gets one edits-only
+        call of its own, up to the request ceiling.
         """
         root = await self._client().room_get_event(room_id, thread_id)
         events: list[ProjectedEvent] = []
@@ -971,6 +975,7 @@ class ConversationHydrator:
             unreadable=unreadable,
         )
         events.extend(relations.events)
+        edits_fetched: frozenset[str] = frozenset()
         if (
             root_projected is not None
             and not relations.complete
@@ -988,6 +993,7 @@ class ConversationHydrator:
                 edits_only=True,
             )
             events.extend(root_edits.events)
+            edits_fetched = frozenset({thread_id})
             if root_edits.ceiling_reached and not _edited_by_sender(root_projected, root_edits.events):
                 # Edits arrive newest first, so anyone in the room can push the
                 # sender's own past the ceiling with edits of theirs. The root,
@@ -997,15 +1003,104 @@ class ConversationHydrator:
                     root_projected,
                     content=_with_notice(root_projected.content, _UNREADABLE_EDIT_NOTICE),
                 )
+        stream_endings = await self._fetch_stream_endings(
+            room_id,
+            thread_id,
+            events,
+            edits_fetched=edits_fetched,
+            unreadable=unreadable,
+        )
+        events.extend(stream_endings.events)
         # A thread whose root could not be read is missing the message the whole
         # thread is about, which is the one event this walk refuses to spend its
         # window on precisely because a thread without it is not the thread.
         # Root and relations share diagnostics, classified at their read seam.
         return _Walk(
             events=tuple(events),
-            complete=relations.complete and readable_root is not None,
+            complete=relations.complete and stream_endings.complete and readable_root is not None,
             unreadable=relations.unreadable,
         )
+
+    async def _fetch_stream_endings(
+        self,
+        room_id: str,
+        thread_id: str,
+        events: Sequence[ProjectedEvent],
+        *,
+        edits_fetched: frozenset[str],
+        unreadable: _UnreadableHistory,
+    ) -> _Walk:
+        """Fetch the direct edits of every message a thread walk left mid-stream.
+
+        A recursive relation walk does not always deliver a message's edits
+        before the message, or at all. Tuwunel's paging drops edits of a reply
+        whose parent fell on an earlier page and returns others after the
+        reply, while its direct-edit lookup for that reply is right. That breaks
+        both promises the walk rests on: that the tree is whole, and that
+        stopping just after admitting a message keeps its edit tail.
+
+        The damage that matters has one shape. A streamed reply missing its
+        ending is installed at its placeholder, and prompts drop a placeholder
+        as nothing to read, so a model loses the reply instead of reading an
+        older revision of it. The walk can see that for free: the newest
+        revision it holds of such a message still promises another. Those
+        messages, and only those, get the lookup the root gets, on any server.
+
+        A user's edit of an ordinary message is not covered. Nothing in the
+        message says an edit is missing, so covering it would cost one lookup
+        for every message in the window on every server, to repair text that is
+        older rather than absent.
+
+        Lookups run in walk order, newest first, and stop at ``max_requests``,
+        because each is at least one request. Each walks one message's direct
+        edits only and is held to the event ceiling, like the root's. On a
+        server whose walk is whole, the only messages that qualify are streams
+        still running or cut off for good, and a lookup that finds no ending
+        leaves them as the server holds them. Stopping at the ceiling, or
+        meeting an edit nobody can read, leaves the thread incomplete, because
+        it still holds messages nothing vouched for.
+        """
+        edits: defaultdict[str, list[ProjectedEvent]] = defaultdict(list)
+        for event in events:
+            if event.replaces_event_id is not None:
+                edits[event.replaces_event_id].append(event)
+        unfinished = [
+            event
+            for event in events
+            if _is_logical_message(event)
+            and event.event_id not in edits_fetched
+            and is_unfinished_stream(_reduce_current_revision(event, edits[event.event_id]).content)
+        ]
+        seen = {event.event_id for event in events}
+        found: list[ProjectedEvent] = []
+        complete = True
+        for message in unfinished[: self.max_requests]:
+            message_edits = await self._fetch_relations(
+                room_id,
+                message.event_id,
+                window_messages=None,
+                unreadable=unreadable,
+                edits_only=True,
+            )
+            complete = complete and message_edits.complete
+            for edit in message_edits.events:
+                if edit.event_id not in seen:
+                    seen.add(edit.event_id)
+                    found.append(edit)
+        if unfinished:
+            log = logger.info
+            if len(unfinished) > self.max_requests:
+                complete = False
+                log = logger.warning
+            log(
+                "conversation_hydration_unfinished_streams_refetched",
+                room_id=room_id,
+                thread_id=thread_id,
+                unfinished_streams=len(unfinished),
+                edit_lookups=min(len(unfinished), self.max_requests),
+                edits_found=len(found),
+            )
+        return _Walk(events=tuple(found), complete=complete, unreadable=unreadable)
 
     async def _fetch_relations(
         self,
@@ -1028,6 +1123,8 @@ class ConversationHydrator:
         and an edit is sent after the message it revises, so every edit of a
         message arrives before that message does. The room walk's backwards
         pagination already rests on exactly this and for exactly this reason.
+        Not every server keeps this order for a recursive walk, and
+        `_fetch_stream_endings` repairs the messages that losing it costs most.
 
         So the unit the window is applied to is the logical message, and the
         only place the walk may stop for it is the moment one has just been
