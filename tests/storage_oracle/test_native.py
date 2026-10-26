@@ -1,4 +1,4 @@
-"""Comparison 1: the storage v2 store, driven by every recorded sequence, shows what the Agno-layout store recorded.
+"""Comparison 1: the conversation store, driven by every recorded sequence, shows what the Agno-layout store recorded.
 
 Every difference is one of the named masks of ``masks.py``. Each sequence's masks, and the step where a mask ended
 its comparison, are pinned in ``native_masks.json``, so a change of where the two stores part shows as a failure
@@ -19,15 +19,9 @@ import pytest
 from tests.storage_oracle.actions import Scenario
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.masks import MASKS, MaskedBackend
-from tests.storage_oracle.record import FIXTURES, decode, digest
-from tests.storage_oracle.test_recorded import first_difference
+from tests.storage_oracle.record import SEQUENCES, decode, digest, first_difference, sequence_id
 
-_SEQUENCES = sorted([*(FIXTURES / "generated").glob("*.json"), *(FIXTURES / "named").glob("*.json")])
 _PINS = Path(__file__).with_name("native_masks.json")
-
-
-def _id(path: Path) -> str:
-    return f"{path.parent.name}/{path.stem}"
 
 
 @dataclass
@@ -75,28 +69,28 @@ def compare(path: Path, root: Path) -> Comparison:
     return comparison
 
 
-@pytest.mark.parametrize("path", _SEQUENCES, ids=_id)
+@pytest.mark.parametrize("path", SEQUENCES, ids=sequence_id)
 def test_a_recorded_sequence_shows_the_same_on_the_v2_store_but_for_named_masks(path: Path, tmp_path: Path) -> None:
     """The v2 store gives every recorded outcome and observable once each named mask undoes its change."""
     comparison = compare(path, tmp_path)
     assert comparison.used <= MASKS.keys()
-    assert comparison.pin() == json.loads(_PINS.read_text(encoding="utf-8"))[_id(path)]
+    assert comparison.pin() == json.loads(_PINS.read_text(encoding="utf-8"))[sequence_id(path)]
 
 
 def test_every_mask_is_used_and_every_sequence_pinned() -> None:
     """Each named mask explains a difference some recorded sequence shows, and no pin is stale."""
     pins = json.loads(_PINS.read_text(encoding="utf-8"))
-    assert set(pins) == {_id(path) for path in _SEQUENCES}
+    assert set(pins) == {sequence_id(path) for path in SEQUENCES}
     assert {mask for pin in pins.values() for mask in pin["used"]} == MASKS.keys()
 
 
 def _write_pins() -> None:
     pins: dict[str, object] = {}
-    for path in _SEQUENCES:
+    for path in SEQUENCES:
         with tempfile.TemporaryDirectory() as root:
             comparison = compare(path, Path(root))
-        pins[_id(path)] = comparison.pin()
-        print(_id(path), comparison.pin(), comparison.compared_steps)
+        pins[sequence_id(path)] = comparison.pin()
+        print(sequence_id(path), comparison.pin(), comparison.compared_steps)
     lines = (f"{json.dumps(name)}: {json.dumps(pin, sort_keys=True)}" for name, pin in sorted(pins.items()))
     _PINS.write_text("{\n" + ",\n".join(lines) + "\n}\n", encoding="utf-8")
 

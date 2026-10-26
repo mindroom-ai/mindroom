@@ -1,61 +1,51 @@
-"""``NextBackend``: the action vocabulary through the storage v2 store and summary rows.
+"""``NextBackend``: the action vocabulary through the conversation store and the helpers production calls.
 
-Each primitive calls what the cutover (PLAN-3095 task 10) makes production call at that point, through
-``store_next`` and ``summary_rows_next``. Where a production helper is still bound to the Agno-layout modules, this
-module holds a small local equivalent that calls the v2 ones instead (the chunk and fold bases, the redaction loop,
-the seen-id and candidate reads, delegation state, and interrupted records); task 10f replaces them with the
-cut-over helpers. Helpers that only call methods both stores share (``set_force_compaction``,
-``has_queued_force_compaction``, ``save_compaction_usage``) are called as they are.
+Each primitive calls what production calls at that point, or, where production binds the call to a bot or a lane,
+the same store methods in the same order. A production helper that returns nothing of what it stored runs on
+``_Writes``, which keeps what each run write returned, so the backend reports and checks it. An older database is
+written as an older release left it and opened through the conversion, as the runtime opens it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
 from contextlib import closing
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, Literal, cast, override
 
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.delegation.state import DELEGATION_STATE_KEY
-from mindroom.history.interrupted_replay import _build_interrupted_replay_run, _unfolded
-from mindroom.history.run_visibility import replays_in_scope, run_in_scope
+from mindroom.constants import (
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
+    MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+)
+from mindroom.delegation.execution import persist_delegation_state
+from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import (
-    _legacy_summary_may_contain,
-    _read_preserved_scope_seen_event_ids,
-    _with_scope_seen_event_ids,
     add_pending_force_compaction_scope,
+    append_compaction_chunk,
+    append_fold,
     consume_pending_force_compaction_scope,
     first_scope_session,
-    has_queued_force_compaction,
+    read_chunk_basis,
+    read_fold_basis,
+    remove_history_of_redacted_events,
+    remove_runs_answering,
     set_force_compaction,
 )
-from mindroom.history.summary_rows_next import (
-    CoveredRun,
-    Fold,
-    append_summary,
-    covered_runs,
-    cut_at_event,
-    cut_at_legacy_row,
-    folded_tool_call_ids,
-    history_event_ids,
-    latest_row,
-    legacy_event_ids,
-    retire,
-    seen_event_ids,
-    source_event_ids,
-)
+from mindroom.history.summary_rows import Fold, latest_row
 from mindroom.llm.runs import RunStatus
-from mindroom.session_storage.agent_storage import save_compaction_usage
-from mindroom.session_storage.codec import run_columns, run_type
-from mindroom.session_storage.schema import TableNames, log_schema_sql
-from mindroom.session_storage.store_next import ConversationStore, SaveOutcome, connect_conversation_database
+from mindroom.session_storage.agent_storage import create_state_storage, save_compaction_usage
+from mindroom.session_storage.codec import run_kind
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.store import connect_conversation_database
 from mindroom.session_storage.types import session_state_snapshot
-from mindroom.usage.storage import quote_identifier
+from mindroom.usage.storage import quote_identifier, usage_table_sql
 from tests.storage_oracle.backend import (
-    LEGACY_EVENTS,
     REQUESTER_ID,
     SESSION_ID,
     SUMMARY_MODEL,
@@ -63,237 +53,105 @@ from tests.storage_oracle.backend import (
     Driver,
     FoldBasisView,
 )
-from tests.storage_oracle.observe import Readers, observe
+from tests.storage_oracle.observe import observe
 
 if TYPE_CHECKING:
-    import sqlite3
-    from collections.abc import Callable, Collection, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.delegation.state import DelegationState
     from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
+    from mindroom.history.storage import FoldBasis, _ChunkBasis
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore, SaveOutcome
     from mindroom.session_storage.types import ConversationSession
     from tests.storage_oracle.actions import Action, ScenarioKind
     from tests.storage_oracle.backend import FoldInput
     from tests.storage_oracle.determinism import Determinism
 
-
-@dataclass(frozen=True)
-class _Basis:
-    """What a chunk or fold builds on: the scope's latest summary row and the stored runs it covers, as read."""
-
-    based_on: int | None
-    covered: tuple[CoveredRun, ...]
-
-
-def _latest_text(
-    store: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-) -> tuple[int | None, str | None]:
-    latest = latest_row(store, session_id=session.session_id, scope_key=scope.key)
-    if latest is None:
-        return None, None
-    return latest.id, (latest.summary or "").strip() or None
+# The compaction archive every release from #2351 until the summary rows created beside the sessions table.
+_ARCHIVE_DDL = (
+    "CREATE TABLE {s}_compactions (id INTEGER PRIMARY KEY, "
+    "session_id TEXT NOT NULL REFERENCES {s}(session_id) ON DELETE CASCADE, "
+    "scope_key TEXT NOT NULL, summary TEXT, summary_model TEXT, "
+    "legacy INTEGER NOT NULL DEFAULT 0, legacy_event_ids TEXT, created_at INTEGER NOT NULL)",
+    "CREATE TABLE {s}_compacted_runs (id INTEGER PRIMARY KEY, "
+    "compaction_id INTEGER NOT NULL REFERENCES {s}_compactions(id) ON DELETE CASCADE, "
+    "session_id TEXT NOT NULL, run_id TEXT NOT NULL, run_type TEXT, event_ids TEXT NOT NULL, "
+    "seen_event_ids TEXT NOT NULL DEFAULT '[]', run_data TEXT, UNIQUE(session_id, run_id))",
+)
 
 
-def read_chunk_basis(
-    store: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-    run_ids: Sequence[str],
-    *,
-    previous_summary: str | None,
-) -> _Basis | None:
-    """``history.storage.read_chunk_basis`` on the v2 summary rows."""
-    based_on, latest_summary = _latest_text(store, session, scope)
-    covered = tuple(covered_runs(store, session_id=session.session_id, run_ids=run_ids))
-    if latest_summary != previous_summary or {run.run_id for run in covered if run.visible} != set(run_ids):
-        return None
-    return _Basis(based_on=based_on, covered=covered)
+@dataclass
+class _Writes:
+    """A store that keeps each run write's record and result, for a production helper that returns neither.
 
+    Every other attribute is the store's own.
+    """
 
-def read_fold_basis(
-    store: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-) -> FoldBasisView | None:
-    """``history.storage.read_fold_basis`` on the v2 summary rows, as the oracle's basis view."""
-    based_on, latest_summary = _latest_text(store, session, scope)
-    stored = store.load_session(session.session_id, session.kind)
-    runs = [run for run in (stored.runs if stored is not None else []) if replays_in_scope(run, scope)]
-    run_ids = [run.run_id for run in runs]
-    covered = tuple(covered_runs(store, session_id=session.session_id, run_ids=run_ids))
-    if {run.run_id for run in covered if run.visible} != set(run_ids):
-        return None
-    return FoldBasisView(
-        handle=_Basis(based_on=based_on, covered=covered),
-        summary=latest_summary,
-        run_ids=tuple(run_ids),
-    )
+    store: ConversationStore
+    results: list[tuple[AnyRunRecord | None, SaveOutcome | bool]] = field(default_factory=list)
 
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.store, name)
 
-def read_scope_seen_event_ids(store: ConversationStore, session: ConversationSession, scope: HistoryScope) -> set[str]:
-    """``history.storage.read_scope_seen_event_ids`` on the v2 summary rows."""
-    seen = _read_preserved_scope_seen_event_ids(session.metadata, scope)
-    seen |= history_event_ids(store, session_id=session.session_id, scope_key=scope.key, kind="seen")
-    for run in session.runs:
-        if replays_in_scope(run, scope):
-            seen.update(seen_event_ids(run.metadata))
-    return seen
+    def save_run(
+        self,
+        session: ConversationSession,
+        run: AnyRunRecord,
+        *,
+        record_usage: bool,
+        state: dict[str, Any] | None = None,
+    ) -> SaveOutcome:
+        outcome = self.store.save_run(session, run, record_usage=record_usage, state=state)
+        self.results.append((run, outcome))
+        return outcome
 
+    def save_interrupted_record(
+        self,
+        session: ConversationSession,
+        record: AnyRunRecord,
+        *,
+        state: dict[str, Any] | None = None,
+    ) -> Literal["written", "removed"]:
+        outcome = self.store.save_interrupted_record(session, record, state=state)
+        self.results.append((record, outcome))
+        return outcome
 
-def read_scope_history_event_ids(
-    store: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-) -> set[str]:
-    """``history.storage._read_scope_history_event_ids`` on the v2 summary rows: the redaction candidates."""
-    event_ids = history_event_ids(store, session_id=session.session_id, scope_key=scope.key, kind="all")
-    for run in session.runs:
-        if run_in_scope(run, scope) and run.parent_run_id is None:
-            event_ids |= seen_event_ids(run.metadata) | source_event_ids(run.metadata)
-    return event_ids
-
-
-def remove_redacted_event(
-    store: ConversationStore,
-    *,
-    session: ConversationSession,
-    scope: HistoryScope,
-    event_id: str,
-    legacy_source_event_id: str | None = None,
-) -> bool:
-    """``history.storage._remove_redacted_event_from_history`` on the v2 summary rows."""
-    session_id = session.session_id
-    legacy = legacy_event_ids(store, session_id=session_id, scope_key=scope.key)
-    if legacy is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy):
-        cut_at_legacy_row(store, session=session, scope_key=scope.key)
-    elif not cut_at_event(
-        store,
-        session_id=session_id,
-        scope_key=scope.key,
-        event_id=event_id,
-        match="any",
-        session=session,
-    ):
-        return False
-    elif legacy is not None:
-        retire(store, session=session, scope_key=scope.key)
-    store.update_metadata(session, partial(_with_scope_seen_event_ids, scope=scope, event_ids=set()))
-    return True
-
-
-def remove_history_of_redacted_events(
-    store: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-    redacted: set[str],
-) -> list[str]:
-    """``history.storage.remove_history_of_redacted_events``, synchronously, for events whose source is unknown."""
-    removed: list[str] = []
-    while True:
-        candidates = read_scope_history_event_ids(store, session, scope)
-        newly_removed = [
-            event_id
-            for event_id in sorted(redacted & candidates - set(removed))
-            if remove_redacted_event(store, session=session, scope=scope, event_id=event_id)
-        ]
-        if not newly_removed:
-            return removed
-        removed.extend(newly_removed)
+    def patch_run_metadata(
+        self,
+        session_id: str,
+        run_id: str,
+        changes: Mapping[str, Any],
+        *,
+        session: ConversationSession | None = None,
+    ) -> bool:
+        patched = self.store.patch_run_metadata(session_id, run_id, changes, session=session)
+        self.results.append((None, patched))
+        return patched
 
 
 def edit_cut(store: ConversationStore, scope: HistoryScope, event_id: str) -> bool:
-    """Remove the history an edited event's answer started, as ``history.storage.remove_runs_answering`` does."""
-    return cut_at_event(store, session_id=SESSION_ID, scope_key=scope.key, event_id=event_id, match="answered")
+    """Remove the history an edited event's answer started, as an edit's cleanup does."""
+    return remove_runs_answering(store, SESSION_ID, scope, event_id)
 
 
 def redaction_cut(store: ConversationStore, scope: HistoryScope, redacted: set[str]) -> list[str]:
     """Run a reply's redaction cleanup over the conversation, which sees every event in ``redacted`` as redacted."""
     session = store.load_session(SESSION_ID, scope.kind)
-    return [] if session is None else remove_history_of_redacted_events(store, session, scope, redacted)
+    if session is None:
+        return []
 
+    async def redacted_history_events(event_ids: tuple[str, ...]) -> dict[str, str | None]:
+        return {event_id: None for event_id in event_ids if event_id in redacted}
 
-def persist_delegation_state(
-    store: ConversationStore,
-    session: ConversationSession,
-    response: AnyRunRecord,
-    state: DelegationState,
-) -> SaveOutcome | bool:
-    """``delegation.execution.persist_delegation_state`` as spec v4 section 3.7 has it; return what it did.
-
-    A paused record saves whole (P1), since its requirements carry the child answers; any other record, or a paused
-    one the store refuses as final, gets only its delegation key (P2), and the result says whether that run is stored.
-    """
-    response.metadata = {**(response.metadata or {}), DELEGATION_STATE_KEY: state.to_dict()}
-    if response.status is RunStatus.paused:
-        saved = store.save_run(session, deepcopy(response), record_usage=False)
-        if saved != "final":
-            return saved
-    return store.patch_run_metadata(
-        session.session_id,
-        response.run_id,
-        {DELEGATION_STATE_KEY: state.to_dict()},
-        session=session,
-    )
-
-
-def persist_interrupted_replay_snapshot(
-    store: ConversationStore,
-    *,
-    session: ConversationSession,
-    run_id: str,
-    snapshot: InterruptedReplaySnapshot,
-    state: dict[str, object] | None,
-) -> tuple[AnyRunRecord, str]:
-    """``history.interrupted_replay.persist_interrupted_replay_snapshot`` through P4; return the record and outcome."""
-    folded = folded_tool_call_ids(store, session_id=session.session_id, run_id=run_id)
-    record = interrupted_record(session, run_id, snapshot, folded)
-    return record, store.save_interrupted_record(session, record, state=state)
-
-
-def interrupted_record(
-    session: ConversationSession,
-    run_id: str,
-    snapshot: InterruptedReplaySnapshot,
-    folded: Collection[str],
-) -> AnyRunRecord:
-    """Return the interrupted record of run ``run_id``, its ``folded`` tool calls left out of the retained context."""
-    snapshot = replace(
-        snapshot,
-        completed_tools=_unfolded(snapshot.completed_tools, folded),
-        interrupted_tools=_unfolded(snapshot.interrupted_tools, folded),
-    )
-    return _build_interrupted_replay_run(snapshot=snapshot, run_id=run_id, session=session)
+    return asyncio.run(remove_history_of_redacted_events(store, session, scope, redacted_history_events))
 
 
 def _rewritten(changed: Sequence[AnyRunRecord]) -> object:
-    """Report a message rewrite as the Agno-layout store reports its saves: one written run per run it changed."""
+    """Report a message rewrite as the Agno-layout store reported its saves: one written run per run it changed."""
     return ["written"] * len(changed) if changed else "unchanged"
-
-
-V2_READERS = Readers(
-    seen_event_ids=read_scope_seen_event_ids,
-    redaction_candidates=read_scope_history_event_ids,
-    folded_tool_call_ids=lambda store, session_id, run_id: folded_tool_call_ids(
-        store,
-        session_id=session_id,
-        run_id=run_id,
-    ),
-    force_queued=has_queued_force_compaction,
-)
-
-
-def open_v2_store(database: Path) -> ConversationStore:
-    """Open ``database`` as storage v2, creating its tables and meta row when missing, as the conversion entry will."""
-    database.parent.mkdir(parents=True, exist_ok=True)
-    with closing(connect_conversation_database(database)) as connection:
-        for statement in log_schema_sql(TableNames.of_database(database)):
-            connection.execute(statement)
-    return ConversationStore(database)
 
 
 def replay_view(messages: Sequence[dict[str, Any]], status: str, folded: Collection[str]) -> list[dict[str, Any]]:
@@ -312,7 +170,7 @@ def replay_view(messages: Sequence[dict[str, Any]], status: str, folded: Collect
 
 
 class NextBackend(Driver):
-    """The oracle's backend for the storage v2 store.
+    """The oracle's backend for the conversation store.
 
     It keeps what each run's writes stored, so a test can check what the store shows against it: the last message
     list a full save or a message rewrite stored, with the status rule 5 applied (``saved``), the messages each run's
@@ -353,11 +211,14 @@ class NextBackend(Driver):
 
     @override
     def open_store(self) -> None:
-        self.store = open_v2_store(self.database)
+        self.store = create_state_storage(self.owner, self.root)
 
     @override
     def load(self) -> ConversationSession | None:
         return self.store.load_session(SESSION_ID, self.kind)
+
+    def _written(self, record: AnyRunRecord, status: str | None = None) -> None:
+        self.saved[record.run_id] = ([message.to_dict() for message in record.messages], status or record.status.value)
 
     def _save(
         self,
@@ -369,7 +230,7 @@ class NextBackend(Driver):
     ) -> list[str]:
         outcome = self.store.save_run(session, deepcopy(record), record_usage=usage, state=state)
         if outcome == "written":
-            self.saved[record.run_id] = ([message.to_dict() for message in record.messages], record.status.value)
+            self._written(record)
         return [outcome]
 
     @override
@@ -391,7 +252,7 @@ class NextBackend(Driver):
 
     @override
     def link_response(self, run_id: str, response_event_id: str) -> object:
-        # The response link is one metadata patch of the stored run (P2), in the lane.
+        # As ``ConversationStateWriter.apersist_response_event_id_in_session_run`` does in its lane.
         patched = self.store.patch_run_metadata(
             SESSION_ID,
             run_id,
@@ -400,7 +261,7 @@ class NextBackend(Driver):
         return ["written"] if patched else "not-stored"
 
     def _rewrite(self, edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]]) -> list[AnyRunRecord]:
-        """Rewrite the loaded runs' messages with ``edit`` (P3); return the runs the edit changed."""
+        """Rewrite the loaded runs' messages with ``edit``; return the runs the edit changed."""
         changed: list[AnyRunRecord] = []
         statuses: dict[str, str] = {}
 
@@ -413,28 +274,24 @@ class NextBackend(Driver):
         for run in changed:
             # Only the loaded runs store, each under its stored status.
             if run.run_id in statuses:
-                self.saved[run.run_id] = ([message.to_dict() for message in run.messages], statuses[run.run_id])
+                self._written(run, statuses[run.run_id])
         return changed
 
     @override
     def finalize_notice(self, response_turn_id: str) -> object:
+        # As ``_finalize_queued_notice_in_new_session_storage`` does.
         if not self.store.has_session(SESSION_ID, self.kind):
             return "no-session"
         return _rewritten(self._rewrite(partial(_finalize_queued_notice_in_runs, response_turn_id=response_turn_id)))
 
     @override
     def scrub_notices(self, session: ConversationSession) -> object:
-        # The in-memory check first; P3 only when it finds a crash-left notice. The check's copies are dropped, so the
-        # rewrite gets their ids again, as the Agno-layout store's one edit got them.
+        # As ``scrub_queued_notice_session_context`` does: the in-memory check first, and a rewrite only when it finds
+        # a crash-left notice. The check's copies are dropped, so the rewrite gets their ids again.
+        recover = partial(_recover_prior_queued_notices, active_response_turn_id=None)
         with self.determinism.ids_repeated():
-            found = _recover_prior_queued_notices(session, active_response_turn_id=None)
-        if not found:
-            return "unchanged"
-        return _rewritten(
-            self._rewrite(
-                lambda runs: _recover_prior_queued_notices(replace(session, runs=runs), active_response_turn_id=None),
-            ),
-        )
+            found = recover(session.runs)
+        return _rewritten(self._rewrite(recover)) if found else "unchanged"
 
     @override
     def persist_delegation(self, session: ConversationSession, record: AnyRunRecord, state: DelegationState) -> object:
@@ -447,9 +304,12 @@ class NextBackend(Driver):
         record: AnyRunRecord,
         state: DelegationState,
     ) -> SaveOutcome | bool:
-        result = persist_delegation_state(self.store, session, record, state)
-        if result == "written":
-            self.saved[record.run_id] = ([message.to_dict() for message in record.messages], record.status.value)
+        """Run ``persist_delegation_state``; return its last write's result: a full save's outcome or whether P2 hit."""
+        writes = _Writes(self.store)
+        asyncio.run(persist_delegation_state(cast("ConversationStore", writes), session, record, state))
+        saved, result = writes.results[-1]
+        if result == "written" and saved is not None:
+            self._written(saved)
         return result
 
     @override
@@ -469,16 +329,20 @@ class NextBackend(Driver):
         run_id: str,
         snapshot: InterruptedReplaySnapshot,
         state: dict[str, object] | None,
-    ) -> tuple[AnyRunRecord, str]:
-        record, outcome = persist_interrupted_replay_snapshot(
-            self.store,
+    ) -> tuple[AnyRunRecord, SaveOutcome | bool]:
+        """Run ``persist_interrupted_replay_snapshot``; return the record it saved and the save's outcome."""
+        writes = _Writes(self.store)
+        persist_interrupted_replay_snapshot(
+            storage=cast("ConversationStore", writes),
             session=session,
             run_id=run_id,
             snapshot=snapshot,
             state=state,
         )
+        [(record, outcome)] = writes.results
+        assert record is not None
         if outcome == "written":
-            self.saved[run_id] = ([message.to_dict() for message in record.messages], record.status.value)
+            self._written(record)
         return record, outcome
 
     @override
@@ -491,17 +355,14 @@ class NextBackend(Driver):
 
     @override
     def append_chunk(self, session: ConversationSession, basis: object, run_ids: Sequence[str], summary: str) -> bool:
-        assert isinstance(basis, _Basis)
-        row_id = append_summary(
+        return append_compaction_chunk(
             self.store,
-            session_id=session.session_id,
-            scope_key=self.scope.key,
-            based_on=basis.based_on,
-            covered=[run for run in basis.covered if run.run_id in run_ids],
-            summary=summary,
             session=session,
+            scope=self.scope,
+            basis=cast("_ChunkBasis", basis),
+            included_run_ids=run_ids,
+            summary=summary,
         )
-        return row_id is not None
 
     def _summary_usage(self, session: ConversationSession, initial_session: ConversationSession | None) -> None:
         save_compaction_usage(
@@ -515,11 +376,15 @@ class NextBackend(Driver):
 
     @override
     def chunk_summary_usage(self, session: ConversationSession) -> None:
+        # ``scope_usage_recorder`` records without an initial session.
         self._summary_usage(session, None)
 
     @override
     def fold_basis(self, session: ConversationSession) -> FoldBasisView | None:
-        return read_fold_basis(self.store, session, self.scope)
+        basis = read_fold_basis(self.store, session, self.scope)
+        if basis is None:
+            return None
+        return FoldBasisView(handle=basis, summary=basis.summary, run_ids=tuple(run.run_id for run in basis.runs))
 
     @override
     def fold_summary_usage(self, session: ConversationSession) -> None:
@@ -528,27 +393,26 @@ class NextBackend(Driver):
 
     @override
     def append_fold(self, session: ConversationSession, basis: FoldBasisView, summary: str, fold: FoldInput) -> bool:
-        handle = basis.handle
-        assert isinstance(handle, _Basis)
         run_id = fold.record.run_id
         had_row = run_id in self.stored_runs()
-        row_id = append_summary(
+        appended = append_fold(
             self.store,
-            session_id=session.session_id,
-            scope_key=self.scope.key,
-            based_on=handle.based_on,
-            covered=handle.covered,
+            session=session,
+            scope=self.scope,
+            basis=cast("FoldBasis", basis.handle),
             summary=summary,
             fold=Fold(
                 run=fold.record,
                 messages=fold.messages,
                 member_run_ids=frozenset(member.run_id for member in fold.members),
             ),
-            session=session,
         )
-        if row_id is None:
+        if not appended:
             return False
-        self.folds[row_id] = fold
+        # The fold's row is its scope's newest, since nothing else writes meanwhile.
+        row = latest_row(self.store, session_id=session.session_id, scope_key=self.scope.key)
+        assert row is not None
+        self.folds[row.id] = fold
         self.folded.setdefault(run_id, set()).update(message.id for message in fold.messages)
         if not had_row:
             # The fold stored the running run as a cancelled row holding only what it took.
@@ -569,6 +433,7 @@ class NextBackend(Driver):
 
     @override
     def request_force(self, session: ConversationSession) -> None:
+        # As ``request_compaction_before_next_reply`` does: the flag on the stored row, then the tools' state.
         set_force_compaction(
             self.store,
             session=first_scope_session(self.scope, SESSION_ID),
@@ -579,136 +444,99 @@ class NextBackend(Driver):
 
     @override
     def prepare_scope_state(self, session: ConversationSession) -> None:
+        # As ``_prepare_scope_state_for_run`` does.
         if consume_pending_force_compaction_scope(session, self.scope):
             set_force_compaction(self.store, session=session, scope=self.scope, forced=True)
             self.store.save_session_state(session, session_state_snapshot(session.session_state))
 
     @override
     def seed_legacy(self, variant: int) -> None:
-        """Write what the conversion makes of ``Driver.seed_legacy``'s older databases, then reopen it.
-
-        The conversion (task 9) adopts the pre-archive summary as a legacy row at ``through = 0`` holding its
-        preserved seen ids, and drops the adopted metadata keys; it turns each archive generation into a row after
-        its restored runs, a legacy generation at 0 and a barrier at the previous row's ``through``.
-        """
-        with closing(connect_conversation_database(self.database)) as connection, connection:
+        # The opened database has no session row yet, so the older one replaces it.
+        names = AgnoTableNames(self.owner)
+        self.database.unlink()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            for statement in (*agno_runs_sql(names), usage_table_sql(names.sessions)):
+                connection.execute(statement)
             if variant == 0:
-                self._insert_session(connection, {})
-                self._insert_row(
-                    connection,
-                    through=0,
-                    summary="legacy summary",
-                    legacy=True,
-                    event_ids=LEGACY_EVENTS[0][:2],
-                    seen=LEGACY_EVENTS[0][:2],
-                )
+                self._seed_pre_archive(connection)
             else:
-                self._insert_session(connection, None)
-                self._insert_row(
-                    connection,
-                    through=0,
-                    summary="legacy summary",
-                    legacy=True,
-                    event_ids=("$legacy-0",),
-                    seen=("$legacy-0",),
-                )
-                generations = [("S:a0,legacy", "a0")]
-                if variant == 1:
-                    generations += [(None, None), ("S:a1", "a1")]
-                through = 0
-                for summary, run_id in generations:
-                    if run_id is not None:
-                        through = self._insert_archived_run(connection, run_id)
-                    event_ids = () if run_id is None else (f"${run_id}", f"$read-by-{run_id}")
-                    seen = () if run_id is None else (f"${run_id}",)
-                    self._insert_row(
-                        connection,
-                        through=through,
-                        summary=summary,
-                        legacy=False,
-                        event_ids=event_ids,
-                        seen=seen,
-                    )
+                self._seed_archive(connection, retired=variant == 1)
         self.open_store()
 
-    def _insert_session(self, connection: sqlite3.Connection, metadata: dict[str, object] | None) -> None:
+    def _insert_session(
+        self,
+        connection: sqlite3.Connection,
+        metadata: dict[str, object] | None,
+        summary: str | None,
+    ) -> None:
         owner_column = "team_id" if self.kind == "team" else "agent_id"
         connection.execute(
             f'INSERT INTO "{self.names.sessions}" (session_id, session_type, {owner_column}, session_data, metadata, '  # noqa: S608
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 SESSION_ID,
                 self.kind,
                 self.owner,
                 json.dumps({"session_state": {}}),
                 json.dumps(metadata),
+                None if summary is None else json.dumps({"summary": summary}),
                 self.determinism.now,
                 self.determinism.now,
             ),
         )
 
-    def _insert_row(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        through: int,
-        summary: str | None,
-        legacy: bool,
-        event_ids: Sequence[str],
-        seen: Sequence[str],
-    ) -> None:
-        connection.execute(
-            f"INSERT INTO {quote_identifier(self.names.log_summaries)} (session_id, scope_key, through, summary, "  # noqa: S608
-            "legacy, event_ids, seen_event_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                SESSION_ID,
-                self.scope.key,
-                through,
-                summary,
-                int(legacy),
-                json.dumps(sorted(event_ids)),
-                json.dumps(sorted(seen)),
-                self.determinism.now,
-            ),
+    def _seed_pre_archive(self, connection: sqlite3.Connection) -> None:
+        """A conversation the destructive compactor left: a replayed summary, tombstones, and preserved seen ids."""
+        legacy_runs = ["legacy-1", "legacy-2"]
+        self._insert_session(
+            connection,
+            {
+                MINDROOM_COMPACTION_METADATA_KEY: {
+                    "version": 2,
+                    "states": {self.scope.key: {"compacted_run_ids": legacy_runs}},
+                },
+                MINDROOM_MATRIX_HISTORY_METADATA_KEY: {
+                    "version": 1,
+                    "states": {self.scope.key: {"seen_event_ids": [f"${run_id}" for run_id in legacy_runs]}},
+                },
+            },
+            "legacy summary",
         )
 
-    def _insert_archived_run(self, connection: sqlite3.Connection, run_id: str) -> int:
-        """Insert an archived run as the conversion restores it, with the next ``seq``; return that ``seq``."""
-        names = self.names
-        record = self.archived_run(run_id)
-        data = record.to_dict()
-        (seq,) = connection.execute(
-            f"UPDATE {quote_identifier(names.log_meta)} SET next_seq = next_seq + 1 RETURNING next_seq - 1",  # noqa: S608
-        ).fetchone()
-        columns = run_columns(data, run_type(record))
-        connection.execute(
-            f"INSERT INTO {quote_identifier(names.log_runs)} (run_id, session_id, parent_run_id, kind, scope_key, "  # noqa: S608
-            "status, seq, created_at, updated_at, metadata, record, requirements, tools) "
-            "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                run_id,
-                SESSION_ID,
-                columns.kind,
-                columns.scope_key,
-                columns.status,
-                seq,
-                record.created_at,
-                record.created_at,
-                columns.metadata,
-                columns.record,
-                columns.requirements,
-                columns.tools,
-            ),
-        )
-        connection.executemany(
-            f"INSERT INTO {quote_identifier(names.log_messages)} (run_id, message_id, ord, data) VALUES (?, ?, ?, ?)",  # noqa: S608
-            [
-                (run_id, message["id"], position, json.dumps(message))
-                for position, message in enumerate(data["messages"])
-            ],
-        )
-        return seq
+    def _seed_archive(self, connection: sqlite3.Connection, *, retired: bool) -> None:
+        """A compaction archive: a legacy generation and an ordinary one, then, when ``retired``, a barrier and another."""
+        sessions = self.names.sessions
+        generations: list[tuple[str | None, int, list[str], list[str]]] = [
+            ("legacy summary", 1, ["$legacy-0"], []),
+            ("S:a0,legacy", 0, [], ["a0"]),
+        ]
+        if retired:
+            generations += [(None, 0, [], []), ("S:a1", 0, [], ["a1"])]
+        self._insert_session(connection, None, generations[-1][0])
+        for statement in _ARCHIVE_DDL:
+            connection.execute(statement.format(s=sessions))
+        for summary, legacy, legacy_event_ids, archived in generations:
+            generation_id = connection.execute(
+                f'INSERT INTO "{sessions}_compactions" (session_id, scope_key, summary, summary_model, legacy, '  # noqa: S608
+                "legacy_event_ids, created_at) VALUES (?, ?, ?, 'summary-model', ?, ?, ?)",
+                (SESSION_ID, self.scope.key, summary, legacy, json.dumps(legacy_event_ids), self.determinism.now),
+            ).lastrowid
+            for run_id in archived:
+                run = self.archived_run(run_id)
+                connection.execute(
+                    f'INSERT INTO "{sessions}_compacted_runs" (compaction_id, session_id, run_id, run_type, '  # noqa: S608
+                    "event_ids, seen_event_ids, run_data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        SESSION_ID,
+                        run_id,
+                        run_kind(run),
+                        json.dumps([f"${run_id}", f"$read-by-{run_id}"]),
+                        json.dumps([f"${run_id}"]),
+                        json.dumps(run.to_dict()),
+                    ),
+                )
 
     @override
     def observe(self) -> dict[str, object]:
-        return observe(self.store, SESSION_ID, self.scope, readers=V2_READERS, run_ids=self.known_run_ids())
+        return observe(self.store, SESSION_ID, self.scope, run_ids=self.known_run_ids())

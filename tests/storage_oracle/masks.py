@@ -26,11 +26,11 @@ from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.history.session_runs import session_runs
-from mindroom.history.summary_rows_next import folded_tool_call_ids, history_event_ids, latest_row
-from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES
+from mindroom.history.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.session_storage.store_next import ConversationStore
+from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES
+from mindroom.session_storage.store import ConversationStore
 from mindroom.usage.storage import quote_identifier
 from tests.storage_oracle.backend import SESSION_ID
 from tests.storage_oracle.next_backend import (
@@ -380,9 +380,8 @@ class MaskedBackend(NextBackend):
 
     @override
     def scrub_notices(self, session: ConversationSession) -> object:
-        old_session = replace(session, runs=self._old_view_runs(session.runs))
         with self.determinism.ids_repeated():
-            old_changed = _recover_prior_queued_notices(old_session, active_response_turn_id=None)
+            old_changed = _recover_prior_queued_notices(self._old_view_runs(session.runs), active_response_turn_id=None)
         super().scrub_notices(session)
         return self._old_rewrite(old_changed)
 
