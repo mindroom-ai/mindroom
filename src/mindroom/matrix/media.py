@@ -37,7 +37,7 @@ _FILE_OR_VIDEO_MESSAGE_EVENT_TYPES = (*_FILE_MESSAGE_EVENT_TYPES, *_VIDEO_MESSAG
 _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
-MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
+_MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
@@ -88,13 +88,21 @@ def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispat
     return is_image_message_event(event) or is_file_or_video_message_event(event)
 
 
+def is_matrix_media_msgtype(msgtype: object) -> bool:
+    """Return whether one msgtype names standard Matrix media.
+
+    Senders write msgtype, and edits install it unvalidated, so a value that is not text is never media.
+    """
+    return isinstance(msgtype, str) and msgtype in _MATRIX_MEDIA_MSGTYPES
+
+
 def is_encrypted_media_event_source(event_source: Mapping[str, Any]) -> bool:
     """Return whether one event source contains standard encrypted media."""
     content = event_source.get("content")
     return (
         event_source.get("type") == "m.room.message"
         and isinstance(content, Mapping)
-        and content.get("msgtype") in MATRIX_MEDIA_MSGTYPES
+        and is_matrix_media_msgtype(content.get("msgtype"))
         and "file" in content
     )
 
