@@ -1198,23 +1198,9 @@ async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("leader", "writer", "body"),
-    [
-        pytest.param(
-            [delegate("call-write", "writer", "Write it up"), answer("Done.")],
-            [[Await(_writer_unavailable)]],
-            "**Writer**: Writer unavailable\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\nDone.",
-            id="completed",
-        ),
-    ],
-)
 async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_streamed_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    leader: list[list[ScriptStep]],
-    writer: list[list[ScriptStep]],
-    body: str,
 ) -> None:
     """A resume shows each run's content in a slot that streamed no text of its own, as the Agno-backed resume did.
 
@@ -1222,9 +1208,9 @@ async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_stream
     streams nothing, and its error fills its slot.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
-    team.models["default"] = ScriptedModel(leader)
+    team.models["default"] = ScriptedModel([delegate("call-write", "writer", "Write it up"), answer("Done.")])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
-    team.models["writer-model"] = ScriptedModel(writer)
+    team.models["writer-model"] = ScriptedModel([[Await(_writer_unavailable)]])
 
     result = await team.resume(
         raised.paused,
@@ -1233,7 +1219,9 @@ async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_stream
     )
 
     assert ProbeToolkit.calls == ["dangerous"]
-    assert result.response_text == HEADER + body
+    assert result.response_text == (
+        HEADER + "**Writer**: Writer unavailable\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\nDone."
+    )
 
 
 @pytest.mark.asyncio
