@@ -1,4 +1,4 @@
-"""What adapters share to build a turn: the answering model and its timings, and reasoning written inline.
+"""What adapters share to build a turn: its timings and stream progress, the events that end it, and inline reasoning.
 
 Every assistant message a model answered is stored with its provenance (``llm/messages.py`` ``model_provenance``),
 which usage accounting and a run's own model messages read; ``stamp_model`` is how an adapter records it on the turn
@@ -8,19 +8,19 @@ it finishes.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.llm.messages import Message, model_provenance
-from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady
+from mindroom.llm.provider import ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, TurnCompleted, UsageReported
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
-    from mindroom.llm.provider import ModelIdentity, StreamEvent
+    from mindroom.llm.provider import ModelIdentity, StopReason, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["ThinkTagSplitter", "finished_assistant_message", "output_started", "stamp_finished_turn", "stamp_model"]
+__all__ = ["ThinkTagSplitter", "TurnTimer", "finished_turn", "stamp_finished_turn", "stamp_model", "turn_end"]
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
@@ -34,43 +34,52 @@ def stamp_model(message: Message, identity: ModelIdentity) -> None:
     }
 
 
-def stamp_finished_turn(
-    message: Message,
-    identity: ModelIdentity,
-    *,
-    started: float,
-    first_output_at: float | None,
-) -> Message:
-    """Record which model answered ``message`` and how long the request took; ``started`` is a monotonic time."""
-    stamp_model(message, identity)
-    message.metrics.duration = time.monotonic() - started
-    if first_output_at is not None:
-        message.metrics.time_to_first_token = first_output_at - started
-    return message
-
-
-def output_started(first_output_at: float | None, event: StreamEvent) -> float | None:
-    """Return when the turn's first output arrived: ``first_output_at``, or now when ``event`` is that output.
+@dataclass(slots=True)
+class TurnTimer:
+    """When one turn's request started and when its first output arrived, as monotonic times.
 
     Text, reasoning, and complete tool calls are output; usage reports and stream progress are not.
     """
-    if first_output_at is None and isinstance(event, TextDelta | ReasoningDelta | ToolCallReady):
-        return time.monotonic()
-    return first_output_at
+
+    started: float = field(default_factory=time.monotonic)
+    first_output_at: float | None = None
+
+    def output(self, event: StreamEvent) -> StreamEvent:
+        """Return ``event``, noting when it is the turn's first output."""
+        if self.first_output_at is None and isinstance(event, TextDelta | ReasoningDelta | ToolCallReady):
+            self.first_output_at = time.monotonic()
+        return event
+
+    def chunk(self, events: Sequence[StreamEvent]) -> Iterator[StreamEvent]:
+        """Yield the events one provider chunk carried, noting its output, or progress when it carried none.
+
+        A chunk without events, such as a tool-call argument piece or a hosted tool's progress, still shows that
+        the provider is working.
+        """
+        for event in events or [StreamProgress()]:
+            yield self.output(event)
 
 
-def finished_assistant_message(
+def stamp_finished_turn(message: Message, identity: ModelIdentity, timer: TurnTimer) -> None:
+    """Record which model answered ``message`` and how long the request took."""
+    stamp_model(message, identity)
+    message.metrics.duration = time.monotonic() - timer.started
+    if timer.first_output_at is not None:
+        message.metrics.time_to_first_token = timer.first_output_at - timer.started
+
+
+def finished_turn(
     identity: ModelIdentity,
+    timer: TurnTimer,
     *,
     content: str | None,
     reasoning: str | None = None,
     tool_calls: Sequence[dict[str, Any]],
     provider_data: dict[str, Any] | None = None,
     usage: MessageMetrics | None,
-    started: float,
-    first_output_at: float | None,
-) -> Message:
-    """Return the finished assistant message of one turn, stamped with its provenance and timings."""
+    stop_reason: StopReason | None,
+) -> list[StreamEvent]:
+    """Return the events that end one finished turn, its assistant message stamped with its provenance and timings."""
     message = Message(
         role="assistant",
         content=content,
@@ -80,7 +89,17 @@ def finished_assistant_message(
     )
     if usage is not None:
         message.metrics = usage
-    return stamp_finished_turn(message, identity, started=started, first_output_at=first_output_at)
+    stamp_finished_turn(message, identity, timer)
+    return turn_end(message, stop_reason, usage_reported=usage is not None)
+
+
+def turn_end(message: Message, stop_reason: StopReason | None, *, usage_reported: bool) -> list[StreamEvent]:
+    """Return a finished turn's last events: its final usage report, when the provider reported usage, then completion.
+
+    The final report carries the message's metrics, timings included.
+    """
+    completed = TurnCompleted(message=message, stop_reason=stop_reason)
+    return [UsageReported(message.metrics), completed] if usage_reported else [completed]
 
 
 @dataclass(slots=True)

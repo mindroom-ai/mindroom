@@ -10,12 +10,11 @@ import asyncio
 import hashlib
 import json
 import random
-import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted
-from mindroom.providers.assistant_turn import finished_assistant_message
+from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady
+from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 
 if TYPE_CHECKING:
@@ -127,27 +126,24 @@ class SyntheticProvider:
             and last_message.tool_call_id == plan.tool_call_id
         )
         content = plan.suffix if continuation else plan.prefix
-        started = time.monotonic()
-        first_text_at: float | None = None
+        timer = TurnTimer()
         for start in range(0, len(content), settings.chunk_chars):
             chunk = content[start : start + settings.chunk_chars]
             if settings.chars_per_second:
                 await asyncio.sleep(len(chunk) / settings.chars_per_second)
-            if first_text_at is None:
-                first_text_at = time.monotonic()
-            yield TextDelta(chunk)
+            yield timer.output(TextDelta(chunk))
         tool_calls = [] if continuation or plan.tool_call_id is None else [_shell_call(plan.tool_call_id)]
         for call in tool_calls:
             yield ToolCallReady(call)
-        message = finished_assistant_message(
+        for event in finished_turn(
             self.identity,
+            timer,
             content=content or None,
             tool_calls=tool_calls,
             usage=None,
-            started=started,
-            first_output_at=first_text_at,
-        )
-        yield TurnCompleted(message=message, stop_reason="tool_use" if tool_calls else "end")
+            stop_reason="tool_use" if tool_calls else "end",
+        ):
+            yield event
 
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> SyntheticProvider:
