@@ -59,7 +59,6 @@ from mindroom.knowledge.collections import (
     delete_collection,
     open_collection,
     readers_drained,
-    row_count,
     write_source_rows,
 )
 from mindroom.knowledge.file_listing import (
@@ -1597,14 +1596,19 @@ class KnowledgeManager:
         return taken, dropped
 
     def _sealed_collection_is_usable(self, seal: CandidateCheckpoint) -> bool:
-        """Return whether a sealed collection still holds exactly its sealed rows.
+        """Return whether a sealed collection still holds exactly its sealed rows, in a file at most a quarter free.
 
         A store that cannot answer makes the seal unusable rather than failing
-        the refresh: reusing it is only an optimization.
+        the refresh: reusing it is only an optimization. Deleted rows leave
+        their pages free for reuse but never shrink the file, so a collection
+        whose source shrank is copied afresh instead.
         """
         collection = open_collection(self._collections, seal.collection)
         try:
-            rows = row_count(collection) if collection.exists() else None
+            if not collection.exists():
+                return False
+            rows = collection.row_count()
+            free = collection.free_fraction()
         except Exception:
             logger.warning(
                 "Dropping the seal of an unreadable knowledge collection",
@@ -1613,7 +1617,7 @@ class KnowledgeManager:
                 exc_info=True,
             )
             return False
-        return rows is not None and rows == seal.row_count
+        return rows == seal.row_count and free <= 0.25
 
     def _published_state_and_cleanup_safety(self) -> tuple[PublishedIndexState | None, bool]:
         """Return the persisted state, and whether candidate cleanup may run at all.
@@ -2072,7 +2076,7 @@ class KnowledgeManager:
                 failed={},
                 target_revision=run.baseline_revision,
                 total_files=run.total_files,
-                row_count=await asyncio.to_thread(row_count, run.collection),
+                row_count=await asyncio.to_thread(run.collection.row_count),
             )
         kept = await _shielded_write(
             asyncio.to_thread(rotate_seals, self._base_storage_path, retired=run.retired_collection, published=seal),

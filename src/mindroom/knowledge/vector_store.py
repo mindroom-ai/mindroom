@@ -192,6 +192,13 @@ class KnowledgeCollection:
         with closing(self._connect()) as connection:
             return connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
 
+    def free_fraction(self) -> float:
+        """Return the share of the file's pages that deleted rows left free; SQLite reuses them but never shrinks."""
+        with closing(self._connect()) as connection:
+            pages = connection.execute("PRAGMA page_count").fetchone()[0]
+            free = connection.execute("PRAGMA freelist_count").fetchone()[0]
+        return free / pages if pages else 0.0
+
     def has_rows(self) -> bool:
         """Return whether the collection holds any row."""
         with closing(self._connect()) as connection:

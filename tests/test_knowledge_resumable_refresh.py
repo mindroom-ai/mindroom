@@ -4338,6 +4338,44 @@ async def test_a_chunking_change_or_forced_rebuild_re_embeds_everything_and_keep
 
 
 @pytest.mark.asyncio
+async def test_a_kept_collection_a_shrinking_source_left_mostly_empty_is_copied_afresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store_writes: _StoreWrites,
+) -> None:
+    """Deleted rows never shrink a file, so a kept collection left mostly free pages is replaced by a fresh copy."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    large = docs_path / "large.md"
+    large.write_text(_overlapping_body(4000), encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=500)
+    assert (await _manager(config).reindex_all()).published
+    (docs_path / names[0]).write_text("first edit", encoding="utf-8")
+    assert (await _manager(config).reindex_all()).published
+    assert len(_collection_names(config)) == 2
+    large.unlink()
+    collections_while_copying: list[int] = []
+    original_copy = KnowledgeManager._copy_published_vectors
+
+    def _recording_copy(self: KnowledgeManager, **kwargs: Any) -> dict[str, FileSignature]:  # noqa: ANN401
+        collections_while_copying.append(len(_collection_names(config)))
+        return original_copy(self, **kwargs)
+
+    monkeypatch.setattr(KnowledgeManager, "_copy_published_vectors", _recording_copy)
+    store_writes.clear()
+
+    # Two take-overs leave both collections mostly empty; the next two refreshes replace each with a fresh copy.
+    for step in range(4):
+        (docs_path / names[step]).write_text(f"edit {step}", encoding="utf-8")
+        await _refresh_and_check(config, docs_path)
+
+    assert store_writes.copied > 0, "no collection left mostly empty was copied afresh"
+    # The worn collection is dropped before the copy, so only the published index and the copy share the disk.
+    assert max(collections_while_copying) == 2
+    assert all(_collection(config, name).free_fraction() <= 0.25 for name in _collection_names(config))
+
+
+@pytest.mark.asyncio
 async def test_a_refresh_that_finds_nothing_changed_keeps_the_retired_collection(
     tmp_path: Path,
     store_writes: _StoreWrites,
