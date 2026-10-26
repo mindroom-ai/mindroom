@@ -2900,7 +2900,6 @@ depends_on = [
     "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
-    "mindroom.history.team_scope",
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.model_usage",

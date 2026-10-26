@@ -37,7 +37,6 @@ from mindroom.history.replay import (
 from mindroom.history.session_context import (
     ScopeSessionContext,
     has_named_member,
-    resolve_bound_team_scope,
 )
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
@@ -45,7 +44,6 @@ from mindroom.history.storage import (
     set_force_compaction,
 )
 from mindroom.history.summary_call import is_summary_timeout
-from mindroom.history.team_scope import ad_hoc_team_has_private_member
 from mindroom.history.types import (
     CompactionDecision,
     CompactionLifecycleFailure,
@@ -759,7 +757,7 @@ async def prepare_bound_scope_history(
     history_settings: ResolvedHistorySettings,
     static_prompt_tokens: int,
     non_prompt_tokens: int,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     team_name: str | None,
     active_model_name: str | None,
     active_context_window: int | None,
@@ -773,13 +771,8 @@ async def prepare_bound_scope_history(
     team's, whose replay policy and compaction config the scope follows. ``team_name`` is the configured team, or None
     for an ad hoc one.
     """
-    if scope_context is not None:
-        # A team without a named member has no history, whether or not its scope is open.
-        has_scope = has_named_member(member_names)
-    elif team_name is None and ad_hoc_team_has_private_member(member_names, config.agents):
-        has_scope = False
-    else:
-        has_scope = resolve_bound_team_scope(member_names=member_names, config=config, team_name=team_name) is not None
+    # A team without a named member has no history, whether or not its scope is open.
+    has_scope = has_named_member(member_names)
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         entity_name=team_name,

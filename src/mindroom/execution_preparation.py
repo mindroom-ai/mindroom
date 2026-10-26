@@ -911,7 +911,7 @@ async def prepare_agent_execution_context(
 async def _prepare_bound_team_execution_context(
     ctx: ResponseTurnContext,
     *,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     member_names: Sequence[str],
     leader_system_message: Message,
     leader_tools: Sequence[ToolSpec],
@@ -998,7 +998,7 @@ async def _prepare_bound_team_execution_context(
 async def prepare_bound_team_run_context(
     ctx: ResponseTurnContext,
     *,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     member_names: Sequence[str],
     leader_system_message: Message,
     leader_tools: Sequence[ToolSpec],

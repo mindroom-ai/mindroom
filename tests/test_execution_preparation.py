@@ -64,6 +64,7 @@ from tests.conftest import (
     build_unseen_context_messages_for_test,
     make_turn_context,
     make_visible_message,
+    unstored_team_scope_context,
 )
 from tests.fakes.scripted_model import ScriptedModel
 from tests.history_helpers import replay_settings
@@ -340,7 +341,7 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
 
     await _prepare_bound_team_execution_context(
         make_turn_context("test_agent"),
-        scope_context=None,
+        scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         member_names=["test_agent"],
         leader_system_message=Message(role="system", content="You lead the team."),
         leader_tools=(),
@@ -853,7 +854,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
 
     await _prepare_bound_team_execution_context(
         make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
-        scope_context=None,
+        scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         member_names=["test_agent"],
         leader_system_message=leader_system_message,
         leader_tools=leader_tools,
@@ -902,7 +903,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
             reply_to_event_id="$current",
             active_event_ids=frozenset(),
         ),
-        scope_context=None,
+        scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         member_names=["test_agent"],
         leader_system_message=leader_system_message,
         leader_tools=(),
