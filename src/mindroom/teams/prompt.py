@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """The team leader's system prompt, rendered like an agent's: its identity, the ``<team>`` block, then the turn.
 
 The team's identity (its name, its purpose, and how conversation history reaches it), the ``<team>`` block (the

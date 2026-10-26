@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Render an agent's system prompt from named sections, as a stable part and a turn part.
 
 The stable part holds what an agent's build fixes, so it stays byte for byte the same across the build's turns and
