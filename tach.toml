@@ -6138,8 +6138,13 @@ visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.legacy_chroma_storage"
-depends_on = ["mindroom.knowledge.vector_store", "mindroom.logging_config", "mindroom.tool_system.dependencies"]
-visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.manager"]
+depends_on = [
+    "mindroom.knowledge.registry",
+    "mindroom.knowledge.vector_store",
+    "mindroom.logging_config",
+    "mindroom.tool_system.dependencies",
+]
+visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.manager", "mindroom.knowledge.watch"]
 
 [[modules]]
 path = "mindroom.embeddings.batching"
@@ -6334,6 +6339,7 @@ visibility = ["mindroom.knowledge.search", "mindroom.knowledge.utils"]
 path = "mindroom.knowledge.watch"
 depends_on = [
     "mindroom.knowledge.file_listing",
+    "mindroom.knowledge.legacy_chroma_storage",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
 ]

@@ -81,7 +81,11 @@ from mindroom.knowledge.indexing_config import (
     knowledge_git_dir,
     storage_key_for_base,
 )
-from mindroom.knowledge.legacy_chroma_storage import copy_legacy_chroma_rows, legacy_chroma_store_exists
+from mindroom.knowledge.legacy_chroma_storage import (
+    chroma_era_publication,
+    copy_legacy_chroma_rows,
+    legacy_chroma_store_exists,
+)
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -1233,12 +1237,8 @@ class KnowledgeManager:
         if persisted_state is None or persisted_state.status != "complete" or persisted_state.collection is None:
             return None
         settings = persisted_state.settings
-        if not settings.vector_store:
-            # LEGACY_COMPAT: Chroma-era publications are reusable: their vectors are copied out of Chroma once.
-            # Legacy format: published metadata without vector_store, its vectors in the base's Chroma database.
-            # Last legacy release: v2026.10.568; replacement: the next release stores semantic indexes in owned SQLite files.
-            # Handling: compare settings as if the publication were owned; the copy reads Chroma.
-            # Coverage: tests/test_knowledge_collection_cleanup.py::test_a_chroma_era_index_is_copied_without_embedding_again.
+        if chroma_era_publication(settings):
+            # Compared as if the publication were owned; the copy reads Chroma.
             settings = replace(settings, vector_store=self._indexing_settings.vector_store)
         return persisted_state.collection if settings == self._indexing_settings else None
 

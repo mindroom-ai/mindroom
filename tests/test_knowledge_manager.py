@@ -72,6 +72,7 @@ from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.index_reader import PublishedIndexReader
 from mindroom.knowledge.indexing_config import IndexingSettings, indexing_settings_key, knowledge_git_dir
+from mindroom.knowledge.legacy_chroma_storage import chroma_era_shared_base_ids
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature, _PreparedFile
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
@@ -1392,6 +1393,31 @@ def test_local_knowledge_without_poll_interval_starts_no_poller(tmp_path: Path) 
     """Without poll_interval_seconds a local base gets no poll target, so the watcher starts no poller for it."""
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
     assert _shared_poll_targets(config, runtime_paths_for(config)) == {}
+
+
+def test_chroma_era_shared_bases_convert_smallest_first(tmp_path: Path) -> None:
+    """Startup conversions run smallest base first, so most bases are searchable soon; owned bases are not listed."""
+    config = _config(
+        tmp_path,
+        bases={"big": tmp_path / "big", "owned": tmp_path / "owned", "small": tmp_path / "small"},
+        agent_bases=["big", "owned", "small"],
+    )
+    runtime_paths = runtime_paths_for(config)
+    for base_id, indexed_count in (("big", 500), ("owned", 1), ("small", 3)):
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        settings = manager._indexing_settings
+        save_published_index_state(
+            manager._indexing_settings_path,
+            state_for_publication(
+                settings=settings if base_id == "owned" else replace(settings, vector_store=""),
+                collection=manager._collections.default_collection,
+                indexed_count=indexed_count,
+                source_signature="published",
+                published_revision=None,
+            ),
+        )
+
+    assert chroma_era_shared_base_ids(config, runtime_paths) == ["small", "big"]
 
 
 @pytest.mark.asyncio
