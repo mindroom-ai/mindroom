@@ -1,4 +1,4 @@
-"""Behavior of the owned Gemini, Ollama, and synthetic adapters that the C1 goldens do not exercise."""
+"""Behavior of the owned Gemini, Ollama, and synthetic adapters that the provider goldens do not exercise."""
 
 from __future__ import annotations
 
@@ -1366,8 +1366,8 @@ def test_gemini_schema_conversion_breaks_cycles_and_leaves_the_input_alone() -> 
     assert schema == original
 
 
-def test_gemini_converts_mcp_tool_schemas_as_agno_did() -> None:
-    """Unions, type lists, dict values, empty objects, and unresolved or untyped properties convert as Agno's did.
+def test_gemini_converts_the_json_schema_shapes_mcp_tools_send() -> None:
+    """Unions, type lists, dict values, empty objects, and unresolved or untyped properties convert for Gemini.
 
     MCP and plugin tools send their own JSON schemas, so any of these can reach a Gemini request.
     """

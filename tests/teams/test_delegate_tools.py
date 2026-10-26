@@ -1,4 +1,4 @@
-"""What the leader reads for a finished member run, with and without streaming: Agno's rules, but never ``null``."""
+"""What the leader reads for a finished member run, with and without streaming, which is never ``null``."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from mindroom.teams.delegate_tools import (
 )
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
-from tests.team_runtime.squad import member, scripted
+from tests.teams.squad import member, scripted
 
 if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMember
@@ -29,7 +29,7 @@ _TOOLS = [
 ]
 
 
-def test_member_result_text_follows_agno_for_text_tool_results_and_silence() -> None:
+def test_a_streamed_member_result_is_its_text_else_its_tool_results_else_the_no_response_notice() -> None:
     assert member_result_text(RunRecord(run_id="r", content="42"), stream=True) == "42"
     assert member_result_text(RunRecord(run_id="r", content="", tools=_TOOLS), stream=True) == "first,second"
     assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS), stream=True) == "first,second"

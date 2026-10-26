@@ -129,7 +129,7 @@ def test_members_without_a_consensus_get_the_no_consensus_note_and_a_lone_consen
 
 
 def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> None:
-    """A run whose content is empty shows the text its own model requests wrote, as Agno's blocking reply read it.
+    """A run whose content is empty shows the text its own model requests wrote.
 
     An earlier reply in the thread reaches the run's input as an assistant message no model answered, so it is not
     the run's text.
@@ -164,7 +164,7 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
     """A member whose run failed shows why, credentials redacted, whether its record is live or loaded from storage.
 
     The live record carries the reason the loop recorded, though its model wrote text first; a loaded one holds only
-    Agno's stored content, the raw error, since the model wrote nothing.
+    its stored content, the raw error, since the model wrote nothing.
     """
     reason = redact_sensitive_text(_RAW_FAILURE)
     checker = RunRecord(

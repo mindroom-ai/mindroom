@@ -671,7 +671,7 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
         ("bedrock_claude", True, "/v1/messages?beta=true", None),
     ],
 )
-async def test_tool_definitions_carry_only_the_fields_agno_sent(
+async def test_tool_definitions_carry_only_the_fields_the_claude_wire_takes(
     tmp_path: Path,
     route: str,
     strict_sent: bool,

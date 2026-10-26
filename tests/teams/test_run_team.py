@@ -1,8 +1,8 @@
-"""Team runs on the owned loop store the rows Agno stored and tell the leader what Agno told it.
+"""Team runs store the rows the storage goldens hold and tell the leader what each member returned.
 
-The C4 goldens are the reference: ``team-completed`` (a member used a tool), ``team-member-error`` (a member's run
+The storage goldens are the reference: ``team-completed`` (a member used a tool), ``team-member-error`` (a member's run
 failed), ``team-paused`` (a member's call waits for approval), and the streamed collaborate run ``panel-completed``.
-Member rows leave out the team run's metadata, which Agno copied into them (``stored_as_owned``).
+Member rows leave out the team run's metadata, which the storage goldens copy into them (``stored_as_owned``).
 """
 # ruff: noqa: D103
 
@@ -29,7 +29,7 @@ from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
 from tests.providers.golden_support import Wire, hide_provider_environment, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter
-from tests.team_runtime.squad import (
+from tests.teams.squad import (
     PANEL,
     SQUAD,
     Store,
@@ -95,7 +95,7 @@ def _delegation_to_both(mode: TeamMode) -> list[Any]:
     )
 
 
-async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> None:
+async def test_a_coordinate_run_with_a_member_tool_call_stores_the_team_completed_rows() -> None:
     team_row = golden_run("team_squad", SQUAD, "team-completed")
     writer_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-00000000004b")
     leader = scripted(
@@ -214,7 +214,7 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
     assert [(log["team_id"], log["member_id"]) for log in failures] == [("squad", "checker")]
 
 
-async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
+async def test_a_member_approval_pauses_the_team_with_the_team_paused_rows() -> None:
     team_row = golden_run("team_squad", SQUAD, "team-paused")
     checker_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-00000000005a")
     leader = scripted(
@@ -258,7 +258,7 @@ async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
     assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
 
 
-async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_text_in_member_order() -> None:
+async def test_a_streamed_collaborate_run_stores_the_panel_rows_and_joins_member_text_in_member_order() -> None:
     team_row = golden_run("team_panel", PANEL, "panel-completed")
     writer_row = golden_run("team_panel", PANEL, "00000000-0000-4000-8000-00000000006d")
     checker_row = golden_run("team_panel", PANEL, "00000000-0000-4000-8000-000000000070")
@@ -315,7 +315,7 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
     ]
 
 
-async def test_an_unknown_member_id_answers_the_leader_with_agno_s_roster_notice() -> None:
+async def test_an_unknown_member_id_answers_the_leader_with_the_not_found_notice_and_roster() -> None:
     leader = scripted(
         "leader-model",
         _delegate("call-nobody", "nobody", "Do it", metrics=usage(10, 2)),
@@ -347,7 +347,7 @@ async def test_an_unknown_member_id_answers_the_leader_with_agno_s_roster_notice
     assert record.status is RunStatus.completed
 
 
-async def test_a_collaborate_member_that_pauses_adds_agno_s_notice_in_its_place_and_pauses_the_team() -> None:
+async def test_a_collaborate_member_that_pauses_adds_its_paused_notice_in_its_place_and_pauses_the_team() -> None:
     leader = scripted(
         "leader-model",
         calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
@@ -371,7 +371,7 @@ async def test_a_collaborate_member_that_pauses_adds_agno_s_notice_in_its_place_
     assert record.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
     writer_record, checker_record = store.members
     assert (writer_record.status, checker_record.status) == (RunStatus.completed, RunStatus.paused)
-    assert record.member_responses == [checker_record]  # Only the paused member rides along, as Agno stored it.
+    assert record.member_responses == [checker_record]  # Only the paused member rides along.
     assert record.requirements is not None
     [requirement] = record.requirements
     assert (requirement.member_agent_id, requirement.member_run_id) == ("checker", checker_record.run_id)
@@ -467,7 +467,7 @@ async def test_a_member_s_external_call_pauses_the_team_with_the_member_s_raw_ca
     assert requirement.member_run_id == member.run_id
     assert record.tools is not None
     assert record.tools[0].result == MEMBER_PAUSED_RESULT.format(name="Checker")
-    # A silent external pause names nothing, so the team's paused text is empty, as Agno's was.
+    # A silent external pause names nothing, so the team's paused text is empty.
     assert team_paused_content(record) == ""
 
 
@@ -546,7 +546,7 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
         ),
     ],
 )
-async def test_a_blocking_collaborate_run_gives_the_leader_agno_s_labeled_member_results(
+async def test_a_blocking_collaborate_run_gives_the_leader_each_member_result_labeled_with_its_name(
     writer_turns: list[list[Any]],
     checker_turns: list[list[Any]],
     expected: str,
@@ -645,13 +645,13 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
     assert record.tools[0].result == expected
     delegated = leader.requests[1].messages[-1]
     assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-all", expected)
-    # The member's stored row keeps Agno's content: the text its model wrote before the failure, else the error.
+    # The member's stored row keeps its content: the text its model wrote before the failure, else the error.
     [failed] = [member for member in store.members if member.agent_id == "checker"]
     stored_content = "I will check." if wrote_text else "checker provider down: api_key=example-secret"
     assert (failed.status, failed.content) == (RunStatus.error, stored_content)
 
 
-async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_notice_and_pauses_the_team() -> None:
+async def test_a_blocking_collaborate_pause_adds_the_notice_after_the_labeled_results_and_pauses_the_team() -> None:
     leader = scripted(
         "leader-model",
         calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
@@ -692,7 +692,7 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
         pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="blocking-tool-only"),
     ],
 )
-async def test_a_coordinate_member_without_text_reaches_the_leader_by_each_path_s_rule(
+async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_member_result_rule_of_its_stream_mode(
     stream: bool,
     writer_turns: list[list[Any]],
     expected: str,

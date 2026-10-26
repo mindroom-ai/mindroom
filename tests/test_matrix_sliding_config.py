@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, create_autospec
 from uuid import uuid4
 
 import nio
 import pytest
-from nio.durable import DurableSyncConfig, SlidingSyncConfig, open_durable_sync
+from nio.durable import DurableSync, DurableSyncConfig, SlidingSyncConfig, open_durable_sync
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.sync_loop import bot_ingestion_config
+from mindroom.matrix.sync_loop import bot_ingestion_config, subscribe_sliding_rooms
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.threading_helpers import ThreadingBehaviorTestBase
@@ -25,6 +26,32 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["classic", "sliding"])
+async def test_subscriptions_add_each_joined_room_whose_state_nio_still_awaits(mode: str) -> None:
+    """A joined room outside the list stays subscribed until its state arrives; a sendable or left room adds none."""
+    config = Config.model_validate({"matrix_sync": {"mode": mode, "sliding_timeline_limit": 3}})
+    session = create_autospec(DurableSync, instance=True)
+    awaited, sendable, left = "!awaited:example.org", "!sendable:example.org", "!left:example.org"
+    session.client = SimpleNamespace(rooms=dict.fromkeys((awaited, sendable, left)))
+
+    async def wait_for_room_ready(room_id: str) -> bool:
+        if room_id == awaited:
+            await asyncio.Event().wait()
+        return room_id == sendable
+
+    session.wait_for_room_ready.side_effect = wait_for_room_ready
+
+    await subscribe_sliding_rooms(session, config, ["!configured:example.org", "#alias:example.org"])
+
+    if mode == "classic":
+        session.update_sliding_subscriptions.assert_not_awaited()
+        return
+    subscriptions = session.update_sliding_subscriptions.await_args.args[0]
+    assert set(subscriptions) == {"!configured:example.org", awaited}
+    assert subscriptions[awaited]["timeline_limit"] == 3
 
 
 def test_sliding_config_retains_timeline_limit_and_classic_default() -> None:

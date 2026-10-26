@@ -173,10 +173,10 @@ async def _adapter_turn(built: _Built, request: ModelRequest) -> Any:  # noqa: A
 
 
 @pytest.mark.asyncio
-async def test_usage_on_several_chat_chunks_adds_up_as_agno_summed_it(tmp_path: Path) -> None:
+async def test_usage_on_several_chat_chunks_adds_up(tmp_path: Path) -> None:
     """Each chunk's usage adds to the turn's, so every partial report and the final one hold the running sum.
 
-    Agno added every usage-bearing chunk to the assistant message's metrics; a server that repeats its cumulative
+    Every usage-bearing chunk adds to the assistant message's metrics, so a server that repeats its cumulative
     usage on each chunk is counted once per chunk.
     """
     first = {"prompt_tokens": 40, "completion_tokens": 1, "total_tokens": 41}

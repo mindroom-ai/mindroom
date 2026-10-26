@@ -1,4 +1,4 @@
-"""The owned Claude adapters reproduce every C1 provider golden of the Anthropic wire family.
+"""The owned Claude adapters reproduce every provider golden of the Anthropic wire family.
 
 Each golden pins the request Agno 3.0.9 plus MindRoom's patches sent for ``anthropic``, ``vertexai_claude``,
 or ``bedrock_claude`` and the assistant message they parsed from the canned reply; the owned adapter must

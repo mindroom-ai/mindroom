@@ -831,3 +831,32 @@ def test_each_tool_result_names_its_own_call_in_the_summary_input() -> None:
     args = summary_input[summary_input.rindex("<tool_args>", 0, write_result) : write_result]
     assert "a.txt" in args
     assert "x" * 300 not in args
+
+
+@pytest.mark.parametrize("max_input_tokens", [100_000, 300], ids=["whole", "excerpt"])
+def test_a_failed_tool_result_is_marked_in_the_summary_input(max_input_tokens: int) -> None:
+    """A summary can tell a call that failed from one that returned, whether its run is summarized whole or cut short."""
+    run = _completed_run(
+        "run-failed-call",
+        messages=[
+            Message(
+                role="tool",
+                tool_call_id="c1",
+                tool_name="shell",
+                content="make: *** No rule to make target 'deploy'.",
+                tool_call_error=True,
+            ),
+            Message(role="tool", tool_call_id="c2", tool_name="shell", content="y" * 4_000, tool_call_error=False),
+        ],
+    )
+
+    summary_input, _included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=max_input_tokens,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
+    )
+
+    assert '<message role="tool" tool_call_id="c1" tool_name="shell" error="true">\nmake: *** No rule' in summary_input
+    assert '<message role="tool" tool_call_id="c2" tool_name="shell">\nyyy' in summary_input

@@ -131,7 +131,7 @@ Skipped where the route has nothing to pin:
 
 `prompts/<scenario>.json` holds every model request one scenario sends, as the provider adapter receives it from the request loop; the files were first captured under Agno 3.0.9 and now regenerate from owned code.
 `tests/agno_parity/prompt_scenarios.py` builds each scenario through the production builders (`ai.stream_agent_response`, `teams.envelope.team_response_stream`, `matrix_rtc.call_tools.build_call_tools`, and each helper's call site) and records the requests the owned path sends.
-`tests/agent_loop/test_prompt_parity.py` compares the golden each helper, Matrix reply, and voice-call scenario regenerates with its file, byte for byte, and `tests/team_runtime/test_prompt_parity.py` compares the team goldens.
+`tests/agent_loop/test_prompt_parity.py` compares the golden each helper, Matrix reply, and voice-call scenario regenerates with its file, byte for byte, and `tests/teams/test_prompt_parity.py` compares the team goldens.
 Requests MindRoom sends through its own provider layer are recorded where the provider adapter receives them, below the request pipeline.
 
 Each file has these keys:
