@@ -1456,11 +1456,11 @@ async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
     *,
     stream: bool,
 ) -> None:
-    """Live chunks, the pause, and the resume's progress show no no-consensus note; the finished reply may.
+    """Live chunks, the pause, and the resume's progress show no no-consensus note; the finished reply ends with it.
 
     The checker writes before its gated call and the leader has not answered when the team pauses, so every
     unfinished view shows member text without a consensus. After the approval the leader says nothing, so the reply
-    finishes with the note exactly when it holds no consensus. A blocking turn sends no live chunks.
+    finishes without one. A blocking turn sends no live chunks.
     """
     team = squad_turn(
         tmp_path,
@@ -1493,9 +1493,7 @@ async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
     unfinished = [*(rendered(chunk) for chunk in live), paused.response_text, *(chunk.content for chunk in progress)]
     assert all("Let me touch it." in text and _NO_CONSENSUS not in text for text in unfinished)
     assert isinstance(result, CompletedApprovalRun)
-    assert (_NO_CONSENSUS in result.response_text) is ("**Team Consensus**" not in result.response_text)
-    if stream:
-        assert result.response_text == f"{HEADER}**Checker**: Let me touch it.\n\nTouched.\n\n\n{_NO_CONSENSUS}"
+    assert result.response_text == f"{HEADER}**Checker**: Let me touch it.\n\nTouched.\n\n\n{_NO_CONSENSUS}"
 
 
 @pytest.mark.asyncio
