@@ -18,6 +18,11 @@ _EMBEDDER_PROVIDER_FIELDS: dict[str, frozenset[str]] = {"openai": frozenset(Embe
 _DEFAULT_EMBEDDER_FIELDS = frozenset({"model", "host", "dimensions"})
 
 
+def _sets_a_value(value: object) -> bool:
+    """Return whether a config value sets anything; null and blank strings do not, as credential resolution reads them."""
+    return bool(value.strip()) if isinstance(value, str) else value is not None
+
+
 def _validate_memory_search_includes(value: list[str]) -> list[str]:
     """Validate include patterns stay inside the memory root."""
     normalized = [validate_safe_relative_pattern(pattern, field_name="memory.search.include") for pattern in value]
@@ -77,7 +82,11 @@ class _MemoryEmbedderConfig(BaseModel):
     def _reject_fields_the_provider_ignores(self) -> Self:
         """Reject a set field that the configured provider would silently ignore."""
         accepted = _EMBEDDER_PROVIDER_FIELDS.get(self.provider, _DEFAULT_EMBEDDER_FIELDS)
-        ignored = [f"memory.embedder.config.{name}" for name, value in self.config if value and name not in accepted]
+        ignored = [
+            f"memory.embedder.config.{name}"
+            for name, value in self.config
+            if name not in accepted and _sets_a_value(value)
+        ]
         if ignored:
             listed = ignored[0] if len(ignored) == 1 else f"{', '.join(ignored[:-1])} and {ignored[-1]}"
             verb, pronoun = ("does", "it") if len(ignored) == 1 else ("do", "them")

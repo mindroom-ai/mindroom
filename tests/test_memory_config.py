@@ -544,10 +544,11 @@ class TestMemoryConfig:
         with pytest.raises(ValidationError, match=re.escape(message)):
             _MemoryEmbedderConfig.model_validate({"provider": provider, "config": {"model": "embed", **fields}})
 
+    @pytest.mark.parametrize("blank", [None, "", "   "])
     @pytest.mark.parametrize("provider", ["ollama", "sentence_transformers", "huggingface"])
-    def test_embedder_fields_left_unset_load_with_any_provider(self, provider: str) -> None:
-        """A null or blank field sets nothing, so a provider that ignores it still loads."""
-        unset = {"api_key": None, "credentials_service": None, "query_prefix": "", "document_prefix": None}
+    def test_embedder_fields_left_unset_load_with_any_provider(self, provider: str, blank: str | None) -> None:
+        """A null, empty, or whitespace-only field sets nothing, so a provider that ignores it still loads."""
+        unset = {"api_key": blank, "credentials_service": None, "query_prefix": blank, "document_prefix": blank}
 
         embedder = _MemoryEmbedderConfig.model_validate({"provider": provider, "config": {"model": "embed", **unset}})
 
