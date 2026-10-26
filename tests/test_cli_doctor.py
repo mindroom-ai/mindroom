@@ -16,6 +16,7 @@ from mindroom.cli.doctor import (
     _check_memory_config,
     _check_memory_embedder,
     _check_pairing,
+    _check_providers,
     _check_single_provider,
     _classify_vertexai_claude_error,
     _validate_provider_key,
@@ -467,3 +468,32 @@ def test_homeserver_check_requires_advertised_sliding_support(
     )
     expected = (1, 0, 0) if advertised is True else (0, 1, 0)
     assert _check_matrix_homeserver(_doctor_runtime_paths(tmp_path), config=config) == expected
+
+
+@pytest.mark.parametrize(
+    ("env_file", "expected"),
+    [("OLLAMA_API_KEY=env-key\n", (1, 0, 0)), ("", (0, 1, 0))],
+    ids=["env_file_key", "no_key"],
+)
+def test_ollama_reachability_check_sends_the_key_the_runtime_sends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_file: str,
+    expected: tuple[int, int, int],
+) -> None:
+    """A server that requires a key is checked with ``OLLAMA_API_KEY``, read from ``.env`` as Ollama models read it."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+
+    def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
+        authorized = httpx.Headers(headers).get("authorization") == "Bearer env-key"
+        return httpx.Response(200 if authorized else 401, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    config = Config(
+        models={"default": ModelConfig(provider="ollama", id="gemma4", host="http://ollama.local:11434")},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_providers(config, runtime_paths) == expected
