@@ -28,7 +28,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
-from tests.conftest import persist_runs, seed_session
+from tests.conftest import persist_runs, seed_session, stored_session_state
 from tests.history_helpers import store_fold
 
 if TYPE_CHECKING:
@@ -571,18 +571,14 @@ def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_
     with pytest.raises(sqlite3.IntegrityError, match="replay refused"):
         persist_interrupted_replay_snapshot(**replay)
 
-    fields = storage.read_session_fields("session-1")
-    assert fields is not None
-    assert fields.session_state == {}
+    assert stored_session_state(storage, "session-1") == {}
     assert session.stored_session_state == {}
 
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TRIGGER refuse_replay")
     persist_interrupted_replay_snapshot(**replay)
 
-    fields = storage.read_session_fields("session-1")
-    assert fields is not None
-    assert fields.session_state == {"recovered": "value"}
+    assert stored_session_state(storage, "session-1") == {"recovered": "value"}
     # The replay run is saved through the session the state came from, which learns both.
     assert session.stored_session_state == {"recovered": "value"}
     assert [run.run_id for run in session.runs] == ["old1", "cancelled-run"]

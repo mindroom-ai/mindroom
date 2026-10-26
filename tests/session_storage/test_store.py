@@ -29,7 +29,7 @@ from mindroom.session_storage.store import (
     store_fold,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from tests.conftest import seed_session_row, seed_session_state
+from tests.conftest import seed_session_row, seed_session_state, stored_session_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -851,7 +851,7 @@ def test_a_new_database_reads_as_empty(store: ConversationStore) -> None:
     """A database opened before anything was written to it reads as empty instead of failing."""
     assert store.load_session("s1", "agent") is None
     assert not store.has_session("s1", "agent")
-    assert store.read_session_fields("s1") is None
+    assert store.read_session_metadata("s1") is None
     assert store.list_runs("s1") == []
     assert store.get_run("r1") is None
     assert store.list_updated_sessions("code", since=0) == []
@@ -1346,12 +1346,6 @@ async def test_the_save_that_creates_the_session_row_records_the_state_it_stored
     assert _loaded(store).session_state == {"cwd": "/other"}
 
 
-def _row_state(store: ConversationStore, session_id: str) -> dict[str, Any]:
-    fields = store.read_session_fields(session_id)
-    assert fields is not None
-    return fields.session_state
-
-
 @pytest.mark.asyncio
 async def test_saves_read_a_session_state_another_thread_keeps_changing(store: ConversationStore) -> None:
     """Saves copy ``session_state`` while another thread changes it in place, and each records what its row holds.
@@ -1383,9 +1377,9 @@ async def test_saves_read_a_session_state_another_thread_keeps_changing(store: C
             # The first terminal save creates the row, and the second writes the state again once it changed.
             persist = persist_to(store, session)
             await persist(_run(f"r{index}"))
-            assert session.stored_session_state == _row_state(store, session.session_id)
+            assert session.stored_session_state == stored_session_state(store, session.session_id)
             await persist(_run(f"r{index}-again"))
-            assert session.stored_session_state == _row_state(store, session.session_id)
+            assert session.stored_session_state == stored_session_state(store, session.session_id)
     finally:
         stop.set()
         changer.join()

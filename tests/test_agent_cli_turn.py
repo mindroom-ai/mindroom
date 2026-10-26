@@ -51,7 +51,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, stored_session_state
 from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit
 
@@ -1801,8 +1801,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
         assert paused.cli_call["parent_bash_call_id"] == "outer"
         assert paused.tool_trace[0].parent_bash_call_id == "outer"
         assert paused.tool_trace[0].toolkit_name == "actions"
-        saved = catalog.store.read_session_fields("session")
-        assert saved.session_state["before_pause"] is True
+        assert stored_session_state(catalog.store, "session")["before_pause"] is True
         waiting.set()
         await decide.wait()
         requirement = paused.requirements[0]

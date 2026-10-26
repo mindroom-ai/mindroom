@@ -41,7 +41,7 @@ from mindroom.session_storage.schema import (
     TableNames,
     owner_scope_key,
 )
-from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.usage.storage import project_usage, quote_identifier, usage_upsert_sql
 
 if TYPE_CHECKING:
@@ -116,13 +116,14 @@ class ConversationStore:
         with closing(connect_conversation_database(self.path)) as connection, _begun(connection, write=write):
             yield connection
 
-    def read_session_fields(self, session_id: str) -> SessionFields | None:
-        """Read one session row's metadata and ``session_state`` without its runs, or None when the row is missing."""
+    def read_session_metadata(self, session_id: str) -> dict[str, Any] | None:
+        """Read one session row's metadata without its state or runs, or None when the row is missing or holds none."""
         with self.transaction(write=False) as connection:
-            row = self._session_row(connection, session_id)
-        if row is None:
-            return None
-        return SessionFields(metadata=decoded_mapping(row[4]), session_state=_session_state(row[3]))
+            row = connection.execute(
+                f"SELECT metadata FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
+                (session_id,),
+            ).fetchone()
+        return None if row is None else decoded_mapping(row[0])
 
     def has_session(self, session_id: str, kind: SessionKind) -> bool:
         """Return whether a ``kind`` session ``session_id`` is stored, the condition under which a load finds it."""

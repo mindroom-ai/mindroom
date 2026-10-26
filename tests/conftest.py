@@ -155,7 +155,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.store import _write_session_state, ensure_session_row, persist_to
+from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -3553,6 +3553,16 @@ def seed_session_state(storage: "ConversationStore", session: "ConversationSessi
         ensure_session_row(connection, storage.names, session)
         _write_session_state(connection, storage.names, session.session_id, state)
     session.stored_session_state = state
+
+
+def stored_session_state(storage: "ConversationStore", session_id: str) -> "dict[str, Any]":
+    """Return the ``session_state`` the row of session ``session_id`` holds, as a load reads it, without its runs."""
+    with storage.transaction(write=False) as connection:
+        (session_data,) = connection.execute(
+            f"SELECT session_data FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
+            (session_id,),
+        ).fetchone()
+    return _session_state(session_data)
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":

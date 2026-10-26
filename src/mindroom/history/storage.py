@@ -152,11 +152,10 @@ def with_force_compaction(metadata: dict[str, Any] | None, scope: HistoryScope) 
 def has_queued_force_compaction(storage: ConversationStore, session_id: str, scope: HistoryScope) -> bool:
     """Return whether one scope must compact before its next run.
 
-    Reads only the session row, whose metadata holds the request; loading the session would also decode every stored
-    run, which takes seconds on a long session.
+    Reads only the session row's metadata, which holds the request; loading the session would also decode every
+    stored run, which takes seconds on a long session.
     """
-    fields = storage.read_session_fields(session_id)
-    return fields is not None and _scope_state(fields.metadata, scope).force_compact_before_next_run
+    return _scope_state(storage.read_session_metadata(session_id), scope).force_compact_before_next_run
 
 
 def run_event_ids(run: AnyRunRecord) -> set[str]:

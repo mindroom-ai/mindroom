@@ -25,14 +25,6 @@ def session_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(state))
 
 
-@dataclass(frozen=True, slots=True)
-class SessionFields:
-    """The two session-row fields MindRoom writes by field: scope metadata and the tools' shared ``session_state``."""
-
-    metadata: dict[str, Any] | None
-    session_state: dict[str, Any]
-
-
 @dataclass(kw_only=True)
 class ConversationSession:
     """One conversation's session row and the runs a load returns.
@@ -65,7 +57,6 @@ class ConversationSession:
 
 __all__ = [
     "ConversationSession",
-    "SessionFields",
     "SessionKind",
     "session_state_snapshot",
 ]

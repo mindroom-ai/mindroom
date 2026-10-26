@@ -66,7 +66,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
 from tests.approval_continuation_helpers import approval_continuation, carries_approval_receipt
-from tests.conftest import install_model_providers, unwrap_extracted_collaborator
+from tests.conftest import install_model_providers, stored_session_state, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import store_fold
 from tests.identity_helpers import persist_entity_accounts
@@ -605,9 +605,7 @@ async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recover
 
     await persist_to(store, session)(RunRecord(run_id="later", session_id="session", agent_id="helper"))
 
-    fields = store.read_session_fields("session")
-    assert fields is not None
-    assert fields.session_state == {"recovered": "v"}
+    assert stored_session_state(store, "session") == {"recovered": "v"}
 
 
 def _outer_bash_approval(arguments: dict[str, object]) -> RunRequirement:
