@@ -469,7 +469,10 @@ def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelId
 
 
 def _record_batch(record: AnyRunRecord, batch: ToolBatch) -> None:
-    """Add every call's execution to the record in call order, refused ones included, and a requirement for each paused one."""
+    """Add every call's execution to the record in call order, refused ones included.
+
+    Each paused call also adds its requirement.
+    """
     if record.tools is None:
         record.tools = []
     for call in batch.calls:

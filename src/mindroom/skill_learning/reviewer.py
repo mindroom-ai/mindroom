@@ -103,7 +103,10 @@ def _review_input_budget_tokens(config: Config, model_name: str) -> int:
 
 
 def _awaits_decision(function: ToolFunction) -> bool:
-    """Return whether a call of this function waits for a decision: it pauses its run, asks as its job, or runs elsewhere."""
+    """Return whether a call of this function waits for a decision.
+
+    It does when it pauses its run, asks as its job, or runs elsewhere.
+    """
     return bool(
         function.requires_confirmation or function.external_execution or function.approval_type == JOB_APPROVAL_TYPE,
     )
@@ -119,7 +122,8 @@ def _review_tools(
 
     Like Hermes' denial message, every other tool answers with the skill tools the review can use. A tool whose call
     waits for a decision (``awaiting_decision``) gets no function, so the loop answers that it does not exist or is not
-    available instead of pausing the review. Returns the functions and the skill tools that run, in the order the review prompt lists them.
+    available instead of pausing the review. Returns the functions and the skill tools that run, in the order the review
+    prompt lists them.
     """
     # The functions run the review's own methods, which validate their arguments as the agent's coercing functions
     # would, such as refusing an action outside the enum.

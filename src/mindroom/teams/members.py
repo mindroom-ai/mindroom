@@ -440,10 +440,10 @@ def build_team_spec(
 
     The leader is named by the team's label (``materialized_team_label``) and identified by the history scope of
     ``scope_context``. The leader prompt opens with the team's identity, the configured team's name and purpose or the
-    ad hoc team's label, in the OpenAI-compatible API's form with ``include_openai_compat_guidance``, then holds each member's authored role and the leader's tool instructions in offer order,
-    then the date and session context in ``timezone`` with ``system_enrichment`` appended; the team's own history
-    settings and call budget come from the configured team ``configured_team_name``, or the defaults when it is None
-    for an ad hoc one.
+    ad hoc team's label, in the OpenAI-compatible API's form with ``include_openai_compat_guidance``, then holds each
+    member's authored role and the leader's tool instructions in offer order, then the date and session context in
+    ``timezone`` with ``system_enrichment`` appended; the team's own history settings and call budget come from the
+    configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
     model = provider_registry.build_model_provider(
         config,

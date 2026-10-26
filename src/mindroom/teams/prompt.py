@@ -69,7 +69,7 @@ TEAM_MEMBER_NOT_FOUND_TEMPLATE = (
 
 
 def render_members_roster(members: Sequence[TeamMember]) -> str:
-    """Return the ``<team_members>`` entries: one ``<member>`` element per member with its id, name, and authored role."""
+    """Return the ``<team_members>`` entries: one ``<member>`` per member, with its id, name, and authored role."""
     return "".join(
         f'<member id="{member.spec.id}" name="{member.spec.name}">\n  Role: {member.role}\n</member>\n'
         for member in members

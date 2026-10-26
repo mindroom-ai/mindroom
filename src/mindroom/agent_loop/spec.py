@@ -21,12 +21,11 @@ if TYPE_CHECKING:
 class AgentSpec:
     """One configured agent as the loop runs it.
 
-    ``id`` and ``name`` are stored on every run as ``agent_id`` and ``agent_name``. ``system_messages`` are the
-    rendered prompt the loop sends first, the stable part before the turn part (``prompt.render_system_messages``),
-    and empty for an agent without one. ``toolkits`` offer each function name
-    once, as the agent's build resolved them (``offered_toolkits``), and ``functions`` holds those functions by
-    name in offer order. ``max_tool_calls_per_turn`` bounds the tool calls of one run, and with it the model
-    requests.
+    ``id`` and ``name`` are stored on every run as ``agent_id`` and ``agent_name``. ``system_messages`` are the rendered
+    prompt the loop sends first, the stable part before the turn part (``prompt.render_system_messages``), and empty for
+    an agent without one. ``toolkits`` offer each function name once, as the agent's build resolved them
+    (``offered_toolkits``), and ``functions`` holds those functions by name in offer order. ``max_tool_calls_per_turn``
+    bounds the tool calls of one run, and with it the model requests.
     """
 
     id: str

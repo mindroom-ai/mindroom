@@ -279,9 +279,10 @@ def _close_cerebras_objects(schema: Any) -> None:  # noqa: ANN401 - any JSON sch
 
 
 def deepseek_request_thinks(settings: ChatSettings) -> bool:
-    """Return whether a DeepSeek request thinks: as an authored ``extra_body.thinking`` says, else as ``use_thinking`` does.
+    """Return whether a DeepSeek request thinks.
 
-    The authored ``extra_body``, from ``request_params`` when it sets one, merges over the switch the route sends.
+    It thinks as an authored ``extra_body.thinking`` says, else as ``use_thinking`` does. The authored ``extra_body``,
+    from ``request_params`` when it sets one, merges over the switch the route sends.
     """
     request_params = settings.request_params or {}
     authored = request_params.get("extra_body", settings.extra_body)
@@ -292,7 +293,10 @@ def deepseek_request_thinks(settings: ChatSettings) -> bool:
 
 
 def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings) -> None:
-    """Send DeepSeek's thinking switch from ``use_thinking``; a request that does not think sends no reasoning effort."""
+    """Send DeepSeek's thinking switch from ``use_thinking``.
+
+    A request that does not think sends no reasoning effort.
+    """
     if not deepseek_request_thinks(settings):
         params.pop("reasoning_effort", None)
     switch = {"type": "enabled" if settings.use_thinking else "disabled"}
