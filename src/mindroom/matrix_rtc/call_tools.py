@@ -794,7 +794,6 @@ async def _run_authorized_call_agent(
                     runtime_paths=runtime_paths,
                     config=config,
                     knowledge=knowledge_resolution.knowledge,
-                    on_attempt_start=lambda run_id, _model_name: recorder.set_run_id(run_id),
                     show_tool_calls=False,
                     run_metadata_collector=run_metadata,
                     execution_identity=execution_identity,
@@ -958,7 +957,7 @@ def _realtime_parameters(function: ToolFunction) -> dict[str, Any]:
     schema = dict(function.parameters)
     if not schema:
         return {"type": "object", "properties": {}}
-    # TODO(simplify): `additionalProperties: false` here is kept as main behaves (Agno processed each function twice).
+    # TODO(simplify): `additionalProperties: false` here reproduces a second pass of Agno's entrypoint processing.
     # Offer the function's schema as it is. The realtime model would see tool schemas without it; the golden pins it.
     if function.entrypoint_processed and schema != AGNO_EMPTY_PARAMETERS:
         schema["additionalProperties"] = False

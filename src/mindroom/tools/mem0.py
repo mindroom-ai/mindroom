@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     display_name="Mem0 Memory",
     description="Persistent memory system that stores, retrieves, searches, and manages user memories and context",
-    category=ToolCategory.PRODUCTIVITY,  # Database tools → Productivity
+    category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key for cloud usage
     setup_type=SetupType.API_KEY,  # Optional API key for cloud usage
     icon="Brain",
@@ -95,7 +95,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["mem0ai"],  # Already in pyproject.toml
-    docs_url="https://docs.agno.com/tools/toolkits/database/mem0",
+    docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#mem0",
     function_names=("add_memory", "delete_all_memories", "get_all_memories", "search_memory"),
 )
 def mem0_tools() -> type[Mem0Tools]:

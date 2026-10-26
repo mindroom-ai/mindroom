@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import signal
-import subprocess
-import sys
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import replace
 from threading import Event
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.knowledge import collections, read_process, registry
+from mindroom.knowledge import collections, index_reader, registry
 from mindroom.knowledge.collections import (
     CollectionSpace,
     candidate_collection_name,
@@ -25,13 +22,13 @@ from mindroom.knowledge.index_metadata import (
     save_published_index_state,
     state_for_publication,
 )
-from mindroom.knowledge.read_proxy import ChromaReadProxy, collection_exists
+from mindroom.knowledge.index_reader import PublishedIndexReader
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config
+from tests.knowledge_test_support import _config, seed_collection
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
 
@@ -40,7 +37,7 @@ class _Embedder:
 
     def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
         del purpose
-        return [[1.0, 0.0] for _text in texts]
+        return [[1.0] for _text in texts]
 
     async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
         return self.embed(texts, purpose=purpose)
@@ -50,8 +47,8 @@ class _Embedder:
 def publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy]:
-    """Build the production descriptor with one real, published native collection."""
+) -> tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader]:
+    """Build the production reader with one real, published collection."""
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
     paths = runtime_paths_for(config)
     key = registry.resolve_published_index_key("docs", config=config, runtime_paths=paths)
@@ -65,39 +62,37 @@ def publication(
         published_revision=None,
     )
     monkeypatch.setattr(registry, "create_configured_embedder", lambda *_args: _Embedder())
-    proxy = registry._build_published_index_reader(key, state, config=config, runtime_paths=paths)
-    assert isinstance(proxy, ChromaReadProxy)
-    return space, key, proxy
+    reader = registry._build_published_index_reader(key, state, config=config, runtime_paths=paths)
+    assert isinstance(reader, PublishedIndexReader)
+    return space, key, reader
 
 
 def _publish(space: CollectionSpace, key: registry.PublishedIndexKey, content: str) -> str:
     name = candidate_collection_name(space)
-    with closing(open_collection(space, name)) as handle:
-        collection = handle.client.create_collection(name)
-        collection.add(ids=[content], embeddings=[[1.0, 0.0]], documents=[content])
-        save_published_index_state(
-            registry.published_index_metadata_path(key),
-            state_for_publication(
-                settings=key.indexing_settings,
-                collection=name,
-                indexed_count=1,
-                source_signature=content,
-                published_revision=None,
-            ),
-        )
-        cleanup_superseded_collections(space, client=handle.client, preserved=frozenset({name}))
+    seed_collection(open_collection(space, name), [{"id": content, "content": content}])
+    save_published_index_state(
+        registry.published_index_metadata_path(key),
+        state_for_publication(
+            settings=key.indexing_settings,
+            collection=name,
+            indexed_count=1,
+            source_signature=content,
+            published_revision=None,
+        ),
+    )
+    cleanup_superseded_collections(space, preserved=frozenset({name}))
     return name
 
 
 @pytest.mark.asyncio
 async def test_retained_reader_follows_refresh(
-    publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
+    publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
 ) -> None:
     """An agent created before multiple swaps queries the current publication."""
-    space, key, proxy = publication
+    space, key, reader = publication
     _publish(space, key, "replacement")
     _publish(space, key, "latest")
-    documents = await proxy.asearch("alpha", limit=5)
+    documents = await reader.asearch("alpha", limit=5)
     assert [document.content for document in documents] == ["latest"]
 
 
@@ -107,11 +102,11 @@ async def test_retained_reader_follows_refresh(
     ["embedder_model", "embedder_dimensions", "knowledge_path", "storage_root", "base_id", "include_patterns"],
 )
 async def test_retained_reader_rejects_changed_scope_or_embeddings(
-    publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
+    publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
     field: str,
 ) -> None:
     """A newer collection must not redirect the old requester or query vector."""
-    space, key, proxy = publication
+    space, key, reader = publication
     name = _publish(space, key, "replacement")
     settings = replace(key.indexing_settings, **{field: "changed"})
     save_published_index_state(
@@ -124,28 +119,28 @@ async def test_retained_reader_rejects_changed_scope_or_embeddings(
             published_revision=None,
         ),
     )
-    with pytest.raises(RuntimeError, match="Knowledge read failed \\(ValueError\\)"):
-        await proxy.asearch("alpha", limit=5)
+    with pytest.raises(ValueError, match="unavailable or incompatible"):
+        await reader.asearch("alpha", limit=5)
 
 
 @pytest.mark.asyncio
 async def test_retained_reader_accepts_new_chunk_settings(
-    publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
+    publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
 ) -> None:
     """Chunk boundaries do not change vector or requester compatibility."""
-    space, key, proxy = publication
+    space, key, reader = publication
     _publish(space, replace(key, indexing_settings=replace(key.indexing_settings, chunk_size="2000")), "replacement")
-    assert [document.content for document in await proxy.asearch("alpha", limit=5)] == ["replacement"]
+    assert [document.content for document in await reader.asearch("alpha", limit=5)] == ["replacement"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("metadata", [None, "corrupt", "indexing"])
 async def test_retained_reader_does_not_hide_unavailable_publication(
-    publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
+    publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
     metadata: str | None,
 ) -> None:
     """Loss of the authoritative publication fails explicitly, even if old vectors exist."""
-    _space, key, proxy = publication
+    _space, key, reader = publication
     path = registry.published_index_metadata_path(key)
     if metadata is None:
         path.unlink()
@@ -155,59 +150,31 @@ async def test_retained_reader_does_not_hide_unavailable_publication(
         state = load_published_index_state(path)
         assert state is not None
         save_published_index_state(path, replace(state, status="indexing"))
-    with pytest.raises(RuntimeError, match="Knowledge read failed \\(ValueError\\)"):
-        await proxy.asearch("alpha", limit=5)
-
-
-_GATED_READER = """
-import signal
-import sys
-from pathlib import Path
-from threading import Event
-from contextlib import contextmanager
-from mindroom.knowledge import read_worker
-
-release = Event()
-signal.signal(signal.SIGUSR1, lambda *_: release.set())
-original = read_worker.read_collection
-
-@contextmanager
-def select(*selection):
-    with original(*selection) as collection:
-        Path(sys.argv[1]).write_text(collection)
-        release.wait()
-        yield collection
-
-read_worker.read_collection = select
-read_worker._main()
-"""
+    with pytest.raises(ValueError, match="unavailable or incompatible"):
+        await reader.asearch("alpha", limit=5)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", [False, True])
 @pytest.mark.parametrize("direct_delete", [False, True])
-async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
-    publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
-    tmp_path: Path,
+async def test_cleanup_waits_for_selected_reader_and_releases_after_read(
+    publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
     monkeypatch: pytest.MonkeyPatch,
-    cancel: bool,
     direct_delete: bool,
 ) -> None:
-    """Selection is leased across publication, native query, and cancellation/reaping."""
-    space, key, proxy = publication
-    selected = tmp_path / "selected"
-    processes: list[subprocess.Popen[bytes]] = []
-    spawn_reader = read_process._spawn_reader
+    """A read's selection is leased across publication and deletion until the search finishes."""
+    space, key, reader = publication
+    selected: list[str] = []
+    selection_made = Event()
+    release = Event()
+    original_read_collection = index_reader.read_collection
 
-    def gated_spawn() -> subprocess.Popen[bytes]:
-        process = subprocess.Popen(
-            [sys.executable, "-c", _GATED_READER, str(selected)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            env=read_process._child_environment(),
-        )
-        processes.append(process)
-        return process
+    @contextmanager
+    def gated_read_collection(path: str, collection: str, settings: Mapping[str, str] | None) -> Iterator[str]:
+        with original_read_collection(path, collection, settings) as selection:
+            selected.append(selection)
+            selection_made.set()
+            release.wait()
+            yield selection
 
     cleanup_started = Event()
     original_lock = collections.collection_lifetime_lock
@@ -218,46 +185,31 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
         with original_lock(path, exclusive=exclusive):
             yield
 
-    monkeypatch.setattr(read_process, "_spawn_reader", gated_spawn)
+    monkeypatch.setattr(index_reader, "read_collection", gated_read_collection)
     monkeypatch.setattr(collections, "collection_lifetime_lock", observed_lock)
-    # These waits stay below the reader's 30-second read deadline, so a cancelled read that stopped killing
-    # its reader cannot pass by the reader timing itself out.
-    read_task = asyncio.create_task(proxy.asearch("alpha", limit=5))
+    read_task = asyncio.create_task(reader.asearch("alpha", limit=5))
     refresh_task = None
     try:
-        async with asyncio.timeout(10):
-            # The reader creates the file before writing the collection name into it.
-            while not (selected.exists() and selected.read_text()):  # noqa: ASYNC110 - Observe the real subprocess selection boundary.
-                await asyncio.sleep(0.01)
-        assert selected.read_text() == proxy.collection_name
-        [reader] = processes
+        assert await asyncio.to_thread(selection_made.wait, 10)
+        assert selected == [reader.collection_name]
         refresh_task = asyncio.create_task(
-            asyncio.to_thread(collections._delete_collection_sync, space, proxy.collection_name)
+            asyncio.to_thread(collections._delete_collection_sync, space, reader.collection_name)
             if direct_delete
             else asyncio.to_thread(_publish, space, key, "replacement"),
         )
         assert await asyncio.to_thread(cleanup_started.wait, 10)
         assert not refresh_task.done()
-        assert collection_exists(str(space.storage_path), proxy.collection_name)
-        if cancel:
-            read_task.cancel()
-            assert (await asyncio.wait({read_task}, timeout=10))[0], "cancelling the read did not stop its reader"
-            with pytest.raises(asyncio.CancelledError):
-                read_task.result()
-        else:
-            reader.send_signal(signal.SIGUSR1)
-            assert [document.content for document in await read_task] == ["original"]
+        assert open_collection(space, reader.collection_name).exists()
+        release.set()
+        assert [document.content for document in await read_task] == ["original"]
         await asyncio.wait_for(refresh_task, 10)
-        assert reader.returncode is not None
-        assert not collection_exists(str(space.storage_path), proxy.collection_name)
+        assert not open_collection(space, reader.collection_name).exists()
         if direct_delete:
             await asyncio.to_thread(_publish, space, key, "replacement")
-        # The warm replacement runs the gated reader; serve the follow-up read from a real one.
-        monkeypatch.setattr(read_process, "_spawn_reader", spawn_reader)
-        read_process._discard_warm_reader()
-        assert [document.content for document in await proxy.asearch("alpha", limit=5)] == ["replacement"]
+        monkeypatch.setattr(index_reader, "read_collection", original_read_collection)
+        assert [document.content for document in await reader.asearch("alpha", limit=5)] == ["replacement"]
     finally:
-        read_task.cancel()
+        release.set()
         await asyncio.gather(read_task, return_exceptions=True)
         if refresh_task is not None:
             await asyncio.wait_for(refresh_task, 10)
@@ -265,11 +217,11 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
 
 @pytest.mark.asyncio
 async def test_refresh_resolution_stays_in_requester_storage(
-    publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
+    publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
     tmp_path: Path,
 ) -> None:
     """Identical base/source identities in another requester root cannot redirect reads."""
-    space, key, proxy = publication
+    space, key, reader = publication
     other_root = str(tmp_path / "another-requester")
     other_key = replace(
         key,
@@ -279,28 +231,28 @@ async def test_refresh_resolution_stays_in_requester_storage(
     other_space = replace(space, storage_path=registry.published_index_storage_path(other_key))
     _publish(space, key, "own-replacement")
     _publish(other_space, other_key, "other-private-content")
-    assert [document.content for document in await proxy.asearch("alpha", limit=5)] == ["own-replacement"]
+    assert [document.content for document in await reader.asearch("alpha", limit=5)] == ["own-replacement"]
 
 
 @pytest.mark.asyncio
 async def test_knowledge_initialization_follows_refresh(
-    publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
+    publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
 ) -> None:
     """An agent's knowledge handle follows the same publication as its reader's searches."""
-    space, key, proxy = publication
+    space, key, reader = publication
     _publish(space, key, "replacement")
-    source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=proxy)
+    source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=reader)
     knowledge = AgentKnowledge(sources=(source,))
     assert [hit.content for hit in await knowledge.asearch("alpha")] == ["replacement"]
 
 
 @pytest.mark.asyncio
 async def test_registry_initialization_accepts_superseded_state_snapshot(
-    publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
+    publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
     tmp_path: Path,
 ) -> None:
     """A refresh between metadata loading and handle construction cannot hide memory."""
-    space, key, _proxy = publication
+    space, key, _reader = publication
     state = load_published_index_state(registry.published_index_metadata_path(key))
     assert state is not None
     _publish(space, key, "replacement")
@@ -313,102 +265,3 @@ async def test_registry_initialization_accepts_superseded_state_snapshot(
     )
     assert reader is not None
     assert [hit.content for hit in await reader.asearch("alpha", limit=5)] == ["replacement"]
-
-
-@pytest.mark.parametrize("orphan", [False, True])
-def test_native_reader_deadline_releases_lock_after_parent_death(tmp_path: Path, orphan: bool) -> None:
-    """A kernel deadline releases the lease even when native code holds the GIL."""
-    if sys.platform != "linux":
-        pytest.skip("The isolated orphan supervisor uses Linux child adoption")
-    probe = tmp_path / "reader_probe.py"
-    probe.write_text(
-        """import ctypes, fcntl, os, signal, subprocess, sys, time
-from pathlib import Path
-root = Path(__file__).parent
-pid_path = root / "worker.pid"
-if len(sys.argv) > 1 and sys.argv[1] == "worker":
-    from mindroom.knowledge import read_worker
-    class BlockedNative:
-        def __init__(self, **kwargs): pass
-        def close(self): pass
-        def collection(self):
-            pid_path.write_text(str(os.getpid()))
-            ctypes.PyDLL(None).pause()
-    read_worker.KnowledgeCollection = BlockedNative
-    read_worker._main()
-elif len(sys.argv) > 1 and sys.argv[1] == "parent":
-    import asyncio
-    from mindroom.knowledge import read_process
-    from mindroom.knowledge.read_protocol import ReadRequest
-    def launch():
-        return subprocess.Popen(
-            [sys.executable, __file__, "worker"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        )
-    async def request():
-        return ReadRequest(str(root), "published", [1.0])
-    read_process._spawn_reader = launch
-    asyncio.run(read_process.read_chroma_async(request, timeout=2))
-else:
-    assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
-    orphan = sys.argv[1] == "orphan"
-    child = None
-    process = subprocess.Popen(
-        [sys.executable, __file__, "parent"] if orphan else
-        [sys.executable, __file__, "worker"],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-    )
-    try:
-        if not orphan:
-            process.stdin.write(('0.3\\n{"path":' + __import__('json').dumps(str(root)) +
-                ',"collection":"published","embedding":[1.0]}').encode())
-            process.stdin.close()
-        deadline = time.monotonic() + 15
-        while not (pid_path.exists() and pid_path.read_text()):
-            assert process.poll() is None, process.stderr.read().decode()
-            assert time.monotonic() < deadline
-            time.sleep(.01)
-        child = int(pid_path.read_text())
-        with (root / "collection_lifetime.lock").open("a+") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                pass
-            else:
-                raise AssertionError("native reader did not hold its lease")
-            if orphan:
-                process.kill()
-                process.wait()
-            deadline = time.monotonic() + 4
-            while True:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    assert time.monotonic() < deadline, "orphan retained reader lease"
-                    time.sleep(.01)
-            if orphan:
-                _, status = os.waitpid(child, 0)
-                assert os.waitstatus_to_exitcode(status) == -signal.SIGALRM
-            else:
-                assert process.wait(timeout=2) == -signal.SIGALRM
-            child = None
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        if child is not None and orphan:
-            try:
-                os.kill(child, signal.SIGKILL)
-                os.waitpid(child, 0)
-            except ProcessLookupError:
-                pass
-""",
-    )
-    result = subprocess.run(
-        [sys.executable, str(probe), "orphan" if orphan else "direct"],
-        capture_output=True,
-        text=True,
-        timeout=25,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr

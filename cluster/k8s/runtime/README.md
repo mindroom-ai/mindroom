@@ -228,10 +228,10 @@ Without the copy, agents fail to start with `The bound Matrix device store is mi
 
 `sessionStorage` gives agent and team session databases their own volume.
 The chart mounts it at `sessionStorage.mountPath` (default `/app/session_state`) and sets `MINDROOM_SESSION_STORAGE_PATH` to that path, so do not also set that variable in `env.extra`.
-`knowledgeStorage` gives shared knowledge-base indexes their own volume, mounted at `<storage.mountPath>/knowledge_db` where MindRoom stores them.
+`knowledgeStorage` gives knowledge-base indexes, private agents' indexes included, their own volume, mounted at `<storage.mountPath>/knowledge_db` where MindRoom stores them.
 Each block creates a `<fullname>-sessions` or `<fullname>-knowledge` PVC from `size`, `storageClassName`, and `accessModes`, or mounts `existingClaim` instead.
 Both volumes must be writable by the runtime user; `podSecurityContext.fsGroup` covers volume types that support ownership management.
-Use them to keep these SQLite and Chroma databases on fast `ReadWriteOnce` storage, sized on their own, when `storage` is `ReadWriteMany` network storage shared with dedicated workers.
+Use them to keep these SQLite databases on fast `ReadWriteOnce` storage, sized on their own, when `storage` is `ReadWriteMany` network storage shared with dedicated workers.
 
 ```yaml
 sessionStorage:

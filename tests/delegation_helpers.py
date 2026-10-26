@@ -343,7 +343,6 @@ async def resume(
     return await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        execution_identity=identity,
         tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=runtime),
         decisions=dict(decisions),
         denial_reasons={call_id: (denial_reasons or {}).get(call_id) for call_id in decisions},
@@ -561,6 +560,61 @@ class ReportTools(Toolkit):
         """Write the report."""
         type(self).written.append("written")
         return "report written"
+
+
+class MetadataProbeTools(Toolkit):
+    """The gated ``write_report`` of the ``report`` toolkit, keeping the run metadata each of its calls reads."""
+
+    seen: ClassVar[list[dict[str, object]]] = []
+
+    def __init__(self) -> None:
+        super().__init__(name="report", tools=[self.write_report])
+
+    async def write_report(self, run_context: RunContext) -> str:
+        """Write the report."""
+        type(self).seen.append(dict(run_context.metadata or {}))
+        return "report written"
+
+
+class HandOffTools(Toolkit):
+    """The gated ``write_report`` of the ``report`` toolkit, and ``hand_off``, a call executed outside the agent loop.
+
+    Nothing in MindRoom answers ``hand_off``: a run that calls it pauses with no approval to ask for.
+    """
+
+    handed_off: ClassVar[list[str]] = []
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="report",
+            tools=[self.write_report, self.hand_off],
+            external_execution_required_tools=["hand_off"],
+        )
+
+    async def write_report(self) -> str:
+        """Write the report."""
+        return "report written"
+
+    async def hand_off(self) -> str:
+        """Hand the work to an external executor."""
+        type(self).handed_off.append("handed off")
+        return "handed off"
+
+
+@contextmanager
+def registered_hand_off_tool() -> Iterator[type[HandOffTools]]:
+    """Register ``HandOffTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""
+    HandOffTools.handed_off.clear()
+    with registered_toolkit("report", HandOffTools):
+        yield HandOffTools
+
+
+@contextmanager
+def registered_metadata_probe_tool() -> Iterator[type[MetadataProbeTools]]:
+    """Register ``MetadataProbeTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""
+    MetadataProbeTools.seen.clear()
+    with registered_toolkit("report", MetadataProbeTools):
+        yield MetadataProbeTools
 
 
 @contextmanager

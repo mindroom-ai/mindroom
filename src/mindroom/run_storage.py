@@ -41,16 +41,13 @@ def scope_run_storage(scope_context: ScopeSessionContext) -> RunStorage:
     return RunStorage(scope_context.storage, scope_context.stored_or_first_session(), scope_context.scope)
 
 
-def bind_turn_session(run: TurnRunState) -> RunStorage | None:
+def bind_turn_session(run: TurnRunState) -> RunStorage:
     """Bind the session the turn's runs save into to its scope context, and return where its next attempt is stored.
 
     A scope without a stored session gets its first session, which stays on the turn's scope context, so a later
     attempt of the same turn replays this one's run and an empty-run discard finds it, as a reload of the scope would.
-    A turn without a scope context binds nothing and gets None.
     """
-    if run.scope_context is None:
-        return None
-    run.scope_context = run.scope_context.with_session()
+    run.scope_context = run.scope.with_session()
     return scope_run_storage(run.scope_context)
 
 

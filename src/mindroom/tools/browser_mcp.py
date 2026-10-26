@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         "If you have chat_ui, your first call in a conversation already shows the user the Computer panel; "
         "use chat_ui.open_panel(panel='computer') only to show it again."
     ),
+    docs_url="https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider",
     category=ToolCategory.RESEARCH,
     default_execution_target=ToolExecutionTarget.WORKER,
     consumes_workspace_paths=True,

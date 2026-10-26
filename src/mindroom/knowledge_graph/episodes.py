@@ -16,6 +16,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.history.conversation_text import one_line, run_requester, utterances
@@ -37,7 +38,7 @@ type Progress = tuple[int, str, int]
 RUN_DONE = 1 << 30
 
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
-_GRAPH_FUNCTIONS = ("search_graph", "graph_entity")
+_GRAPH_FUNCTIONS = ("search_graph", "graph_entity", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS)
 # Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
 # in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
 # result no longer says which tool produced it, so it could be either.
@@ -88,7 +89,7 @@ def classify_thread(runs: Sequence[RunRecord], automation_thread_ids: set[str]) 
         return "automation"
     # LEGACY_COMPAT: Automation runs stored without their hook source.
     # Legacy format: Run metadata had no `hook_source` key, so a stored automation run looks like a conversation.
-    # Last legacy release: v2026.10.315; replacement: the next release stores the trusted hook source on every run.
+    # Last legacy release: v2026.10.316; replacement: v2026.10.317 stores the trusted hook source on every run.
     # Handling: A thread whose root was recorded in `tracking/automations/threads.json` counts as an automation thread.
     # Coverage: tests/test_knowledge_graph_episodes.py::test_classify_thread_uses_the_root_hook_source_then_automation_threads.
     if metadata.get("thread_id") in automation_thread_ids:

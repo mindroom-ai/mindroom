@@ -7,7 +7,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -33,8 +32,8 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
-from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
-from tests.providers.golden_support import Wire
+from tests.providers.anthropic_family_support import claude_turn, route_provider, sse_reply
+from tests.providers.golden_support import Wire, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
@@ -138,7 +137,7 @@ _ROUTE_SETTINGS: list[tuple[type[Any], dict[str, Any], frozenset[str]]] = [
             },
         ),
     ),
-    (GeminiSettings, {"temperature": 0.3}, frozenset({"api_key", "client_params", "credentials"})),
+    (GeminiSettings, {"temperature": 0.3}, frozenset({"api_key", "client_params"})),
     (OllamaSettings, {"options": {"num_ctx": 8192}}, frozenset({"api_key", "client_params"})),
     (SyntheticSettings, {"seed": 7}, frozenset({"api_key"})),
 ]
@@ -189,7 +188,7 @@ async def test_model_params_mask_credentials_nested_in_request_params_and_extra_
     )
     provider = build_model_provider(config, _runtime_paths(tmp_path, OPENROUTER_API_KEY="openrouter-key"))
 
-    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
+    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
 
     [request] = chat_wire.requests
     assert request.headers["authorization"] == "Bearer nested-header-secret"
@@ -278,13 +277,13 @@ async def test_transient_context_takes_no_marker_so_the_next_turn_reuses_the_pro
     transient = render_transient_context(
         ("<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>",),
     )
-    wire = Wire(json_reply([{"type": "text", "text": "A1"}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "A1"}]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"extended_cache_time": False})
     system = Message(role="system", content="Stable system")
     for history in ([], [Message(role="user", content="Q1"), Message(role="assistant", content="A1")]):
         prompt = Message(role="user", content="Q2" if history else "Q1")
         context = Message(role="user", content=transient)
-        await claude_turn(provider, ModelRequest(messages=[system, *history, prompt, context], stream=False))
+        await claude_turn(provider, ModelRequest(messages=[system, *history, prompt, context]))
 
     current = wire.body(0)["messages"][0]["content"]
     assert current[0]["cache_control"] == _FIVE_MINUTES
@@ -328,6 +327,24 @@ def test_a_request_already_at_the_marker_limit_passes_through() -> None:
     }
 
     assert _prepared(body) == body
+
+
+def test_message_rungs_that_reach_the_limit_leave_the_last_tool_unmarked() -> None:
+    """The tools marker comes last, so two authored system markers and two new rungs leave it no budget."""
+    body = {
+        "system": [
+            {"type": "text", "text": "S1", "cache_control": _FIVE_MINUTES},
+            {"type": "text", "text": "S2", "cache_control": _FIVE_MINUTES},
+        ],
+        "tools": [_tool("demo_tool")],
+        "messages": [{"role": "user", "content": [_text("m1")]}, {"role": "user", "content": [_text("m2")]}],
+    }
+
+    prepared = _prepared(body)
+
+    assert [message["content"][0]["cache_control"] for message in prepared["messages"]] == [_FIVE_MINUTES] * 2
+    assert prepared["tools"] == body["tools"]
+    assert _marker_count(prepared) == MAX_CACHE_MARKERS
 
 
 def test_thinking_and_empty_text_never_carry_a_marker() -> None:
@@ -625,6 +642,20 @@ def test_vertex_claude_loads_the_runtime_application_credentials(
     assert provider.settings.client_params == {"credentials": fake_credentials}
 
 
+def test_vertex_claude_keeps_its_configured_credentials_over_the_runtime_file(tmp_path: Path) -> None:
+    """Credentials a model passes in ``client_params`` win, so the runtime ``GOOGLE_APPLICATION_CREDENTIALS`` is unread."""
+    runtime_paths = _runtime_paths(tmp_path, GOOGLE_APPLICATION_CREDENTIALS=str(tmp_path / "missing.json"))
+    configured = object()
+    model_config = _vertex_config()
+    model_config = model_config.model_copy(
+        update={"extra_kwargs": {**(model_config.extra_kwargs or {}), "client_params": {"credentials": configured}}},
+    )
+
+    provider = build_claude_provider(model_config, runtime_paths)
+
+    assert provider.settings.client_params == {"credentials": configured}
+
+
 @pytest.mark.parametrize(
     ("content", "message"),
     [
@@ -737,8 +768,8 @@ _COMPLETION = {
 
 @pytest.fixture
 def chat_wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
-    """Answer every request sent through the shared model HTTP client with a finished chat completion."""
-    wire = Wire(httpx.Response(200, json=_COMPLETION))
+    """Answer every request sent through the shared model HTTP client with a finished chat completion stream."""
+    wire = Wire(lambda _request: streamed_reply(_COMPLETION))
     monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
     return wire
 
@@ -747,7 +778,7 @@ async def _send(model_config: ModelConfig, runtime_paths: RuntimePaths) -> None:
     config = Config(models={"default": model_config})
     await complete(
         build_model_provider(config, runtime_paths),
-        ModelRequest(messages=[Message(role="user", content="Hi")], stream=False),
+        ModelRequest(messages=[Message(role="user", content="Hi")]),
     )
 
 

@@ -3,14 +3,13 @@
 One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request
 fetches its URL-backed media, then builds its SDK client and wire body off the event loop (Bedrock credential
 resolution and attachment encoding block), streams the reply through the SDK's message stream, and parses the
-finished message once. A request with ``stream=False`` is sent as one non-streaming call instead. The only
-state an adapter keeps is the ambient Google credentials a Vertex route discovers once.
+finished message once. The only state an adapter keeps is the ambient Google credentials a Vertex route
+discovers once.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -33,8 +32,7 @@ from anthropic.types.beta import (
     BetaToolUseBlock,
 )
 
-from mindroom.constants import runtime_env_path
-from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
+from mindroom.credentials.sync import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     Capabilities,
@@ -51,7 +49,7 @@ from mindroom.llm.provider import (
     hosted_tool_started,
 )
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, claude_rejects_sampling_controls
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
@@ -68,7 +66,6 @@ from mindroom.providers.anthropic.settings import (
     ENDPOINT_VARIABLES,
     ClaudeRouteKind,
     ClaudeSettings,
-    configured_anthropic_endpoint,
     parse_claude_settings,
 )
 from mindroom.providers.anthropic.wire import (
@@ -84,10 +81,10 @@ from mindroom.providers.anthropic.wire import (
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
-from mindroom.providers.credentials import uses_alternative_auth
+from mindroom.providers.credentials import model_api_key
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
-from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
+from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
@@ -130,19 +127,18 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | N
 
     Stored native-compaction checkpoints and the media limits learned from provider errors are keyed by it.
 
-    It reads the route's values with ``client_params`` over them, as the client does, and unset Vertex values
-    fall back to the process environment the SDK reads, so the identity matches the client the SDK would build.
+    It reads the route's values, which the builder filled from the runtime env, with ``client_params`` over them,
+    as the client does.
     """
     client_params = settings.client_params or {}
     if route == "anthropic":
-        return str(configured_anthropic_endpoint(client_params) or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
+        return str(client_params.get("base_url") or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
     if route == "vertexai_claude":
-        params = {**_route_client_kwargs(route, settings), **client_params}
-        region = params["region"] or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])
-        project = params["project_id"] or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"])
+        region = client_params.get("region") or settings.region
+        project = client_params.get("project_id") or settings.project_id
         base_url = (
-            params["base_url"]
-            or os.environ.get(ENDPOINT_VARIABLES["vertexai_claude"])
+            client_params.get("base_url")
+            or settings.base_url
             or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
         )
         return f"{str(base_url).rstrip('/')}|{project}|{region}"
@@ -248,8 +244,7 @@ class ClaudeProvider:
         """Send one request and yield its events; the SDK's message stream accumulates the final message.
 
         ``message_start`` and ``message_delta`` report the usage so far, as a partial ``UsageReported``, so a stream
-        that stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
-        streaming and yields its usage and finished turn once the response arrives.
+        that stops early still settles what Anthropic bills.
         """
         started = time.monotonic()
         request = replace(request, messages=await inline_url_media(request.messages, self.http_client))
@@ -257,16 +252,6 @@ class ClaudeProvider:
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
         try:
-            if not request.stream:
-                response = await (
-                    client.beta.messages.create(**kwargs) if prepared.beta else client.messages.create(**kwargs)
-                )
-                # TODO(simplify): A non-streaming reply leaves time_to_first_token unset. Stamp it when the whole
-                # reply arrives, as the other adapters do. Stored run metrics and operators would notice (#3075).
-                usage, completed = self._finished_turn(response, request, prepared, started, None)
-                yield usage
-                yield completed
-                return
             manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
                 async for event in events:
@@ -305,7 +290,6 @@ class ClaudeProvider:
         message = assistant_message_from_response(
             response,
             record_context_management=self.settings.context_management is not None,
-            streamed=request.stream,
         )
         stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
@@ -361,7 +345,7 @@ class ClaudeProvider:
         """Move sampling controls into ``extra_body`` and drop them for the generations that reject them."""
         moved = {name: params.pop(name) for name in _SAMPLING_CONTROL_NAMES if name in params}
         extra_body: dict[str, Any] = {**moved, **(params.get("extra_body") or {})}
-        if self.identity.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
+        if claude_rejects_sampling_controls(self.identity.id):
             for name in _SAMPLING_CONTROL_NAMES:
                 extra_body.pop(name, None)
         if extra_body:
@@ -601,10 +585,18 @@ def _claude_capabilities(
         ),
         # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
         # non-default sampling on every route.
-        provider_default_sampling=route == "vertexai_claude"
-        or model_id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES),
+        provider_default_sampling=route == "vertexai_claude" or claude_rejects_sampling_controls(model_id),
         claude_family=True,
     )
+
+
+def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Fill the direct route's key and, unless ``client_params`` sets one, its endpoint from the runtime env."""
+    kwargs: dict[str, Any] = {**authored, "api_key": api_key} if api_key else dict(authored)
+    client_params = kwargs.get("client_params") or {}
+    if "base_url" not in client_params and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["anthropic"])):
+        kwargs["client_params"] = {**client_params, "base_url": base_url}
+    return kwargs
 
 
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
@@ -618,14 +610,7 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
         kwargs["region"] = region
     if "base_url" not in kwargs and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["vertexai_claude"])):
         kwargs["base_url"] = base_url
-    client_params = dict(kwargs.get("client_params") or {})
-    if "credentials" not in client_params and (
-        credentials_path := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    ):
-        client_params["credentials"] = load_google_application_credentials(str(credentials_path))
-    if client_params:
-        kwargs["client_params"] = client_params
-    return kwargs
+    return with_runtime_application_credentials(kwargs, runtime_paths)
 
 
 def _bedrock_static_credentials(kwargs: dict[str, Any], runtime_paths: RuntimePaths) -> None:
@@ -695,11 +680,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     route = cast("ClaudeRouteKind", provider_route(model_config.provider))
     authored = dict(model_config.extra_kwargs or {})
     if route == "anthropic":
-        api_key = model_config.configured_api_key()
-        if api_key is None and not uses_alternative_auth(model_config):
-            api_key = get_api_key_for_provider("anthropic", runtime_paths=runtime_paths)
-        if api_key:
-            authored["api_key"] = api_key
+        authored = _anthropic_kwargs(authored, model_api_key(model_config, runtime_paths), runtime_paths)
     elif route == "vertexai_claude":
         authored = _vertex_kwargs(authored, runtime_paths)
     else:

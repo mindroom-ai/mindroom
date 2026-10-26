@@ -1,7 +1,7 @@
 """The owned knowledge code reproduces the knowledge goldens.
 
 The embedder requests and search results regenerate from owned code (``tests.agno_parity.knowledge_goldens``); the
-rows are the Chroma rows Agno wrote, which owned refreshes must still write and the owned read path must still search.
+rows are the rows Agno wrote, which owned refreshes must still write and the owned read path must still search.
 """
 
 from __future__ import annotations
@@ -10,10 +10,9 @@ import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
-import chromadb
 import pytest
 
-from mindroom.knowledge.read_proxy import ChromaReadProxy
+from mindroom.knowledge.index_reader import PublishedIndexReader
 from mindroom.knowledge.search import (
     KNOWLEDGE_SEARCH_TOOL_NAME,
     AgentKnowledge,
@@ -22,6 +21,7 @@ from mindroom.knowledge.search import (
     _format_search_hits,
     _knowledge_search_tool_description,
 )
+from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import tool_definition
 from tests.agno_parity import knowledge_goldens
@@ -50,7 +50,7 @@ SEARCH_GOLDENS: dict[str, Any] = load(SEARCH_PATH)
 
 
 @pytest.mark.parametrize("case", sorted(EMBEDDER_GOLDENS))
-def test_embedders_send_the_request_bodies_agno_sent(
+def test_embedders_send_the_golden_request_bodies(
     case: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -77,40 +77,56 @@ def parity_embedder(monkeypatch: pytest.MonkeyPatch) -> ParityEmbedder:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("parity_embedder")
-async def test_refreshes_write_the_rows_and_collection_settings_agno_wrote(tmp_path: Path) -> None:
-    """Every chunk row keeps its document, metadata keys and values, and embedding; collections keep cosine space."""
+async def test_refreshes_write_the_golden_rows(tmp_path: Path) -> None:
+    """Every chunk row keeps its document, metadata keys and values, and embedding.
+
+    Chroma returned some embeddings up to one float32 ulp from the values it was given, and the owned store keeps the
+    given values, so embeddings compare within float32 precision.
+    """
     config, runtime_paths = golden_config(tmp_path)
 
-    assert await refresh_golden_bases(config, runtime_paths) == ROW_GOLDENS["bases"]
+    refreshed = await refresh_golden_bases(config, runtime_paths)
+
+    assert set(refreshed) == set(ROW_GOLDENS["bases"])
+    for base_id, base in ROW_GOLDENS["bases"].items():
+        rows = refreshed[base_id]["rows"]
+        assert [{**row, "embedding": None} for row in rows] == [{**row, "embedding": None} for row in base["rows"]]
+        for row, golden_row in zip(rows, base["rows"], strict=True):
+            assert row["embedding"] == pytest.approx(golden_row["embedding"], rel=1e-6, abs=1e-7)
 
 
 @pytest.mark.asyncio
 async def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: ParityEmbedder) -> None:
-    """A collection Agno created and filled answers the owned read path exactly as the owned search tool does."""
+    """The rows Agno wrote, stored as they are, answer the owned read path exactly as the owned search tool does."""
     handbook = ROW_GOLDENS["bases"]["handbook"]
-    client = chromadb.PersistentClient(path=str(tmp_path))
-    try:
-        collection = client.create_collection("agno_written", metadata=handbook["collection_metadata"])
-        collection.add(
-            ids=[f"{index:032x}" for index in range(len(handbook["rows"]))],
-            embeddings=[row["embedding"] for row in handbook["rows"]],
-            documents=[row["document"] for row in handbook["rows"]],
-            metadatas=[row["metadata"] for row in handbook["rows"]],
+    collection = KnowledgeCollection(path=tmp_path, name="agno_written")
+    collection.reset()
+    for source_path in dict.fromkeys(row["metadata"]["source_path"] for row in handbook["rows"]):
+        collection.write_source_rows(
+            source_path,
+            [
+                StoredRow(
+                    id=f"{index:032x}",
+                    document=row["document"],
+                    metadata=row["metadata"],
+                    embedding=row["embedding"],
+                )
+                for index, row in enumerate(handbook["rows"])
+                if row["metadata"]["source_path"] == source_path
+            ],
         )
-    finally:
-        client.close()
-    proxy = ChromaReadProxy("agno_written", str(tmp_path), parity_embedder)
+    reader = PublishedIndexReader("agno_written", str(tmp_path), parity_embedder)
 
     for search in SEARCH_GOLDENS["searches"]:
         if search["agent"] != "librarian" or "documents" not in search:
             continue
-        hits = await proxy.asearch(search["query"], limit=10)
+        hits = await reader.asearch(search["query"], limit=10)
         documents = search["documents"]
         assert distances_as_recorded(json.loads(_format_search_hits(hits)), documents) == documents
 
 
 @pytest.mark.asyncio
-async def test_search_tool_results_match_agnos(tmp_path: Path, parity_embedder: ParityEmbedder) -> None:
+async def test_search_tool_results_match_the_search_golden(tmp_path: Path, parity_embedder: ParityEmbedder) -> None:
     """The adapted search tool returns the golden results over the refreshed golden bases.
 
     Documents keep their values and layout, merged bases interleave, an empty base reports no documents, and a
@@ -138,26 +154,26 @@ async def test_the_failing_search_still_fails_after_its_error_text_changes(
     assert regenerated == SEARCH_GOLDENS
 
 
-def test_a_distance_differing_only_in_chromas_last_bits_regenerates_as_recorded() -> None:
-    """An x86_64 machine's distance one float32 ulp from the recorded one keeps the recorded value; a real change does not.
+def test_a_distance_differing_only_in_float32_last_bits_regenerates_as_recorded() -> None:
+    """An aarch64 machine's distance one float32 ulp from the recorded one keeps the recorded value; a real change does not.
 
-    ``0.604523241519928`` is what an x86_64 run returns for the distance an aarch64 run recorded as
-    ``0.6045231819152832``.
+    ``0.6045231819152832`` is what an aarch64 run returns for the distance an x86_64 run recorded as
+    ``0.604523241519928``.
     """
     recorded = next(search["documents"] for search in SEARCH_GOLDENS["searches"] if "documents" in search)
     [index] = [
-        index for index, document in enumerate(recorded) if document["meta_data"]["distances"] == 0.6045231819152832
+        index for index, document in enumerate(recorded) if document["meta_data"]["distances"] == 0.604523241519928
     ]
-    on_x86 = deepcopy(recorded)
-    on_x86[index]["meta_data"] |= {"distances": 0.604523241519928, "similarity_score": 0.604523241519928}
+    on_aarch64 = deepcopy(recorded)
+    on_aarch64[index]["meta_data"] |= {"distances": 0.6045231819152832, "similarity_score": 0.6045231819152832}
     moved = deepcopy(recorded)
     moved[index]["meta_data"]["distances"] = 0.6046
-    replaced = deepcopy(on_x86)
+    replaced = deepcopy(on_aarch64)
     replaced[index]["content"] = "Another chunk."
 
-    assert distances_as_recorded(on_x86, recorded) == recorded
+    assert distances_as_recorded(on_aarch64, recorded) == recorded
     assert distances_as_recorded(moved, recorded)[index]["meta_data"]["distances"] == 0.6046
-    assert distances_as_recorded(replaced, recorded)[index]["meta_data"]["distances"] == 0.604523241519928
+    assert distances_as_recorded(replaced, recorded)[index]["meta_data"]["distances"] == 0.6045231819152832
 
 
 @pytest.mark.parametrize("memory_search_available", [False, True])
@@ -165,7 +181,7 @@ def test_search_function_definition_is_the_golden_tool(memory_search_available: 
     """The adapted search tool's definition is the ``search_knowledge_base`` entry the prompt goldens recorded."""
     source = KnowledgeSource(
         description=KnowledgeSourceDescription(base_id="handbook", description="The team handbook and its policies."),
-        index=cast("ChromaReadProxy", object()),
+        index=cast("PublishedIndexReader", object()),
     )
     knowledge = AgentKnowledge(sources=(source,))
 

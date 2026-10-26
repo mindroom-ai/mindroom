@@ -43,9 +43,12 @@ def tool_catalog(
 
     ``record`` is the stored run an approval recovery continues.
     In minimal mode the batch checkpoint sets it for a live turn.
+    ``runtime`` must be the build's agent's, since the catalog's generated functions run under it.
     """
+    if runtime.agent_name != build.spec.id:
+        msg = f"A tool catalog for agent {build.spec.id!r} needs its runtime context, not {runtime.agent_name!r}'s"
+        raise ValueError(msg)
     return PreparedAgentToolCatalog(
-        agent_name=build.spec.id,
         run=run,
         runtime_context=runtime,
         store=storage.store,

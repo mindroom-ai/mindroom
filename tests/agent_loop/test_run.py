@@ -1,6 +1,6 @@
 """Agent runs end in exactly one stored record, and approval resumes run exactly the approved calls.
 
-The resume tests replay C4's paused rows (``run-paused-approval``, the ``team-paused`` member, and
+The resume tests replay the storage goldens' paused rows (``run-paused-approval``, the ``team-paused`` member, and
 ``run-paused-delegation``) through ``resume_agent`` and compare the result with the rows Agno stored after the
 same resume (``run-approved``, ``run-rejected``, the ``team-approved`` member, ``run-delegation-approved``).
 """
@@ -26,7 +26,7 @@ from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.errors import RateLimited
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelIdentity, ModelRequest, TextDelta, UsageReported
+from mindroom.llm.provider import ModelIdentity, TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -172,7 +172,7 @@ async def test_stored_messages_leave_out_history_copies_and_transient_context() 
 
 
 @pytest.mark.asyncio
-async def test_a_paused_run_is_stored_paused_with_agno_text_when_the_model_said_nothing() -> None:
+async def test_a_paused_run_is_stored_paused_with_the_confirmation_notice_when_the_model_said_nothing() -> None:
     store = _Store()
     model = ScriptedModel([calls(tool_call("add", "c1", a=6, b=7), metrics=usage(1, 1))])
 
@@ -212,7 +212,7 @@ async def test_a_silent_external_pause_has_empty_content() -> None:
     assert (record.status, record.content) == (RunStatus.paused, "")
 
 
-def test_paused_content_follows_agno_for_a_pending_confirmation() -> None:
+def test_paused_content_is_the_confirmation_notice_only_while_a_confirmation_is_pending() -> None:
     confirm = ToolExecution(tool_call_id="c1", tool_name="t", requires_confirmation=True)
     silent = ToolExecution(
         tool_call_id="c2",
@@ -464,7 +464,7 @@ async def test_a_run_without_a_system_message_sends_only_its_input() -> None:
     assert [message.role for message in record.messages] == ["user", "assistant"]
 
 
-# --- resumes against the C4 goldens ---------------------------------------------------------------------------------
+# --- resumes against the storage goldens ----------------------------------------------------------------------------
 
 
 def _golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
@@ -608,7 +608,7 @@ async def _resume(
 
 
 @pytest.mark.asyncio
-async def test_an_approved_call_resumes_into_agno_s_approved_row() -> None:
+async def test_an_approved_call_resumes_into_the_run_approved_row() -> None:
     paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
     before = paused.to_dict()
     model = _model("code-model", answer("6 x 7 = 42.", usage(260, 9, time_to_first_token=0.25)))
@@ -634,32 +634,7 @@ async def test_an_approved_call_resumes_into_agno_s_approved_row() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking-template", "streaming-template"])
-async def test_a_resume_streams_its_requests_even_when_its_template_does_not(stream: bool) -> None:
-    """Every resume streams its requests, as every continuation of the Agno-backed runtime did."""
-    paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
-    model = _model("code-model", answer("6 x 7 = 42."))
-
-    await collect(
-        resume_agent(
-            _agent(model, [_gated_calculator()]),
-            paused,
-            build_resume_request(paused=paused.messages, summary=None, history=[]),
-            approved=[_approval("call-multiply", "multiply", {"a": 6, "b": 7})],
-            denied={},
-            external_results={},
-            context=lambda run_id: context(run_id=run_id, session_id=paused.session_id or "session"),
-            hooks=NO_HOOKS,
-            persist=None,
-            request_template=ModelRequest(messages=(), stream=stream),
-        ),
-    )
-
-    assert [request.stream for request in model.requests] == [True]
-
-
-@pytest.mark.asyncio
-async def test_a_denied_call_resumes_into_agno_s_rejected_row() -> None:
+async def test_a_denied_call_resumes_into_the_run_rejected_row() -> None:
     paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
     model = _model(
         "code-model",
@@ -709,7 +684,7 @@ async def test_a_team_member_s_approved_call_resumes_into_the_member_s_completed
 
 
 @pytest.mark.asyncio
-async def test_an_external_result_resumes_into_agno_s_delegation_approved_row() -> None:
+async def test_an_external_result_resumes_into_the_run_delegation_approved_row() -> None:
     paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$delegation", "run-paused-delegation"))
     expected = _golden_run("agent_code", "!room:example.org:$delegation-approved", "run-delegation-approved")
     model = _model("code-model", answer("The helper found 42.", usage(330, 6, time_to_first_token=0.25)))

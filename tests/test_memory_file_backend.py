@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -2272,6 +2273,32 @@ async def test_workspace_daily_files_live_in_canonical_scope(storage_path: Path,
     assert "Daily note" in daily_files[0].read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    ("agent_timezone", "expected_date"),
+    [("Europe/Amsterdam", "2026-03-21"), (None, "2026-03-20")],
+)
+def test_daily_file_date_follows_the_agent_timezone(
+    storage_path: Path,
+    config: Config,
+    agent_timezone: str | None,
+    expected_date: str,
+) -> None:
+    """The daily file is named by the agent's own date, or by the global timezone's date when it has none."""
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True)
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.timezone = "America/Los_Angeles"
+    config.agents["general"].timezone = agent_timezone
+    instant = datetime(2026, 3, 20, 23, 30, tzinfo=UTC)
+
+    with patch("mindroom.memory._file_backend.datetime") as mock_datetime:
+        mock_datetime.now.side_effect = instant.astimezone
+        append_agent_daily_memory("Daily note", "general", storage_path, config)
+
+    assert [path.name for path in (workspace / "memory").rglob("*.md")] == [f"{expected_date}.md"]
+
+
 @pytest.mark.asyncio
 async def test_shared_file_memory_uses_workspace_root_without_affecting_other_agents(
     storage_path: Path,
@@ -2495,3 +2522,17 @@ async def test_file_backend_refuses_to_rewrite_undecodable_memory_file(storage_p
         await delete_agent_memory("file:memory/2026-06-13.md:1", "general", storage_path, config)
 
     assert daily_file.read_bytes() == original
+
+
+def test_semantic_memory_scores_keep_the_hybrid_rank_order() -> None:
+    """A keyword-lifted hit keeps its rank: each score is the best cosine similarity at or below it."""
+    hits = [
+        SearchHit(content="keyword match", meta_data={"source_path": "a.md", "distances": 0.7}),
+        SearchHit(content="close vector", meta_data={"source_path": "b.md", "distances": 0.2}),
+        SearchHit(content="far vector", meta_data={"source_path": "c.md", "distances": 0.5}),
+    ]
+
+    results = semantic_file_search._memory_results_from_hits(hits, scope_user_id="agent")
+
+    assert [result["memory"] for result in results] == ["keyword match", "close vector", "far vector"]
+    assert [result["score"] for result in results] == pytest.approx([0.8, 0.8, 0.5])

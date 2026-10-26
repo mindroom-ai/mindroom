@@ -13,7 +13,7 @@ import pytest
 from mindroom.ai import _memory_conversation, ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delegation.personas import inline_persona
 from mindroom.dispatch_source import ScheduledHistoryBudget
@@ -238,6 +238,7 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         storage=MagicMock(),
         session=session,
         session_id="thread",
+        storage_factory=lambda: MagicMock(),
     )
     ctx = make_turn_context("general", session_id="thread")
     mem0 = TestMemoryIntegration._config()
@@ -260,3 +261,11 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
     assert _memory_conversation(scheduled, config, scope_context) is None
     persona = replace(ctx, persona=inline_persona("You are a reviewer.", None, None, None))
     assert _memory_conversation(persona, config, scope_context) is None
+    # Compaction nobody configured never runs on its own, so a long conversation drops its oldest runs instead.
+    unauthored = Config(
+        agents={"general": AgentConfig(display_name="General")},
+        defaults=DefaultsConfig(compaction=None),
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+        memory={"backend": "file"},
+    )
+    assert _memory_conversation(ctx, unauthored, scope_context) is None

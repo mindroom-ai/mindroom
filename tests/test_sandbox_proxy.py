@@ -1888,13 +1888,8 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
         )
 
 
-def test_inline_attachment_byte_limit_fits_every_retained_attachment_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_inline_attachment_byte_limit_fits_every_retained_attachment_by_default(tmp_path: Path) -> None:
     """Every attachment MindRoom retains can reach a worker, and the worker can write it."""
-    monkeypatch.delenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", raising=False)
-    monkeypatch.delenv("MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES", raising=False)
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
 
     assert sandbox_proxy_module.inline_attachment_byte_limit(runtime_paths) == RETAINED_MEDIA_MAX_BYTES
@@ -1911,17 +1906,39 @@ def test_inline_attachment_byte_limit_fits_every_retained_attachment_by_default(
     ],
 )
 def test_inline_attachment_byte_limit_honors_valid_operator_overrides(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     configured: str,
     expected: int,
 ) -> None:
     """A positive setting replaces the default; anything else falls back to it."""
-    monkeypatch.delenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", raising=False)
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         process_env={"MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES": configured},
     )
+
+    assert sandbox_proxy_module.inline_attachment_byte_limit(runtime_paths) == expected
+
+
+@pytest.mark.parametrize(
+    ("process_env", "env_file", "expected"),
+    [
+        ({}, "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES=5\n", 5),
+        ({"MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES": "7"}, "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES=5\n", 7),
+        ({}, "", RETAINED_MEDIA_MAX_BYTES),
+    ],
+    ids=["env_file", "process_env_wins", "live_environ_ignored"],
+)
+def test_inline_attachment_byte_limit_reads_the_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    process_env: dict[str, str],
+    env_file: str,
+    expected: int,
+) -> None:
+    """The limit resolves like every runtime setting: the runtime's process env, then its `.env`, then the default."""
+    monkeypatch.setenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", "11")
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
 
     assert sandbox_proxy_module.inline_attachment_byte_limit(runtime_paths) == expected
 

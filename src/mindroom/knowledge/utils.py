@@ -22,6 +22,7 @@ from mindroom.knowledge.refresh_policy import (
     refresh_trigger,
 )
 from mindroom.knowledge.registry import PublishedIndexResolution, get_published_index
+from mindroom.knowledge.rerank import create_reranker
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.rerank import Reranker
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = [
@@ -320,7 +322,12 @@ def resolve_agent_knowledge_access(
         )
         for base_id in base_ids
     ]
-    return _merge_agent_knowledge_resolutions(agent_name, base_ids, resolved_bases)
+    return _merge_agent_knowledge_resolutions(
+        agent_name,
+        base_ids,
+        resolved_bases,
+        reranker=_configured_reranker(config, runtime_paths),
+    )
 
 
 async def resolve_agent_knowledge_access_async(
@@ -361,13 +368,31 @@ async def resolve_agent_knowledge_access_async(
         )
         for base_id in base_ids
     ]
-    return _merge_agent_knowledge_resolutions(agent_name, base_ids, resolved_bases)
+    return _merge_agent_knowledge_resolutions(
+        agent_name,
+        base_ids,
+        resolved_bases,
+        reranker=await asyncio.to_thread(_configured_reranker, config, runtime_paths),
+    )
+
+
+def _configured_reranker(config: Config, runtime_paths: RuntimePaths) -> Reranker | None:
+    """Return the configured knowledge reranker, or None when none is configured or it cannot be built."""
+    if config.knowledge_reranker is None:
+        return None
+    try:
+        return create_reranker(config.knowledge_reranker, runtime_paths)
+    except Exception:
+        logger.warning("Knowledge reranker unavailable; searches keep their ranking", exc_info=True)
+        return None
 
 
 def _merge_agent_knowledge_resolutions(
     agent_name: str,
     base_ids: tuple[str, ...],
     resolved_bases: list[tuple[KnowledgeSource | None, KnowledgeAvailability, str | None]],
+    *,
+    reranker: Reranker | None,
 ) -> _KnowledgeResolution:
     """Merge per-base resolution results into one agent knowledge handle."""
     initializing_base_ids: list[str] = []
@@ -403,7 +428,7 @@ def _merge_agent_knowledge_resolutions(
             availability={base_id: unavailable_bases[base_id].availability.value for base_id in missing_base_ids},
         )
     return _KnowledgeResolution(
-        knowledge=AgentKnowledge(sources=tuple(sources)) if sources else None,
+        knowledge=AgentKnowledge(sources=tuple(sources), reranker=reranker) if sources else None,
         unavailable=unavailable_bases,
     )
 

@@ -42,7 +42,7 @@ from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
 from mindroom.response_turn import PausedAnswer, PausedAttempt, apply_exact_approval_decisions
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
-from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, execute_agent_tool_call
+from mindroom.tool_system.agent_tool_calls import AgentToolCallWaiting, DeferredAgentToolkit, execute_agent_tool_call
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -525,8 +525,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         if mode in {"recover", "recover_again"}:
             binding = await catalog.bind(ToolKey("delegate", "run_subagent"))
             events = [event async for event in execute_agent_tool_call(binding, str(call_id), arguments)]
-            requirement = next(event.requirement for event in events if event.kind == "waiting")
-            assert requirement is not None
+            requirement = next(event.requirement for event in events if isinstance(event, AgentToolCallWaiting))
             with catalog.execution_context():
                 paused = await advance_cli_delegation(
                     binding,

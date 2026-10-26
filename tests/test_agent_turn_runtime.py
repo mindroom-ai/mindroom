@@ -79,6 +79,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
+    agent_turn_recorder_for_test,
     bind_runtime_paths,
     install_model_providers,
     install_runtime_journal_support,
@@ -393,7 +394,7 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
     assert len(reply.model.requests) == 2
     assert reply.model.requests[1].messages[-1].role == "tool"
     assert reply.model.requests[1].messages[-1].content == "touched a"
-    assert all(request.tool_choice is None and request.stream for request in reply.model.requests)
+    assert all(request.tool_choice is None for request in reply.model.requests)
     record = _stored(reply)
     assert record.status is RunStatus.completed
     assert record.content == "The probe answered."
@@ -407,12 +408,12 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_reply_sends_non_streaming_requests_and_returns_the_text(
+async def test_a_blocking_reply_runs_the_same_loop_and_returns_the_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The blocking path runs the same loop with ``stream=False`` requests and the tool trace in the text."""
+    """The blocking path runs the same loop and returns the text with the tool trace in it."""
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Done.")])
 
     text = await _respond(reply)
@@ -420,7 +421,6 @@ async def test_a_blocking_reply_sends_non_streaming_requests_and_returns_the_tex
     assert text.startswith("Done.")
     assert "touch" in text
     assert probe.calls == ["a"]
-    assert all(request.stream is False for request in reply.model.requests)
     assert _stored(reply).status is RunStatus.completed
 
 
@@ -819,7 +819,6 @@ async def test_a_silent_participation_decision_ends_the_reply_before_any_model_r
     assert gate.is_declined
     [decision] = reply.model.requests
     assert decision.tool_choice == "none"
-    assert decision.stream is False
     assert reply.storage.list_runs(SESSION_ID) == []
     assert reply.recorder.outcome == "skipped"
 
@@ -853,7 +852,7 @@ async def test_an_approving_participation_decision_reuses_the_reply_prefix(
     assert decision.messages[-1].role == "user"
     assert "Offer concise technical help." in str(decision.messages[-1].content)
     assert decision.tools == answer_request.tools
-    assert (decision.tool_choice, decision.stream) == ("none", False)
+    assert decision.tool_choice == "none"
     assert answer_request.tool_choice is None
     record = _stored(reply)
     assert record.content == "Useful answer"
@@ -989,7 +988,6 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     assert len(hooks.on_resume_entry) == 1
     assert hooks.on_loop_end is not None
     assert captured["request_template"].native_compaction is None
-    assert captured["request_template"].stream is True
 
 
 @dataclass(frozen=True)
@@ -1245,17 +1243,19 @@ async def _respond_through_runner(
     request: ResponseRequest,
     *,
     streaming: bool,
-) -> tuple[Any, list[str]]:
-    """Run one reply through the runner's turn, in its reply span, and return the outcome and the attempt run ids."""
-    run_ids: list[str] = []
+) -> tuple[Any, str | None]:
+    """Run one reply through the runner's turn, in its reply span, and return the outcome and the last attempt's run id."""
+    runtime = await runner.prepare_response_runtime(request)
+    recorder = agent_turn_recorder_for_test(runner, request, runtime)
     async with response_span(runner, request):
         outcome = await process_and_respond_for_test(
             runner,
             request,
             streaming=streaming,
-            attempt_run_id_collector=run_ids,
+            runtime=runtime,
+            turn_recorder=recorder,
         )
-    return outcome, run_ids
+    return outcome, recorder.run_id
 
 
 def _interrupted_record_spy(monkeypatch: pytest.MonkeyPatch, storage: ConversationStore) -> list[RunStatus | None]:
@@ -1297,10 +1297,10 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     [result] = await asyncio.gather(task, return_exceptions=True)
 
     assert not isinstance(result, BaseException), result
-    outcome, run_ids = result
+    outcome, run_id = result
     assert outcome.delivery.terminal_status == "cancelled"
     assert outcome.run_succeeded is False
-    [run_id] = run_ids
+    assert run_id is not None
     assert statuses_when_interrupted_record_written == [RunStatus.cancelled]
     record = reply.storage.get_run(run_id)
     assert record is not None

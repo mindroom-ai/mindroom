@@ -1,4 +1,4 @@
-"""Behavior of the owned Gemini, Ollama, and synthetic adapters that the C1 goldens do not exercise."""
+"""Behavior of the owned Gemini, Ollama, and synthetic adapters that the provider goldens do not exercise."""
 
 from __future__ import annotations
 
@@ -27,8 +27,17 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides, TextDelta, ToolSpec, TurnCompleted, UsageReported
-from mindroom.providers import remote_media, synthetic_adapter
+from mindroom.llm.provider import (
+    ModelRequest,
+    ReasoningDelta,
+    RequestOverrides,
+    TextDelta,
+    ToolSpec,
+    TurnCompleted,
+    UsageReported,
+)
+from mindroom.providers import credentials as provider_credentials
+from mindroom.providers import google_adc, remote_media, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
 from mindroom.providers.gemini import wire as gemini_wire
@@ -46,8 +55,10 @@ from tests.providers.gemini_ollama_support import (
 from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import StreamEvent
 
 GEMINI = {"provider": "google", "id": "gemini-3.1-pro-preview", "api_key": "test-key"}
@@ -109,6 +120,10 @@ def _gemini_chunk(*parts: dict[str, Any], finish: str | None = "STOP", usage: bo
     return chunk
 
 
+def _ollama_text(content: str) -> dict[str, Any]:
+    return {"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": content}}
+
+
 def _ollama_done(reason: str = "stop", **message: Any) -> dict[str, Any]:  # noqa: ANN401
     return {
         "model": "qwen3.8:27b",
@@ -152,7 +167,7 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
         requested.append(provider)
         return "shared-key"
 
-    monkeypatch.setattr(gemini_adapter, "get_api_key_for_provider", shared_key)
+    monkeypatch.setattr(provider_credentials, "get_api_key_for_provider", shared_key)
     runtime_paths = runtime_paths_for(tmp_path)
 
     api = gemini_adapter.build_provider(ModelConfig(provider="gemini", id="gemini-3.1-pro-preview"), runtime_paths)
@@ -161,35 +176,60 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
 
     assert api.settings.api_key == "shared-key"
     assert vertex.settings.api_key is None
-    assert vertex.vertexai
+    assert vertex.settings.vertexai
     assert own.settings.api_key == "test-key"
-    assert requested == ["google"]
+    assert requested == ["gemini"]
 
 
-def test_gemini_passes_the_environment_key_project_and_location_as_explicit_client_arguments(
+def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runtime_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The SDK ranks an explicit argument above its own environment reads, so these variables stay explicit, as in Agno."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-project")
-    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west4")
+    """A Vertex AI model the config gives no project, location, or credentials takes them from ``.env``."""
+    credentials = Credentials(token="env-token")  # noqa: S106 - synthetic SDK credential
+    loaded: list[str] = []
+
+    def load(path: str) -> Credentials:
+        loaded.append(path)
+        return credentials
+
+    monkeypatch.setattr(google_adc, "_load_google_application_credentials", load)
+    (tmp_path / ".env").write_text(
+        "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
+        encoding="utf-8",
+    )
     runtime_paths = runtime_paths_for(tmp_path)
 
-    api = gemini_adapter.build_provider(ModelConfig(provider="google", id="gemini-3.8-flash"), runtime_paths)
     vertex = gemini_adapter.build_provider(
         ModelConfig(**_config({"provider": "gemini", "id": "gemini-3.8-flash"}, vertexai=True)),
         runtime_paths,
     )
 
-    assert api._client_params() == {"api_key": "env-key"}
-    assert vertex._client_params() == {"vertexai": True, "project": "env-project", "location": "europe-west4"}
+    assert vertex._client_params() == {
+        "vertexai": True,
+        "project": "env-project",
+        "location": "europe-west4",
+        "credentials": credentials,
+    }
+    assert loaded == [str((tmp_path / "adc.json").resolve())]
+    authored = Credentials(token="authored-token")  # noqa: S106 - synthetic SDK credential
+    configured = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI_VERTEX, client_params={"credentials": authored})),
+        runtime_paths,
+    )
+    assert configured._client_params() == {
+        "vertexai": True,
+        "project": "test-project",
+        "location": "us-central1",
+        "credentials": authored,
+    }
+    assert len(loaded) == 1
 
 
 @pytest.mark.asyncio
-async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """GOOGLE_GENAI_USE_VERTEXAI=true sends a model without ``vertexai`` to Vertex AI, as Agno's Gemini did."""
-    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path) -> None:
+    """``GOOGLE_GENAI_USE_VERTEXAI`` in ``.env`` sends a model without ``vertexai`` to Vertex AI."""
+    (tmp_path / ".env").write_text("GOOGLE_GENAI_USE_VERTEXAI=true\n", encoding="utf-8")
     seen: list[httpx.Request] = []
 
     def respond(http_request: httpx.Request) -> httpx.Response:
@@ -200,7 +240,7 @@ async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, mo
         {"provider": "google", "id": "gemini-3.8-flash"},
         project_id="test-project",
         location="us-central1",
-        credentials=Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+        client_params={"credentials": Credentials(token="test-token")},  # noqa: S106 - synthetic SDK credential
     )
     adapter = build_adapter(config, tmp_path, respond)
     _completed([event async for event in adapter.stream(_request())])
@@ -208,11 +248,150 @@ async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, mo
     assert "/projects/test-project/locations/us-central1/" in str(seen[0].url)
 
 
+@pytest.mark.asyncio
+async def test_the_sdk_s_own_vertex_switches_do_not_move_a_gemini_api_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """google-genai gets MindRoom's Vertex AI choice, so variables only the SDK reads cannot switch the route."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    adapter = build_adapter(GEMINI, tmp_path, respond)
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == "generativelanguage.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "test-key"
+
+
+def _transported_gemini(
+    model_config: dict[str, Any],
+    respond: Callable[[httpx.Request], httpx.Response],
+    runtime_paths: RuntimePaths,
+    **client_params: Any,  # noqa: ANN401
+) -> gemini_adapter.GeminiProvider:
+    """Build a Gemini adapter whose SDK client sends through ``respond``, with ``client_params`` merged in as given."""
+    extra_kwargs = dict(model_config.get("extra_kwargs", {}))
+    extra_kwargs["client_params"] = {
+        **extra_kwargs.get("client_params", {}),
+        **client_params,
+        "http_options": {"httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))},
+    }
+    return gemini_adapter.build_provider(ModelConfig(**{**model_config, "extra_kwargs": extra_kwargs}), runtime_paths)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authored", "host"),
+    [
+        (
+            {
+                "client_params": {
+                    "enterprise": True,
+                    "project": "test-project",
+                    "location": "us-central1",
+                    "credentials": Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+                },
+            },
+            "us-central1-aiplatform.googleapis.com",
+        ),
+        ({"vertexai": True, "client_params": {"vertexai": False}}, "generativelanguage.googleapis.com"),
+    ],
+    ids=["client-params-enterprise", "client-params-vertexai-false"],
+)
+async def test_client_params_choose_the_gemini_route_and_the_sdk_agrees(
+    tmp_path: Path,
+    authored: dict[str, Any],
+    host: str,
+) -> None:
+    """An explicit ``enterprise`` or ``vertexai`` client option, which wins over every other option, picks the route."""
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    adapter = _transported_gemini(
+        {"provider": "google", "id": "gemini-3.8-flash", "api_key": "test-key", "extra_kwargs": authored},
+        respond,
+        runtime_paths_for(tmp_path),
+    )
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == host
+    # Vertex AI never takes the Gemini API key, which google-genai refuses beside a project.
+    assert ("x-goog-api-key" in seen[0].headers) is (host == "generativelanguage.googleapis.com")
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_vertexai_false_keeps_a_model_on_the_gemini_api_whatever_the_environment_says(
+    tmp_path: Path,
+) -> None:
+    """``GOOGLE_GENAI_USE_VERTEXAI`` moves only the Gemini models that choose no route themselves."""
+    (tmp_path / ".env").write_text("GOOGLE_GENAI_USE_VERTEXAI=true\n", encoding="utf-8")
+    runtime_paths = runtime_paths_for(tmp_path)
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    gemini_api = _transported_gemini({**GEMINI, "extra_kwargs": {"vertexai": False}}, respond, runtime_paths)
+    unset = gemini_adapter.build_provider(ModelConfig(provider="google", id="gemini-3.8-flash"), runtime_paths)
+    _completed([event async for event in gemini_api.stream(_request())])
+
+    assert (gemini_api.settings.vertexai, unset.settings.vertexai) == (False, True)
+    assert seen[0].url.host == "generativelanguage.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "test-key"
+
+
+@pytest.mark.asyncio
+async def test_vertex_express_mode_takes_no_project_location_or_credentials_from_the_runtime_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Vertex AI key in ``client_params`` excludes a project, a location, and credentials, so none are filled in."""
+    env_credentials = Credentials(token="env-token")  # noqa: S106 - synthetic SDK credential
+    monkeypatch.setattr(google_adc, "_load_google_application_credentials", lambda _path: env_credentials)
+    (tmp_path / ".env").write_text(
+        "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
+        encoding="utf-8",
+    )
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    config = {"provider": "google", "id": "gemini-3.8-flash", "extra_kwargs": {"vertexai": True}}
+    adapter = _transported_gemini(config, respond, runtime_paths_for(tmp_path), api_key="express-key")
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == "aiplatform.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "express-key"
+
+
+def test_ollama_sends_the_runtime_env_key_unless_the_model_has_its_own(tmp_path: Path) -> None:
+    """``OLLAMA_API_KEY`` in ``.env`` authenticates a model that configures no key."""
+    (tmp_path / ".env").write_text("OLLAMA_API_KEY=env-key\n", encoding="utf-8")
+    runtime_paths = runtime_paths_for(tmp_path)
+
+    shared = build_ollama_provider(ModelConfig(**OLLAMA), runtime_paths)
+    own = build_ollama_provider(ModelConfig(**OLLAMA, api_key="own-key"), runtime_paths)
+
+    assert shared._client_params()["headers"] == {"authorization": "Bearer env-key"}
+    assert own._client_params()["headers"] == {"authorization": "Bearer own-key"}
+
+
 def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -> None:
     """The ``timeout`` extra kwarg is in seconds, as Agno's field was, and the SDK client takes milliseconds."""
     adapter = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI, timeout=12.5)), runtime_paths_for(tmp_path))
 
-    assert adapter._client_params() == {"api_key": "test-key", "http_options": {"timeout": 12500}}
+    assert adapter._client_params() == {"api_key": "test-key", "vertexai": False, "http_options": {"timeout": 12500}}
 
 
 @pytest.mark.asyncio
@@ -235,7 +414,7 @@ async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itsel
     for overrides in (RequestOverrides(), RequestOverrides(caller_retries=True)):
         sent.clear()
         with pytest.raises(ProviderUnavailable):
-            await anext(adapter.stream(_request(stream=False, overrides=overrides)))
+            await anext(adapter.stream(_request(overrides=overrides)))
         attempts.append(len(sent))
 
     assert attempts == [3, 1]
@@ -540,26 +719,6 @@ async def test_a_stream_the_provider_never_ended_finishes_no_turn(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("family", "reply"),
-    [
-        (GEMINI, _gemini_chunk({"text": "Hi"}, finish=None, usage=False)),
-        (OLLAMA, {"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": "Hi"}}),
-    ],
-    ids=["gemini", "ollama"],
-)
-async def test_a_whole_reply_finishes_its_turn_without_the_marker_a_stream_ends_with(
-    family: dict[str, Any],
-    reply: dict[str, Any],
-    tmp_path: Path,
-) -> None:
-    """Only a stream can be cut off, so a reply that arrives in one response body always finishes its turn."""
-    _, events = await run_adapter(family, _request(stream=False), tmp_path, httpx.Response(200, json=reply))
-
-    assert _completed(events).message.content == "Hi"
-
-
-@pytest.mark.asyncio
 async def test_gemini_malformed_function_call_fails_with_its_code(tmp_path: Path) -> None:
     """A malformed function call ends the stream with an error the loop can answer with guidance."""
     response = gemini_sse(_gemini_chunk(finish="MALFORMED_FUNCTION_CALL"))
@@ -707,20 +866,6 @@ async def test_gemini_usage_counts_thinking_as_output_and_keeps_cached_input(tmp
 
 
 @pytest.mark.asyncio
-async def test_gemini_non_streaming_requests_use_generate_content(tmp_path: Path) -> None:
-    """``stream=False`` sends the route's non-streaming call and yields only the usage and the finished turn."""
-    reply = httpx.Response(200, json=_gemini_chunk({"text": "Whole."}))
-
-    request, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
-
-    assert request["url"].endswith(":generateContent")
-    completed = _completed(events)
-    assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
-    assert completed.message.content == "Whole."
-    assert completed.message.metrics.tokens.input_tokens == 10
-
-
-@pytest.mark.asyncio
 async def test_gemini_chunks_without_output_are_reported_as_progress(tmp_path: Path) -> None:
     """A chunk that only shows a native tool at work keeps the idle limit alive without becoming output."""
     response = gemini_sse(
@@ -747,21 +892,9 @@ _GEMINI_BLOCKED_PROMPT = {
 
 
 @pytest.mark.asyncio
-async def test_gemini_blocked_prompt_ends_the_turn_without_output(tmp_path: Path) -> None:
-    """A streamed prompt Gemini blocks ends the turn empty and, as in Agno's streamed parser, reports no usage."""
+async def test_gemini_blocked_prompt_ends_the_turn_empty_and_reports_its_prompt_usage(tmp_path: Path) -> None:
+    """A prompt Gemini blocks ends the turn without output and still reports its billed prompt tokens."""
     _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(_GEMINI_BLOCKED_PROMPT))
-
-    completed = _completed(events)
-    assert [type(event).__name__ for event in events] == ["StreamProgress", "TurnCompleted"]
-    assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
-
-
-@pytest.mark.asyncio
-async def test_gemini_non_streamed_blocked_prompt_reports_its_prompt_usage(tmp_path: Path) -> None:
-    """A non-streamed blocked prompt, such as a participation decision, still reports its billed prompt tokens."""
-    reply = httpx.Response(200, json=_GEMINI_BLOCKED_PROMPT)
-
-    _, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
 
     completed = _completed(events)
     assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
@@ -771,6 +904,19 @@ async def test_gemini_non_streamed_blocked_prompt_reports_its_prompt_usage(tmp_p
     ] == [(9, 0, 9)]
     assert completed.message.metrics.tokens.input_tokens == 9
     assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_gemini_chunk_without_candidates_or_a_block_reason_neither_ends_the_reply_nor_counts(
+    tmp_path: Path,
+) -> None:
+    """A chunk with usage but no candidate and no blocked prompt leaves the reply to its finished candidate."""
+    early = {"usageMetadata": {"promptTokenCount": 4, "totalTokenCount": 4}}
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(early, _gemini_chunk({"text": "Hi"})))
+
+    completed = _completed(events)
+    assert (completed.message.content, completed.stop_reason) == ("Hi", "end")
+    assert (completed.message.metrics.tokens.input_tokens, completed.message.metrics.tokens.output_tokens) == (10, 5)
 
 
 @pytest.mark.asyncio
@@ -1387,8 +1533,8 @@ def test_gemini_schema_conversion_breaks_cycles_and_leaves_the_input_alone() -> 
     assert schema == original
 
 
-def test_gemini_converts_mcp_tool_schemas_as_agno_did() -> None:
-    """Unions, type lists, dict values, empty objects, and unresolved or untyped properties convert as Agno's did.
+def test_gemini_converts_the_json_schema_shapes_mcp_tools_send() -> None:
+    """Unions, type lists, dict values, empty objects, and unresolved or untyped properties convert for Gemini.
 
     MCP and plugin tools send their own JSON schemas, so any of these can reach a Gemini request.
     """
@@ -1780,30 +1926,35 @@ async def test_ollama_exceptions_that_are_not_provider_failures_propagate_unchan
 
 
 @pytest.mark.asyncio
-async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> None:
-    """A reply that arrives whole has its ``<think>`` reasoning moved out of the content, as Agno did."""
-    reply = httpx.Response(200, json=_ollama_done(content="<think>Plan first.</think>Hi there"))
+async def test_ollama_streams_a_leading_think_block_as_reasoning(tmp_path: Path) -> None:
+    """A thinking model's ``<think>`` block streams as reasoning, so the reply shows and stores only its answer."""
+    pieces = ["<think>Plan", " first.</thi", "nk>\n\nHi", " there"]
+    reply = ollama_ndjson(*(_ollama_text(piece) for piece in pieces), _ollama_done())
 
-    request, events = await run_adapter(OLLAMA, _request(stream=False), tmp_path, reply)
+    request, events = await run_adapter(OLLAMA, _request(), tmp_path, reply)
 
-    assert request["body"]["stream"] is False
+    assert request["body"]["stream"] is True
     completed = _completed(events)
     assert (completed.message.content, completed.message.reasoning_content) == ("Hi there", "Plan first.")
-    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
-    assert completed.message.metrics.tokens.input_tokens == 7
+    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hi there"
+    assert "".join(event.text for event in events if isinstance(event, ReasoningDelta)) == "Plan first."
 
 
 @pytest.mark.asyncio
-async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Path) -> None:
-    """A whole reply that only calls a tool finishes with the call and no empty text or reasoning."""
-    reply = httpx.Response(
-        200,
-        json=_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}]),
+async def test_ollama_tool_call_replies_have_no_text(tmp_path: Path) -> None:
+    """A reply that only calls a tool finishes with the call and no empty text or reasoning."""
+    reply = ollama_ndjson(
+        _ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}]),
     )
 
-    _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER], stream=False), tmp_path, reply)
+    _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER]), tmp_path, reply)
 
-    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
+    assert [type(event).__name__ for event in events] == [
+        "UsageReported",
+        "ToolCallReady",
+        "UsageReported",
+        "TurnCompleted",
+    ]
     completed = _completed(events)
     assert (completed.message.content, completed.message.reasoning_content) == (None, None)
     [call] = completed.message.tool_calls or []
@@ -1813,19 +1964,30 @@ async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "content",
-    ["<think>\n\n</think>Hi there", "Plan first.</think>Hi there"],
-    ids=["empty-reasoning", "no-opening-tag"],
+    ("content", "expected"),
+    [
+        ("<think>\n\n</think>Hi there", ("Hi there", None)),
+        ("Plan first.</think>Hi there", ("Plan first.</think>Hi there", None)),
+        ("<think>Plan, cut off at </th", (None, "Plan, cut off at </th")),
+    ],
+    ids=["empty-reasoning-dropped", "no-opening-tag-kept", "unclosed-reasoning"],
 )
-async def test_ollama_keeps_think_tags_agno_did_not_split(content: str, tmp_path: Path) -> None:
-    """Agno's Ollama split only an opening ``<think>`` with reasoning inside; other replies stay as they came."""
-    reply = httpx.Response(200, json=_ollama_done(content=content))
+async def test_ollama_splits_only_a_think_block_that_opens_the_reply(
+    content: str,
+    expected: tuple[str | None, str | None],
+    tmp_path: Path,
+) -> None:
+    """An empty ``<think>`` block leaves only the answer, and other text before the tag stays as it came.
 
-    _, events = await run_adapter(OLLAMA, _request(stream=False), tmp_path, reply)
+    The reply's end releases what the splitter held back.
+    """
+    _, events = await run_adapter(OLLAMA, _request(), tmp_path, ollama_ndjson(_ollama_text(content), _ollama_done()))
 
     completed = _completed(events)
-    assert completed.message.content == content
-    assert completed.message.reasoning_content is None
+    assert (completed.message.content, completed.message.reasoning_content) == expected
+    text = "".join(event.text for event in events if isinstance(event, TextDelta))
+    reasoning = "".join(event.text for event in events if isinstance(event, ReasoningDelta))
+    assert (text or None, reasoning or None) == expected
 
 
 @pytest.mark.asyncio
@@ -1874,28 +2036,6 @@ async def test_synthetic_waits_for_each_chunk_at_the_configured_rate(
     _completed([event async for event in provider.stream(_request())])
 
     assert sleeps == [2.0, 2.0, 1.0]
-
-
-@pytest.mark.asyncio
-async def test_a_whole_synthetic_reply_yields_only_its_finished_turn(tmp_path: Path) -> None:
-    """``stream=False`` gets the planned text and shell call on the finished turn, without deltas, as on every route."""
-    config = _synthetic_config(chars_per_second=0, tool_call_probability=1.0)
-    provider = build_synthetic_provider(config, runtime_paths_for(tmp_path))
-    shell = ToolSpec(
-        name="run_shell_command",
-        description="Run a shell command.",
-        parameters={"type": "object"},
-        strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
-    )
-
-    [completed] = [event async for event in provider.stream(_request(tools=[shell], stream=False))]
-
-    assert isinstance(completed, TurnCompleted)
-    assert completed.message.content
-    assert [call["function"]["name"] for call in completed.message.tool_calls or []] == ["run_shell_command"]
 
 
 @pytest.mark.parametrize(

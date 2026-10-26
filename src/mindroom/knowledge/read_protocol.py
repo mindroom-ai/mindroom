@@ -1,27 +1,12 @@
-"""Plain-data protocol for the native knowledge reader."""
+"""Plain-data types knowledge search returns."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import TypeAdapter
-
-MAX_FRAME_BYTES = 16 * 1024 * 1024
 #: The stored chunk metadata key, and so the hit ``meta_data`` key, naming the chunk's source file relative to its base.
 SOURCE_PATH_KEY = "source_path"
-
-
-@dataclass(frozen=True)
-class ReadRequest:
-    """Read an exact collection or its compatible current publication; no credentials cross IPC."""
-
-    path: str
-    collection: str
-    #: The search query's embedding.
-    embedding: list[float]
-    limit: int = 5
-    published_settings: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -34,15 +19,3 @@ class SearchHit:
     #: Every stored key except ``name`` and ``content_id``, then the hit's cosine distance as ``distances`` and
     #: ``similarity_score``.
     meta_data: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class ReadResult:
-    """Search hits, or an explicit native failure classification."""
-
-    hits: list[SearchHit] = field(default_factory=list)
-    error_type: str | None = None
-
-
-request_adapter = TypeAdapter(ReadRequest)
-result_adapter = TypeAdapter(ReadResult)

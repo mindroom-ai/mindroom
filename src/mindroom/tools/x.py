@@ -84,7 +84,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["tweepy"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/x",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#x",
     function_names=(
         "create_post",
         "get_home_timeline",

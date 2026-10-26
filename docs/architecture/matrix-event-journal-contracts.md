@@ -56,6 +56,13 @@ Tuwunel and the MindRoom Synapse fork both cap recursive relation traversal at d
 Synapse reports `recursion_depth` as that constant cap while Tuwunel reports the depth it actually returned, so the only portable check is that a non-empty page reports the field at all, which still catches a server that ignores `recurse` and returns only direct children.
 An empty relation page reports no depth on Tuwunel and is not a failure, and the Matrix version advertised by `/versions` is not proof of recursion depth.
 
+### Tuwunel's recursive relation paging drops and reorders edits
+
+Tuwunel's recursive `/relations` paging leaves out some edits of a reply whose parent fell on an earlier page and returns others after the reply instead of before it, while its direct `/relations/{event}/m.replace` lookup for that reply is complete.
+On one production thread a backwards walk returned 356 of 419 events and missed 26 of 99 edits, and every affected streamed reply was stored at its placeholder under a marker that called the thread whole.
+Thread hydration therefore looks up the direct edits of each message whose newest walked revision still says its reply is unfinished, point refetches read a message's direct edits instead of its relation tree, and markers carry a walk version so threads an older walk marked are walked again.
+User edits of ordinary messages are not looked up, because nothing in a message says an edit is missing, so one this paging drops keeps its earlier text.
+
 ### Transaction deduplication is per sending device
 
 Both homeservers deduplicate a repeated transaction ID per sending device rather than per access token.
@@ -66,4 +73,6 @@ Synapse expires stored transaction mappings on a periodic cleanup, so a determin
 
 Nio's durable producer keeps one successful local membership intent until its outcome is acknowledged and an authoritative sync boundary observes it.
 A later local command waits for that observation, and shutdown may leave the acknowledged observation marker for the next start.
+A join command returns only once nio can send to the room, including a room the producer already reports as joined, because nio refuses plaintext sends into a joined room until a sync delivers its complete state, which neither the client's first sync under MindRoom's sync filter nor an incremental sync that first reports a room does.
+Under Sliding Sync MindRoom subscribes, besides its configured rooms, every joined room whose state nio still waits for, because a room outside both the room list window and the configured subscriptions is never reported, so neither that state nor the observation of a join a restart interrupted would arrive; a room nio can already send to needs no subscription.
 When nio restores decrypted to-device events, it never restores their application subtypes.

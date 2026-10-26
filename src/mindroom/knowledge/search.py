@@ -14,14 +14,17 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.knowledge.read_protocol import SearchHit
+    from mindroom.knowledge.rerank import Reranker
 
 logger = get_logger(__name__)
 
 KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
 _DEFAULT_MAX_RESULTS = 10
 _MAX_MERGED_SOURCE_COVERAGE_RESULTS = 20
+#: Hits each source contributes for the reranker to choose from.
+_RERANK_CANDIDATES_PER_SOURCE = 20
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-# The prompt text and the tool's docstring are Agno's, so prompts and tool schemas stay byte-identical.
+# The prompt text and the tool's docstring, which is its description, are model-visible.
 _SEARCH_INSTRUCTIONS = (
     "You have a knowledge base you can search using the search_knowledge_base tool. "
     "Search before answering questions—don't assume you know the answer. "
@@ -93,11 +96,25 @@ def _interleave(results_by_source: list[list[SearchHit]], limit: int) -> list[Se
     return [hit for rank in zip_longest(*results_by_source) for hit in rank if hit is not None][: max(limit, 0)]
 
 
+async def _reranked(reranker: Reranker, query: str, hits: list[SearchHit], limit: int) -> list[SearchHit]:
+    """Return the ``limit`` hits the reranker scores highest, or the hits as given when reranking fails."""
+    if not hits:
+        return []
+    try:
+        scores = await reranker.ascore(query, [hit.content for hit in hits])
+    except Exception:
+        logger.warning("Knowledge reranking failed; keeping search order", exc_info=True)
+        return hits[:limit]
+    order = sorted(range(len(hits)), key=lambda index: -scores[index])
+    return [hits[index] for index in order[:limit]]
+
+
 @dataclass(frozen=True)
 class AgentKnowledge:
     """The knowledge sources one agent searches through ``search_knowledge_base``."""
 
     sources: tuple[KnowledgeSource, ...]
+    reranker: Reranker | None = None
 
     @property
     def max_results(self) -> int:
@@ -105,23 +122,31 @@ class AgentKnowledge:
         return max(min(len(self.sources), _MAX_MERGED_SOURCE_COVERAGE_RESULTS), _DEFAULT_MAX_RESULTS)
 
     async def asearch(self, query: str, limit: int | None = None) -> list[SearchHit]:
-        """Search sources sequentially, so one query cannot exhaust the native reader slots, and interleave their hits.
+        """Search sources sequentially and interleave their hits, or let the reranker order them when one is set.
 
         A failed source warns and the search goes on, so one unavailable base does not hide the others' results, but
         when every source failed the first failure raises, so it never looks like an empty index (ISSUE-237).
         """
         effective_limit = limit or self.max_results
+        source_limit = max(effective_limit, _RERANK_CANDIDATES_PER_SOURCE) if self.reranker else effective_limit
         answered: list[list[SearchHit]] = []
         first_error: Exception | None = None
         for source in self.sources:
             try:
-                answered.append(await source.index.asearch(query, limit=effective_limit))
+                answered.append(await source.index.asearch(query, limit=source_limit))
             except Exception as exc:
                 first_error = first_error or exc
                 logger.warning("Knowledge source search failed", base_id=source.description.base_id, exc_info=exc)
         if first_error is not None and not answered:
             raise first_error
-        return _interleave(answered, effective_limit)
+        if self.reranker is None:
+            return _interleave(answered, effective_limit)
+        return await _reranked(
+            self.reranker,
+            query,
+            _interleave(answered, source_limit * len(answered)),
+            effective_limit,
+        )
 
     async def _search_tool_result(self, query: str) -> str:
         """Return what ``search_knowledge_base`` tells the model: the hits, no-result text, or the failure's type."""

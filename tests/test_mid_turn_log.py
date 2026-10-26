@@ -25,14 +25,14 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_message import is_scope_summary, mark_summary_follows
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids, segment_tool_call_ids
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
-from tests.history_helpers import compact_runs, log_of
+from tests.history_helpers import compact_runs, log_of, replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _TEAM_SCOPE = HistoryScope(kind="team", scope_id="crew")
-_ALL_HISTORY = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+_ALL_HISTORY = replay_settings()
 
 
 @pytest.fixture

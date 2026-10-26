@@ -12,7 +12,7 @@ import pytest
 import mindroom.pre_model_preparation as pre_model_preparation_module
 from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.memory import MemoryPromptParts
-from mindroom.pre_model_preparation import prepare_prompt_branches
+from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
 from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 
@@ -287,3 +287,34 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
         shutdown_intent=ORDERLY_SHUTDOWN,
     )
     await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_off_loop_build_finishes_before_the_cancellation_propagates() -> None:
+    """A reply cancelled while its agent builds without memory preparation waits for the started build to return."""
+    agent_started = threading.Event()
+    agent_release = threading.Event()
+    agent_finished = threading.Event()
+
+    def blocked_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+        agent_started.set()
+        if not agent_release.wait(5.0):
+            msg = "timed out waiting to release cancelled agent construction"
+            raise TimeoutError(msg)
+        agent_finished.set()
+        return _RUNTIME_MODEL, MagicMock()
+
+    build_task = asyncio.create_task(build_agent_off_loop(blocked_agent, agent_name="general"))
+    try:
+        assert await asyncio.to_thread(agent_started.wait, 1.0)
+        build_task.cancel()
+        await asyncio.sleep(0)
+        assert not build_task.done()
+
+        agent_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await build_task
+    finally:
+        agent_release.set()
+
+    assert agent_finished.is_set()

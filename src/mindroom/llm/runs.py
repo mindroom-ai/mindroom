@@ -84,7 +84,9 @@ class ToolExecution:
         return ReportedCall(self.tool_call_id, self.tool_name, self.tool_args, self.result, self.is_error)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: every field, None included, under its stored key, kept as main writes it."""
+        """Return the stored dict: every field, None included, under its stored key."""
+        # TODO(simplify): every field is stored, None defaults included. Store only the fields that hold a value,
+        # with the storage redesign (#3107, #3095). Stored data would change: new rows would omit unset fields.
         return {_STORED_TOOL_KEYS.get(name, name): value for name, value in asdict(self).items()}
 
     @classmethod
@@ -97,8 +99,8 @@ class ToolExecution:
         # Legacy format: stored tool executions hold ``metrics`` (``start_time``, ``end_time``, ``duration``) and
         # ``created_at``, and stored requirements hold an ISO 8601 ``created_at``, in run rows, summary-row segments,
         # delegation state, and CLI approval payloads; no MindRoom code read them.
-        # Last legacy release: v2026.10.536, whose owned runtime wrote them as the Agno-backed runtime before it did;
-        # replacement: unreleased, whose tool executions and requirements store neither.
+        # Last legacy release: v2026.10.542, which wrote them as every earlier release did; replacement: v2026.10.543,
+        # whose tool executions and requirements store neither.
         # Handling: the keys are ignored on read and never written again, so a rewritten row drops them.
         # Coverage: tests/llm/test_codecs.py::test_tool_execution_round_trips_agno_dict_minus_dropped_keys,
         #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
@@ -346,7 +348,7 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
     # ``files``, ``response_audio``, ``citations``, ``references``, ``reasoning_*``, ``followups``,
     # ``model_provider_data``, fork and queue lineage fields, and per-tool ``requires_user_input``,
     # ``user_input_schema``, ``user_feedback_schema``, ``answered``, ``approval_id``.
-    # Last legacy release: v2026.10.498; replacement: unreleased.
+    # Last legacy release: v2026.10.498; replacement: v2026.10.499.
     # Handling: the keys are ignored on read and never written again; every key MindRoom reads survives.
     # Coverage: tests/llm/test_codecs.py::test_run_record_round_trips_agno_dict_minus_dropped_keys,
     #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
@@ -429,8 +431,8 @@ class TeamRunRecord(_RunRecordCommon):
         # LEGACY_COMPAT: Team run dicts carry the ``team_name`` label of their members.
         # Legacy format: team ``run_data`` rows hold ``team_name``, ``Team-`` followed by the requested member names
         # joined by ``-``; no MindRoom code read it.
-        # Last legacy release: v2026.10.506, whose owned runtime wrote it as the Agno-backed runtime before it did;
-        # replacement: unreleased, whose team runs store no ``team_name``.
+        # Last legacy release: v2026.10.506, which wrote it as every earlier release did; replacement: v2026.10.507,
+        # whose team runs store no ``team_name``.
         # Handling: the key is ignored on read and never written again, so a rewritten row drops it.
         # Coverage: tests/llm/test_codecs.py::test_team_run_record_round_trips_agno_dict_minus_dropped_keys,
         #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys

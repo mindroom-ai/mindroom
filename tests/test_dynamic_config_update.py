@@ -272,6 +272,7 @@ class TestDynamicConfigUpdate:
                 MatrixID(username="email_assistant", domain="localhost"),
                 MatrixID(username="callagent", domain="localhost"),
             ],
+            timezone="UTC",
         )
 
         # Verify the workflow was parsed correctly and includes both agents

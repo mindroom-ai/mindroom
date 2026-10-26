@@ -18,11 +18,10 @@ class GeminiSettings:
     """The ``extra_kwargs`` a Gemini model accepts."""
 
     api_key: str | None = field(default=None, metadata=SECRET)
+    # The model builder records here the route ``gemini_uses_vertexai`` (``providers/credentials.py``) resolved.
     vertexai: bool = False
     project_id: str | None = None
     location: str | None = None
-    # A google.auth credentials object; only programmatic callers can supply one.
-    credentials: object | None = field(default=None, metadata=SECRET)
     client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     timeout: float | None = None
     generation_config: Mapping[str, Any] | None = None
@@ -41,8 +40,9 @@ class GeminiSettings:
     thinking_budget: int | None = None
     include_thoughts: bool | None = None
     thinking_level: str | None = None
-    # Google Search grounding, sent in place of the request's function tools, so a grounded model calls no
-    # function; kept as main behaves.
+    # TODO(simplify): Google Search grounding is sent in place of the request's function tools, so a grounded model
+    # calls no function. Decide whether search combines with function tools (#3075). Users would notice: a grounded
+    # agent could call its tools.
     search: bool = False
 
 

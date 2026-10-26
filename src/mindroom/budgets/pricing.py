@@ -119,13 +119,8 @@ def _priced_counts(counts: TokenCounts) -> TokenCounts:
     )
 
 
-def _whole_count(value: object) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
 def run_cost_usd(
     metrics: RunMetrics | None,
-    usage: Mapping[str, object] | None,
     *,
     model_provider: str | None,
     model_id: str | None,
@@ -136,14 +131,15 @@ def run_cost_usd(
     Per-model details price every model the run used, such as team members on other models,
     as budgets do; without them the run's usage counters are priced at the run's own model.
     """
-    details = metrics.details if metrics is not None else None
+    if metrics is None:
+        return None
     entries = [
         ((entry.provider, entry.id), _priced_counts(entry.tokens))
-        for model_type_entries in (details or {}).values()
+        for model_type_entries in (metrics.details or {}).values()
         for entry in model_type_entries
     ]
-    if not entries and usage is not None and model_provider is not None and model_id is not None:
-        entries = [((model_provider, model_id), _priced_counts(TokenCounts.from_mapping(usage, _whole_count)))]
+    if not entries and model_provider is not None and model_id is not None:
+        entries = [((model_provider, model_id), _priced_counts(metrics.tokens))]
     cost: float | None = None
     for key, totals in entries:
         priced = prices.get(key)

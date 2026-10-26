@@ -21,6 +21,7 @@ import nio
 from cron_descriptor import Options, get_description
 from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema  # noqa: TC002 - pydantic resolves field annotations at runtime
 
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.approval.tool_approval import (
@@ -174,20 +175,19 @@ class CronSchedule(BaseModel):
         return f"{self.minute} {self.hour} {self.day} {self.month} {self.weekday}"
 
     def to_natural_language(self, timezone: str, current_time: datetime | None = None) -> str:
-        """Describe the schedule in the wall time of `timezone`; the cron fields themselves are UTC.
+        """Describe the schedule in the wall time of `timezone` and name the zone; the cron fields themselves are UTC.
 
         A fixed time of day is converted with the offset of the next run, so users see their own
-        clock ("At 08:00") instead of the stored UTC hour; other hour patterns are marked UTC.
+        clock ("At 08:00 (Europe/Amsterdam)") instead of the stored UTC hour; other patterns keep
+        their UTC fields and are marked UTC.
         """
         local = self._in_timezone(ZoneInfo(timezone), current_time or datetime.now(UTC))
         try:
             options = Options(use_24hour_time_format=True)
             description = str(get_description((local or self).to_cron_string(), options))
         except Exception:
-            return f"Cron: {self.to_cron_string()}"
-        if local is None and self.hour != "*" and timezone != "UTC":
-            return f"{description} (UTC)"
-        return description
+            return f"Cron: {self.to_cron_string()} (UTC)"
+        return f"{description} ({'UTC' if local is None else timezone})"
 
     def _in_timezone(self, zone: ZoneInfo, current_time: datetime) -> CronSchedule | None:
         """Return this schedule in `zone` wall time when it runs at one fixed UTC time of day."""
@@ -250,13 +250,22 @@ class ScheduledWorkflow(BaseModel):
     silent: bool = False
     # LEGACY_COMPAT: Scheduled workflows without the pre-approved call flag.
     # Legacy format: Scheduled workflows omitted pre_approved_call before scheduled tool calls existed.
-    # Last legacy release: v2026.10.148; replacement: the next release writes the flag on every workflow.
+    # Last legacy release: v2026.10.150; replacement: v2026.10.151 writes the flag on every workflow.
     # Handling: Pydantic defaults absence to False, which is correct because no earlier task carried an approval.
     # Coverage: tests/test_scheduled_tool_approval.py::test_workflow_without_flag_loads_as_ordinary_task.
     pre_approved_call: bool = Field(
         default=False,
         description="Whether the requester approved this one-time task's tool call while scheduling it",
     )
+    # LEGACY_COMPAT: Scheduled workflows without a timezone.
+    # Legacy format: Scheduled workflows omitted timezone and were interpreted and shown in the global timezone.
+    # Last legacy release: v2026.10.533; replacement: the next release stores the creating agent's timezone.
+    # Handling: Pydantic defaults absence to None, and scheduled_task_timezone reads None as the global timezone,
+    #   so existing tasks keep the wall time they were interpreted and shown in; edits keep None.
+    # Coverage: tests/test_scheduling.py::test_a_stored_task_without_a_timezone_keeps_the_global_timezone.
+    # The IANA timezone the task's times are interpreted and shown in. MindRoom sets it from the scheduling agent,
+    # so the schema the parser model fills leaves it out.
+    timezone: SkipJsonSchema[str | None] = None
 
     @field_validator("execute_at")
     @classmethod
@@ -265,6 +274,11 @@ class ScheduledWorkflow(BaseModel):
         if value is not None and value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value
+
+
+def scheduled_task_timezone(workflow: ScheduledWorkflow, config: Config) -> str:
+    """Return the timezone a task's times are interpreted and shown in: its own, else the global one."""
+    return workflow.timezone or config.timezone
 
 
 class _WorkflowParseError(BaseModel):
@@ -321,6 +335,8 @@ class SchedulingRuntime:
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     matrix_admin: HookMatrixAdmin | None = None
     config_provider: Callable[[], Config | None] | None = None
+    # The agent scheduling through its tool, whose timezone new tasks take; None for chat commands.
+    agent_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -495,6 +511,7 @@ def build_edited_scheduled_workflow(  # noqa: C901
         room_id=room_id,
         new_thread=existing_workflow.new_thread,
         silent=existing_workflow.silent if silent is None else silent,
+        timezone=existing_workflow.timezone,
     )
 
 
@@ -1063,7 +1080,7 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                     room_id=room_id,
                     task_id=task_id,
                     workflow=current_task.workflow,
-                    timezone=config.timezone,
+                    timezone=scheduled_task_timezone(current_task.workflow, config),
                     status="cancelled",
                     created_at=current_task.created_at,
                     matrix_admin=matrix_admin,
@@ -1261,7 +1278,7 @@ async def _save_pending_scheduled_task(
         room_id=room_id,
         task_id=task_id,
         workflow=workflow,
-        timezone=config.timezone,
+        timezone=scheduled_task_timezone(workflow, config),
         status="pending",
         created_at=created_at,
         matrix_admin=matrix_admin,
@@ -1381,10 +1398,12 @@ async def _parse_workflow_schedule(
     config: Config,
     runtime_paths: RuntimePaths,
     available_responders: typing.Sequence[MatrixID],
+    *,
+    timezone: str,
     current_time: datetime | None = None,
     existing_workflow: ScheduledWorkflow | None = None,
 ) -> ScheduledWorkflow | _WorkflowParseError:
-    """Parse natural language into structured workflow using AI."""
+    """Parse natural language into structured workflow using AI, reading wall-clock times in ``timezone``."""
     if current_time is None:
         current_time = datetime.now(UTC)
 
@@ -1404,8 +1423,8 @@ async def _parse_workflow_schedule(
     prompt = config.render_prompt(
         "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
         current_time=current_time.isoformat(),
-        current_time_local=current_time.astimezone(ZoneInfo(config.timezone)).isoformat(),
-        user_timezone=config.timezone,
+        current_time_local=current_time.astimezone(ZoneInfo(timezone)).isoformat(),
+        user_timezone=timezone,
         request=request,
         agent_list=agent_list,
         existing_task_context=_existing_task_parse_context(existing_workflow) if existing_workflow else "",
@@ -1716,7 +1735,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 await _save_one_time_task_status(
                     client=client,
                     task=latest_pending_task,
-                    timezone=config.timezone,
+                    timezone=scheduled_task_timezone(latest_pending_task.workflow, config),
                     status=final_status,
                     matrix_admin=matrix_admin,
                 )
@@ -1757,7 +1776,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     await _save_one_time_task_status(
                         client=client,
                         task=latest_pending_task,
-                        timezone=config.timezone,
+                        timezone=scheduled_task_timezone(latest_pending_task.workflow, config),
                         status="failed",
                         matrix_admin=matrix_admin,
                     )
@@ -1867,10 +1886,11 @@ def _scheduled_task_response_text(
     config: Config,
 ) -> str:
     """Render the stable response persisted with one command-owned mutation."""
+    timezone = scheduled_task_timezone(workflow, config)
     if workflow.schedule_type == "once" and workflow.execute_at:
-        response_text = f"✅ Scheduled for {_format_scheduled_time(workflow.execute_at, config.timezone)}\n"
+        response_text = f"✅ Scheduled for {_format_scheduled_time(workflow.execute_at, timezone)}\n"
     elif workflow.cron_schedule:
-        natural_desc = workflow.cron_schedule.to_natural_language(config.timezone)
+        natural_desc = workflow.cron_schedule.to_natural_language(timezone)
         cron_str = workflow.cron_schedule.to_cron_string()
         response_text = f"✅ Scheduled recurring task: **{natural_desc}**\n"
         response_text += f"   _(Cron: `{cron_str}` UTC)_\n"
@@ -1966,6 +1986,12 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if not available_responders:
         return (None, "❌ No agents or teams in this room are allowed to reply to you.")
 
+    # A new task takes the scheduling agent's timezone; an edit keeps the task's own.
+    task_timezone = (
+        scheduled_task_timezone(existing_task.workflow, config)
+        if existing_task
+        else config.get_entity_timezone(runtime.agent_name)
+    )
     # Parse the workflow request with available responders; edits re-parse
     # against the existing task's content as authoritative prior state.
     workflow_result = await _parse_workflow_schedule(
@@ -1973,6 +1999,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         config,
         runtime_paths,
         available_responders,
+        timezone=task_timezone,
         existing_workflow=existing_task.workflow if existing_task else None,
     )
 
@@ -2025,6 +2052,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     workflow_result.thread_id = None if new_thread else thread_id
     workflow_result.room_id = room_id
     workflow_result.new_thread = new_thread
+    workflow_result.timezone = existing_task.workflow.timezone if existing_task else task_timezone
     if history_limit is not None:
         workflow_result.history_limit = history_limit
     if silent is not None:
@@ -2055,7 +2083,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 room_id=room_id,
                 task_id=task_id,
                 workflow=workflow_result,
-                timezone=config.timezone,
+                timezone=task_timezone,
                 existing_task=existing_task,
                 runtime_paths=runtime_paths,
                 matrix_admin=runtime.matrix_admin,
@@ -2238,6 +2266,7 @@ async def schedule_approved_tool_call(
     assert thread_id is not None
 
     task_id = str(uuid.uuid4())[:8]
+    timezone = config.get_entity_timezone(agent_name)
     any_arguments_offered = scheduled_call_offers_any_arguments(
         config,
         tool_name,
@@ -2262,6 +2291,7 @@ async def schedule_approved_tool_call(
         thread_id=thread_id,
         room_id=room_id,
         pre_approved_call=True,
+        timezone=timezone,
     )
     binding = ScheduledCallBinding(
         task_id=task_id,
@@ -2284,7 +2314,7 @@ async def schedule_approved_tool_call(
         card_reserved = await request_scheduled_call_approval(
             binding,
             approver_user_id=approver_id,
-            scheduled_for_text=_format_local_time(send_at, config.timezone),
+            scheduled_for_text=_format_local_time(send_at, timezone),
             any_arguments_offered=any_arguments_offered,
         )
         if not card_reserved:
@@ -2294,7 +2324,7 @@ async def schedule_approved_tool_call(
             room_id=room_id,
             task_id=task_id,
             workflow=workflow,
-            timezone=config.timezone,
+            timezone=timezone,
             created_at=datetime.now(UTC).isoformat(),
             matrix_admin=runtime.matrix_admin,
         )
@@ -2304,7 +2334,7 @@ async def schedule_approved_tool_call(
     finally:
         if not task_published and card_reserved is not False:
             await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
-    scheduled_for = _format_scheduled_time(send_at, config.timezone)
+    scheduled_for = _format_scheduled_time(send_at, timezone)
     _start_new_scheduled_task(
         runtime.client,
         task_id,
@@ -2377,10 +2407,10 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     runtime_paths: RuntimePaths,
+    config: Config,
     thread_id: str | None = None,
-    config: Config | None = None,
 ) -> str:
-    """List scheduled tasks in human-readable format."""
+    """List scheduled tasks in human-readable format, each in its own timezone."""
     # Pre-check: surface Matrix errors as user-facing messages
     state_response = await client.room_get_state(room_id)
     if not isinstance(state_response, nio.RoomGetStateResponse):
@@ -2418,11 +2448,10 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     tasks.sort(key=_sort_key)
     new_thread_tasks.sort(key=_sort_key)
 
-    timezone = config.timezone if config else "UTC"
-
     def _append_task_lines(lines: list[str], records: list[ScheduledTaskRecord]) -> None:
         for record in records:
             workflow = record.workflow
+            timezone = scheduled_task_timezone(workflow, config)
             if workflow.schedule_type == "once" and workflow.execute_at:
                 time_str = _format_scheduled_time(workflow.execute_at, timezone)
             else:
@@ -2596,7 +2625,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                             room_id=room_id,
                             task_id=task_id,
                             workflow=workflow,
-                            timezone=config.timezone,
+                            timezone=scheduled_task_timezone(workflow, config),
                             status="failed",
                             created_at=task.created_at,
                             matrix_admin=matrix_admin,

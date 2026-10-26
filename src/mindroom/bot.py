@@ -61,7 +61,7 @@ from mindroom.matrix.presence import build_agent_status_message, set_presence_st
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_continuity import SyncContinuityStore
-from mindroom.matrix.sync_loop import bot_ingestion_config, sliding_sync_room_subscriptions
+from mindroom.matrix.sync_loop import bot_ingestion_config, subscribe_sliding_rooms
 from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.message_target import MessageTarget  # noqa: TC001
@@ -596,7 +596,7 @@ class AgentBot:
             dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                 timestamp_ms,
-                timezone=self.config.timezone,
+                timezone=self.config.get_entity_timezone(self.agent_name),
             ),
             on_dispatch_failure=self._retry_failed_coalesced_dispatch,
             on_undelivered_source=self._retry_pending_dispatch_source,
@@ -812,7 +812,7 @@ class AgentBot:
                 receipt_order=self._journal_dispatcher.receipt_order,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
-                    timezone=self.config.timezone,
+                    timezone=self.config.get_entity_timezone(self.agent_name),
                 ),
                 reply_for_sources=self._reply_runtime.store.replies.for_sources,
                 later_human_message=self._later_human_message,
@@ -1331,6 +1331,7 @@ class AgentBot:
                 target_membership=target_membership,
                 read_position=self.journal_principal().ingestion_membership_position,
                 admission_progress=self._ingestion_admission_progress,
+                subscribe_awaited_rooms=lambda: subscribe_sliding_rooms(session, self.config, self.rooms),
                 is_authorized=is_authorized,
             )
         if changed and target_membership == "join" and self.client is not None:
@@ -1736,10 +1737,8 @@ class AgentBot:
         """
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
-        if self.config.matrix_sync.mode == "sliding" and self._ingestion_session is not None:
-            await self._ingestion_session.update_sliding_subscriptions(
-                sliding_sync_room_subscriptions(self.rooms, self.config.matrix_sync.sliding_timeline_limit),
-            )
+        if self._ingestion_session is not None:
+            await subscribe_sliding_rooms(self._ingestion_session, self.config, self.rooms)
 
     async def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""

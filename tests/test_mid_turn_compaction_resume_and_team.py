@@ -232,7 +232,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
             ),
         ),
         persist=persist_to(agent.store, agent.session),
-        request_template=replace(build.request_template, stream=False),
+        request_template=build.request_template,
     )
     finished = [event async for event in events][-1]
     assert isinstance(finished, RunFinished)
@@ -260,7 +260,7 @@ def _approved(paused: RunRecord) -> ResumeDecisions:
 
 
 async def _resume(agent: _Resumable, paused: RunRecord) -> RunRecord:
-    return await agent.runner().continue_run(paused, _approved(paused), None)
+    return await forward_resume(agent.runner().events(paused, _approved(paused)), None, paused=paused)
 
 
 def _summaries(messages: Sequence[Message]) -> list[Message]:

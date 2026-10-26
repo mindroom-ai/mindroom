@@ -155,6 +155,20 @@ async def test_a_due_check_posts_a_visible_prompt_that_the_agent_answers(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_an_agent_timezone_sets_when_its_automations_are_due(tmp_path: Path) -> None:
+    """The default 04:00 check runs at 04:00 in the agent's own timezone, not the install's."""
+    config, _paths, runner, bot = _setup(tmp_path)
+    config.timezone = "America/Los_Angeles"
+    config.agents["mind"].timezone = "Europe/Amsterdam"
+
+    await _tick(runner, NOON)
+    # 04:00 in Amsterdam is still 19:00 the evening before in Los Angeles.
+    await _tick(runner, datetime(2026, 10, 6, 2, 0, tzinfo=UTC))
+
+    assert len(bot.sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_the_internal_user_is_the_prompts_requester(tmp_path: Path) -> None:
     """Like a todo poke without a human, the prompt runs as MindRoom's internal user."""
     _config, _paths, runner, bot = _setup(tmp_path)

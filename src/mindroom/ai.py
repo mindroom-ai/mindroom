@@ -15,12 +15,12 @@ from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
 from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
-from mindroom.agent_loop.run import own_answers, run_agent
+from mindroom.agent_loop.run import own_answers, paused_content, run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
-from mindroom.approval.resume import forward_resume, resume_from_session
+from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
@@ -41,7 +41,6 @@ from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import ScopeSessionContext, load_scope_session
-from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
@@ -103,8 +102,8 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
-    complete_pending_tool_block,
     format_tool_combined,
+    format_tool_completed_event,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -116,7 +115,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.ai_turn_state import AITurnState
-    from mindroom.approval.resume import ResumeDecisions, ResumeEvents
+    from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
@@ -270,8 +269,6 @@ _render_system_enrichment_context = timed("system_prompt_assembly.system_enrichm
 @dataclass
 class _StreamingAttemptState:
     assistant_text: str = ""
-    full_response: str = ""
-    tool_count: int = 0
     observed_tool_calls: int = 0
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
     terminal: TerminalRecord[RunRecord] = field(default_factory=partial(TerminalRecord, RunRecord))
@@ -292,7 +289,7 @@ class _StreamingAttemptState:
 class _AgentTurnCallbacks:
     """Adapter callbacks shared by the blocking and streaming agent turns."""
 
-    load_scope: Callable[[], ScopeSessionContext | None]
+    load_scope: Callable[[], ScopeSessionContext]
     on_scope_loaded: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]
@@ -310,7 +307,7 @@ def _build_agent_turn_callbacks(
 ) -> _AgentTurnCallbacks:
     """Build the entity-specific turn-driver callbacks for one agent response."""
 
-    def _load_scope() -> ScopeSessionContext | None:
+    def _load_scope() -> ScopeSessionContext:
         return load_scope_session(
             scope=HistoryScope(kind="agent", scope_id=agent_name),
             session_id=session_id,
@@ -470,15 +467,7 @@ def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool) ->
 
 def _extract_tool_trace(record: AnyRunRecord) -> list[ToolTraceEntry]:
     """Extract structured tool-trace metadata from a run record."""
-    if not record.tools:
-        return []
-
-    trace: list[ToolTraceEntry] = []
-    for tool in record.tools:
-        tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-        _, trace_entry = format_tool_combined(tool.tool_name, tool_args, tool.result)
-        trace.append(trace_entry)
-    return trace
+    return [format_tool_completed_event(tool.call) for tool in record.tools or ()]
 
 
 def _attach_blocking_pause_presentation(
@@ -487,12 +476,17 @@ def _attach_blocking_pause_presentation(
     *,
     show_tool_calls: bool,
 ) -> PausedAttempt:
-    """Render a blocking pause once, before it crosses the approval boundary."""
+    """Render a blocking pause once, before it crosses the approval boundary.
+
+    A run that paused without text of its own holds the paused notice as its content (``paused_content``), which the
+    pause does not show, as a pause collected from the run's events does not: the approval card says what it waits for.
+    """
     presentation = CollectedStreamPresentation(
         show_tool_calls=show_tool_calls,
         track_hidden_tools=True,
     )
-    presentation.append_text(_extract_response_content(record, show_tool_calls=False))
+    content = _extract_response_content(record, show_tool_calls=False)
+    presentation.append_text("" if content == paused_content(record) else content)
     # A paused call stays started: a call waiting for approval, or a delegation that still waits for its child,
     # or for its turn after a sibling's, until the driver answers it.
     answered = answered_delegation_calls(record)
@@ -588,62 +582,26 @@ def _attempt_run_metadata(
     )
 
 
-def _track_stream_tool_started(state: _StreamingAttemptState, event: ToolStarted, *, show_tool_calls: bool) -> bool:
-    """Track started tool-call metadata for streaming output."""
-    display_tool_index = state.tool_count + 1 if show_tool_calls else None
-    tool_msg, trace_entry = state.tool_tracker.start(event.call, tool_index=display_tool_index, origin=event.origin)
+def _track_stream_tool_started(state: _StreamingAttemptState, event: ToolStarted) -> bool:
+    """Record a started tool call's trace; return False for a call the stream already announced."""
+    _, trace_entry = state.tool_tracker.start(event.call, origin=event.origin)
     if trace_entry is None:
         return False
     state.observed_tool_calls += 1
-    if not show_tool_calls or display_tool_index is None:
-        return True
-
-    state.tool_count = display_tool_index
-    if tool_msg:
-        state.full_response += tool_msg
     return True
 
 
 def _materialize_paused_agent_tool_events(
     state: _StreamingAttemptState,
     tools: Sequence[ToolExecution],
-    *,
-    show_tool_calls: bool,
 ) -> tuple[ToolStarted, ...]:
     """Return the tool-start events of paused calls the stream has not announced yet."""
     events = (ToolStarted(tool.call) for tool in tools)
-    return tuple(event for event in events if _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls))
-
-
-def _track_stream_tool_completed(
-    state: _StreamingAttemptState,
-    event: ToolCompleted,
-    *,
-    show_tool_calls: bool,
-    agent_name: str,
-) -> None:
-    """Track completed tool-call metadata for streaming output."""
-    tool_name, result, pending_tool, _ = state.tool_tracker.complete(event.call, origin=event.origin)
-    if not show_tool_calls:
-        return
-
-    if pending_tool is None or pending_tool.visible_tool_index is None:
-        logger.warning(
-            "Missing pending tool start in AI stream; skipping completion marker",
-            tool_name=tool_name,
-            agent=agent_name,
-        )
-        return
-    state.full_response, _ = complete_pending_tool_block(
-        state.full_response,
-        tool_name,
-        result,
-        tool_index=pending_tool.visible_tool_index,
-    )
+    return tuple(event for event in events if _track_stream_tool_started(state, event))
 
 
 def _stream_completed_without_visible_output(state: _StreamingAttemptState, record: AnyRunRecord) -> bool:
-    visible_text = state.full_response.strip() or (record.content or "").strip()
+    visible_text = state.assistant_text.strip() or (record.content or "").strip()
     return not visible_text and state.observed_tool_calls == 0
 
 
@@ -675,29 +633,18 @@ def _begin_attempt(
     *,
     stream_state: _StreamingAttemptState | None = None,
 ) -> tuple[RunStorage, _AgentAttempt]:
-    """Record one prepared attempt on the turn's run state, and return where its run is stored and its request.
-
-    A turn without a scope context stores its run in its build's store, in a session of its own outside any scope.
-    """
+    """Record one prepared attempt on the turn's run state and recorder, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
     run.unseen_event_ids = prepared_run.unseen_event_ids
     run.run_metadata = run_context.metadata
     storage = bind_turn_session(run)
-    if storage is None:
-        storage = RunStorage(
-            store=prepared_run.build.store,
-            session=new_scope_session(
-                session_id=run_context.session_id,
-                scope_id=run_context.agent_name,
-                is_team=False,
-            ),
-            scope=None,
-        )
     attempt = run.attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
         stream_state=stream_state,
     )
+    if run_context.turn_recorder is not None:
+        run_context.turn_recorder.set_run_id(attempt.run_id)
     return storage, attempt
 
 
@@ -735,12 +682,11 @@ async def _start_agent_run(
     *,
     storage: RunStorage,
     terminal: TerminalRecord[RunRecord],
-    stream: bool,
 ) -> AsyncIterator[RunEvent]:
     """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
 
     A run that pauses on delegations is driven on: its children run, and the run continues with their results
-    through ``_continue_turn_run`` until it completes or waits for an approval. An agent whose shell reaches its
+    through ``_TurnRunContinuation`` until it completes or waits for an approval. An agent whose shell reaches its
     other tools through `mindroom-agent` binds this attempt's CLI first; a minimal turn then offers only Bash, and
     the hidden calls' tool events join the run's own.
     """
@@ -782,21 +728,13 @@ async def _start_agent_run(
         ctx=run,
         hooks=hooks,
         persist=persist_into(terminal, storage),
-        request_template=replace(run_context.request_template, stream=stream),
+        request_template=run_context.request_template,
         metadata=run.metadata,
     )
     driven = drive_delegation_stream(
         events,
         record_type=RunRecord,
-        storage=storage,
-        continue_parent=partial(
-            _continue_turn_run,
-            run_context,
-            spec=spec,
-            hooks=hooks,
-            storage=storage,
-            terminal=terminal,
-        ),
+        continue_parent=_TurnRunContinuation(run_context, spec=spec, hooks=hooks, storage=storage, terminal=terminal),
         agent_name=run_context.agent_name,
         run_child=run_delegated_child_response,
         config=run_context.config,
@@ -812,38 +750,37 @@ async def _start_agent_run(
             yield event
 
 
-async def _continue_turn_run(
-    run_context: _AgentRunContext,
-    paused: RunRecord,
-    decisions: ResumeDecisions,
-    on_event: ResumeEvents | None,
-    *,
-    spec: AgentSpec,
-    hooks: LoopHooks,
-    storage: RunStorage,
-    terminal: TerminalRecord[RunRecord],
-) -> RunRecord:
-    """Continue this attempt's paused run with its delegations' results, as the spec and hooks it ran with.
+@dataclass(frozen=True)
+class _TurnRunContinuation:
+    """Continues one attempt's paused run with its delegations' results, as the spec and hooks it ran with.
 
     The run keeps its hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
     compaction's stop, carries across its continuations. The resume replays the scope's history as the attempt did
     and reuses the paused run's stored system message.
     """
-    prepared = run_context.prepared_run
-    events = resume_from_session(
-        spec,
-        paused,
-        decisions,
-        storage=storage,
-        settings=prepared.build.history_settings,
-        plan=prepared.prepared_history.replay_plan,
-        user_id=run_context.turn.requester_id,
-        model_name=prepared.runtime_model_name,
-        hooks=hooks,
-        persist=persist_into(terminal, storage),
-        request_template=run_context.request_template,
-    )
-    return await forward_resume(events, on_event, paused=paused)
+
+    run_context: _AgentRunContext
+    spec: AgentSpec
+    hooks: LoopHooks
+    storage: RunStorage
+    terminal: TerminalRecord[RunRecord]
+
+    def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        """Resume ``paused`` with ``decisions``; the stream ends as ``resume_from_session``'s does."""
+        prepared = self.run_context.prepared_run
+        return resume_from_session(
+            self.spec,
+            paused,
+            decisions,
+            storage=self.storage,
+            settings=prepared.build.history_settings,
+            plan=prepared.prepared_history.replay_plan,
+            user_id=self.run_context.turn.requester_id,
+            model_name=prepared.runtime_model_name,
+            hooks=self.hooks,
+            persist=persist_into(self.terminal, self.storage),
+            request_template=self.run_context.request_template,
+        )
 
 
 @timed("model_request_to_completion")
@@ -861,7 +798,7 @@ async def _run_blocking_agent_attempt(
         on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
-    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
+    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal)
     async with closing_async_stream(events):
         async for event in events:
             terminal.collect(event)
@@ -955,10 +892,11 @@ def _memory_conversation(
     ):
         return None
     entity = config.resolve_entity(ctx.entity_label)
+    settings = entity.history_settings
     if (
         entity.memory_backend != "file"
-        or not entity.history_settings.replays_whole_history
-        or not (entity.has_authored_compaction_config and entity.compaction_config.enabled)
+        or not settings.replays_whole_history
+        or not (settings.has_authored_compaction_config and settings.compaction_config.enabled)
     ):
         return None
     session = scope_context.session
@@ -1339,13 +1277,14 @@ async def run_delegated_child_response(
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    supports_native_tool_approval: bool,
+    supports_native_tool_approval: bool = True,
     approval_config: Config | None = None,
 ) -> str:
     """Execute the normal response envelope for a prepared child owned by either adapter.
 
-    A minimal child cannot pause for approval: approval-gated tools stay hidden from it,
-    so no adapter ever has to resume it natively.
+    The native delegation driver resumes a child that pauses for approval; the direct delegate tool, which cannot,
+    passes ``supports_native_tool_approval=False``. A minimal child cannot pause for approval: approval-gated tools
+    stay hidden from it, so no adapter ever has to resume it natively.
     """
     identity = child_execution_identity(child)
     authorized_config = authorize_delegation(
@@ -1688,7 +1627,6 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     if pipeline_timing is not None:
                         pipeline_timing.mark("model_first_token")
                 state.assistant_text += event.text
-                state.full_response += event.text
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1703,7 +1641,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     tool_call_id=event.call.tool_call_id,
                     show_tool_calls=show_tool_calls,
                 )
-                _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls)
+                _track_stream_tool_started(state, event)
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1718,7 +1656,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     tool_call_id=event.call.tool_call_id,
                     show_tool_calls=show_tool_calls,
                 )
-                _track_stream_tool_completed(state, event, show_tool_calls=show_tool_calls, agent_name=agent_name)
+                state.tool_tracker.complete(event.call, origin=event.origin)
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1760,7 +1698,7 @@ async def _stream_agent_attempt_chunks(
         with bind_llm_request_log_context(**request_context):
             if pipeline_timing is not None:
                 pipeline_timing.mark_model_request()
-            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal, stream=True)
+            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal)
         events = stream_with_llm_request_log_context(run_events, request_context=request_context)
         chunks = _process_stream_events(
             events,
@@ -2004,11 +1942,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             if paused_attempt is None:
                 raise pause_without_approval_error(record, entity_label="agent")
-            for tool_event in _materialize_paused_agent_tool_events(
-                state,
-                paused_attempt.tools,
-                show_tool_calls=show_tool_calls,
-            ):
+            for tool_event in _materialize_paused_agent_tool_events(state, paused_attempt.tools):
                 _sync_live_turn_recorder()
                 yield tool_event
             yield AttemptResolved(

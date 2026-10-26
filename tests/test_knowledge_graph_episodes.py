@@ -17,6 +17,7 @@ from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
     RenderedEpisode,
     classify_thread,
+    is_evidence,
     newest_display_names,
     render_episodes,
 )
@@ -24,6 +25,7 @@ from mindroom.knowledge_graph.names import entity_names
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.tool_system.catalog import TOOL_METADATA
 
 if TYPE_CHECKING:
     from mindroom.knowledge_graph.store import EpisodeKind
@@ -289,6 +291,17 @@ def test_automation_thread_renders_nothing() -> None:
             ],
             id="shell-lookup",
         ),
+        # A graph edit through a shell echoes the facts and names it changed.
+        pytest.param(
+            [
+                _tool(
+                    "bash",
+                    "Deleted the fact 'Alice leads Atlas'.",
+                    command="mindroom-agent tools call knowledge_graph delete_graph_fact --json '{}'",
+                ),
+            ],
+            id="shell-edit",
+        ),
         # `think` and `analyze` return the model's own thoughts, not anything a tool observed.
         pytest.param([_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")], id="reasoning"),
         # A subagent's answer is another model's prose; its own tool results come in through its own session.
@@ -319,6 +332,12 @@ def test_graph_lookups_and_model_prose_are_never_rendered(tools: list[ToolExecut
     run = _run("r1", tools=tools)
 
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
+def test_no_knowledge_graph_function_is_evidence() -> None:
+    """Lookups return the graph's facts and edits echo the facts and names they changed, so none is new evidence."""
+    for name in TOOL_METADATA["knowledge_graph"].function_names:
+        assert not is_evidence(_tool(name, "Deleted the fact 'Alice leads Atlas'.", fact_id="f1")), name
 
 
 def test_long_tool_arguments_never_cut_off_the_result() -> None:

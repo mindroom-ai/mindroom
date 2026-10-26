@@ -227,8 +227,6 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
             embedder_provider_config["embedding_dims"] = resolved_embedder.dimensions
     elif embedder_provider == "ollama":
         embedder_provider_config["ollama_base_url"] = resolved_embedder.host
-    elif embedder_provider == "sentence_transformers" and resolved_embedder.dimensions is not None:
-        embedder_provider_config["embedding_dims"] = resolved_embedder.dimensions
 
     return {
         "embedder": embedder_config,

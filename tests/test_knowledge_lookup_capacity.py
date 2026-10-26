@@ -1,22 +1,22 @@
-"""Published metadata contention must not consume unrelated executor capacity."""
+"""Lookups waiting on a collection deletion must not consume unrelated executor capacity."""
 
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from contextvars import ContextVar
 from threading import Lock
 from typing import TYPE_CHECKING
 
 import pytest
-from chromadb.api.client import Client
-from chromadb.config import Settings
 
 from mindroom.knowledge import registry, utils
+from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.index_metadata import save_published_index_state, state_for_publication
+from mindroom.knowledge.vector_store import KnowledgeCollection
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config
+from tests.knowledge_test_support import _config, seed_collection
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -56,8 +56,7 @@ def published_metadata(
     runtime_paths = runtime_paths_for(config)
     key = registry.resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     storage = registry.published_index_storage_path(key)
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(storage))) as client:
-        client.create_collection("published")
+    seed_collection(KnowledgeCollection(path=storage, name="published"), [{"content": "one document"}])
     save_published_index_state(
         registry.published_index_metadata_path(key),
         state_for_publication(
@@ -77,7 +76,7 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
     published_metadata: tuple[Config, RuntimePaths, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Blocked metadata reads stay bounded and leave unrelated work runnable."""
+    """Lookups blocked behind a deletion's exclusive lock stay bounded and leave unrelated work runnable."""
     config, runtime_paths, storage = published_metadata
     requester: ContextVar[str] = ContextVar("lookup_requester", default="missing")
     started: list[str] = []
@@ -110,8 +109,9 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
                 active -= 1
 
     monkeypatch.setattr(utils, "get_published_index", lookup)
-    connection = sqlite3.connect(storage / "chroma.sqlite3")
-    connection.execute("BEGIN EXCLUSIVE")
+    # A deletion holds the exclusive lifetime lock that every lookup's existence probe shares.
+    deletion = ExitStack()
+    deletion.enter_context(collection_lifetime_lock(storage, exclusive=True))
     tasks: list[asyncio.Task[utils.KnowledgeBaseAccessResolution]] = []
     with ThreadPoolExecutor(max_workers=1) as executor:
         asyncio.get_running_loop().set_default_executor(executor)
@@ -134,6 +134,8 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
             await _wait_until(lambda: len(started) >= 1)
             assert await asyncio.wait_for(asyncio.to_thread(lambda: "available"), timeout=0.5) == "available"
             await _wait_until(lambda: len(started) == 4)
+            # An unblocked lookup finishes in milliseconds; these stay pending until the deletion releases its lock.
+            await asyncio.sleep(0.1)
             for task in tasks[4:]:
                 task.cancel()
             for task in tasks[4:]:
@@ -141,8 +143,7 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
                     await task
             assert not any(task.done() for task in tasks[:4])
         finally:
-            connection.rollback()
-            connection.close()
+            deletion.close()
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
     assert peak == 4

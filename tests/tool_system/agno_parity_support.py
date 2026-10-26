@@ -1,4 +1,4 @@
-"""Build registered tools the way the C3 tool goldens were captured from Agno 3.0.9, and read them as the goldens do.
+"""Build registered tools the way the tool goldens were captured from Agno 3.0.9, and read them as the goldens do.
 
 `tests/fixtures/agno_parity/README.md` describes the goldens.
 The capture used this same setup: one agent of a config shaped like `mindroom config init` output, dummy credentials
@@ -69,6 +69,7 @@ CONFIG = {
             "role": "Captures tool schemas.",
             "delegate_to": ["helper"],
             "knowledge_graph": True,
+            "knowledge_graph_edits": True,
         },
         "helper": {"display_name": "Helper", "role": "Helps with delegated work."},
     },

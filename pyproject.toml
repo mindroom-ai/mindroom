@@ -42,7 +42,7 @@ dependencies = [
   "mcp[cli]>=2.3,<3",
   "mdit-py-plugins>=0.5",
   # Owned to-device transport requires the durable NIO API.
-  "mindroom-nio[e2e]==1.1.6",
+  "mindroom-nio[e2e]==1.2",
   "ollama>=0.6.1",
   # 3.30 returns a streamed Chat Completions connection to the pool.
   "openai>=3.30",
@@ -336,6 +336,9 @@ newspaper = [
 ]
 notion = [
   "notion-client",
+]
+numpy = [
+  "numpy>=2",
 ]
 oauth_connections = []
 openai = [

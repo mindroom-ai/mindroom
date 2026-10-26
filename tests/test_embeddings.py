@@ -406,3 +406,29 @@ def test_mem0_openai_signature_does_not_guess_unknown_model_dimensions() -> None
         "",
         "1024",
     )
+
+
+@pytest.mark.asyncio
+async def test_local_embedding_does_not_need_the_shared_default_executor() -> None:
+    """Local embeds queue on their own thread, so a busy default executor does not hold up a knowledge search."""
+
+    class _Model:
+        def encode_query(self, text: str, *, normalize_embeddings: bool) -> np.ndarray:
+            del text, normalize_embeddings
+            return np.array([1.0, 0.0])
+
+        def encode_document(self, text: str, *, normalize_embeddings: bool) -> np.ndarray:
+            return self.encode_query(text, normalize_embeddings=normalize_embeddings)
+
+    embedder = local_embedder._SentenceTransformersEmbedder(client=_Model())
+    loop = asyncio.get_running_loop()
+    busy = ThreadPoolExecutor(1)
+    loop.set_default_executor(busy)
+    release = threading.Event()
+    blocked = loop.run_in_executor(None, release.wait)
+    try:
+        assert await asyncio.wait_for(embedder.aembed(["q"], purpose="query"), timeout=5) == [[1.0, 0.0]]
+    finally:
+        release.set()
+        await blocked
+        busy.shutdown()

@@ -222,11 +222,22 @@ Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 
-The top-level `timezone` setting (default `UTC`) controls how MindRoom interprets times in requests and displays scheduled times.
+The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](configuration/teams.md#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
+An unknown timezone name fails config validation.
 
 ```yaml
 timezone: America/Los_Angeles
+agents:
+  atlas:
+    display_name: Atlas
+    timezone: Europe/Amsterdam
 ```
+
+A schedule keeps the timezone it was created in: when `atlas` schedules "tomorrow at 9" with its `scheduler` tool, the task runs at 09:00 in Amsterdam, and later chat edits and listings use Amsterdam time too.
+The dashboard's Schedules page shows dates and times in the top-level timezone, while every recurring schedule's description names the timezone it is written in, such as `At 09:00 (Europe/Amsterdam)`.
+Schedules created before agents had their own timezone keep following the top-level setting.
 
 Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
 Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
@@ -291,7 +302,7 @@ agents:
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
-- `cron` is a five-field expression in the configured [timezone](#timezone).
+- `cron` is a five-field expression in the agent's [timezone](#timezone).
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
@@ -384,11 +395,11 @@ agents:
 ```
 
 1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
-2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
+2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks; an agent with [`knowledge_graph_edits`](knowledge-graph.md#letting-the-agent-fix-its-graph) is also asked to fix the mistakes it found in the graph.
 3. The agent answers the prompt like any message, with its own tools and [approval rules](tool-approval.md); a shared agent's call that needs approval is denied, because no person asked for the run, while a private agent's call waits in the thread until its requester answers or the request expires.
 4. When the run ends, MindRoom marks the thread resolved and adds its tool results to the graph; the agent's own summary is not added, and an interrupted run adds nothing.
 
-The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
+The prompt tells the agent to only read, apart from fixing its graph when it may edit it, and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
 The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 A turn whose message was redacted can still be listed until the agent next replies in that conversation.
 
@@ -401,5 +412,5 @@ A turn whose message was redacted can still be listed until the agent next repli
 | `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run, if people talked to the agent since |
 | `model` | the agent's model | A key of `models` to run the exploration with |
 
-Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`; for an agent with `knowledge_graph_edits`, its `{fix_step}` and `{fix_exception}` placeholders insert `EXPLORATION_FIX_STEP` and `EXPLORATION_FIX_EXCEPTION`, which are overridable too and start with their own separator, a line break and a comma.
 Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.

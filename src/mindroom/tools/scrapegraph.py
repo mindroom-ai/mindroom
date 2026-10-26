@@ -94,7 +94,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["scrapegraph-py"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/scrapegraph",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#scrapegraph",
     function_names=("crawl", "markdownify", "scrape", "searchscraper", "smartscraper"),
 )
 def scrapegraph_tools() -> type[ScrapeGraphTools]:

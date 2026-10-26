@@ -17,6 +17,7 @@ from psycopg.rows import dict_row
 
 from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
+    upgrade_hydration_walk_version,
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
 )
@@ -161,6 +162,12 @@ class PostgresBackend:
             )
             existing_tables = frozenset(str(row["table_name"]) for row in cursor.fetchall())
             upgrade_legacy_journal(_PostgresTransaction(cursor), existing_tables)
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'conversation_hydration'",
+            )
+            hydration_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
+            upgrade_hydration_walk_version(_PostgresTransaction(cursor), hydration_columns)
             cursor.execute(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema = current_schema() AND table_name = 'matrix_delivery_outbox'",

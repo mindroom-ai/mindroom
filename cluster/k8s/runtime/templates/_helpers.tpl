@@ -151,7 +151,7 @@ Quoted state PVC directories, as seen at /state, that the prepare-state-storage 
 {{- end -}}
 
 {{- /*
-Shared knowledge-base indexes live at <storage.mountPath>/knowledge_db; KnowledgeManager has no override for it.
+Knowledge-base indexes, private agents' included, live at <storage.mountPath>/knowledge_db; KnowledgeManager has no override for it.
 */ -}}
 {{- define "mindroom-runtime.knowledgeStorageMountPath" -}}
 {{- printf "%s/knowledge_db" (trimSuffix "/" (clean .Values.storage.mountPath)) -}}

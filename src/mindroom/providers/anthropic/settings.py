@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs
+from mindroom.providers.extra_kwargs import SECRET, reject_unsupported_extra_kwargs, settings_from_extra_kwargs
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -19,14 +19,20 @@ if TYPE_CHECKING:
 
 type ClaudeRouteKind = Literal["anthropic", "vertexai_claude", "bedrock_claude"]
 
-# The runtime env variable that sets a route's endpoint when its config sets none; the anthropic SDK alone reads
-# ``ANTHROPIC_BASE_URL``.
-ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {"vertexai_claude": "ANTHROPIC_VERTEX_BASE_URL"}
+# The runtime env variable that sets a route's endpoint when its config sets none.
+ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "vertexai_claude": "ANTHROPIC_VERTEX_BASE_URL",
+}
 
-# Kept as main behaves; a reply that reaches this cap is answered as cut off instead of run (the loop's policy).
+# TODO(simplify): a Claude reply whose model config sets no ``max_tokens`` stops at this fixed cap, and a reply that
+# reaches it is answered as cut off instead of run (the loop's policy). Default to the model's maximum or a documented
+# per-model default (#3113). Users would notice longer Claude replies.
 _DEFAULT_MAX_TOKENS = 8192
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past ten minutes unless the
 # client has an explicit timeout; 3600 s is the SDK's own ceiling for non-streaming operations.
+# TODO(simplify): every request streams, so the SDK guard this timeout satisfies no longer applies. Drop it for the
+# SDK's default timeout. Operators would notice the shorter default (#3119).
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 
 _COMMON_KEYS = frozenset(
@@ -49,6 +55,8 @@ _COMMON_KEYS = frozenset(
         "top_p",
     },
 )
+# The ``extra_kwargs`` keys each route's config may set. Bedrock's ``aws_profile`` names the AWS profile its boto3
+# ``session`` resolves, so it is no setting of its own.
 ACCEPTED_KEYS: dict[ClaudeRouteKind, frozenset[str]] = {
     "anthropic": _COMMON_KEYS | {"auth_token"},
     "vertexai_claude": _COMMON_KEYS | {"base_url", "project_id", "region"},
@@ -92,7 +100,6 @@ class ClaudeSettings:
     aws_secret_key: str | None = field(default=None, metadata=SECRET)
     aws_session_token: str | None = field(default=None, metadata=SECRET)
     aws_region: str | None = None
-    aws_profile: str | None = None
     session: Session | None = field(default=None, metadata=SECRET)
 
     def effective_thinking(self) -> Mapping[str, Any] | None:
@@ -123,8 +130,12 @@ def configured_anthropic_endpoint(client_params: Mapping[str, Any] | None) -> st
 
 
 def parse_claude_settings(route: ClaudeRouteKind, extra_kwargs: Mapping[str, Any] | None) -> ClaudeSettings:
-    """Parse authored ``extra_kwargs`` for one route, rejecting keys the route does not accept."""
-    return settings_from_extra_kwargs(ClaudeSettings, extra_kwargs, provider=route, accepted=ACCEPTED_KEYS[route])
+    """Parse one route's resolved ``extra_kwargs``, rejecting keys the route does not accept.
+
+    Bedrock resolves ``aws_profile`` into ``session`` first, so the profile reaches no settings field.
+    """
+    reject_unsupported_extra_kwargs(extra_kwargs, ACCEPTED_KEYS[route], provider=route)
+    return settings_from_extra_kwargs(ClaudeSettings, extra_kwargs, provider=route)
 
 
 __all__ = [

@@ -107,7 +107,6 @@ async def _catalog(
 ) -> agent_tool_calls.PreparedAgentToolCatalog:
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
-        agent_name="helper",
         run=RunContext(run_id="run", user_id="@alice:test", session=session),
         runtime_context=_runtime(tmp_path),
         store=None,
@@ -132,7 +131,6 @@ def test_a_catalog_cannot_be_built_for_a_run_without_a_session(tmp_path: Path) -
     """A run outside the session its catalog's checkpoints and delegations write fails at once."""
     with pytest.raises(TypeError, match="belongs to a session"):
         agent_tool_calls.PreparedAgentToolCatalog(
-            agent_name="helper",
             run=RunContext(run_id="run", session=UnstoredSession("session"), user_id="@alice:test"),
             runtime_context=_runtime(tmp_path),
             store=None,
@@ -204,7 +202,7 @@ async def test_a_failed_offloaded_cli_call_ends_as_that_calls_failure(tmp_path: 
     try:
         with job_control_context(JobControl()) if in_job else nullcontext():
             events = await _events(catalog, "threads", "offloading")
-        assert events[-1].kind == "failed"
+        assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
         assert "runner refused the call" in str(events[-1].call.result)
     finally:
         shared.shutdown(wait=False)
@@ -246,9 +244,9 @@ async def test_prepared_call_preserves_real_owner_context_and_middleware(tmp_pat
     assert catalog.run.session_state == {"changed": True}
     assert catalog.record is None
     assert get_tool_runtime_context() is None
-    descriptor = await catalog.describe(ToolKey("inspect", "inspect_binding"))
-    assert descriptor.instructions == ("Keep identity.",)
-    assert descriptor.input_schema["properties"] == {}
+    described = await catalog.bind(ToolKey("inspect", "inspect_binding"))
+    assert described.instructions == ("Keep identity.",)
+    assert described.function.parameters["properties"] == {}
 
 
 @pytest.mark.asyncio
@@ -294,9 +292,10 @@ async def test_sync_async_generators_media_and_generated_functions(tmp_path: Pat
         events = await _events(catalog, "ordinary", name, args)
         assert events[-1].kind == "completed"
         assert events[-1].call.result == expected
-    events = await _events(catalog, "ordinary", "media")
-    assert [event.kind for event in events] == ["started", "media", "completed"]
-    assert events[1].media.images[0].url == "https://example.org/image.png"
+    started, media, completed = await _events(catalog, "ordinary", "media")
+    assert (started.kind, completed.kind) == ("started", "completed")
+    assert isinstance(media, agent_tool_calls.AgentToolCallMedia)
+    assert media.media.images[0].url == "https://example.org/image.png"
     events = await _events(catalog, "agent", "search_knowledge_base", {"query": "binding"})
     assert events[-1].call.result == "Knowledge about binding"
     assert catalog.run.session_state["streamed"] is True
@@ -313,19 +312,19 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
 
     catalog = await _catalog(tmp_path, [_function(action)], max_tool_calls_per_turn=1)
     events = await _events(catalog, "actions", "action", {"value": "wrong"})
-    assert events[-1].kind == "failed"
+    assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
     assert seen == []
     events = await _events(catalog, "actions", "action", {"value": 1})
-    assert events[-1].kind == "completed"
+    assert (events[-1].kind, events[-1].call.is_error) == ("completed", False)
     events = await _events(catalog, "actions", "action", {"value": 2})
-    assert events[-1].kind == "failed"
+    assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
     assert seen == [1]
 
     for flag in ("requires_confirmation", "external_execution"):
         catalog = await _catalog(tmp_path, [_function(action, **{flag: True})])
-        events = await _events(catalog, "actions", "action", {"value": 3})
-        assert events[-1].kind == "waiting"
-        assert events[-1].requirement.tool_execution.tool_args == {"value": 3}
+        [waiting] = await _events(catalog, "actions", "action", {"value": 3})
+        assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
+        assert waiting.requirement.tool_execution.tool_args == {"value": 3}
     assert seen == [1]
     catalog = await _catalog(tmp_path, [_function(action, stop_after_tool_call=True)])
     events = await _events(catalog, "actions", "action", {"value": 4})
@@ -359,10 +358,10 @@ async def test_a_waiting_cli_call_keeps_its_function_s_approval_type_and_silence
         return value
 
     catalog = await _catalog(tmp_path, [_function(action, **flags)])
-    events = await _events(catalog, "actions", "action", {"value": 3})
+    [waiting] = await _events(catalog, "actions", "action", {"value": 3})
 
-    assert [event.kind for event in events] == ["waiting"]
-    stored = events[0].requirement.tool_execution.to_dict()
+    assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
+    stored = waiting.requirement.tool_execution.to_dict()
     expected = {**paused, "approval_type": "audit", "external_execution_silent": True, "tool_args": {"value": 3}}
     assert {key: stored[key] for key in expected} == expected
 
@@ -418,8 +417,8 @@ async def test_lazy_metadata_and_single_materialization(tmp_path: Path) -> None:
     assert catalog.metadata() == [{"toolkit": "lazy", "description": "Lazy operations", "deferred": True}]
     assert builds == []
     key = ToolKey("lazy", "action")
-    first, second = await asyncio.gather(catalog.describe(key), catalog.describe(key))
-    assert first == second
+    first, second = await asyncio.gather(catalog.bind(key), catalog.bind(key))
+    assert first is second
     assert first.instructions == ("Actual lazy instructions",)
     assert builds == [catalog.runtime_context]
     assert (await _events(catalog, "lazy", "action", {"value": 9}))[-1].call.result == "9"
@@ -600,9 +599,8 @@ async def test_a_brought_in_function_answers_to_its_own_tool_and_is_approved_und
         [_toolkit("implementation", action, instructions="Source guidance")],
         owners={"action": "authored_alias"},
     )
-    descriptor = await catalog.describe(ToolKey("implementation", "action"))
-    assert descriptor.instructions == ("Source guidance",)
     binding = await catalog.bind(ToolKey("implementation", "action"))
+    assert binding.instructions == ("Source guidance",)
     assert binding.approval_toolkit == "authored_alias"
     assert catalog.approved_binding("authored_alias", "action") is binding
     with pytest.raises(UnknownToolError, match="No toolkit 'authored_alias'"):
@@ -637,8 +635,7 @@ async def test_generator_failure_is_terminal_and_does_not_leak_context(tmp_path:
 
     catalog = await _catalog(tmp_path, [_toolkit("stream", broken)])
     events = await _events(catalog, "stream", "broken")
-    assert events[-1].kind == "failed"
-    assert events[-1].call.is_error
+    assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
     assert get_tool_runtime_context() is None
 
 
@@ -769,9 +766,9 @@ async def test_exact_native_confirmation_resumes_prepared_call(
 
     catalog = await _catalog(tmp_path, [_function(action, requires_confirmation=True)])
     binding = await catalog.bind(ToolKey("actions", "action"))
-    events = await _events(catalog, "actions", "action", {"value": 3})
-    requirement = events[-1].requirement
-    assert requirement is not None
+    [waiting] = await _events(catalog, "actions", "action", {"value": 3})
+    assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
+    requirement = waiting.requirement
     if approved:
         requirement.confirm()
     else:
@@ -786,7 +783,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(
         )
     ]
     assert seen == ([3] if approved else [])
-    assert resumed[-1].kind == ("completed" if approved else "failed")
+    assert (resumed[-1].kind, resumed[-1].call.is_error) == ("completed", not approved)
     assert approved or resumed[-1].call.result == denial
     assert binding.function.requires_confirmation is True
     for changed in (4, 3.0):

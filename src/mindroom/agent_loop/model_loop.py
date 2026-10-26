@@ -255,9 +255,8 @@ def _accept_turn(
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
     The provider stamped the message with the model that answered it. A request that answers without content, as the
-    adapters report a streamed turn without text, leaves the content as it was, so a resumed run keeps its paused text
-    until the model says something new. Empty content, which a reply that does not stream can carry, is blank text;
-    its member results tell blank text from none.
+    adapters report a turn without text, leaves the content as it was, so a resumed run keeps its paused text until the
+    model says something new.
     """
     metrics = state.record.metrics
     assert metrics is not None

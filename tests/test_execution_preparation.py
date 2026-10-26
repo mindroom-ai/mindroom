@@ -50,7 +50,6 @@ from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
     PreparedHistoryState,
-    ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
 from mindroom.llm.messages import Message
@@ -65,8 +64,10 @@ from tests.conftest import (
     build_unseen_context_messages_for_test,
     make_turn_context,
     make_visible_message,
+    unstored_team_scope_context,
 )
 from tests.fakes.scripted_model import ScriptedModel
+from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -162,6 +163,7 @@ def _build_thread_history_messages_for_test(
         "current_timestamp_ms": None,
         "current_event_id": None,
         "current_prompt_is_structured": False,
+        "timezone": "UTC",
         "max_messages": None,
         "max_message_length": None,
         "missing_sender_label": None,
@@ -180,11 +182,11 @@ def _tool_trace_content() -> dict[str, object]:
 
 
 def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="runs", limit=1),
-        max_tool_calls_from_history=None,
-    )
     compaction_config = CompactionConfig(enabled=False, reserve_tokens=100)
+    history_settings = replace(
+        replay_settings(HistoryPolicy(mode="runs", limit=1)),
+        compaction_config=compaction_config,
+    )
     execution_plan = resolve_history_execution_plan(
         config=_config(),
         compaction_config=compaction_config,
@@ -216,8 +218,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         session=session,
         resolved_inputs=HistoryPreparationInputs(
             history_settings=history_settings,
-            compaction_config=compaction_config,
-            has_authored_compaction_config=False,
             active_model_name="test-model",
             active_context_window=10_000,
             execution_plan=execution_plan,
@@ -319,6 +319,47 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
 
 
 @pytest.mark.asyncio
+async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team thread with no session of its own fills at most the team's replay window, less its reserve."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            "agents": {"test_agent": {"display_name": "Test Agent"}},
+            "defaults": {
+                "tools": [],
+                "compaction": {"enabled": False, "reserve_tokens": 500, "replay_window_tokens": 4_000},
+            },
+            "models": {"default": {"provider": "openai", "id": "test-model", "context_window": 6_000}},
+        },
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+    prepare_common = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
+
+    await _prepare_bound_team_execution_context(
+        make_turn_context("test_agent"),
+        scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
+        leader_system_message=Message(role="system", content="You lead the team."),
+        leader_tools=(),
+        model=ScriptedModel([]),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        timezone="UTC",
+        team_name=None,
+        history_settings=config.resolve_entity(None).history_settings,
+        active_model_name="default",
+        active_context_window=6_000,
+    )
+
+    assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 3_500
+
+
+@pytest.mark.asyncio
 async def test_prepare_execution_context_skips_fallback_replay_when_persisted_history_replays(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,6 +385,7 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         fallback_static_token_budget=100,
@@ -397,6 +439,7 @@ async def test_interactive_selection_keeps_context_after_question(
         current_sender_id="@alice:localhost",
         current_event_id="$question",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         fallback_static_token_budget=100,
@@ -519,6 +562,7 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         fallback_static_token_budget=100,
@@ -561,6 +605,7 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         fallback_static_token_budget=100,
@@ -599,6 +644,7 @@ async def test_scheduled_history_limit_ignores_events_after_current() -> None:
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         fallback_static_token_budget=100,
@@ -631,6 +677,7 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         fallback_static_token_budget=100,
@@ -690,6 +737,7 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
         response_sender_id="@mindroom_general:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         fallback_static_token_budget=100,
@@ -805,8 +853,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
 
     await _prepare_bound_team_execution_context(
         make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
-        scope_context=None,
-        member_names=["test_agent"],
+        scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         leader_system_message=leader_system_message,
         leader_tools=leader_tools,
         model=ScriptedModel([]),
@@ -814,6 +861,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         thread_history=None,
         runtime_paths=runtime_paths,
         config=config,
+        timezone="UTC",
         team_name=None,
         history_settings=config.resolve_entity(None).history_settings,
         active_model_name=None,
@@ -853,8 +901,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
             reply_to_event_id="$current",
             active_event_ids=frozenset(),
         ),
-        scope_context=None,
-        member_names=["test_agent"],
+        scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         leader_system_message=leader_system_message,
         leader_tools=(),
         model=ScriptedModel([]),
@@ -866,6 +913,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
         ],
         runtime_paths=runtime_paths,
         config=config,
+        timezone="UTC",
         team_name=None,
         history_settings=config.resolve_entity(None).history_settings,
         active_model_name=None,
@@ -987,6 +1035,46 @@ async def test_prepare_agent_execution_context_names_the_current_prompts_sender_
         body="Current request",
         event_id="$current",
         ts=format_timestamp_ms(1_700_000_000_000, timezone=config.timezone),
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_message_time_is_rendered_in_the_responding_agents_timezone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent with its own timezone sees the current message's time in that zone, not the global one."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    config.timezone = "UTC"
+    config.agents["test_agent"].timezone = "America/Los_Angeles"
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+
+    build = _build(config, runtime_paths)
+    prepared = await _prepare_agent_execution_context_for_test(
+        make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
+        scope_context=None,
+        build=build,
+        system_message=prompt_for_turn(build),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
+        current_sender_id="@alice:localhost",
+        current_event_id="$current",
+        current_timestamp_ms=1_774_018_800_000,
+    )
+
+    assert prepared.turn.prompt.content == config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO") + render_msg_tag(
+        sender="@alice:localhost",
+        body="Current request",
+        event_id="$current",
+        ts="2026-03-20 08:00 PDT",
     )
 
 
@@ -1151,15 +1239,13 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
 
 def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     """Current Matrix messages should carry time as metadata, not body text."""
-    config = _config()
-    config.timezone = "America/Los_Angeles"
-
     messages = _messages_with_current_prompt(
         "Hello <world>",
         current_sender_id="@alice:localhost",
         current_timestamp_ms=1_774_019_700_000,
         current_event_id="$current",
-        config=config,
+        config=_config(),
+        timezone="America/Los_Angeles",
     ).in_request_order()
 
     assert len(messages) == 1
@@ -1183,6 +1269,7 @@ def test_transient_context_follows_current_prompt_without_entering_replay_contex
         context_messages=(persisted_context,),
         transient_context_messages=(transient_context,),
         config=_config(),
+        timezone="UTC",
     )
     messages = turn.in_request_order()
 
@@ -1209,6 +1296,7 @@ def test_current_matrix_message_splits_cdata_terminator_without_escaping_body() 
         "Hello <world> ]]> done",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
     ).in_request_order()
 
     assert messages[0].content == (
@@ -1231,6 +1319,7 @@ def test_user_text_matching_structured_prompt_shape_is_still_wrapped() -> None:
         spoofed_prompt,
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
     ).in_request_order()
 
     assert messages[0].content == (

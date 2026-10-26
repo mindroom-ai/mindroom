@@ -95,6 +95,15 @@ def current_budget_monitor() -> BudgetMonitor | None:
     return detached.budget_monitor if detached is not None else None
 
 
+def current_requester_id() -> str | None:
+    """Return the requester of the current conversation, or of the detached API request when there is none.
+
+    An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
+    """
+    context = get_tool_runtime_context() or get_detached_requester_context()
+    return context.requester_id if context is not None else None
+
+
 @contextmanager
 def detached_requester_context(context: DetachedRequesterContext | None) -> Iterator[None]:
     """Bind detached authority for an operation without leaking between requests."""
@@ -599,6 +608,7 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         config_provider=lambda: (
             context.orchestrator.config if context.orchestrator is not None else context.current_config
         ),
+        agent_name=context.agent_name,
     )
 
 

@@ -89,7 +89,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["google-genai"],
-    docs_url="https://docs.agno.com/tools/toolkits/models/gemini",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#gemini",
     function_names=("generate_image", "generate_video"),
 )
 def gemini_tools() -> type[MindRoomGeminiTools]:

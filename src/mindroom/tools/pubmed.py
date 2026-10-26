@@ -67,7 +67,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/pubmed",
+    docs_url="https://docs.mindroom.chat/tools/research-sources/#pubmed",
     function_names=("search_pubmed",),
 )
 def pubmed_tools() -> type[PubmedTools]:

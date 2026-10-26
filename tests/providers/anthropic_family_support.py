@@ -7,13 +7,11 @@ documents the format. Request building, the pipeline stages, and normalization a
 
 from __future__ import annotations
 
-import json
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import httpx2
 import pytest
 from google.oauth2.credentials import Credentials
@@ -24,15 +22,19 @@ from mindroom.llm.provider import TurnCompleted
 from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider
 from tests.providers.golden_support import (
     Replay,
+    claude_stream_events,
     encoded_response,
     hide_provider_environment,
     httpx2_transport,
     replay_through_pipeline,
+    sse_response,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+    import httpx
 
     from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
     from tests.providers.golden_support import SentRequest, Wire
@@ -117,76 +119,16 @@ def claude_message(
     }
 
 
-def json_reply(
-    blocks: list[dict[str, Any]],
-    *,
-    stop_reason: str = "end_turn",
-    usage: dict | None = None,
-) -> httpx.Response:
-    """Return the non-streaming reply with ``blocks``."""
-    return httpx.Response(200, json=claude_message(blocks, stop_reason=stop_reason, usage=usage))
-
-
 def sse_reply(
     blocks: list[dict[str, Any]],
     *,
     stop_reason: str = "end_turn",
     usage: dict | None = None,
+    context_management: dict[str, Any] | None = None,
 ) -> httpx.Response:
-    """Stream the blocks the way the API does: a start event, deltas per block, the stop reason, the stop."""
-    final_usage = usage or CLAUDE_USAGE
-    events: list[dict[str, Any]] = [
-        {
-            "type": "message_start",
-            "message": claude_message([], stop_reason="end_turn", usage={**final_usage, "output_tokens": 1})
-            | {"stop_reason": None},
-        },
-    ]
-    for index, authored in enumerate(blocks):
-        # Popping the helper-only keys below must leave the caller's blocks reusable.
-        block = dict(authored)
-        kind = block["type"]
-        deltas: list[dict[str, Any]]
-        if kind == "text":
-            start: dict[str, Any] = {"type": "text", "text": ""}
-            deltas = [{"type": "text_delta", "text": block["text"]}]
-        elif kind == "thinking":
-            start = {"type": "thinking", "thinking": "", "signature": ""}
-            deltas = [
-                {"type": "thinking_delta", "thinking": block["thinking"]},
-                {"type": "signature_delta", "signature": block["signature"]},
-            ]
-        elif kind == "tool_use":
-            partial_json = block.pop("partial_json", None)
-            start = {**block, "input": {}}
-            deltas = [
-                {
-                    "type": "input_json_delta",
-                    "partial_json": json.dumps(block["input"]) if partial_json is None else partial_json,
-                },
-            ]
-        else:
-            # Other blocks arrive whole, unless the block names deltas of its own.
-            deltas = block.pop("deltas", [])
-            start = block
-        events.append({"type": "content_block_start", "index": index, "content_block": start})
-        events.extend({"type": "content_block_delta", "index": index, "delta": delta} for delta in deltas)
-        events.append({"type": "content_block_stop", "index": index})
-    events.append(
-        {
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": final_usage["output_tokens"]},
-        },
-    )
-    events.append({"type": "message_stop"})
-    return encoded_response(
-        {
-            "status": 200,
-            "headers": {"content-type": "text/event-stream"},
-            "sse": [{"event": event["type"], "data": event} for event in events],
-        },
-    )
+    """Stream the blocks the way the API does (``claude_stream_events``), with the context editing the response applied."""
+    message = claude_message(blocks, stop_reason=stop_reason, usage=usage)
+    return sse_response(claude_stream_events(message, context_management=context_management), named=True)
 
 
 def route_provider(route: str, tmp_path: Path, wire: Wire, **config: Any) -> ClaudeProvider:  # noqa: ANN401

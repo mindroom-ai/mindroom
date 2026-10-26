@@ -302,7 +302,7 @@ def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: P
 
 
 def test_status_reports_persisted_count_without_loading_collection(tmp_path: Path) -> None:
-    """Routine status endpoints should not load Chroma collection handles."""
+    """Routine status endpoints should not open knowledge collections."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -311,10 +311,10 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, indexed_count=4)
 
-    # Every knowledge collection handle opens its Chroma client through this one function.
+    # Every knowledge collection read or write opens its database file through this one method.
     with (
         patch(
-            "mindroom.knowledge.chroma_client._persistent_client",
+            "mindroom.knowledge.vector_store.KnowledgeCollection._connect",
             side_effect=AssertionError("collection should not open"),
         ),
         patch(
@@ -334,7 +334,7 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
 
 
 def test_status_does_not_probe_collection_availability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Status endpoints should report metadata without probing Chroma collection availability."""
+    """Status endpoints should report metadata without probing collection availability."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"

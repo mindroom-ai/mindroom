@@ -37,7 +37,7 @@ from mindroom.config.models import (
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
-from mindroom.config.validation import duplicate_items, validate_history_limit_choice
+from mindroom.config.validation import TimezoneName, duplicate_items, validate_history_limit_choice
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
@@ -302,6 +302,13 @@ class AgentConfig(BaseModel):
         default=None,
         description="Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
     )
+    knowledge_graph_edits: bool | None = Field(
+        default=None,
+        description=(
+            "Let this agent delete wrong facts and entities from its knowledge graph, merge duplicate entities, and "
+            "rewrite entity summaries"
+        ),
+    )
     model: str = Field(
         default="default",
         description="Configured model alias used for this agent's replies",
@@ -311,6 +318,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Cheaper model alias this agent may switch to, used by cold_cache",
         json_schema_extra=dashboard_hint(reference="model"),
+    )
+    timezone: TimezoneName | None = Field(
+        default=None,
+        description="IANA timezone for this agent's dates, times, and schedules; inherits the top-level timezone",
     )
     memory_backend: MemoryBackend | None = Field(
         default=None,

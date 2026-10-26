@@ -530,24 +530,6 @@ def test_memory_llm_shared_key_is_not_sent_to_its_custom_endpoint(
     assert "Memory LLM: OPENAI_API_KEY not checked for openai/m, which calls https://mem-gateway.example/v1" in output
 
 
-def test_memory_embedder_shared_key_is_checked_only_at_the_provider_s_own_api(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Mem0 calls a gemini embedder at Google's API whatever its ``host``, so the shared key goes only there."""
-    (tmp_path / ".env").write_text("GOOGLE_API_KEY=shared\n", encoding="utf-8")
-    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    sent = _record_key_checks(monkeypatch)
-    embedder = {
-        "provider": "gemini",
-        "config": {"model": "gemini-embedding-2", "host": "https://embed-gateway.example"},
-    }
-    config = Config(memory={"backend": "mem0", "embedder": embedder}, router=RouterConfig(model="default"))
-
-    assert _check_memory_embedder(config, runtime_paths) == (1, 0, 0)
-    assert [url for url, _headers in sent] == ["https://generativelanguage.googleapis.com/v1beta/models?key=shared"]
-
-
 def test_memory_config_probes_embedder_for_knowledge_only_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

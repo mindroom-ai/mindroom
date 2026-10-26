@@ -1,8 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""The tool side of the loop: the tools a run offers, and one assistant message's tool calls planned, run, and answered.
-
-Tool messages, tool executions, and the texts the model reads keep the shapes main stores and sends.
-"""
+"""The loop's tool side: the tools a run offers, and one assistant message's tool calls planned, run, and answered."""
 
 from __future__ import annotations
 

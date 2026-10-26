@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
@@ -34,23 +34,19 @@ from mindroom.history.replay import (
     plan_replay_that_fits,
     scope_visible_runs,
 )
-from mindroom.history.session_context import (
-    ScopeSessionContext,
-    has_named_member,
-    resolve_bound_team_scope,
-)
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
     read_scope_state,
     set_force_compaction,
 )
 from mindroom.history.summary_call import is_summary_timeout
-from mindroom.history.team_scope import ad_hoc_team_has_private_member
 from mindroom.history.types import (
     CompactionDecision,
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
     CompactionLifecycleStart,
+    CompactionLifecycleStatus,
+    CompactionMode,
     CompactionReplyOutcome,
     HistoryScope,
     HistoryScopeState,
@@ -70,8 +66,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.config.main import Config
-    from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
     from mindroom.history.summary_rows import Segment
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
@@ -120,8 +116,6 @@ class HistoryPreparationInputs:
     """Fully resolved policy/model/token inputs for one history preparation."""
 
     history_settings: ResolvedHistorySettings
-    compaction_config: CompactionConfig
-    has_authored_compaction_config: bool
     active_model_name: str
     active_context_window: int | None
     execution_plan: ResolvedHistoryExecutionPlan
@@ -284,7 +278,7 @@ async def prepare_scope_history(
             else execution_plan.hard_replay_budget_tokens
         )
         compaction_result = await _run_scope_compaction_with_lifecycle(
-            mode="manual" if state.force_compact_before_next_run else "auto",
+            mode=state.compaction_mode,
             session_id=session.session_id,
             scope=scope_context.scope,
             execution_plan=execution_plan,
@@ -402,7 +396,7 @@ type _ScopeCompactor = Callable[
 
 async def _run_scope_compaction_with_lifecycle(
     *,
-    mode: Literal["auto", "manual"],
+    mode: CompactionMode,
     session_id: str,
     scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,
@@ -434,7 +428,7 @@ async def _run_scope_compaction_with_lifecycle(
     # instead of the configured primary.
     serving_summary_model = execution_plan.compaction_model_name
 
-    async def _fail(status: Literal["failed", "timeout"], failure_reason: str) -> None:
+    async def _fail(status: CompactionLifecycleStatus, failure_reason: str) -> None:
         failure = CompactionLifecycleFailure(
             notice_event_id=notice_event_id,
             mode=mode,
@@ -664,10 +658,11 @@ def finalize_history_preparation(
     if pipeline_timing is not None:
         pipeline_timing.mark("replay_plan_start")
     resolved_inputs = prepared_scope_history.resolved_inputs
+    history_settings = resolved_inputs.history_settings
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=resolved_inputs.compaction_config,
-        has_authored_compaction_config=resolved_inputs.has_authored_compaction_config,
+        compaction_config=history_settings.compaction_config,
+        has_authored_compaction_config=history_settings.has_authored_compaction_config,
         active_model_name=resolved_inputs.active_model_name,
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
@@ -684,7 +679,6 @@ def finalize_history_preparation(
             reason=describe_compaction_unavailability(execution_plan),
         )
 
-    history_settings = resolved_inputs.history_settings
     session, scope = prepared_scope_history.session, prepared_scope_history.scope
     native_history = prepared_scope_history.native_history
     replay_estimator = prepared_scope_history.replay_estimator
@@ -753,14 +747,13 @@ def finalize_history_preparation(
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_bound_scope_history(
     *,
-    member_names: Sequence[str],
     model: ModelProvider,
     runtime_paths: RuntimePaths,
     config: Config,
     history_settings: ResolvedHistorySettings,
     static_prompt_tokens: int,
     non_prompt_tokens: int,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     team_name: str | None,
     active_model_name: str | None,
     active_context_window: int | None,
@@ -771,15 +764,9 @@ async def prepare_bound_scope_history(
     """Prepare one team-owned scope by compacting its persisted session before the run.
 
     ``model`` is the leader's provider, whose native compaction the scope may use, and ``history_settings`` the built
-    team's, which its replay plan follows. ``team_name`` is the configured team, or None for an ad hoc one.
+    team's, whose replay policy and compaction config the scope follows. ``team_name`` is the configured team, or None
+    for an ad hoc one.
     """
-    if scope_context is not None:
-        # A team without a named member has no history, whether or not its scope is open.
-        has_scope = has_named_member(member_names)
-    elif team_name is None and ad_hoc_team_has_private_member(member_names, config.agents):
-        has_scope = False
-    else:
-        has_scope = resolve_bound_team_scope(member_names=member_names, config=config, team_name=team_name) is not None
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         entity_name=team_name,
@@ -788,8 +775,6 @@ async def prepare_bound_scope_history(
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
-    if not has_scope:
-        return PreparedScopeHistory(scope=None, session=None, resolved_inputs=resolved_inputs)
     return await prepare_scope_history(
         model=model,
         resolved_inputs=resolved_inputs,
@@ -812,11 +797,11 @@ def resolve_entity_preparation_inputs(
     active_model_name: str | None,
     active_context_window: int | None,
 ) -> HistoryPreparationInputs:
-    """Resolve the compaction config, runtime model, and plan for one agent or team scope.
+    """Resolve the runtime model and plan for one agent or team scope.
 
-    ``history_settings`` are the ones the entity's build resolved, which the scope's replay follows.
+    ``history_settings`` are the ones the entity's build resolved, whose replay policy and compaction config the
+    scope follows.
     """
-    resolved_entity = config.resolve_entity(entity_name)
     runtime_model = config.resolve_runtime_model(
         entity_name=entity_name,
         active_model_name=active_model_name,
@@ -824,14 +809,12 @@ def resolve_entity_preparation_inputs(
     )
     return HistoryPreparationInputs(
         history_settings=history_settings,
-        compaction_config=resolved_entity.compaction_config,
-        has_authored_compaction_config=resolved_entity.has_authored_compaction_config,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
         execution_plan=resolve_history_execution_plan(
             config=config,
-            compaction_config=resolved_entity.compaction_config,
-            has_authored_compaction_config=resolved_entity.has_authored_compaction_config,
+            compaction_config=history_settings.compaction_config,
+            has_authored_compaction_config=history_settings.has_authored_compaction_config,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
             static_prompt_tokens=static_prompt_tokens,

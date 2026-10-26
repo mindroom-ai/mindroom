@@ -81,6 +81,9 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 | `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
 | `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
 
+Only the `openai` provider reads `api_key`, `credentials_service`, `query_prefix`, and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects a nonblank value in these fields for any other provider.
+Config load also rejects `dimensions` for `ollama` and `sentence_transformers`, which always return the model's full-size vectors.
+
 ```yaml
 memory:
   backend: mem0
@@ -141,6 +144,10 @@ The `openai` embedder takes its API key from the first of these that is set:
 
 Use `credentials_service` when the embedding endpoint needs a different key than chat, voice, or other OpenAI-compatible models.
 With no key at all, keyless local OpenAI-compatible endpoints still work, while a keyed endpoint fails with an authentication error.
+
+An Ollama server that requires a key gets `OLLAMA_API_KEY`.
+For knowledge bases, the knowledge graph, and semantic file-memory search, MindRoom reads it from the process environment, then the `.env` beside `config.yaml`.
+Mem0's own Ollama clients, for its embedder and an `ollama` memory LLM, read it only from the process environment.
 When the embedder rejects its credential, semantic memory search reports the cause in `memory` tool output and in the agent's prompt instead of returning empty results, and `/api/health` includes an `embedder` block until a request succeeds again.
 
 ### Memory LLM

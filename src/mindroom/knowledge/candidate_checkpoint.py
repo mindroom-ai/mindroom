@@ -17,6 +17,12 @@ Loading replays the journal over the snapshot; a torn trailing line from a
 crash is ignored. Compaction rewrites the snapshot and then removes the
 journal, and replaying an already-compacted journal is idempotent.
 
+A *seal* (``published_index_seal.json``, renamed ``retired_index_seal.json``
+once a later publication retires its collection) is a snapshot of one clean
+publication's final claims. Its collection holds exactly those claims, and
+nothing writes it while the seal exists: a refresh takes it over as the next
+candidate only by renaming the seal onto the candidate snapshot.
+
 The checkpoint never makes a candidate queryable: publication still goes
 through the published-index metadata, and a candidate is only ever resumed when
 its recorded identity and settings fingerprint match the current runtime.
@@ -42,6 +48,8 @@ _CANDIDATE_CHECKPOINT_SCHEMA_VERSION = 2
 
 _CANDIDATE_CHECKPOINT_FILENAME = "candidate_index.json"
 _CANDIDATE_JOURNAL_FILENAME = "candidate_index.jsonl"
+_PUBLISHED_SEAL_FILENAME = "published_index_seal.json"
+_RETIRED_SEAL_FILENAME = "retired_index_seal.json"
 
 #: ``(source_mtime_ns, source_size, source_content_digest)`` for one source file.
 #: The content digest is what makes resume safe across Git checkouts, which
@@ -92,6 +100,8 @@ class CandidateCheckpoint:
     failed: Mapping[str, CandidateFailure] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
+    #: Only seals rely on this: the rows the collection held when it was sealed.
+    row_count: int = 0
     #: Journal entries replayed when this checkpoint was loaded. Not persisted:
     #: it exists so a resumed run inherits the compaction bound instead of
     #: restarting the count and letting the journal grow without limit across
@@ -157,6 +167,7 @@ def _snapshot_payload(checkpoint: CandidateCheckpoint) -> dict[str, object]:
         },
         "created_at": checkpoint.created_at,
         "updated_at": checkpoint.updated_at,
+        "row_count": checkpoint.row_count,
     }
 
 
@@ -210,6 +221,7 @@ def _parse_snapshot(payload: Mapping[str, object]) -> CandidateCheckpoint | None
     total_files = payload.get("total_files")
     created_at = payload.get("created_at")
     updated_at = payload.get("updated_at")
+    row_count = payload.get("row_count")
     return CandidateCheckpoint(
         collection=collection,
         settings=settings,
@@ -220,6 +232,7 @@ def _parse_snapshot(payload: Mapping[str, object]) -> CandidateCheckpoint | None
         failed=failed,
         created_at=created_at if isinstance(created_at, str) else "",
         updated_at=updated_at if isinstance(updated_at, str) else "",
+        row_count=row_count if isinstance(row_count, int) and not isinstance(row_count, bool) else 0,
     )
 
 
@@ -266,16 +279,17 @@ def _apply_journal_entry(
         failed[relative_path] = failure
 
 
-def load_candidate_checkpoint(base_storage_path: Path) -> CandidateCheckpoint | None:
-    """Load the persisted candidate, replaying journal updates over the snapshot."""
-    snapshot_path = _candidate_checkpoint_path(base_storage_path)
+def _load_snapshot(snapshot_path: Path) -> CandidateCheckpoint | None:
     try:
         raw_payload = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else None
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(raw_payload, dict):
-        return None
-    checkpoint = _parse_snapshot(raw_payload)
+    return _parse_snapshot(raw_payload) if isinstance(raw_payload, dict) else None
+
+
+def load_candidate_checkpoint(base_storage_path: Path) -> CandidateCheckpoint | None:
+    """Load the persisted candidate, replaying journal updates over the snapshot."""
+    checkpoint = _load_snapshot(_candidate_checkpoint_path(base_storage_path))
     if checkpoint is None:
         return None
 
@@ -348,3 +362,39 @@ def delete_candidate_checkpoint(base_storage_path: Path) -> None:
     # authoritative snapshot available for a safe retry.
     _candidate_journal_path(base_storage_path).unlink(missing_ok=True)
     _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)
+
+
+def load_seals(base_storage_path: Path) -> dict[Path, CandidateCheckpoint | None]:
+    """Return each seal file present, with the claims it holds or None when it is unreadable."""
+    paths = (base_storage_path / _RETIRED_SEAL_FILENAME, base_storage_path / _PUBLISHED_SEAL_FILENAME)
+    return {path: _load_snapshot(path) for path in paths if path.exists()}
+
+
+def take_sealed_candidate(base_storage_path: Path, seal_path: Path) -> None:
+    """Make the sealed collection the candidate by renaming its seal onto the candidate snapshot.
+
+    Any candidate it replaces is retired first, snapshot before journal, so an
+    interruption leaves either that whole candidate or none, never a snapshot
+    that lost its journal.
+    """
+    _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)
+    _candidate_journal_path(base_storage_path).unlink(missing_ok=True)
+    seal_path.replace(_candidate_checkpoint_path(base_storage_path))
+
+
+def rotate_seals(base_storage_path: Path, *, retired: str | None, published: CandidateCheckpoint | None) -> str | None:
+    """Record one publication: retire the seal of the collection it replaced, then seal ``published`` if given.
+
+    Returns the replaced collection when it is still sealed, so it is kept for
+    the next refresh to resume.
+    """
+    published_seal = base_storage_path / _PUBLISHED_SEAL_FILENAME
+    sealed = _load_snapshot(published_seal)
+    kept = retired if sealed is not None and sealed.collection == retired else None
+    if kept is not None:
+        published_seal.replace(base_storage_path / _RETIRED_SEAL_FILENAME)
+    else:
+        published_seal.unlink(missing_ok=True)
+    if published is not None:
+        write_json_atomic(published_seal, _snapshot_payload(published))
+    return kept

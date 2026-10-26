@@ -15,7 +15,6 @@ from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.history.session_context import resolve_bound_team_scope
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
@@ -205,15 +204,18 @@ def materialize_team_members(
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    config: Config,
     configured_team_name: str | None,
     reason_prefix: str,
     active_model_names: Mapping[str, str],
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
 ) -> ResolvedExactTeamMembers:
-    """Materialize the exact requested team-member set from the live orchestrator without silent fallback."""
-    assert orchestrator.config is not None
+    """Materialize the exact requested team-member set under the turn's ``config`` without silent fallback.
+
+    The orchestrator says which shared agents are running now.
+    """
     materializable_agent_names = resolve_team_materializable_agent_names(
-        orchestrator.config,
+        config,
         resolve_live_shared_agent_names(orchestrator),
         allow_direct_private_agents=allow_direct_private_team_agents(
             execution_identity,
@@ -222,7 +224,7 @@ def materialize_team_members(
     )
     return materialize_exact_team_members(
         requested_team_agent_names(agent_names),
-        config=orchestrator.config,
+        config=config,
         runtime_paths=orchestrator.runtime_paths,
         execution_identity=execution_identity,
         materializable_agent_names=materializable_agent_names,
@@ -384,11 +386,13 @@ def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
 class BuiltTeam:
     """One team ready to run: its spec, its history settings, the tool-call policy the leader's own tools run under, and the team's jobs.
 
-    ``leader_jobs`` is the team as tool jobs see it while the instance runs them for a Matrix owner.
+    ``leader_jobs`` is the team as tool jobs see it while the instance runs them for a Matrix owner. ``timezone``
+    dates the turn: the leader's date line and the current message's time.
     """
 
     spec: TeamSpec
     history_settings: ResolvedHistorySettings
+    timezone: str
     leader_middleware: tuple[ToolMiddleware, ...]
     leader_jobs: JobActor | None
 
@@ -399,19 +403,20 @@ def build_team_spec(
     mode: TeamMode,
     config: Config,
     runtime_paths: RuntimePaths,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     execution_identity: ToolExecutionIdentity | None,
     model_name: str,
     configured_team_name: str | None,
+    timezone: str,
     system_enrichment: str = "",
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
-    The leader is named by the team's label (``materialized_team_label``) and identified by the team's history scope,
-    or by that label for a team that names no member and so has no scope. The leader prompt holds each member's
-    roster role, the leader's tool instructions in offer order, the provider family's note, and the date context with
-    ``system_enrichment`` appended; the team's own history settings and call budget come from the configured team
-    ``configured_team_name``, or the defaults when it is None for an ad hoc one.
+    The leader is named by the team's label (``materialized_team_label``) and identified by the history scope of
+    ``scope_context``. The leader prompt holds each member's roster role, the leader's tool instructions in offer
+    order, the provider family's note, and the date context in ``timezone`` with ``system_enrichment`` appended; the
+    team's own history settings and call budget come from the configured team ``configured_team_name``, or the
+    defaults when it is None for an ad hoc one.
     """
     model = provider_registry.build_model_provider(
         config,
@@ -421,16 +426,6 @@ def build_team_spec(
     )
     label = materialized_team_label(members.display_names)
     team_view = config.resolve_entity(configured_team_name)
-    if scope_context is not None:
-        team_id = scope_context.scope.scope_id
-    else:
-        scope = resolve_bound_team_scope(
-            member_names=members.requested_agent_names,
-            config=config,
-            team_name=configured_team_name,
-            execution_identity=execution_identity,
-        )
-        team_id = scope.scope_id if scope is not None else label
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
     team_members = tuple(
         _team_member(
@@ -443,7 +438,7 @@ def build_team_spec(
         for build in members.builds
     )
     leader = AgentSpec(
-        id=team_id,
+        id=scope_context.scope.scope_id,
         name=label,
         model=model,
         system_message=None,
@@ -451,7 +446,7 @@ def build_team_spec(
         max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
     )
     additional_context = appended_context(
-        render_date_context(config.timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
+        render_date_context(timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
         system_enrichment,
     )
     system_message = render_leader_system_message(
@@ -465,6 +460,7 @@ def build_team_spec(
     return BuiltTeam(
         spec=TeamSpec(leader=replace(leader, system_message=system_message), mode=mode, members=team_members),
         history_settings=team_view.history_settings,
+        timezone=timezone,
         leader_middleware=() if jobs is None else jobs.middleware,
         leader_jobs=None if jobs is None else jobs.actor,
     )

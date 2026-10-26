@@ -34,7 +34,7 @@ Other automation threads (`dreaming`, `prompt_curation`, plugin automations) are
 An automation turn inside an ordinary conversation thread adds no conversation lines, because its prompt is an automation's and not a person's, but its tool results are still ingested like any turn's.
 A thread's kind is derived from the trusted hook source of its root prompt (`automation/exploration`, other `automation/` sources, or none), not from a record written after the run, so ingestion classifies a thread correctly however early it reaches it.
 Context that hooks attach to a message (`<mindroom_message_context>`, such as location) is written by MindRoom, not the person, so ingestion strips it from every message and a message holding only that context adds no line.
-Calls to the `knowledge_graph` tool and their results, including lookups through a shell, are never ingested and never become leads, or extracted claims would return as fresh tool evidence; the `reasoning` tool's `think` and `analyze`, subagents', workflow participants', and Claude Code's answers, and results collected from background jobs, which no longer name the tool that produced them, are left out because they are or can be a model's prose.
+Calls to the `knowledge_graph` tool and their results, including lookups and edits through a shell, are never ingested and never become leads, or extracted claims would return as fresh tool evidence; the `reasoning` tool's `think` and `analyze`, subagents', workflow participants', and Claude Code's answers, and results collected from background jobs, which no longer name the tool that produced them, are left out because they are or can be a model's prose.
 Each message is joined onto one line, because Graphiti reads every dialogue line as a new speaker's, so a line break in someone's message cannot put words in another person's mouth.
 
 Every fact is an attributed claim, not a verified truth.
@@ -48,6 +48,34 @@ Search results return the kinds and origins of each fact's episodes, so the agen
 Rejected: a `record_evidence` tool the agent calls during exploration.
 It lets a model paraphrase, omit, or invent evidence, and its own summaries would then return as fresh evidence on later runs.
 
+### Agents may clean their graph, never write facts into it
+
+An agent reading its graph found many mistakes and had no way to fix them; the sections below record kinds that extraction makes, such as file paths as entities and one person under several entities.
+With `knowledge_graph_edits`, the `knowledge_graph` tool also deletes a fact, deletes an entity with its facts, merges a duplicate entity into another, which moves its facts with their sources, and rewrites an entity's summary.
+These edits only remove facts or move them between entities, so every remaining fact still comes from an episode and keeps its sources, and the rule above holds.
+A summary has no sources: Graphiti's model writes it from the entity's earlier summary and the facts and episodes that mention it, appending fact text while it is short and condensing it past 2,000 characters, so a deleted fact stays in it, and the agent that deleted the fact rewrites it.
+They are on by default, because an agent that reads its graph is the one that notices its mistakes and an operator should not have to clean graphs by hand; a shared agent's requesters, or a tool result that steers the agent, can then delete what other requesters' conversations added, so an operator who does not want that turns them off or requires approval for them.
+Edit calls and their results are never ingested, because they echo the graph's own facts.
+
+Rejected: rewriting a fact's text or dates, and renaming an entity.
+The agent would author the content while the fact kept sources that never said it, which is the `record_evidence` problem; a fact that changed is history that newer evidence supersedes, so the tool tells the agent to keep it.
+Rejected: edits by entity name or fact text, because names repeat, and same-name duplicates are what a merge fixes.
+Edits take ids, which lookups show only when edits are on, so read-only agents' lookups stay as short as before.
+Rejected: a separate edit tool listed in `tools`, because the lookups would still need to know about it to show ids.
+Rejected: also looking an entity up under its other configured names, so a lookup of the one name lists every duplicate; an agent's key, display name, and username often name something else, such as a company, which the lookup then offered for merging, and every exception, such as an alias that names another entity or an alias listed for an agent, needed a rule of its own.
+Rejected: clearing the summaries of a deleted fact's entities, which drops the condensed summary of a central entity for one wrong fact, and removing the fact's text from them, which misses the condensed ones that central entities have.
+
+Limitations: edits do not wait for ingestion, because an extraction takes about a minute and an agent's edit would wait for it.
+So an episode extracted into the same graph while an edit runs can recreate the entity the edit removed, and a change it makes meanwhile to the facts the edit touches, such as a source added to a fact being moved, can be lost; a merge lists the duplicate's facts again until none is new, so a whole new fact rarely is.
+A later episode that states a deleted fact again adds it back.
+The conversation in which the agent confirms a deletion is ingested too; a live probe on 2026-10-25 with GPT-6 Luna through Codex extracted a wrong fact, deleted it, and then extracted a conversation where the agent quoted it as deleted.
+In three such runs the wrong fact never came back; one run added the correction ("Alice never waters the plant") and a fact about the agent's deletion, which the built-in rule against an assistant's housekeeping did not stop.
+Naming graph edits in that rule was not tried, because the rule asks the model to extract the knowledge such housekeeping contains, which for a deletion is the deleted fact.
+A merge drops the duplicate's links from episodes to entities (Graphiti's `MENTIONS` edges), which MindRoom never reads; each fact's own sources stay.
+A merge cut off midway, for example when its reply is stopped, leaves the moved facts on both entities until the agent repeats it, which finishes it.
+A fact both entities held appears twice on the kept entity, each copy with its own sources, so deleting either copy deletes those sources.
+The kept entity keeps its summary until Graphiti rewrites it for the next episode that mentions the entity.
+
 ### Exploration runs as a visible automation turn
 
 Exploration reuses the automation runner: the check in code decides whether to run, and the run is a normal turn in a new thread, so tool execution keeps worker routing, credentials, file access, tool hooks, usage tracking, and the stop control.
@@ -60,7 +88,7 @@ Approval cards and the stop control need a visible thread, and the thread is the
 ### Exploration is a prompt, with the agent's own tools and approval rules
 
 An exploration turn is an ordinary turn started by a trusted automation prompt: the agent has its usual tools, and approval rules apply as in any turn, so a call that needs approval waits in the exploration thread for a private agent's requester, and a shared agent's is denied because no person asked for its run, which a live run on 2026-10-16 confirmed.
-The prompt asks the agent to only read and to stay within `max_tool_calls`; the agent's `max_tool_calls_per_turn` is the enforced limit, and approval rules are what stop writes, as for any turn that reads untrusted content.
+The prompt asks the agent to only read, apart from fixing its own graph when `knowledge_graph_edits` allows it, and to stay within `max_tool_calls`; the agent's `max_tool_calls_per_turn` is the enforced limit, and approval rules are what stop writes, as for any turn that reads untrusted content.
 
 Rejected: restricting exploration turns in code with an operator allowlist, hidden approval-gated functions, and a per-thread call cap.
 Every capability that runs or defers work beside a turn's own tool list became a way around the allowlist: background jobs, skills, knowledge search, delegation, and the OAuth MCP `call_tool` dispatcher, which reaches any remote tool by name.
@@ -108,7 +136,7 @@ Graphiti reads a type model's docstring as the type's description, so the docstr
 With `Entity` excluded, Graphiti removes it from the list of types the extractor is asked to choose from, and drops a node whose type id falls outside that list.
 Keeping paths and URLs out is what the docstrings and the instructions aim for, not something the exclusion guarantees, so each docstring says what does not belong to its type.
 When the edge extractor names an endpoint that is not in the extracted node list, Graphiti's `materialize_dangling_endpoint_node` saves it as a node labelled only `Entity` and never checks `excluded_entity_types` on that path; its own comment says this happens especially for value-like endpoints, for example `openclaw -> EDITED -> config.yaml`.
-Such untyped nodes can still appear, and MindRoom does not clean them up yet.
+Such untyped nodes can still appear; MindRoom does not clean them up itself, and an agent with `knowledge_graph_edits` can delete them.
 The instructions ask for one full name per entity, keep paths, source files, URLs, environment variables, configuration keys, commit hashes, branch names, command lines, and log files inside the facts that use them, and date each fact by when it happened or held rather than when it was discussed.
 They reach only the node and edge extraction prompts, not entity deduplication or summaries.
 Existing graphs keep their old nodes; only new episodes follow the types.
@@ -150,7 +178,7 @@ Entities that share a name are listed once, and an alias that another listed ent
 `custom_extraction_instructions` reach only Graphiti's node and edge extraction prompts, which is where names are chosen.
 They are joined as the built-in rules, then the operator's `knowledge_graph.extraction_instructions`, then the episode's names, so the operator's text reads as a continuation of the rules and everything before the names is the same for every episode.
 The built-in rule that keeps an assistant's own activity out named the old `agent <name>` label; it now points at the speakers the list marks as agents, a wording change made after that rule's measurements and not measured again.
-`graph_entity` tries the name as asked when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay.
+`graph_entity` tries the name as asked when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay, and an agent with `knowledge_graph_edits` sees one listed with its id when it looks up the name it was extracted under, and can merge it.
 
 Rejected: matching entries against display names.
 An earlier attempt matched an entry on every name a speaker went by, so an entry fixing a first-name duplicate could list the first name, which was also the speaker's display name.

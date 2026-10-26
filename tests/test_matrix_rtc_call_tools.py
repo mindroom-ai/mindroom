@@ -30,7 +30,7 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelP
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -70,6 +70,7 @@ from tests.authorization_helpers import (
 from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -166,7 +167,7 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
         ),
         prompt=PromptSpec(role=role, instructions=()),
         request_template=ModelRequest(messages=()),
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        history_settings=replay_settings(),
         store=None,
         surface=AgentSurface(
             mode="standard",
@@ -837,9 +838,8 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
 
     async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
         calls.append((turn, kwargs))
-        on_attempt_start = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
-        on_attempt_start("call-run-1", "default")
         recorder = kwargs["turn_recorder"]
+        recorder.set_run_id("call-run-1")  # type: ignore[union-attr]
         recorder.record_completed(  # type: ignore[union-attr]
             run_metadata={"model": "same-chat-model"},
             assistant_text="It is sunny.",
@@ -982,9 +982,8 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     )
 
     async def cancel_before_playout(_turn: ResponseTurnContext, **cancel_kwargs: object) -> str:
-        on_attempt_start = cast("Callable[[str, str], None]", cancel_kwargs["on_attempt_start"])
-        on_attempt_start("call-run-2", "default")
         recorder = cancel_kwargs["turn_recorder"]
+        recorder.set_run_id("call-run-2")  # type: ignore[union-attr]
         recorder.record_interrupted(  # type: ignore[union-attr]
             run_metadata={"model": "same-chat-model"},
             assistant_text="generated but never spoken",

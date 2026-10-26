@@ -669,7 +669,7 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
             metadata = catalog.metadata()
             assert any(item["toolkit"] == "calculator" and item.get("deferred") for item in metadata)
             binding = await catalog.bind(ToolKey("calculator", "add"))
-            assert binding.catalog.agent_name == "helper"
+            assert binding.catalog.runtime_context.agent_name == "helper"
             assert binding.function.name == "add"
             assert any(item["toolkit"] == "duckduckgo" and item.get("deferred") for item in catalog.metadata())
         finally:

@@ -47,6 +47,24 @@ def test_missing_model_api_key_provider_honors_model_credentials(tmp_path: Path)
     ]
 
 
+def test_a_gemini_model_on_vertex_ai_needs_no_google_key(tmp_path: Path) -> None:
+    """``GOOGLE_GENAI_USE_VERTEXAI`` in ``.env`` moves every Gemini model to Vertex AI, which authenticates without one."""
+    config = Config(models={"default": ModelConfig(provider="gemini", id="gemini-3.8-flash")})
+    gemini_api = test_runtime_paths(tmp_path / "gemini-api")
+    (tmp_path / "vertex").mkdir()
+    (tmp_path / "vertex" / ".env").write_text("GOOGLE_GENAI_USE_VERTEXAI=true\n", encoding="utf-8")
+    vertex = test_runtime_paths(tmp_path / "vertex")
+
+    assert missing_model_api_key_provider(config, gemini_api, "default") == "google"
+    assert missing_model_api_key_provider(config, vertex, "default") is None
+    enterprise = ModelConfig(
+        provider="gemini",
+        id="gemini-3.8-flash",
+        extra_kwargs={"client_params": {"enterprise": True}},
+    )
+    assert missing_model_api_key_provider(Config(models={"default": enterprise}), gemini_api, "default") is None
+
+
 def test_model_config_rejects_api_key_in_both_fields_without_echoing_keys() -> None:
     """Two configured keys would leave one unused, and the error must not print either."""
     model = {"provider": "openai", "id": "model", "api_key": "sk-secret1", "extra_kwargs": {"api_key": "sk-secret2"}}

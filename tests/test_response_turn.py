@@ -209,6 +209,7 @@ def _load_scope_factory(log: _AdapterLog) -> Callable[[], ScopeSessionContext]:
             storage=Mock(spec=ConversationStore),
             session=None,
             session_id="session-1",
+            storage_factory=lambda: Mock(spec=ConversationStore),
         )
         return log.scope
 
@@ -560,9 +561,9 @@ async def test_blocking_scope_session_loads_off_event_loop() -> None:
     event_loop_thread = threading.get_ident()
     load_threads: list[int] = []
 
-    def _load_scope() -> ScopeSessionContext | None:
+    def _load_scope() -> ScopeSessionContext:
         load_threads.append(threading.get_ident())
-        return None
+        return _load_scope_factory(log)()
 
     async def _attempt(
         _run: TurnRunState,
@@ -590,9 +591,9 @@ async def test_streaming_scope_session_loads_off_event_loop() -> None:
     event_loop_thread = threading.get_ident()
     load_threads: list[int] = []
 
-    def _load_scope() -> ScopeSessionContext | None:
+    def _load_scope() -> ScopeSessionContext:
         load_threads.append(threading.get_ident())
-        return None
+        return _load_scope_factory(log)()
 
     async def _attempt(
         _run: TurnRunState,
@@ -623,12 +624,12 @@ async def test_cancel_during_scope_load_waits_for_the_load() -> None:
     allow_enter = threading.Event()
     loaded = threading.Event()
 
-    def _load_scope() -> ScopeSessionContext | None:
+    def _load_scope() -> ScopeSessionContext:
         enter_started.set()
         if not allow_enter.wait(timeout=5):
             pytest.fail("scope load was never released")
         loaded.set()
-        return None
+        return _load_scope_factory(log)()
 
     async def _unexpected_attempt(
         _run: TurnRunState,
@@ -717,6 +718,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
             storage=storage,
             session=_stored_session(),
             session_id="session-1",
+            storage_factory=lambda: storage,
         )
 
     attempt_history: list[list[str | None]] = []
@@ -792,6 +794,7 @@ async def test_history_cleanup_repeats_until_a_pass_removes_nothing_new(monkeypa
         storage=Mock(spec=ConversationStore),
         session=ConversationSession(session_id="session-1", kind="agent", owner_id="general"),
         session_id="session-1",
+        storage_factory=lambda: Mock(spec=ConversationStore),
     )
 
     await response_turn_module._remove_history_of_redacted_events(

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.constants import runtime_env_path
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials as GoogleCredentials
+
+    from mindroom.constants import RuntimePaths
 
 _GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
@@ -39,7 +42,7 @@ def load_ambient_google_credentials() -> tuple[GoogleCredentials, str | None]:
     return cast("GoogleCredentials", credentials), project_id
 
 
-def load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
+def _load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
     """Load Google ADC credentials for Vertex-backed model clients."""
     if not Path(credentials_path).is_file():
         msg = (
@@ -66,3 +69,17 @@ def load_google_application_credentials(credentials_path: str) -> GoogleCredenti
     except Exception as exc:
         msg = f"Failed to load GOOGLE_APPLICATION_CREDENTIALS at {credentials_path}: {exc}"
         raise _GoogleApplicationCredentialsError(msg) from exc
+
+
+def with_runtime_application_credentials(kwargs: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Return a Vertex model's settings with the runtime ``GOOGLE_APPLICATION_CREDENTIALS`` in their ``client_params``.
+
+    Credentials ``client_params`` already set win, and without the variable the settings come back unchanged, so the
+    route falls back to Application Default Credentials.
+    """
+    client_params = kwargs.get("client_params") or {}
+    credentials_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+    if "credentials" in client_params or credentials_path is None:
+        return kwargs
+    credentials = _load_google_application_credentials(str(credentials_path))
+    return {**kwargs, "client_params": {**client_params, "credentials": credentials}}

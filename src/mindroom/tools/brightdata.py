@@ -95,7 +95,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/brightdata",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#brightdata",
     function_names=("get_screenshot", "scrape_as_markdown", "search_engine", "web_data_feed"),
 )
 def brightdata_tools() -> type[BrightDataTools]:

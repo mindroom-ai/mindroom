@@ -19,6 +19,7 @@ type IndependentUsageKind = Literal[
     "memory_auto_flush",
     "memory_extraction",
     "dynamic_workflow",
+    "knowledge_chunk_context",
     "knowledge_graph",
     "live_voice",
     "realtime_voice",

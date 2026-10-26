@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from functools import partial
+from typing import TYPE_CHECKING
 
 import httpx
 import ollama
 import pytest
 
+import mindroom.embeddings.ollama_embedder as ollama_embedder_module
+from mindroom.config.main import Config
 from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
     EMBEDDER_UNREACHABLE_DETAIL,
@@ -17,8 +20,13 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
     extract_classified_embedder_detail,
 )
+from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.ollama_embedder import OllamaEmbedder
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
+from tests.conftest import bind_runtime_paths, test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _Reply = list[list[float]] | Exception | httpx.Response
 
@@ -100,6 +108,44 @@ def test_ollama_embedder_reports_an_http_error_by_its_status(status_code: int, t
         asyncio.run(embedder.aembed(["text"], purpose="query"))
     assert str(excinfo.value) == f"embedder request failed (HTTP {status_code})"
     assert embedder_failure_is_transient(excinfo.value) is transient
+
+
+@pytest.mark.parametrize(
+    ("env_file", "authorization"),
+    [("OLLAMA_API_KEY=env-key\n", "Bearer env-key"), ("", None)],
+    ids=["env_file_key", "no_key"],
+)
+def test_configured_ollama_embedder_sends_the_runtime_env_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_file: str,
+    authorization: str | None,
+) -> None:
+    """``OLLAMA_API_KEY`` in the ``.env`` beside ``config.yaml`` authenticates the configured Ollama embedder."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {"models": {}, "memory": {"embedder": {"provider": "ollama", "config": {"model": "nomic-embed-text"}}}},
+        ),
+        runtime_paths,
+    )
+    authorizations: list[str | None] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        authorizations.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"model": "nomic-embed-text", "embeddings": [[0.5]]})
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(ollama_embedder_module, "Client", partial(ollama.Client, transport=transport))
+    monkeypatch.setattr(ollama_embedder_module, "AsyncClient", partial(ollama.AsyncClient, transport=transport))
+    embedder = create_configured_embedder(config, runtime_paths)
+
+    embedder.embed(["document"], purpose="document")
+    asyncio.run(embedder.aembed(["query"], purpose="query"))
+
+    assert authorizations == [authorization, authorization]
 
 
 @pytest.mark.asyncio

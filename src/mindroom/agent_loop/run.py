@@ -16,7 +16,7 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
 from mindroom.agent_loop.tools import PreparedTools
@@ -37,13 +37,41 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.events import RunEvent
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.tool_system.tool_function import ToolkitClose
 
 logger = get_logger(__name__)
 
 type Persist[R] = Callable[[R], Awaitable[None]]
+
+
+class _StartedRunFields(TypedDict):
+    """What every run record starts with, an agent's or a team's: its run, session, requester, model, and metadata."""
+
+    run_id: str
+    session_id: str
+    parent_run_id: str | None
+    user_id: str | None
+    model: str
+    model_provider: str
+    metrics: RunMetrics
+    metadata: dict[str, Any] | None
+
+
+def started_run_fields(ctx: RunContext, model: ModelProvider, *, metadata: dict[str, Any] | None) -> _StartedRunFields:
+    """Return the fields of the record a run in ``ctx`` on ``model`` starts with, storing ``metadata``."""
+    identity = model.identity
+    return _StartedRunFields(
+        run_id=ctx.run_id,
+        session_id=ctx.session_id,
+        parent_run_id=ctx.parent_run_id,
+        user_id=ctx.user_id,
+        model=identity.id,
+        model_provider=identity.provider,
+        metrics=RunMetrics(),
+        metadata=metadata,
+    )
 
 
 class ApprovedCall(Protocol):
@@ -84,16 +112,8 @@ def run_agent(
     content is the exception's text when the model had said nothing, then re-raises. The ``ERROR`` record's
     ``error`` holds the exception's text with credentials redacted.
     """
-    identity = spec.model.identity
     record = RunRecord(
-        run_id=ctx.run_id,
-        session_id=ctx.session_id,
-        parent_run_id=ctx.parent_run_id,
-        user_id=ctx.user_id,
-        model=identity.id,
-        model_provider=identity.provider,
-        metrics=RunMetrics(),
-        metadata=metadata,
+        **started_run_fields(ctx, spec.model, metadata=metadata),
         agent_id=spec.id,
         agent_display_name=spec.name,
     )
@@ -130,8 +150,7 @@ def resume_agent(
     an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
     ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
     events; denied calls answer with their reason, or the default note when it is None or empty; external results
-    answer as they are. The requests stream (``resume_request_template``). The returned stream ends as
-    ``run_agent``'s does.
+    answer as they are. The returned stream ends as ``run_agent``'s does.
     """
     plan = plan_resume(spec, paused, approved=approved, denied=denied, external_results=external_results)
     return resume_planned(
@@ -183,7 +202,7 @@ def resume_planned(
 ) -> AsyncIterator[RunEvent]:
     """Run a planned resume: answer the decided calls, then continue the loop over ``messages``.
 
-    The run's context is ``context`` of the planned record's run id. The requests stream (``resume_request_template``).
+    The run's context is ``context`` of the planned record's run id.
     """
     return drive_run(
         spec,
@@ -192,21 +211,9 @@ def resume_planned(
         ctx=context(plan.record.run_id),
         hooks=hooks,
         persist=persist,
-        template=resume_request_template(request_template),
+        template=request_template,
         resumed=plan.decided,
     )
-
-
-def resume_request_template(template: ModelRequest) -> ModelRequest:
-    """Return the template a resume's requests use: ``template``, streaming.
-
-    ``resume_planned`` and the team runtime's ``continue_team`` apply it, so every resume of an agent, a team, or a
-    team member streams, an approval's and a delegation's continuation alike.
-    """
-    # TODO(simplify): a resume streams even when the run it continues did not. Resume with the run's own template,
-    # which removes this function. Models and providers would notice: such a resume would send non-streaming
-    # requests and hand a team leader its members' results as a non-streaming run does.
-    return replace(template, stream=True)
 
 
 def check_approved_tools_offered(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> None:
@@ -361,8 +368,9 @@ async def drive_run[R: AnyRunRecord](
         await _store_interrupted(record, messages, started, persist, error=error)
         raise
     else:
-        # Reported before the toolkits close, kept as main behaves. A consumer that reads the end of the stream, such
-        # as a delegation's, still waits through a slow close, such as a stdio MCP server's exit.
+        # Reported before the toolkits close, so a consumer handles the finished run before a slow close, such as a
+        # stdio MCP server's exit, begins; one that reads the end of the stream, such as a delegation's, still waits
+        # through it.
         yield RunFinished(record)
     finally:
         await close_toolkits(closes)
@@ -380,7 +388,7 @@ async def _store_interrupted[R: AnyRunRecord](
 
     Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
     run records its ``failure_text`` in ``error``, redacted, which is what its caller reports; its stored content is
-    that text only when its model said nothing, kept as main stores it. The store finishes even if the waiter is
+    that text only when its model said nothing. The store finishes even if the waiter is
     cancelled again, so a record the caller writes for the same run afterwards is never overwritten by this one.
     """
     if error is None:
@@ -448,7 +456,7 @@ __all__ = [
     "plan_resume",
     "resume_agent",
     "resume_planned",
-    "resume_request_template",
     "resumed_record",
     "run_agent",
+    "started_run_fields",
 ]

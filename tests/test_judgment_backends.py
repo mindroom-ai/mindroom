@@ -190,18 +190,13 @@ async def test_backends_share_capacity_and_cancellation_releases_it(
 
 def _gemini_config(respond: Callable[[httpx.Request], httpx.Response], *, vertexai: bool) -> Config:
     """Return a config whose ``cheap`` model is Gemini 3.8 Flash answering through ``respond``."""
-    extra_kwargs: dict[str, object] = {
-        "client_params": {
-            "http_options": {"httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))},
-        },
+    client_params: dict[str, object] = {
+        "http_options": {"httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))},
     }
+    extra_kwargs: dict[str, object] = {"client_params": client_params}
     if vertexai:
-        extra_kwargs |= {
-            "vertexai": True,
-            "project_id": "test-project",
-            "location": "us-central1",
-            "credentials": Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
-        }
+        client_params["credentials"] = Credentials(token="test-token")  # noqa: S106 - synthetic SDK credential
+        extra_kwargs |= {"vertexai": True, "project_id": "test-project", "location": "us-central1"}
     model = ModelConfig(
         provider="google",
         id="gemini-3.8-flash",
@@ -265,7 +260,7 @@ async def test_llm_decision_request_offers_no_tools_and_disables_provider_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The decision is one non-streaming request with tool choice none, sent while provider tools are disabled."""
+    """The decision is one request with tool choice none, sent while provider tools are disabled."""
     disabled: list[bool] = []
 
     async def observe() -> None:
@@ -289,7 +284,7 @@ async def test_llm_decision_request_offers_no_tools_and_disables_provider_tools(
     assert disabled == [True]
     assert not provider_tools_disabled()
     [request] = judge.requests
-    assert (request.tools, request.tool_choice, request.stream) == ((), "none", False)
+    assert (request.tools, request.tool_choice) == ((), "none")
     assert [message.role for message in request.messages] == ["system", "user"]
 
 

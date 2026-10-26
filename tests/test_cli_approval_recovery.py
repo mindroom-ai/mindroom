@@ -308,7 +308,6 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            execution_identity=identity,
             tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
             decisions={"switch": True},
             denial_reasons={"switch": None},
@@ -809,7 +808,6 @@ async def _checkpointed_batch(
         metadata={"agent_mode": "minimal"},
     )
     catalog = PreparedAgentToolCatalog(
-        agent_name="helper",
         run=RunContext(
             run_id="saved-run",
             user_id=runtime.requester_id,
@@ -1079,14 +1077,12 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             recovered.ctx,
             recovered.presentation,
             prompt=recovered.prompt,
-            show_tool_calls=continuation.show_tool_calls,
             reusable_build=recovered.reusable_build,
             initial_continuation_count=recovered.initial_continuation_count,
             delegation_depth=recovered.delegation_depth,
             media=MediaInputs(images=recovered.media.images),
             config=runtime.config,
             runtime_paths=runtime.runtime_paths,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
             knowledge=None,
             refresh_scheduler=None,
             tool_trace_collector=[],
@@ -1230,7 +1226,6 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
         return await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            execution_identity=identity,
             tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
             decisions={"search-id": True},
             denial_reasons={"search-id": None},
@@ -1343,7 +1338,6 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace if saved_trace else ()),
-            execution_identity=identity,
             tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
             decisions={call_id: True},
             denial_reasons={call_id: None},

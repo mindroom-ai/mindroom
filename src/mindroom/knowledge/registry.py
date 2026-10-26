@@ -22,11 +22,11 @@ from mindroom.knowledge.index_metadata import (
 )
 from mindroom.knowledge.indexing_config import (
     IndexingSettings,
-    chroma_collection_exists,
     indexing_settings_key,
     published_index_settings_compatible,
     storage_key_for_base,
 )
+from mindroom.knowledge.vector_store import KnowledgeCollection
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 from mindroom.tool_system.dependencies import ensure_optional_deps
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge.read_proxy import ChromaReadProxy
+    from mindroom.knowledge.index_reader import PublishedIndexReader
     from mindroom.runtime_resolution import ResolvedKnowledgeBinding
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -79,7 +79,7 @@ class _PublishedIndexHandle:
     """Read handle for the published knowledge index."""
 
     key: PublishedIndexKey
-    reader: ChromaReadProxy
+    reader: PublishedIndexReader
     state: PublishedIndexState
     metadata_path: Path
     embedder_client_signature: str | None = None
@@ -366,12 +366,12 @@ def _build_published_index_reader(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> ChromaReadProxy:
-    from mindroom.knowledge.read_proxy import ChromaReadProxy  # noqa: PLC0415
+) -> PublishedIndexReader:
+    from mindroom.knowledge.index_reader import PublishedIndexReader  # noqa: PLC0415
 
-    # The read worker imports Chroma, which an upgrade may have removed since the index was built.
-    ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
-    return ChromaReadProxy(
+    # Searching needs numpy, which installs on first use.
+    ensure_optional_deps(["numpy"], "numpy", runtime_paths)
+    return PublishedIndexReader(
         collection_name=_state_collection_name(state),
         path=str(published_index_storage_path(key)),
         embedder=create_configured_embedder(config, runtime_paths),
@@ -380,11 +380,11 @@ def _build_published_index_reader(
 
 
 def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
-    """Return whether persisted metadata points at an existing Chroma collection."""
+    """Return whether persisted metadata points at an existing collection."""
     if state.status != "complete" or state.collection is None:
         return False
     try:
-        return chroma_collection_exists(published_index_storage_path(key), state.collection)
+        return KnowledgeCollection(path=published_index_storage_path(key), name=state.collection).exists()
     except Exception:
         logger.warning(
             "Published knowledge collection existence check failed",
@@ -473,7 +473,7 @@ def _load_queryable_index_from_state(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> ChromaReadProxy | None:
+) -> PublishedIndexReader | None:
     if not _published_index_state_queryable(key, state):
         return None
     reader = _build_published_index_reader(key, state, config=config, runtime_paths=runtime_paths)
@@ -574,7 +574,7 @@ def get_published_index(
 def _publish_knowledge_index(
     key: PublishedIndexKey,
     *,
-    reader: ChromaReadProxy,
+    reader: PublishedIndexReader,
     state: PublishedIndexState,
     metadata_path: Path | None = None,
     embedder_client_signature: str | None = None,

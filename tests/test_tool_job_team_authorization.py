@@ -40,7 +40,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     tool_execution_identity,
 )
-from tests.conftest import bind_runtime_paths, install_model_providers
+from tests.conftest import bind_runtime_paths, install_model_providers, unstored_team_scope_context
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.history_helpers import _runtime_paths as history_runtime_paths
@@ -482,10 +482,11 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
-            scope_context=None,
+            scope_context=unstored_team_scope_context(config, ["alpha", "zeta"], team_name="pair"),
             execution_identity=identity,
             model_name="default",
             configured_team_name="pair",
+            timezone="UTC",
         )
         assert any(function.name == "job" for toolkit in built.spec.leader.toolkits for function in toolkit.functions)
         assert built.leader_jobs is not None

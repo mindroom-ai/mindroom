@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     icon="Share2",
     icon_color="text-sky-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_move",
     function_names=("move_thread",),
     requires_room_context=True,
 )

@@ -24,7 +24,13 @@ from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, write_config_yaml
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    unstored_team_scope_context,
+    write_config_yaml,
+)
 from tests.identity_helpers import entity_ids
 from tests.providers.bare_adapter import bare_adapter
 
@@ -129,10 +135,11 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime.runtime_paths,
-        scope_context=None,
+        scope_context=unstored_team_scope_context(config, ["general"], team_name="team"),
         execution_identity=None,
         model_name=config.resolve_entity("team").model_name,
         configured_team_name="team",
+        timezone="UTC",
     )
     router = build_model_provider(config, runtime.runtime_paths, config.router.model)
     return agent, members.builds[0], team, router
@@ -147,12 +154,12 @@ def _temperature(model: ModelProvider) -> float | None:
 
 def _history_plan(config: Config, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
-    entity = config.resolve_entity(entity_name)
+    settings = config.resolve_entity(entity_name).history_settings
     model = config.resolve_runtime_model(entity_name=entity_name)
     return resolve_history_execution_plan(
         config=config,
-        compaction_config=entity.compaction_config,
-        has_authored_compaction_config=entity.has_authored_compaction_config,
+        compaction_config=settings.compaction_config,
+        has_authored_compaction_config=settings.has_authored_compaction_config,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
         static_prompt_tokens=0,

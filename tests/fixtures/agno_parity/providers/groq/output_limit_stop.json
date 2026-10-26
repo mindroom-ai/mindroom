@@ -19,7 +19,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -50,6 +49,7 @@
   "request": {
     "body": {
       "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -71,40 +71,84 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "choices": [
-        {
-          "finish_reason": "length",
-          "index": 0,
-          "message": {
-            "content": "Pack a light rain jacket and",
-            "role": "assistant"
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "openai/gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "Pack a light rain jacket and"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "openai/gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "length",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "openai/gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "x_groq": {
+            "id": "req_parity",
+            "usage": {
+              "completion_time": 0.021,
+              "completion_tokens": 8,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_time": 0.004,
+              "prompt_tokens": 42,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "queue_time": 0.011,
+              "total_time": 0.025,
+              "total_tokens": 50
+            }
           }
         }
-      ],
-      "created": 1792540800,
-      "id": "chatcmpl-parity",
-      "model": "openai/gpt-oss-120b",
-      "object": "chat.completion",
-      "system_fingerprint": "fp_parity",
-      "usage": {
-        "completion_time": 0.021,
-        "completion_tokens": 8,
-        "completion_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "prompt_time": 0.004,
-        "prompt_tokens": 42,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        },
-        "queue_time": 0.011,
-        "total_time": 0.025,
-        "total_tokens": 50
+      },
+      {
+        "data": "[DONE]"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "output_limit_stop"

@@ -350,7 +350,6 @@ def _validate_vertexai_claude_connection(
     request = ModelRequest(
         messages=[Message(role="user", content="Reply with OK.")],
         overrides=RequestOverrides(prompt_cache=False, disable_thinking=True),
-        stream=False,
     )
     try:
         provider = build_provider(probe_config, runtime_paths)
@@ -621,7 +620,6 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
         return 0, 0, 1
 
-    # Mem0 passes these embedders only a model, so they call their provider's own API whatever the host says.
     valid, detail = _validate_provider_key(emb.provider, api_key or "")
     return _print_validation(
         valid,

@@ -1428,6 +1428,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](https://docs.mindroom.chat/configuration/agents/#defaults) |
 | `memory` | Memory backends and embedder | [Memory](https://docs.mindroom.chat/memory/) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
+| `knowledge_reranker` | Optional reranker for knowledge search results | [Reranking](https://docs.mindroom.chat/knowledge/#reranking) |
 | `knowledge_graph` | Graph of facts built from agents' conversations | [Knowledge Graph](https://docs.mindroom.chat/knowledge-graph/) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](https://docs.mindroom.chat/mcp/) |
 | `plugins` | Plugin loading | [Plugins](https://docs.mindroom.chat/plugins/) |
@@ -1438,7 +1439,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `room_models` | Map of managed room name to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
-| `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/) |
+| `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
@@ -1716,6 +1717,8 @@ agents:
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
+| `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) |
+| `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
@@ -1842,6 +1845,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `markdown` | `true` |
 | `cheap_model` | `null`; ignored for an agent whose `model` is the same. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `knowledge_graph` | `false` |
+| `knowledge_graph_edits` | `true` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compaction` | enabled; see [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
 | `max_tool_calls_per_turn` | `1000` |
@@ -2040,7 +2044,7 @@ Provider credentials come from environment variables, stored credentials, CLI lo
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
 A key in `extra_kwargs.client_params.api_key` reaches the provider's API client over all of these, so that model never needs the shared key.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
-A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key.
+A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
@@ -2080,6 +2084,8 @@ For Ollama, you can also set:
 
 ```bash
 OLLAMA_HOST=http://localhost:11434
+# Optional key for a server that requires one, sent by models that configure no api_key:
+# OLLAMA_API_KEY=...
 ```
 
 For Vertex AI Claude, set these instead of an API key:
@@ -2095,7 +2101,8 @@ For `claude-sonnet-5-5`, use the [global endpoint or a supported multi-region en
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 For Gemini on Vertex AI (`provider: google` with `extra_kwargs.vertexai: true`), authenticate the same way and set `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, or pass `extra_kwargs.project_id` and `extra_kwargs.location`.
-Gemini reads these variables and `GOOGLE_APPLICATION_CREDENTIALS` only from the process environment, not from `.env`.
+Setting `GOOGLE_GENAI_USE_VERTEXAI=true` moves every `google` and `gemini` model to Vertex AI unless the model chooses its route itself: `extra_kwargs.client_params.enterprise`, then `extra_kwargs.client_params.vertexai`, then `extra_kwargs.vertexai`, set to `true` or `false`, wins over the variable.
+`GOOGLE_GENAI_USE_ENTERPRISE` selects nothing.
 
 `OPENAI_BASE_URL` is described in [Configuration — Model Providers](https://docs.mindroom.chat/configuration/#model-providers).
 
@@ -2439,13 +2446,13 @@ MindRoom ends a streamed request when the provider sends no event for `stream_id
 If nothing was streamed yet, MindRoom sends the request once more, unless a provider-hosted tool such as web search or code execution had started, since resending would run that tool again.
 A second silent attempt, or a stall after text appeared or such a tool started, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 The limit measures the gap between provider events, so long replies and slow tool calls are unaffected.
-It applies only to streamed responses (`defaults.enable_streaming: true`, the default).
+It applies to every model request, also when `defaults.enable_streaming` is off, except compaction summaries, which their own [`timeout_seconds`](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) bounds.
 
 By default the limit is 300 seconds for hosted providers on their built-in endpoint.
 Local servers can stay silent for minutes while a request waits in a queue or a model loads, so `ollama`, `llama_cpp`, and any model with a configured endpoint get no limit unless you set one.
-A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one read from `OPENAI_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, or `ANTHROPIC_VERTEX_BASE_URL`.
+A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one read from `OPENAI_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, `ANTHROPIC_BASE_URL`, or `ANTHROPIC_VERTEX_BASE_URL`.
 Set the limit explicitly for a hosted service behind a custom endpoint, such as OrcaRouter or the Z.ai coding endpoint.
-Endpoint variables that only a provider SDK reads, such as `ANTHROPIC_BASE_URL`, are not detected; set `0` when one points at a local server.
+Endpoint variables that only a provider SDK reads, such as `GOOGLE_GEMINI_BASE_URL`, are not detected; set `0` when one points at a local server.
 For a local model, pick a value above its slowest queue wait plus model load; set `0` to turn the limit off for a hosted model:
 
 ```yaml
@@ -3184,6 +3191,9 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 | `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
 | `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
 
+Only the `openai` provider reads `api_key`, `credentials_service`, `query_prefix`, and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects a nonblank value in these fields for any other provider.
+Config load also rejects `dimensions` for `ollama` and `sentence_transformers`, which always return the model's full-size vectors.
+
 ```yaml
 memory:
   backend: mem0
@@ -3244,6 +3254,10 @@ The `openai` embedder takes its API key from the first of these that is set:
 
 Use `credentials_service` when the embedding endpoint needs a different key than chat, voice, or other OpenAI-compatible models.
 With no key at all, keyless local OpenAI-compatible endpoints still work, while a keyed endpoint fails with an authentication error.
+
+An Ollama server that requires a key gets `OLLAMA_API_KEY`.
+For knowledge bases, the knowledge graph, and semantic file-memory search, MindRoom reads it from the process environment, then the `.env` beside `config.yaml`.
+Mem0's own Ollama clients, for its embedder and an `ollama` memory LLM, read it only from the process environment.
 When the embedder rejects its credential, semantic memory search reports the cause in `memory` tool output and in the agent's prompt instead of returning empty results, and `/api/health` includes an `embedder` block until a request succeeds again.
 
 ### Memory LLM
@@ -3479,7 +3493,7 @@ Its existing `learning/<agent>.db` databases under agent state roots stay on dis
 
 Knowledge bases give agents access to your own documents.
 Point a knowledge base at a folder or Git repository and assign it to agents.
-In `semantic` mode (the default), MindRoom indexes the files with an embedder into a vector database, and assigned agents get a `search_knowledge_base` tool.
+In `semantic` mode (the default), MindRoom indexes the files with an embedder into a vector index, and assigned agents get a `search_knowledge_base` tool.
 In `files` mode, MindRoom skips embeddings and agents inspect the files directly with their file and shell tools.
 
 ## Quick Start
@@ -3556,6 +3570,7 @@ knowledge_bases:
 | `require_content_before_publish` | bool | `false` | Keep a new semantic index in the initializing state until at least one source file exists, instead of publishing an empty index |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
+| `chunk_context_model` | string | `null` | Model (a key under `models`) that writes a short context for each chunk of a multi-chunk file before it is indexed; see [Contextual Chunk Headers](#contextual-chunk-headers); semantic mode only |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns a file must match to be included |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns removed after include filtering |
 | `include_extensions` | list | `null` | Exact set of extensions to index instead of the default text-like set (semantic mode only) |
@@ -3574,13 +3589,15 @@ Agents search the last successfully published index, and a missing, stale, or fa
 A successful refresh replaces the published index; a failed refresh keeps the previous one and shows the error in the base's status.
 
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
-Changing `chunk_size`, `chunk_overlap`, the embedder, or any file filter re-embeds the whole base on the next refresh.
+A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
+Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
+Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
 Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, 500, 502, 503, 504, and 529) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
 
 Knowledge base configuration hot-reloads.
-After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
+After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
 
 ### Folders Written by Another Host
@@ -3707,6 +3724,61 @@ Private knowledge has no background file watcher: with `watch: true` or `git`, i
 An agent can combine private knowledge with shared top-level `knowledge_bases`, which stay the mechanism for documents shared across agents or users.
 Private knowledge is available in normal agent conversations, not through the OpenAI-compatible `/v1` API.
 With `private.knowledge.git`, use a dedicated subtree such as `kb_repo`; MindRoom rejects `.` and any path that overlaps private file memory (`memory/`, `MEMORY.md`) or content copied from `template_dir`.
+
+## Search
+
+`search_knowledge_base` ranks a base's chunks two ways and merges the two rankings.
+One compares the query's embedding with every chunk's embedding, exactly rather than approximately.
+The other scores the query's words with BM25 over a keyword index that matches English word forms, so `leads` finds `lead`.
+Reciprocal rank fusion merges them, so a chunk that names the exact command, setting, or error message in the query ranks high even when its embedding is not the closest.
+Each result still reports its cosine distance as `distances`.
+
+### Reranking
+
+A reranker reads the query together with each candidate chunk and reorders them.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, `BAAI/bge-reranker-v2-m3` put the right page first for 86% of questions instead of 79%, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+Strong rerankers need a GPU or a hosted API to answer quickly; `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
+
+```yaml
+knowledge_reranker:
+  provider: cohere                 # or sentence_transformers
+  model: rerank-v3.5
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | `cohere` or `sentence_transformers` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use |
+| `model` | string | required | Rerank model name |
+| `url` | string | `https://api.cohere.com/v2/rerank` | Rerank endpoint for `cohere`; Jina (`https://api.jina.ai/v1/rerank`), vLLM, and Infinity accept the same format |
+| `api_key` | string | `null` | API key for `cohere` |
+| `credentials_service` | string | `cohere` | Credential service that holds the `cohere` API key when `api_key` is unset |
+
+The reranker sees the top 20 chunks of every base one search covers and returns the best of them across bases.
+It applies to `search_knowledge_base` only; automatic memory search keeps the merged ranking, so it adds no latency to replies.
+If the reranker fails, the search returns its results in the merged order and logs a warning.
+
+### Contextual Chunk Headers
+
+A chunk taken out of a long document often loses what it is about, such as which product or section it belongs to.
+With `chunk_context_model`, a model reads each chunk of a multi-chunk file together with the document around it and writes a sentence or two that places the chunk in that document.
+
+```yaml
+models:
+  fast:
+    provider: openai
+    id: gpt-5.4-mini
+
+knowledge_bases:
+  docs:
+    path: ./knowledge_docs
+    chunk_context_model: fast
+```
+
+The context is stored in front of its chunk, so it is embedded, keyword-indexed, and shown to agents with the chunk.
+It costs one model call per chunk of every added or changed multi-chunk file; single-chunk files are indexed as they are, and unchanged files keep their stored chunks.
+Turning `chunk_context_model` on, or changing it, rebuilds the base, so every multi-chunk file gets new contexts once.
+A file whose context call fails is not indexed in that refresh and is retried on the next one.
+Usage is recorded under `knowledge_chunk_context`.
 
 ## Git-Backed Knowledge Bases
 
@@ -3929,14 +4001,18 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 ## Storage
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
-They use Chroma, whose `chromadb` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[chromadb]`.
-For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
-Files-mode bases build no vector index, but refreshing them still loads the `chromadb` extra.
+Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
+Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
+Private agent knowledge is indexed under `<storage_path>/knowledge_db/private/<requester>/`, outside the private roots that sandboxed workers can write, with one directory per requester and agent.
+Removing a private instance leaves its index behind; each index directory's `indexing_settings.json` names the `knowledge_path` it was built from.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
-## Search Limits
-
-A search times out after 30 seconds, and at most four searches run at once; a search that finds no free slot can fail with `Knowledge reader is busy; try again shortly`.
+A shared base's index that earlier MindRoom versions stored in Chroma is converted on its first refresh after upgrading: its chunks and vectors are copied out of Chroma, and only files changed since are embedded again.
+The copy needs the `chromadb` extra, which installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; without it, the base is rebuilt, which embeds every file again.
+Private agent indexes are rebuilt in their new location.
+A base cannot be searched until its converted index publishes, which for a very large base can take a while.
+A shared base's old `chroma.sqlite3` and segment directories are removed once its new index is published.
+Private agent indexes used to live in the agent's state root, `<storage_path>/private_instances/<scope>/<agent>/knowledge_db/`, beside the private root rather than inside it; MindRoom no longer reads that directory, so it can be deleted after upgrading.
 
 ## Dashboard and API
 
@@ -3998,7 +4074,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
+Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -4035,7 +4111,7 @@ Every other alias is a plain name that extraction maps to the entry's name and t
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
-Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`.
+Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`, or an agent with [`knowledge_graph_edits`](#letting-the-agent-fix-its-graph) merges them.
 
 ## The `knowledge_graph` Tool
 
@@ -4049,12 +4125,33 @@ Each fact comes back with its validity, for example `valid 2026-01-05 until 2026
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
-An agent reads only its own graph; a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) has one graph per requester.
+An agent reaches only its own graph; a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) has one graph per requester.
+
+## Letting the Agent Fix Its Graph
+
+An agent with a graph can correct it.
+`agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `true`) turns this off when `false`, which keeps the agent's lookups read-only; setting it to `true` on an agent without `knowledge_graph` is a config error.
+With edits on, its lookups show each fact's and entity's id, `graph_entity` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains four functions:
+
+```python
+delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing
+delete_graph_entity("<entity id>")                   # a file path, URL, or other non-entity, with every fact that touches it
+merge_graph_entities("<duplicate id>", "<kept id>")  # the duplicate's facts and their sources move to the kept entity
+update_graph_entity_summary("<entity id>", "...")    # a summary that still states a deleted fact
+```
+
+The kept entity keeps its name and summary, and facts between the two merged entities are dropped.
+An entity's summary is model-written text that collects what was said about it, so a deleted fact stays in it until the agent rewrites the summary.
+Ask the agent to fix what it finds wrong, or let an [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) run do it: with edits on, its prompt also asks the agent to fix the mistakes it found in the graph.
+Deleting is permanent, and a later conversation or tool result that states a deleted fact again adds it back; the agent is told to keep a fact that held and later changed, because newer evidence marks it superseded.
+To approve each edit before it happens, add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules for `delete_graph_*`, `merge_graph_entities`, and `update_graph_entity_summary`.
+To keep extraction from creating a merged-away name again, list it in [`knowledge_graph.aliases`](#names).
 
 ## Privacy
 
 A shared agent's graph holds what it learned from every requester's conversations, including tool results, and anyone who can talk to that agent can query it.
-Use a private agent when requesters must not see each other's facts.
+Unless `knowledge_graph_edits` is `false`, anyone who can talk to a shared agent can also have it delete, merge, or rewrite what that graph holds.
+Use a private agent when requesters must not see or change each other's facts.
 
 ## Cost and Health
 
@@ -4525,11 +4622,22 @@ Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 
-The top-level `timezone` setting (default `UTC`) controls how MindRoom interprets times in requests and displays scheduled times.
+The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
+An unknown timezone name fails config validation.
 
 ```yaml
 timezone: America/Los_Angeles
+agents:
+  atlas:
+    display_name: Atlas
+    timezone: Europe/Amsterdam
 ```
+
+A schedule keeps the timezone it was created in: when `atlas` schedules "tomorrow at 9" with its `scheduler` tool, the task runs at 09:00 in Amsterdam, and later chat edits and listings use Amsterdam time too.
+The dashboard's Schedules page shows dates and times in the top-level timezone, while every recurring schedule's description names the timezone it is written in, such as `At 09:00 (Europe/Amsterdam)`.
+Schedules created before agents had their own timezone keep following the top-level setting.
 
 Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
 Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
@@ -4594,7 +4702,7 @@ agents:
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
-- `cron` is a five-field expression in the configured [timezone](#timezone).
+- `cron` is a five-field expression in the agent's [timezone](#timezone).
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
@@ -4687,11 +4795,11 @@ agents:
 ```
 
 1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
-2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
+2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks; an agent with [`knowledge_graph_edits`](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) is also asked to fix the mistakes it found in the graph.
 3. The agent answers the prompt like any message, with its own tools and [approval rules](https://docs.mindroom.chat/tool-approval/); a shared agent's call that needs approval is denied, because no person asked for the run, while a private agent's call waits in the thread until its requester answers or the request expires.
 4. When the run ends, MindRoom marks the thread resolved and adds its tool results to the graph; the agent's own summary is not added, and an interrupted run adds nothing.
 
-The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
+The prompt tells the agent to only read, apart from fixing its graph when it may edit it, and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
 The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 A turn whose message was redacted can still be listed until the agent next replies in that conversation.
 
@@ -4704,7 +4812,7 @@ A turn whose message was redacted can still be listed until the agent next repli
 | `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run, if people talked to the agent since |
 | `model` | the agent's model | A key of `models` to run the exploration with |
 
-Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`; for an agent with `knowledge_graph_edits`, its `{fix_step}` and `{fix_exception}` placeholders insert `EXPLORATION_FIX_STEP` and `EXPLORATION_FIX_EXCEPTION`, which are overridable too and start with their own separator, a line break and a comma.
 Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.
 
 # Chat Commands
@@ -5427,7 +5535,7 @@ When a provider rejects a request containing inline media (images, audio, video,
 The retry adds `[Inline media unavailable for this model]` to the message that carried the media and tells the agent the content was not inspected, so the agent can still open the file through the [`attachments` tool](https://docs.mindroom.chat/attachments/#the-attachments-tool) or explain the limitation.
 If the provider error says the model does not support that kind of input, such as `does not support image input` or `is not a multimodal model`, later requests to the same model leave that media kind out from the start until MindRoom restarts.
 Other rejections, such as an image the provider could not decode, drop the media from that one request only.
-Once a streamed reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals are never retried without media.
+Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals are never retried without media.
 
 # Attachments
 
@@ -15417,6 +15525,7 @@ The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
+Knowledge indexes, including private agents' indexes, their metadata, and candidate checkpoints, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
 When the broker is enabled, the worker-routed `shell` and `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
@@ -15619,6 +15728,7 @@ Do not report or "fix" these; they are deliberate.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
+- Unless `knowledge_graph_edits` is off, any requester of a shared agent, or a tool result that steers it, can have it delete facts and entities from the shared graph, merge its entities, or rewrite their summaries, as with any write tool; the edits reach only that agent's own graph.
 - Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so raising `knowledge_graph.generation` rebuilds the graphs without them; replies and voice calls already running finish on the old graphs, which stay stored until `knowledge_graph/` is deleted with MindRoom stopped; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.

@@ -13,7 +13,13 @@ from mindroom.history.message_content import (
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
+from mindroom.history.types import (
+    HistoryPolicy,
+    HistoryScope,
+    ResolvedHistorySettings,
+    ResolvedReplayPlan,
+    replayed_summary_text,
+)
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import (
     checkpoint_estimated_tokens,
@@ -175,10 +181,8 @@ def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> lis
 
 
 def current_summary_text(session: ConversationSession) -> str | None:
-    """Return a nonempty durable summary, normalized for replay."""
-    if session.summary is None:
-        return None
-    return session.summary.text.strip() or None
+    """Return the session's durable summary as replay reads it (``replayed_summary_text``), or None without one."""
+    return replayed_summary_text(session.summary.text) if session.summary is not None else None
 
 
 def compaction_marker(session: ConversationSession, scope: HistoryScope) -> tuple[str | None, str | None]:

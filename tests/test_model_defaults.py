@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
 import yaml
 
 from mindroom import model_defaults
@@ -317,3 +318,19 @@ def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> N
     }
 
     assert openrouter_alternative_aliases == openrouter_saas_aliases
+
+
+@pytest.mark.parametrize(
+    ("model_id", "rejects"),
+    [
+        ("claude-sonnet-5-5", True),
+        ("anthropic.claude-opus-5-5", True),
+        ("anthropic/claude-fable-5.1", True),
+        ("Claude-Opus-5-5", True),
+        ("claude-sonnet-4-5", False),
+        ("anthropic/claude-haiku-5.5", False),
+    ],
+)
+def test_claude_sampling_rule_reads_the_model_behind_any_route_spelling(model_id: str, *, rejects: bool) -> None:
+    """Direct, Bedrock, and gateway ids name the same generation, in any letter case."""
+    assert model_defaults.claude_rejects_sampling_controls(model_id) is rejects

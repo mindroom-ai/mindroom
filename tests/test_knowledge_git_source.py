@@ -48,14 +48,16 @@ from mindroom.knowledge.refresh_runner import (
 from mindroom.knowledge.registry import (
     get_published_index,
     published_index_metadata_path,
+    published_index_storage_path,
     resolve_published_index_key,
     source_root_for_published_index_key,
 )
+from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import (
     _config,
-    _VectorDb,
     patch_vector_store,  # noqa: F401  # requested via pytestmark below
+    stored_rows,
 )
 
 if TYPE_CHECKING:
@@ -1412,8 +1414,14 @@ def _object_files(git_dir: Path) -> dict[str, int]:
     }
 
 
-def _published_row_ids() -> dict[str, list[object]]:
-    return {name: [row["id"] for row in rows] for name, rows in _VectorDb.collections.items()}
+def _published_row_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, list[object]]:
+    storage = published_index_storage_path(
+        resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths),
+    )
+    return {
+        name: [row["id"] for row in stored_rows(KnowledgeCollection(path=storage, name=name))]
+        for name in list_collection_names(storage)
+    }
 
 
 async def _search(config: Config, runtime_paths: RuntimePaths, query: str) -> list[str]:
@@ -1485,7 +1493,7 @@ async def test_legacy_in_tree_git_dir_is_renamed_not_refetched(
     git_dir.rename(docs_path / ".git")
     _git(docs_path, "config", "--unset", "core.worktree")
     object_files = _object_files(docs_path / ".git")
-    row_ids = _published_row_ids()
+    row_ids = _published_row_ids(config, runtime_paths)
     commands = _record_git_commands(monkeypatch)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -1494,7 +1502,7 @@ async def test_legacy_in_tree_git_dir_is_renamed_not_refetched(
     assert not (docs_path / ".git").exists()
     assert _object_files(git_dir) == object_files
     assert not any(args[0] in {"clone", "init"} for args in commands)
-    assert _published_row_ids() == row_ids
+    assert _published_row_ids(config, runtime_paths) == row_ids
     assert await _search(config, runtime_paths, "legacy") == ["legacy content"]
 
     _push_change(remote_work, remote_bare, "updated content")

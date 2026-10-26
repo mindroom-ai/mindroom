@@ -164,7 +164,7 @@ def _read_final_response(client: httpx.Client, response: httpx.Response) -> str:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/custom_api",
+    docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#custom_api",
     function_names=("make_request",),
 )
 def custom_api_tools() -> type[CustomApiTools]:

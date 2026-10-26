@@ -6,7 +6,7 @@ icon: lucide/book-open
 
 Knowledge bases give agents access to your own documents.
 Point a knowledge base at a folder or Git repository and assign it to agents.
-In `semantic` mode (the default), MindRoom indexes the files with an embedder into a vector database, and assigned agents get a `search_knowledge_base` tool.
+In `semantic` mode (the default), MindRoom indexes the files with an embedder into a vector index, and assigned agents get a `search_knowledge_base` tool.
 In `files` mode, MindRoom skips embeddings and agents inspect the files directly with their file and shell tools.
 
 ## Quick Start
@@ -83,6 +83,7 @@ knowledge_bases:
 | `require_content_before_publish` | bool | `false` | Keep a new semantic index in the initializing state until at least one source file exists, instead of publishing an empty index |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
+| `chunk_context_model` | string | `null` | Model (a key under `models`) that writes a short context for each chunk of a multi-chunk file before it is indexed; see [Contextual Chunk Headers](#contextual-chunk-headers); semantic mode only |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns a file must match to be included |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns removed after include filtering |
 | `include_extensions` | list | `null` | Exact set of extensions to index instead of the default text-like set (semantic mode only) |
@@ -101,13 +102,15 @@ Agents search the last successfully published index, and a missing, stale, or fa
 A successful refresh replaces the published index; a failed refresh keeps the previous one and shows the error in the base's status.
 
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
-Changing `chunk_size`, `chunk_overlap`, the embedder, or any file filter re-embeds the whole base on the next refresh.
+A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
+Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
+Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
 Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, 500, 502, 503, 504, and 529) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
 
 Knowledge base configuration hot-reloads.
-After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
+After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
 
 ### Folders Written by Another Host
@@ -234,6 +237,61 @@ Private knowledge has no background file watcher: with `watch: true` or `git`, i
 An agent can combine private knowledge with shared top-level `knowledge_bases`, which stay the mechanism for documents shared across agents or users.
 Private knowledge is available in normal agent conversations, not through the OpenAI-compatible `/v1` API.
 With `private.knowledge.git`, use a dedicated subtree such as `kb_repo`; MindRoom rejects `.` and any path that overlaps private file memory (`memory/`, `MEMORY.md`) or content copied from `template_dir`.
+
+## Search
+
+`search_knowledge_base` ranks a base's chunks two ways and merges the two rankings.
+One compares the query's embedding with every chunk's embedding, exactly rather than approximately.
+The other scores the query's words with BM25 over a keyword index that matches English word forms, so `leads` finds `lead`.
+Reciprocal rank fusion merges them, so a chunk that names the exact command, setting, or error message in the query ranks high even when its embedding is not the closest.
+Each result still reports its cosine distance as `distances`.
+
+### Reranking
+
+A reranker reads the query together with each candidate chunk and reorders them.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, `BAAI/bge-reranker-v2-m3` put the right page first for 86% of questions instead of 79%, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+Strong rerankers need a GPU or a hosted API to answer quickly; `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
+
+```yaml
+knowledge_reranker:
+  provider: cohere                 # or sentence_transformers
+  model: rerank-v3.5
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | `cohere` or `sentence_transformers` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use |
+| `model` | string | required | Rerank model name |
+| `url` | string | `https://api.cohere.com/v2/rerank` | Rerank endpoint for `cohere`; Jina (`https://api.jina.ai/v1/rerank`), vLLM, and Infinity accept the same format |
+| `api_key` | string | `null` | API key for `cohere` |
+| `credentials_service` | string | `cohere` | Credential service that holds the `cohere` API key when `api_key` is unset |
+
+The reranker sees the top 20 chunks of every base one search covers and returns the best of them across bases.
+It applies to `search_knowledge_base` only; automatic memory search keeps the merged ranking, so it adds no latency to replies.
+If the reranker fails, the search returns its results in the merged order and logs a warning.
+
+### Contextual Chunk Headers
+
+A chunk taken out of a long document often loses what it is about, such as which product or section it belongs to.
+With `chunk_context_model`, a model reads each chunk of a multi-chunk file together with the document around it and writes a sentence or two that places the chunk in that document.
+
+```yaml
+models:
+  fast:
+    provider: openai
+    id: gpt-5.4-mini
+
+knowledge_bases:
+  docs:
+    path: ./knowledge_docs
+    chunk_context_model: fast
+```
+
+The context is stored in front of its chunk, so it is embedded, keyword-indexed, and shown to agents with the chunk.
+It costs one model call per chunk of every added or changed multi-chunk file; single-chunk files are indexed as they are, and unchanged files keep their stored chunks.
+Turning `chunk_context_model` on, or changing it, rebuilds the base, so every multi-chunk file gets new contexts once.
+A file whose context call fails is not indexed in that refresh and is retried on the next one.
+Usage is recorded under `knowledge_chunk_context`.
 
 ## Git-Backed Knowledge Bases
 
@@ -456,14 +514,18 @@ See [Memory](memory.md#embedder) for the embedder fields, API key resolution, an
 ## Storage
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
-They use Chroma, whose `chromadb` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[chromadb]`.
-For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
-Files-mode bases build no vector index, but refreshing them still loads the `chromadb` extra.
+Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
+Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
+Private agent knowledge is indexed under `<storage_path>/knowledge_db/private/<requester>/`, outside the private roots that sandboxed workers can write, with one directory per requester and agent.
+Removing a private instance leaves its index behind; each index directory's `indexing_settings.json` names the `knowledge_path` it was built from.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
-## Search Limits
-
-A search times out after 30 seconds, and at most four searches run at once; a search that finds no free slot can fail with `Knowledge reader is busy; try again shortly`.
+A shared base's index that earlier MindRoom versions stored in Chroma is converted on its first refresh after upgrading: its chunks and vectors are copied out of Chroma, and only files changed since are embedded again.
+The copy needs the `chromadb` extra, which installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; without it, the base is rebuilt, which embeds every file again.
+Private agent indexes are rebuilt in their new location.
+A base cannot be searched until its converted index publishes, which for a very large base can take a while.
+A shared base's old `chroma.sqlite3` and segment directories are removed once its new index is published.
+Private agent indexes used to live in the agent's state root, `<storage_path>/private_instances/<scope>/<agent>/knowledge_db/`, beside the private root rather than inside it; MindRoom no longer reads that directory, so it can be deleted after upgrading.
 
 ## Dashboard and API
 

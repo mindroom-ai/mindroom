@@ -291,17 +291,6 @@ async def test_silent_stream_is_retried_once_then_fails_as_stalled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_requests_are_not_retried() -> None:
-    inner = _ScriptedProvider([[_transient()], [_turn()]])
-    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
-
-    with pytest.raises(ProviderUnavailable):
-        await _drain(provider, ModelRequest(messages=[_user()], stream=False))
-
-    assert len(inner.requests) == 1
-
-
-@pytest.mark.asyncio
 async def test_a_timeout_the_provider_raises_is_not_reported_as_a_stall() -> None:
     """An SDK's own timeout inside the idle limit propagates as raised instead of becoming a retried stall."""
     inner = _ScriptedProvider([[TimeoutError("read timed out")], [_turn()]])
@@ -1153,6 +1142,21 @@ async def test_a_partial_usage_report_of_an_abandoned_stream_is_recorded(tmp_pat
     with capture_logs() as logs:
         assert isinstance(await anext(stream), UsageReported)
         await stream.aclose()
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)
+    _, response_record = _log_records(tmp_path)
+    assert response_record["usage"]["cache_read_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_a_failed_attempt_logs_the_partial_usage_it_reported(tmp_path: Path) -> None:
+    """An attempt that fails after only a partial report, as a Claude stream can, logs that usage."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, cache_read_tokens=42))
+    inner = _ScriptedProvider([[UsageReported(usage, final=False), _transient()]])
+
+    with capture_logs() as logs, pytest.raises(ProviderUnavailable):
+        await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
 
     [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
     assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)

@@ -19,7 +19,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -84,7 +83,8 @@
             "ttl": "1h"
           }
         }
-      ]
+      ],
+      "stream": true
     },
     "headers": {
       "accept": "application/json",
@@ -96,28 +96,79 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "content": [
-        {
-          "text": "Pack a light rain jacket and",
-          "type": "text"
-        }
-      ],
-      "id": "msg_parity",
-      "model": "claude-sonnet-5-5",
-      "role": "assistant",
-      "stop_reason": "max_tokens",
-      "stop_sequence": null,
-      "type": "message",
-      "usage": {
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-        "input_tokens": 42,
-        "output_tokens": 8
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": "Pack a light rain jacket and",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "max_tokens",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 8
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "output_limit_stop"

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="OAuth Connections",
     description="Get a confirmation link to reset an account connection for this agent",
+    docs_url="https://docs.mindroom.chat/oauth-framework/#oauth_connections",
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

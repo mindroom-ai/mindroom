@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -26,6 +27,7 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_loop.helpers import collect
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -36,7 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.approval.resume import ResumeDecisions, ResumeEvents
+    from mindroom.approval.resume import ResumeDecisions
     from mindroom.llm.events import RunEvent
 
 _PAUSED = RunRecord(
@@ -51,16 +53,21 @@ async def _paused_run() -> AsyncIterator[RunEvent]:
     yield RunFinished(_PAUSED)
 
 
-async def _unused_continue(paused: RunRecord, _decisions: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
-    return paused
+@dataclass(frozen=True)
+class _UnusedContinuation:
+    storage: RunStorage
+
+    def events(self, _paused: RunRecord, _decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        return _paused_run()
 
 
 def _stream(**options: object) -> AsyncIterator[RunEvent]:
     return execution.drive_delegation_stream(
         _paused_run(),
         record_type=RunRecord,
-        storage=RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
-        continue_parent=_unused_continue,
+        continue_parent=_UnusedContinuation(
+            RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
+        ),
         agent_name="leader",
         run_child=cast("Callable", None),
         config=cast("Callable", None),  # type: ignore[arg-type]
@@ -68,6 +75,27 @@ def _stream(**options: object) -> AsyncIterator[RunEvent]:
         execution_identity=None,
         **options,  # type: ignore[arg-type]
     )
+
+
+@pytest.mark.asyncio
+async def test_the_driver_refuses_a_paused_run_whose_owner_is_not_a_matrix_conversation() -> None:
+    """A run paused on delegations whose owner is not a Matrix conversation is refused before any call advances."""
+    owner = ToolExecutionIdentity("openai_compat", "leader", "@alice:localhost", None, None, None, "session-1")
+    stream = execution.drive_delegation_stream(
+        _paused_run(),
+        record_type=RunRecord,
+        continue_parent=_UnusedContinuation(
+            RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
+        ),
+        agent_name="leader",
+        run_child=cast("Callable", None),
+        config=cast("Callable", None),  # type: ignore[arg-type]
+        runtime_paths=cast("Callable", None),  # type: ignore[arg-type]
+        execution_identity=owner,
+    )
+
+    with pytest.raises(RuntimeError, match="requires a Matrix execution owner"):
+        [event async for event in stream]
 
 
 @pytest.mark.asyncio
@@ -281,8 +309,7 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
         with pytest.raises(failure, match="Consumer stopped"):
             await execution._drive_delegations(
                 paused,
-                storage=runner.storage,
-                continue_parent=runner.continue_run,
+                continue_parent=runner,
                 agent_name="leader",
                 run_child=unused_child,
                 config=config,

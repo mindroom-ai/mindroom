@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     icon="LayoutList",
     icon_color="text-blue-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_room",
     function_names=("matrix_room",),
 )
 def matrix_room_tools() -> type[MatrixRoomTools]:

@@ -23,16 +23,15 @@ from mindroom.agent_loop.run import (
     drive_run,
     plan_resume,
     resume_planned,
-    resume_request_template,
     resumed_record,
     run_agent,
+    started_run_fields,
 )
 from mindroom.agent_loop.tools import PreparedTools, sorted_specs
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
-from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.teams.delegate_tools import (
     DELEGATION_TOOLS,
@@ -52,6 +51,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, ReasoningDelta, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import RunMetrics
     from mindroom.teams.delegate_tools import MemberRunner
     from mindroom.teams.spec import TeamMember, TeamSpec
 
@@ -83,28 +83,29 @@ def run_team(
     hooks: LoopHooks,
     persist: Persist[AnyRunRecord],
     request_template: ModelRequest,
+    stream: bool,
 ) -> AsyncIterator[TeamRunEvent]:
     """Run one team turn: the leader's system message, then ``run_input`` as the history subsystem built it.
 
     The stream yields the leader's events, every member's events as ``MemberEvent``, and finally ``RunFinished`` with
     the ``COMPLETED`` or ``PAUSED`` team record after ``persist`` stored it; ``persist`` also receives every member
     record as its run ends. The team record ends as ``run_agent``'s does on cancellation and errors, and cancelling
-    the stream cancels the members with the leader.
+    the stream cancels the members with the leader. ``stream`` says whether the turn's reply streams, which selects
+    the rules of what the leader reads for a member's run (``member_result_text``).
     """
     leader = spec.leader
-    identity = leader.model.identity
-    record = TeamRunRecord(
-        run_id=ctx.run_id,
-        session_id=ctx.session_id,
-        user_id=ctx.user_id,
-        model=identity.id,
-        model_provider=identity.provider,
-        metrics=RunMetrics(),
-        metadata=ctx.metadata,
-        team_id=leader.id,
-    )
+    record = TeamRunRecord(**started_run_fields(ctx, leader.model, metadata=ctx.metadata), team_id=leader.id)
     messages = [*([] if leader.system_message is None else [leader.system_message]), *run_input]
-    return _drive_team(spec, record, messages, ctx=ctx, hooks=hooks, persist=persist, template=request_template)
+    return _drive_team(
+        spec,
+        record,
+        messages,
+        ctx=ctx,
+        hooks=hooks,
+        persist=persist,
+        template=request_template,
+        stream=stream,
+    )
 
 
 def continue_team(
@@ -126,8 +127,7 @@ def continue_team(
     name a waiting call, else ``ValueError`` here before anything runs.
     A member that completes hands the leader its text in the member-results message, which replaces every
     delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
-    requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
-    (``resume_request_template``).
+    requirements on the team run, and the leader sends no request.
     """
     # A resume that fails or is cancelled stores this record over the paused team row on purpose, as an agent's does
     # (``_store_interrupted`` in ``agent_loop/run.py``): the resume ends its approval anyway.
@@ -171,7 +171,11 @@ def continue_team(
         ctx=context(record.run_id),
         hooks=hooks,
         persist=persist,
-        template=resume_request_template(request_template),
+        template=request_template,
+        # TODO(simplify): a resume hands its leader members' results by the streamed rules even when the run it
+        # continues did not stream. Resume with the run's own rules. Models would notice: such a resume would hand a
+        # team leader its members' results as a non-streaming run does.
+        stream=True,
         entry=entry,
         resumed=decided,
     )
@@ -291,8 +295,8 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
             msg = f"Paused team run {paused.run_id!r} no longer holds member run {run_id!r}"
             raise ValueError(msg)
         decided = decisions.take(member_id, {requirement.tool_execution.tool_call_id for requirement in group})
-        # The member resumes from its own record with its requirements naming the member, as the team run's copies
-        # do, so the resumed member row stores those fields as main stores them.
+        # The member resumes from its own record with its requirements naming the member and its run, as the team
+        # run's copies do, so the member row its resume stores names them too.
         named = replace(
             member_record,
             requirements=[
@@ -339,7 +343,7 @@ def _answer_delegations(
 def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner, *, stream: bool) -> AgentSpec:
     """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run.
 
-    ``stream`` is whether the run's leader requests stream, which selects the delegation's result rules.
+    ``stream`` is whether the run's reply streams, which selects the delegation's result rules.
     """
     leader = spec.leader
     delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member, stream=stream)
@@ -357,17 +361,12 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
 
 @dataclass(frozen=True, slots=True)
 class _MemberRuns:
-    """Run and resume the members of one team run, forwarding their events tagged with the member.
-
-    ``stream`` is whether the team run's leader requests stream; every member request follows it, kept as main
-    behaves.
-    """
+    """Run and resume the members of one team run, forwarding their events tagged with the member."""
 
     record: TeamRunRecord
     ctx: RunContext
     emit: Emit
     persist: Persist[AnyRunRecord]
-    stream: bool
 
     async def run(self, member: TeamMember, task: str) -> RunRecord:
         """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input.
@@ -381,7 +380,7 @@ class _MemberRuns:
             ctx=ctx,
             hooks=member.hooks(ctx.run_id),
             persist=self._persist,
-            request_template=self._request_template(member),
+            request_template=member.request_template,
         )
         return await self._finish(member, ctx.run_id, stream)
 
@@ -394,12 +393,9 @@ class _MemberRuns:
             context=self._member_context,
             hooks=member.hooks(paused.run_id),
             persist=self._persist,
-            request_template=self._request_template(member),
+            request_template=member.request_template,
         )
         return await self._finish(member, paused.run_id, stream)
-
-    def _request_template(self, member: TeamMember) -> ModelRequest:
-        return replace(member.request_template, stream=self.stream)
 
     def _member_context(self, run_id: str) -> RunContext:
         """Return a member run's context: the team run's, so its tools share the team's state, under its own run id."""
@@ -447,18 +443,20 @@ async def _drive_team(
     hooks: LoopHooks,
     persist: Persist[AnyRunRecord],
     template: ModelRequest,
+    stream: bool,
     entry: Callable[[_MemberRuns], Awaitable[None]] | None = None,
     resumed: Sequence[RunRequirement] | None = None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Stream the leader's loop over ``messages`` and its members' runs, owning the team run's cancellation.
 
-    ``entry`` is the work the run does with its members before the loop, and ``resumed`` the leader's decided calls.
+    ``stream`` selects the delegation's result rules (``_leader_spec``), ``entry`` is the work the run does with its
+    members before the loop, and ``resumed`` the leader's decided calls.
     """
 
     async def produce(emit: Emit) -> None:
-        members = _MemberRuns(record, ctx, emit, persist, stream=template.stream)
-        leader = _leader_spec(spec, record, members.run, stream=template.stream)
-        stream = drive_run(
+        members = _MemberRuns(record, ctx, emit, persist)
+        leader = _leader_spec(spec, record, members.run, stream=stream)
+        events = drive_run(
             leader,
             record,
             messages,
@@ -473,13 +471,13 @@ async def _drive_team(
             resumed=resumed,
             pause_content=team_paused_content,
         )
-        async with closing_async_stream(stream):
-            async for event in stream:
+        async with closing_async_stream(events):
+            async for event in events:
                 emit(event)
 
-    stream = callback_event_stream(produce)
-    async with closing_async_stream(stream):
-        async for item in stream:
+    produced = callback_event_stream(produce)
+    async with closing_async_stream(produced):
+        async for item in produced:
             # The producer's own result, None, comes last; everything before it is an event.
             if item is not None:
                 yield cast("TeamRunEvent", item)

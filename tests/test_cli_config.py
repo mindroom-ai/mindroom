@@ -63,7 +63,7 @@ from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import load_config_yaml, normalize_console_output
-from tests.providers.golden_support import httpx2_transport
+from tests.providers.golden_support import httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -3621,7 +3621,7 @@ def _vertex_ok(_request: httpx2.Request) -> httpx.Response:
         "stop_sequence": None,
         "usage": {"input_tokens": 5, "output_tokens": 1},
     }
-    return httpx.Response(200, json=message)
+    return streamed_reply(message)
 
 
 def _vertex_wire(
@@ -4011,7 +4011,7 @@ class TestDoctor:
         assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
         [request] = requests
         assert request.url.path == (
-            "/v1/projects/mindroom-test/locations/us-central1/publishers/anthropic/models/claude-sonnet-5:rawPredict"
+            "/v1/projects/mindroom-test/locations/us-central1/publishers/anthropic/models/claude-sonnet-5:streamRawPredict"
         )
         assert request.headers["authorization"] == "Bearer ambient-token"
         assert request.extensions["timeout"]["read"] == 10
@@ -4042,7 +4042,7 @@ class TestDoctor:
             loaded.append(path)
             return GoogleCredentials(token="file-token")  # noqa: S106 - synthetic credential
 
-        monkeypatch.setattr("mindroom.providers.anthropic.messages.load_google_application_credentials", _load_adc)
+        monkeypatch.setattr("mindroom.providers.google_adc._load_google_application_credentials", _load_adc)
         requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
@@ -4074,8 +4074,8 @@ class TestDoctor:
         assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
         assert "vertexai_claude connection valid for claude-haiku-4-5" in result.output
         assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == [
-            "claude-sonnet-5:rawPredict",
-            "claude-haiku-4-5:rawPredict",
+            "claude-sonnet-5:streamRawPredict",
+            "claude-haiku-4-5:streamRawPredict",
         ]
 
     def test_vertexai_claude_missing_env_is_warning(

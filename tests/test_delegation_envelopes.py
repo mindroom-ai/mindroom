@@ -149,8 +149,7 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
         # The parent's run stored its pause; the driver owns the delegation from there.
         operation = _drive_delegations(
             parent.record,
-            storage=parent.runner.storage,
-            continue_parent=parent.runner.continue_run,
+            continue_parent=parent.runner,
             agent_name="leader",
             run_child=unused_child,
             config=config,

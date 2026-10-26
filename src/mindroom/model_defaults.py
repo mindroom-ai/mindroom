@@ -68,6 +68,7 @@ __all__ = (
     "TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES",
     "ZAI_BASE_URL_DEFAULT",
     "ModelPreset",
+    "claude_rejects_sampling_controls",
     "llama_cpp_server_command",
 )
 
@@ -174,6 +175,15 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     "claude-sonnet-5.5",
     "claude-sonnet-5",
 )
+
+
+def claude_rejects_sampling_controls(model_id: str) -> bool:
+    """Return whether a Claude model id rejects non-default ``temperature``, ``top_p``, and ``top_k``.
+
+    The direct, Bedrock, Vertex, and gateway spellings of one generation all end with its suffix.
+    """
+    return model_id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+
 
 _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"
 _OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5.5"

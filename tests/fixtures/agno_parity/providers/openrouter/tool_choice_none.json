@@ -20,7 +20,6 @@
     "output_schema": null,
     "portable_replay": null,
     "provider_tools_disabled": true,
-    "stream": false,
     "tool_choice": "none",
     "tools": [
       {
@@ -81,7 +80,6 @@
     "message": {
       "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
       "provider_data": {
-        "finish_reason": "stop",
         "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "z-ai/glm-5.3",
@@ -102,6 +100,7 @@
   "request": {
     "body": {
       "model": "z-ai/glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -112,6 +111,9 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
+      "stream_options": {
+        "include_usage": true
+      },
       "tool_choice": "none",
       "tools": [
         {
@@ -179,37 +181,88 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "choices": [
-        {
-          "finish_reason": "stop",
-          "index": 0,
-          "message": {
-            "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
-            "role": "assistant"
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "z-ai/glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "z-ai/glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "z-ai/glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "z-ai/glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "cost": 0.00021,
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
           }
         }
-      ],
-      "created": 1792540800,
-      "id": "chatcmpl-parity",
-      "model": "z-ai/glm-5.3",
-      "object": "chat.completion",
-      "system_fingerprint": "fp_parity",
-      "usage": {
-        "completion_tokens": 12,
-        "completion_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "cost": 0.00021,
-        "prompt_tokens": 42,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        },
-        "total_tokens": 54
+      },
+      {
+        "data": "[DONE]"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "tool_choice_none"

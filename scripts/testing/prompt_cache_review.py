@@ -529,7 +529,7 @@ def build_provider_message_blobs_from_messages(
         if apply_cache_ladder:
             cache_control = ladder_cache_control(model_params)
             if cache_control is not None:
-                chat_messages, _ = mark_message_cache_rungs(chat_messages, cache_control, MESSAGE_RUNG_COUNT)
+                chat_messages = mark_message_cache_rungs(chat_messages, cache_control, MESSAGE_RUNG_COUNT)
         raw_blobs = tuple(stable_json(message) for message in chat_messages)
         normalized_blobs = tuple(stable_json(strip_cache_control(message)) for message in chat_messages)
         return raw_blobs, normalized_blobs, preview
@@ -1084,12 +1084,10 @@ def run_live_probe_sequence(
             model_params=model_params,
             apply_cache_ladder=install_hook,
         )
-        request = ModelRequest(
-            messages=tuple(request_messages),
-            stream=False,
-        )
+        request = ModelRequest(messages=tuple(request_messages))
         response = asyncio.run(closing_model_connections(complete(provider, request)))
         response_text = extract_model_response_text(response)
+        tokens = response.usage.tokens
         turn_results.append(
             LiveProbeTurn(
                 turn_index=turn_index,
@@ -1104,10 +1102,10 @@ def run_live_probe_sequence(
                     if previous_request_row is None
                     else current_extends_previous_raw(previous_request_row, request_row)
                 ),
-                input_tokens=response_usage_int(response, "input_tokens"),
-                output_tokens=response_usage_int(response, "output_tokens"),
-                cache_read_tokens=response_usage_int(response, "cache_read_tokens"),
-                cache_write_tokens=response_usage_int(response, "cache_write_tokens"),
+                input_tokens=tokens.input_tokens,
+                output_tokens=tokens.output_tokens,
+                cache_read_tokens=tokens.cache_read_tokens,
+                cache_write_tokens=tokens.cache_write_tokens,
                 response_text=response_text,
                 preview=request_row.preview,
             ),
@@ -1198,23 +1196,6 @@ def extract_model_response_text(response: ModelTurn) -> str:
     if isinstance(content, str) and content:
         return content
     return extract_text(content) or "<empty response>"
-
-
-def response_usage_int(response: ModelTurn, field_name: str) -> int:
-    """Return one integer usage field from a model response."""
-    usage = response.message.metrics
-    if usage is None:
-        return 0
-    if field_name == "input_tokens":
-        return coerce_int(usage.input_tokens)
-    if field_name == "output_tokens":
-        return coerce_int(usage.output_tokens)
-    if field_name == "cache_read_tokens":
-        return coerce_int(usage.cache_read_tokens)
-    if field_name == "cache_write_tokens":
-        return coerce_int(usage.cache_write_tokens)
-    msg = f"Unsupported response usage field: {field_name}"
-    raise ValueError(msg)
 
 
 def print_live_probe_results(mode_label: str, turns: list[LiveProbeTurn], *, threshold: float) -> None:
@@ -1340,11 +1321,6 @@ def prompt_family_label(system_prompt: str) -> str:
         if normalized:
             return shorten_text(normalized, 54)
     return "<empty system prompt>"
-
-
-def coerce_int(value: object) -> int:
-    """Coerce a loose numeric value into an integer or zero."""
-    return value if isinstance(value, int) else 0
 
 
 if __name__ == "__main__":

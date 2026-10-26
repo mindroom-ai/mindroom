@@ -12,14 +12,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import PROVIDER_ENV_KEYS
-from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
+from mindroom.credentials.sync import get_secret_from_env
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.llm.provider import Capabilities, MediaKind, ModelIdentity, StructuredOutput
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
     CEREBRAS_API_PATH,
     CEREBRAS_HOST_DEFAULT,
-    CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
     DEEPSEEK_BASE_URL_DEFAULT,
     GROQ_API_PATH,
     GROQ_HOST_DEFAULT,
@@ -27,8 +26,9 @@ from mindroom.model_defaults import (
     OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
     OPENROUTER_BASE_URL_DEFAULT,
     ZAI_BASE_URL_DEFAULT,
+    claude_rejects_sampling_controls,
 )
-from mindroom.providers.credentials import own_api_key, uses_alternative_auth
+from mindroom.providers.credentials import model_api_key, own_api_key, uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_keys
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -205,21 +205,19 @@ class ProviderRuntime:
 
 
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
-    """Return the configured key, else the provider's shared key."""
-    key = own_api_key(model_config)
-    if key or uses_alternative_auth(model_config) or route_key in _NO_SHARED_KEY:
-        return key or None
-    shared = get_api_key_for_provider(route_key, runtime_paths=runtime.runtime_paths)
+    """Return the configured key, else the provider's shared key; routes in ``_NO_SHARED_KEY`` take no shared key."""
+    if route_key in _NO_SHARED_KEY:
+        return own_api_key(model_config)
+    key = model_api_key(model_config, runtime.runtime_paths)
     # Azure and Z.ai keys may also come straight from their variables, including the ``_FILE`` forms.
-    if shared or route_key not in _ROUTE_KEY_VARIABLES:
-        return shared
+    if key or uses_alternative_auth(model_config, runtime.runtime_paths) or route_key not in _ROUTE_KEY_VARIABLES:
+        return key
     return get_secret_from_env(PROVIDER_ENV_KEYS[route_key], runtime_paths=runtime.runtime_paths)
 
 
 def _provider_default_sampling(model_id: str) -> bool:
     """Return whether the model rejects a temperature, so overrides must leave sampling to the provider."""
-    lowered = model_id.casefold()
-    return lowered.endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES) or lowered.rsplit("/", 1)[-1].startswith(
+    return claude_rejects_sampling_controls(model_id) or model_id.casefold().rsplit("/", 1)[-1].startswith(
         OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
     )
 
@@ -493,7 +491,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
                 route_key,
                 settings,
                 api_key=api_key,
-                alternative_auth=uses_alternative_auth(model_config),
+                alternative_auth=uses_alternative_auth(model_config, runtime.runtime_paths),
                 base_url=base_url,
                 runtime=runtime,
             ),
@@ -562,7 +560,6 @@ def _build_responses(
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         provider_default_sampling=_provider_default_sampling(model_id),
-        streams_only=route_key == "codex",
     )
     wire = ResponsesWire(
         route=route_key,

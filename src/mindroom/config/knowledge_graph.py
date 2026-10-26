@@ -6,6 +6,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mindroom.config.schema_hints import dashboard_hint
 
+# The knowledge_graph tool's functions that only an agent with knowledge_graph_edits gets.
+KNOWLEDGE_GRAPH_EDIT_FUNCTIONS = (
+    "delete_graph_entity",
+    "delete_graph_fact",
+    "merge_graph_entities",
+    "update_graph_entity_summary",
+)
+
 
 class KnowledgeGraphIngestConfig(BaseModel):
     """How the background worker turns finished conversation turns into graph episodes."""

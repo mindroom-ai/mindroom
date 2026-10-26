@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     name="coding",
     display_name="Coding Tools",
     description="Find code, search across files, and make precise edits",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#coding",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.AGENT,
     managed_init_args=(ToolManagedInitArg.FILE_ACCESS, ToolManagedInitArg.SHARED_DIRECTORY_ROOTS),

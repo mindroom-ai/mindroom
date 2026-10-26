@@ -706,8 +706,6 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
                 thread_id="$thread",
                 reply_to_event_id="$event",
             ),
-            thread_summary_room_id="!room:localhost",
-            thread_summary_thread_id="$thread",
             thread_summary_message_count_hint=3,
         ),
         PostResponseEffectsDeps(
@@ -772,8 +770,11 @@ async def test_post_response_effects_skip_thread_summary_for_unsuccessful_turn(
         ),
         ResponseOutcome(
             run_succeeded=run_succeeded,
-            thread_summary_room_id="!room:localhost",
-            thread_summary_thread_id="$thread",
+            response_target=MessageTarget.resolve(
+                room_id="!room:localhost",
+                thread_id="$thread",
+                reply_to_event_id="$event",
+            ),
             thread_summary_message_count_hint=2,
         ),
         PostResponseEffectsDeps(
@@ -1027,8 +1028,11 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
                 delivery_kind="sent",
             ),
             ResponseOutcome(
-                thread_summary_room_id="!room:localhost",
-                thread_summary_thread_id="$thread",
+                response_target=MessageTarget.resolve(
+                    room_id="!room:localhost",
+                    thread_id="$thread",
+                    reply_to_event_id="$event",
+                ),
                 thread_summary_message_count_hint=4,
             ),
             deps,
@@ -1135,8 +1139,11 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
                 delivery_kind="sent",
             ),
             ResponseOutcome(
-                thread_summary_room_id="!adhoc:localhost",
-                thread_summary_thread_id="$thread",
+                response_target=MessageTarget.resolve(
+                    room_id="!adhoc:localhost",
+                    thread_id="$thread",
+                    reply_to_event_id="$event",
+                ),
                 thread_summary_message_count_hint=4,
                 thread_summary_entity_name="general",
             ),
@@ -3639,6 +3646,7 @@ def test_pre_replay_crash_recovery_preserves_prior_persisted_and_active_live_not
                 storage=store,
                 session=session,
                 session_id=session.session_id,
+                storage_factory=lambda: store,
             ),
             entity_name="general",
         )

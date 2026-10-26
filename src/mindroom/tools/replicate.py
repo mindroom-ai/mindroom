@@ -54,7 +54,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["replicate"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/replicate",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#replicate",
     function_names=("generate_media",),
 )
 def replicate_tools() -> type[MindRoomReplicateTools]:

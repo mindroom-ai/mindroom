@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from itertools import accumulate
 from typing import TYPE_CHECKING
 
 from mindroom.embeddings.errors import extract_classified_embedder_detail
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _SEMANTIC_TIMING_PREFIX = "system_prompt_assembly.memory_search.semantic"
-_memory_refresh_scheduler = KnowledgeRefreshScheduler()
+_memory_refresh_scheduler: KnowledgeRefreshScheduler | None = None
 
 
 class SemanticFileMemoryIndexUnavailableError(RuntimeError):
@@ -43,6 +44,14 @@ class SemanticFileMemoryIndexUnavailableError(RuntimeError):
     def __init__(self, message: str, *, degraded_reason: str | None = None) -> None:
         super().__init__(message)
         self.degraded_reason = degraded_reason
+
+
+def _memory_scheduler(runtime_paths: RuntimePaths) -> KnowledgeRefreshScheduler:
+    """Return the process's file-memory refresh scheduler, built with the refresh limit of its first runtime."""
+    global _memory_refresh_scheduler
+    if _memory_refresh_scheduler is None:
+        _memory_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
+    return _memory_refresh_scheduler
 
 
 def schedule_semantic_file_memory_refresh(
@@ -62,7 +71,7 @@ def schedule_semantic_file_memory_refresh(
         search_config=search_config,
     )
     try:
-        _memory_refresh_scheduler.schedule_refresh(
+        _memory_scheduler(runtime_paths).schedule_refresh(
             resolution.base_id,
             config=resolution.config,
             runtime_paths=runtime_paths,
@@ -83,8 +92,12 @@ def _memory_results_from_hits(
     *,
     scope_user_id: str,
 ) -> list[MemoryResult]:
+    # Hits arrive in hybrid rank order, which word matches can lift above closer vectors. Each score is the best cosine
+    # similarity at or below its rank, so scores stay on the cosine scale merged keyword matches rank against, and
+    # sorting by them keeps the hybrid order.
+    scores = list(accumulate((1.0 - hit.meta_data["distances"] for hit in reversed(hits)), max))[::-1]
     results: list[MemoryResult] = []
-    for rank, hit in enumerate(hits, start=1):
+    for rank, (hit, score) in enumerate(zip(hits, scores, strict=True), start=1):
         source_file = hit.meta_data.get(SOURCE_PATH_KEY)
         if not isinstance(source_file, str):
             source_file = "memory"
@@ -96,8 +109,7 @@ def _memory_results_from_hits(
                 id=f"semantic:{source_file}:{rank}",
                 memory=content,
                 user_id=scope_user_id,
-                # The cosine similarity, which merged keyword matches' word-overlap scores rank against.
-                score=1.0 - hit.meta_data["distances"],
+                score=score,
                 metadata={"source_file": source_file, "semantic": True, "search_mode": "semantic"},
             ),
         )

@@ -58,7 +58,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](scheduling.md#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
+Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -95,7 +95,7 @@ Every other alias is a plain name that extraction maps to the entry's name and t
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
-Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`.
+Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`, or an agent with [`knowledge_graph_edits`](#letting-the-agent-fix-its-graph) merges them.
 
 ## The `knowledge_graph` Tool
 
@@ -109,12 +109,33 @@ Each fact comes back with its validity, for example `valid 2026-01-05 until 2026
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
-An agent reads only its own graph; a [private agent](configuration/agents.md#private-instances) has one graph per requester.
+An agent reaches only its own graph; a [private agent](configuration/agents.md#private-instances) has one graph per requester.
+
+## Letting the Agent Fix Its Graph
+
+An agent with a graph can correct it.
+`agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `true`) turns this off when `false`, which keeps the agent's lookups read-only; setting it to `true` on an agent without `knowledge_graph` is a config error.
+With edits on, its lookups show each fact's and entity's id, `graph_entity` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains four functions:
+
+```python
+delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing
+delete_graph_entity("<entity id>")                   # a file path, URL, or other non-entity, with every fact that touches it
+merge_graph_entities("<duplicate id>", "<kept id>")  # the duplicate's facts and their sources move to the kept entity
+update_graph_entity_summary("<entity id>", "...")    # a summary that still states a deleted fact
+```
+
+The kept entity keeps its name and summary, and facts between the two merged entities are dropped.
+An entity's summary is model-written text that collects what was said about it, so a deleted fact stays in it until the agent rewrites the summary.
+Ask the agent to fix what it finds wrong, or let an [`exploration`](scheduling.md#exploration) run do it: with edits on, its prompt also asks the agent to fix the mistakes it found in the graph.
+Deleting is permanent, and a later conversation or tool result that states a deleted fact again adds it back; the agent is told to keep a fact that held and later changed, because newer evidence marks it superseded.
+To approve each edit before it happens, add [`tool_approval`](tool-approval.md) rules for `delete_graph_*`, `merge_graph_entities`, and `update_graph_entity_summary`.
+To keep extraction from creating a merged-away name again, list it in [`knowledge_graph.aliases`](#names).
 
 ## Privacy
 
 A shared agent's graph holds what it learned from every requester's conversations, including tool results, and anyone who can talk to that agent can query it.
-Use a private agent when requesters must not see each other's facts.
+Unless `knowledge_graph_edits` is `false`, anyone who can talk to a shared agent can also have it delete, merge, or rewrite what that graph holds.
+Use a private agent when requesters must not see or change each other's facts.
 
 ## Cost and Health
 

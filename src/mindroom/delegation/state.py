@@ -78,7 +78,7 @@ class SubagentPersona:
         skills = data.get("skills", ())
         # LEGACY_COMPAT: Authored subagent personas persisted without knowledge.
         # Legacy format: Persona snapshots in parent delegation state and subagent session records omitted knowledge; an authored child with a tool list had no knowledge search and one without a tool list searched every caller knowledge base.
-        # Last legacy release: v2026.10.262; replacement: the next release persists each persona's knowledge bases, null following its tool list.
+        # Last legacy release: v2026.10.263; replacement: v2026.10.264 persists each persona's knowledge bases, null following its tool list.
         # Handling: An absent knowledge field reads as null, which follows the tool list exactly as those releases did, so retained authored children and their follow-ups keep their knowledge search.
         # Coverage: tests/test_delegation_sessions.py::test_persona_snapshot_without_knowledge_follows_its_tool_list.
         knowledge = data.get("knowledge")
@@ -301,7 +301,7 @@ def child_call_id(delegation_id: str, card_id: str) -> str:
 
 
 class ChildResponseRunner(Protocol):
-    """Normal response envelope supplied by the caller of the native driver."""
+    """Normal response envelope supplied by the caller of the native driver, whose children can pause for approval."""
 
     async def __call__(
         self,
@@ -311,7 +311,6 @@ class ChildResponseRunner(Protocol):
         config: Config,
         runtime_paths: RuntimePaths,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
-        supports_native_tool_approval: bool,
     ) -> str:
         """Execute a child response in its retained scope, reporting exact run IDs."""
         ...

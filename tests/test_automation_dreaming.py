@@ -291,6 +291,20 @@ def test_recent_conversations_and_daily_notes_are_on_the_agenda_and_today_is_not
     assert staged == sorted([YESTERDAY, "memory/projects.md"])
 
 
+def test_today_is_the_agents_own_date(tmp_path: Path) -> None:
+    """At noon UTC it is already tomorrow on Kiritimati, so an agent there reviews the UTC date's note but not its own."""
+    workspace = _workspace(tmp_path, timezone="Pacific/Kiritimati")
+    agent_today_note = f"memory/{TODAY + timedelta(days=1)}.md"
+    workspace.write(TODAY_NOTE, "- Yesterday on Kiritimati.\n")
+    workspace.write(agent_today_note, "- Fresh note.\n")
+
+    _started(workspace)
+
+    agenda = workspace.agenda()
+    assert f"- `{TODAY_NOTE}`" in agenda
+    assert agent_today_note not in agenda
+
+
 def test_the_cap_leaves_the_rest_due_for_the_next_run(tmp_path: Path) -> None:
     """At most 40 inputs per run, oldest first; the others come back next time."""
     workspace = _workspace(tmp_path)

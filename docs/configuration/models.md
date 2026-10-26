@@ -172,7 +172,7 @@ Provider credentials come from environment variables, stored credentials, CLI lo
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
 A key in `extra_kwargs.client_params.api_key` reaches the provider's API client over all of these, so that model never needs the shared key.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
-A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key.
+A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
@@ -212,6 +212,8 @@ For Ollama, you can also set:
 
 ```bash
 OLLAMA_HOST=http://localhost:11434
+# Optional key for a server that requires one, sent by models that configure no api_key:
+# OLLAMA_API_KEY=...
 ```
 
 For Vertex AI Claude, set these instead of an API key:
@@ -227,7 +229,8 @@ For `claude-sonnet-5-5`, use the [global endpoint or a supported multi-region en
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 For Gemini on Vertex AI (`provider: google` with `extra_kwargs.vertexai: true`), authenticate the same way and set `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, or pass `extra_kwargs.project_id` and `extra_kwargs.location`.
-Gemini reads these variables and `GOOGLE_APPLICATION_CREDENTIALS` only from the process environment, not from `.env`.
+Setting `GOOGLE_GENAI_USE_VERTEXAI=true` moves every `google` and `gemini` model to Vertex AI unless the model chooses its route itself: `extra_kwargs.client_params.enterprise`, then `extra_kwargs.client_params.vertexai`, then `extra_kwargs.vertexai`, set to `true` or `false`, wins over the variable.
+`GOOGLE_GENAI_USE_ENTERPRISE` selects nothing.
 
 `OPENAI_BASE_URL` is described in [Configuration — Model Providers](index.md#model-providers).
 
@@ -571,13 +574,13 @@ MindRoom ends a streamed request when the provider sends no event for `stream_id
 If nothing was streamed yet, MindRoom sends the request once more, unless a provider-hosted tool such as web search or code execution had started, since resending would run that tool again.
 A second silent attempt, or a stall after text appeared or such a tool started, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 The limit measures the gap between provider events, so long replies and slow tool calls are unaffected.
-It applies only to streamed responses (`defaults.enable_streaming: true`, the default).
+It applies to every model request, also when `defaults.enable_streaming` is off, except compaction summaries, which their own [`timeout_seconds`](history.md#agent-compaction-settings) bounds.
 
 By default the limit is 300 seconds for hosted providers on their built-in endpoint.
 Local servers can stay silent for minutes while a request waits in a queue or a model loads, so `ollama`, `llama_cpp`, and any model with a configured endpoint get no limit unless you set one.
-A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one read from `OPENAI_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, or `ANTHROPIC_VERTEX_BASE_URL`.
+A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one read from `OPENAI_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, `ANTHROPIC_BASE_URL`, or `ANTHROPIC_VERTEX_BASE_URL`.
 Set the limit explicitly for a hosted service behind a custom endpoint, such as OrcaRouter or the Z.ai coding endpoint.
-Endpoint variables that only a provider SDK reads, such as `ANTHROPIC_BASE_URL`, are not detected; set `0` when one points at a local server.
+Endpoint variables that only a provider SDK reads, such as `GOOGLE_GEMINI_BASE_URL`, are not detected; set `0` when one points at a local server.
 For a local model, pick a value above its slowest queue wait plus model load; set `0` to turn the limit off for a hosted model:
 
 ```yaml

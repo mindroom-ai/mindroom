@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="OpenWeather",
     description="Weather data services from OpenWeatherMap API",
-    category=ToolCategory.DEVELOPMENT,  # Based on agno docs structure: /tools/toolkits/others/
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses api_key parameter
     icon="WiDaySunny",  # Weather icon
@@ -80,7 +80,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],  # From agno requirements
-    docs_url="https://docs.agno.com/tools/toolkits/others/openweather",  # URL without .md extension
+    docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#openweather",
     function_names=("geocode_location", "get_air_pollution", "get_current_weather", "get_forecast"),
 )
 def openweather_tools() -> type[OpenWeatherTools]:
