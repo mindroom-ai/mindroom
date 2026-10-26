@@ -2998,6 +2998,7 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
+        router_missing=None,
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
@@ -3056,6 +3057,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
+        router_missing=None,
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
@@ -3182,6 +3184,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
+        router_missing=None,
     )
 
     with (
@@ -4065,6 +4068,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
+        router_missing=None,
     )
     retry_sources = Mock()
     runner._approval_responses.retry_sources = retry_sources
