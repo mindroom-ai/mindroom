@@ -1888,13 +1888,8 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
         )
 
 
-def test_inline_attachment_byte_limit_fits_every_retained_attachment_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_inline_attachment_byte_limit_fits_every_retained_attachment_by_default(tmp_path: Path) -> None:
     """Every attachment MindRoom retains can reach a worker, and the worker can write it."""
-    monkeypatch.delenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", raising=False)
-    monkeypatch.delenv("MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES", raising=False)
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
 
     assert sandbox_proxy_module.inline_attachment_byte_limit(runtime_paths) == RETAINED_MEDIA_MAX_BYTES
@@ -1911,13 +1906,11 @@ def test_inline_attachment_byte_limit_fits_every_retained_attachment_by_default(
     ],
 )
 def test_inline_attachment_byte_limit_honors_valid_operator_overrides(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     configured: str,
     expected: int,
 ) -> None:
     """A positive setting replaces the default; anything else falls back to it."""
-    monkeypatch.delenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", raising=False)
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         process_env={"MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES": configured},
