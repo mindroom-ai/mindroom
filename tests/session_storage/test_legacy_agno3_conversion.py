@@ -440,6 +440,23 @@ def test_a_fold_run_without_a_row_takes_its_latest_folds_place_and_keeps_its_mem
     assert _query(database, "SELECT folded_by FROM \"code_sessions_log_runs\" WHERE run_id = 'member'") == [(1,)]
 
 
+@pytest.mark.parametrize("field", ["agent_id", "user_id"])
+def test_a_lone_surrogate_in_a_runs_text_field_converts_as_a_replacement_character(tmp_path: Path, field: str) -> None:
+    """A run row's or fold member's text field worker code wrote with an escaped lone surrogate reads as U+FFFD."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0, run_data=json.dumps({**_run("r0").to_dict(), field: "x\ud800"}))
+    segment = _segment(members=(_run("gone.m", parent_run_id="gone"),))
+    segment["member_responses"][0][field] = "x\ud800"
+    _insert_summary(database, 1, 0, segment_run_id="gone", segment=segment)
+
+    store = _converted(database)
+
+    for run_id in ("r0", "gone.m"):
+        run = store.get_run(run_id)
+        assert run is not None
+        assert run.to_dict()[field] == "x\ufffd"
+
+
 def test_a_run_whose_metadata_is_not_an_object_converts(tmp_path: Path) -> None:
     """Metadata worker code stored as something other than an object neither stops the conversion nor changes."""
     database = _agno_database(tmp_path)
@@ -762,8 +779,14 @@ def test_a_fold_whose_run_id_is_not_text_names_no_run(tmp_path: Path, fold_run_i
 
 @pytest.mark.parametrize(
     ("raw", "kept"),
-    [("{not json", []), ('{"$e": "$e"}', []), ("5", []), ('[1, "$e", {"id": "$f"}, ["$g"]]', ["$e"])],
-    ids=["not-json", "object", "number", "mixed-list"],
+    [
+        ("{not json", []),
+        ('{"$e": "$e"}', []),
+        ("5", []),
+        ('[1, "$e", {"id": "$f"}, ["$g"]]', ["$e"]),
+        ('["$e\\ud800"]', ["$e\ufffd"]),
+    ],
+    ids=["not-json", "object", "number", "mixed-list", "lone-surrogate"],
 )
 def test_summary_event_ids_keep_only_their_text_entries(tmp_path: Path, raw: str, kept: list[str]) -> None:
     """Event ids worker code wrote as anything but a JSON array of text keep only their text entries, so the scope reads.

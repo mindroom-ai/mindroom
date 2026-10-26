@@ -560,6 +560,19 @@ def test_archive_text_that_is_not_utf8_reads_with_replacement_characters(tmp_pat
     assert seen == {"$legacy\ufffd", "$r0", "$\ufffd\ufffd\ufffd"}
 
 
+@pytest.mark.parametrize("field", ["agent_id", "user_id"])
+def test_an_archived_run_with_a_lone_surrogate_returns_with_a_replacement_character(tmp_path: Path, field: str) -> None:
+    """A text field worker code archived with an escaped lone surrogate, which SQLite cannot store, reads as U+FFFD."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    _set_archived(tmp_path, "run_data", json.dumps({**_run("r0").to_dict(), field: "x\ud800"}))
+
+    restored = _open(tmp_path).get_run("r0")
+
+    assert restored is not None
+    assert restored.to_dict()[field] == "x\ufffd"
+    assert _replay(tmp_path).stored == ["r0", "r1"]
+
+
 def test_the_archive_step_leaves_text_reads_to_the_steps_after_it(tmp_path: Path) -> None:
     """Replacement characters stay the archive's rule: the connection reads text as it did once the step ends."""
     _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])

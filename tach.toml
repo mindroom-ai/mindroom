@@ -1081,6 +1081,7 @@ visibility = [
     "mindroom.session_storage.store",
     "mindroom.history.legacy_compaction_state",
     "mindroom.session_storage.legacy_agno3_conversion",
+    "mindroom.session_storage.legacy_agno3_schema",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.stats_storage",
 ]
@@ -1119,6 +1120,7 @@ visibility = [
 path = "mindroom.session_storage.legacy_agno3_schema"
 depends_on = [
     "mindroom.llm",
+    "mindroom.session_storage.legacy_agno2_runs",
     "mindroom.session_storage.legacy_tool_results",
     "mindroom.session_storage.schema",
     "mindroom.usage.storage",

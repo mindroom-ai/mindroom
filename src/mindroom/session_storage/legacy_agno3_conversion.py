@@ -32,7 +32,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.codec import run_kind
-from mindroom.session_storage.legacy_agno2_runs import stored_timestamp
+from mindroom.session_storage.legacy_agno2_runs import decode_json, stored_timestamp
 from mindroom.session_storage.legacy_agno3_backup import write_conversion_backup
 from mindroom.session_storage.legacy_agno3_schema import (
     AGNO_SCHEMA_VERSIONS_TABLE,
@@ -270,7 +270,7 @@ def _summary_rows(
     )
     now = int(time.time())
     for row_id, scope_key, after_run_index, summary, legacy, event_ids, seen, created_at, run_id, segment in rows:
-        decoded = _decoded(json.loads, segment) if segment is not None else None
+        decoded = _decoded(decode_json, segment) if segment is not None else None
         yield _SummaryRow(
             row_id,
             scope_key,
@@ -287,7 +287,7 @@ def _summary_rows(
 
 def _text_event_ids(raw: object) -> str:
     """Return a summary row's stored event ids as a JSON array of their text entries, the only ones MindRoom wrote."""
-    decoded = _decoded(json.loads, raw) if isinstance(raw, str) else None
+    decoded = _decoded(decode_json, raw) if isinstance(raw, str) else None
     event_ids = decoded if isinstance(decoded, list) else []
     return json.dumps([event_id for event_id in event_ids if isinstance(event_id, str)])
 
