@@ -38,10 +38,13 @@ Set up the homeserver (examples use `chat.example.com`):
     ```
 
 3. Turn on "Bypass OPTIONS requests to origin" (`options_preflight_bypass`) on the Access application, because browsers send CORS preflights without credentials.
-4. Let `/_matrix/client/v1/media` and `/_matrix/media/v3/upload` bypass Access. Images and uploads cannot carry the header, and the homeserver refuses them without a Matrix access token.
+   Every `OPTIONS` request then reaches the origin without an Access session, so make sure no route answers `OPTIONS` with private content; nginx `return` answers any method.
+4. Let `/_matrix/client/versions`, `/_matrix/client/v1/media` and `/_matrix/media/v3/upload` bypass Access.
+   The app checks `/versions` before the organization's sign-in, images and uploads cannot carry the header, and the homeserver refuses the media paths without a Matrix access token.
 5. Run a homeserver that allows the `cf-access-token` header in CORS, such as the MindRoom fork of Tuwunel.
 
 Access application paths include everything below them, so answer 404 for anything under the public advert path.
+Accounts that were signed in before the homeserver moved behind Access need to sign out and in again, and their earlier push registrations stay on the server until removed.
 
 ## Reporting Issues
 
