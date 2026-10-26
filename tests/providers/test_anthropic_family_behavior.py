@@ -240,10 +240,14 @@ async def test_a_whole_reply_finishes_with_the_message_its_stream_would(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False], ids=["streamed", "blocking"])
-async def test_stored_reasoning_is_what_agno_stored_for_the_stream_mode(tmp_path: Path, *, stream: bool) -> None:
-    """A streamed reply stores its thinking blocks joined, a blocking reply only the last, as Agno did.
+async def test_a_stream_stores_every_thinking_block_and_a_blocking_reply_only_the_last(
+    tmp_path: Path,
+    *,
+    stream: bool,
+) -> None:
+    """A streamed reply stores its thinking blocks joined, a blocking reply only the last.
 
-    Agno summed a stream's thinking and redacted thinking deltas, and its response parser kept the last block of each.
+    A stream sums its thinking and redacted thinking deltas, and a blocking reply keeps the last block of each.
     """
     blocks = [
         {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
@@ -260,23 +264,6 @@ async def test_stored_reasoning_is_what_agno_stored_for_the_stream_mode(tmp_path
     expected = ("First. Second.", "redacted-1redacted-2") if stream else ("Second.", "redacted-2")
     assert (message.reasoning_content, message.redacted_reasoning_content) == expected
     assert (message.provider_data or {})["signature"] == "sig-2"
-
-
-@pytest.mark.asyncio
-async def test_a_whole_reply_stores_its_last_thinking_block_where_a_stream_stores_them_all(tmp_path: Path) -> None:
-    """Agno's whole-response parser kept the last thinking block, while its stream summed every block's deltas."""
-    blocks = [
-        {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
-        {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
-        {"type": "text", "text": "Done."},
-    ]
-    reasoning = {}
-    for stream, reply in ((True, sse_reply(blocks)), (False, json_reply(blocks))):
-        provider = route_provider("anthropic", tmp_path, Wire(reply), extra_kwargs={"thinking": {"type": "adaptive"}})
-        turn = await claude_turn(provider, ModelRequest(messages=_user(), stream=stream))
-        reasoning[stream] = turn.message.reasoning_content
-
-    assert reasoning == {True: "First. Second.", False: "Second."}
 
 
 @pytest.mark.asyncio
@@ -696,7 +683,7 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
         ("bedrock_claude", True, "/v1/messages?beta=true", None),
     ],
 )
-async def test_tool_definitions_carry_only_the_fields_agno_sent(
+async def test_tool_definitions_carry_only_the_fields_the_claude_wire_takes(
     tmp_path: Path,
     route: str,
     strict_sent: bool,

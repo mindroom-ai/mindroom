@@ -70,7 +70,6 @@ from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.scripted_agent_helpers import registered_toolkit
-from tests.team_runtime.squad import member as squad_member
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
@@ -86,6 +85,7 @@ from tests.team_turn_helpers import (
     rendered,
     squad_turn,
 )
+from tests.teams.squad import member as squad_member
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
@@ -762,7 +762,7 @@ _TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch 
         ),
     ],
 )
-async def test_a_blocking_team_pause_shows_its_runs_records_with_agno_s_paused_notices(
+async def test_a_blocking_team_pause_shows_its_runs_records_with_their_paused_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     show_tool_calls: bool,
@@ -771,7 +771,7 @@ async def test_a_blocking_team_pause_shows_its_runs_records_with_agno_s_paused_n
     consensus_slot: str,
     separators: list[str] | None,
 ) -> None:
-    """A blocking pause renders its runs' records, as the Agno-backed blocking pause did, not its events' document.
+    """A blocking pause renders its runs' records, not its events' document.
 
     Each slot holds its run's text first, the member's and the leader's paused notices included, and then the run's
     tool calls, the member's gated call still pending. The snapshot the resume continues holds the same slots.

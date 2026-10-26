@@ -320,7 +320,7 @@ def scrub_generated_ids(value: object) -> Any:  # noqa: ANN401 - arbitrary JSON
 
 
 def normalized_request(request: SentRequest) -> dict[str, Any]:
-    """Return the method, URL, stable headers, and JSON body of one SDK request, as C1 recorded them."""
+    """Return the method, URL, stable headers, and JSON body of one SDK request, as the provider goldens record them."""
     headers = {
         name: value
         for name, value in sorted(request.headers.items())

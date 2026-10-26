@@ -39,7 +39,7 @@ class Utterance:
     display_name: str | None
     # Send this only through redaction.
     unredacted: str
-    # The stored message, for its tool calls and tool name.
+    # The stored message, for its tool calls, its tool name, and whether its tool call failed.
     message: Message
 
 

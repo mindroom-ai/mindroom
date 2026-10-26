@@ -707,6 +707,7 @@ class TestAgentBot(AgentBotTestBase):
             wait_for_membership_idle=AsyncMock(),
             next_batch=AsyncMock(return_value=None),
             change_membership=AsyncMock(return_value=True),
+            wait_for_room_ready=AsyncMock(return_value=True),
         )
         bot.journal_principal = MagicMock(return_value=principal)
         bot._ingestion_session = session
@@ -733,6 +734,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ]
         assert session.wait_for_membership_idle.await_count == 3
+        # Each successful join, the no-op one included, returns once nio can send to the room.
+        assert session.wait_for_room_ready.await_args_list == [call(room_id)] * 3
         assert principal.ingestion_membership_position.await_args_list == [
             call(room_id),
             call(room_id),

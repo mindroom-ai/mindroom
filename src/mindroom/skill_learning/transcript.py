@@ -134,7 +134,9 @@ def _heading(message: Utterance) -> str:
     if message.kind == "runtime":
         return "RUNTIME:"
     if message.kind == "tool_result":
-        return f"TOOL RESULT ({message.message.tool_name or 'unknown tool'}):"
+        # A failed call's error text reads like any result, so a reviewer would learn the failed command as working.
+        outcome = "ERROR" if message.message.tool_call_error else "RESULT"
+        return f"TOOL {outcome} ({message.message.tool_name or 'unknown tool'}):"
     return "ASSISTANT:"
 
 

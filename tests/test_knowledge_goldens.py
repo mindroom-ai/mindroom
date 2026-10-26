@@ -50,7 +50,7 @@ SEARCH_GOLDENS: dict[str, Any] = load(SEARCH_PATH)
 
 
 @pytest.mark.parametrize("case", sorted(EMBEDDER_GOLDENS))
-def test_embedders_send_the_request_bodies_agno_sent(
+def test_embedders_send_the_golden_request_bodies(
     case: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -77,7 +77,7 @@ def parity_embedder(monkeypatch: pytest.MonkeyPatch) -> ParityEmbedder:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("parity_embedder")
-async def test_refreshes_write_the_rows_and_collection_settings_agno_wrote(tmp_path: Path) -> None:
+async def test_refreshes_write_the_golden_rows(tmp_path: Path) -> None:
     """Every chunk row keeps its document, metadata keys and values, and embedding.
 
     Chroma returned some embeddings up to one float32 ulp from the values it was given, and the owned store keeps the
@@ -126,7 +126,7 @@ async def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: 
 
 
 @pytest.mark.asyncio
-async def test_search_tool_results_match_agnos(tmp_path: Path, parity_embedder: ParityEmbedder) -> None:
+async def test_search_tool_results_match_the_search_golden(tmp_path: Path, parity_embedder: ParityEmbedder) -> None:
     """The adapted search tool returns the golden results over the refreshed golden bases.
 
     Documents keep their values and layout, merged bases interleave, an empty base reports no documents, and a

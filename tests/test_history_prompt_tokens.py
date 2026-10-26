@@ -182,7 +182,7 @@ def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt
     )
 
 
-def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
+def test_estimate_prompt_visible_history_tokens_drops_a_tool_result_whose_call_the_message_limit_cut() -> None:
     session = _session(
         "session-1",
         runs=[

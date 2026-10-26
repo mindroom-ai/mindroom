@@ -77,8 +77,8 @@ TEST_AGNO_IMPORTERS = frozenset(
         "conftest.py",
         "delegation_helpers.py",
         "scripted_agent_helpers.py",
-        "team_runtime/test_continue_team.py",
         "team_turn_helpers.py",
+        "teams/test_continue_team.py",
         "test_agent_cli_control_tools.py",
         "test_agent_cli_media.py",
         "test_agent_cli_standard_mode.py",
@@ -184,7 +184,7 @@ AGNO_RUNTIME_MODULES = ("agno.agent", "agno.run", "agno.models", "agno.team", "a
 TEST_AGNO_RUNTIME_IMPORTERS = frozenset(
     {
         "agent_loop/test_run.py",
-        "team_runtime/test_continue_team.py",
+        "teams/test_continue_team.py",
         "test_agent_cli_standard_mode.py",
         "test_agent_cli_turn.py",
         "test_agent_tool_calls.py",

@@ -548,14 +548,14 @@ async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_r
         (True, "Five is prime.Five is odd."),
     ],
 )
-async def test_a_collaborate_leader_reads_its_members_results_as_agno_s_delegation_gave_them_on_each_path(
+async def test_a_collaborate_leader_reads_its_members_results_labeled_only_from_a_blocking_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
     expected: str,
 ) -> None:
-    """A blocking reply labels each member's result with its name, as Agno's non-stream broadcast did."""
+    """A blocking reply labels each member's result with its name; a streamed reply joins the results as they are."""
     team = _team(
         tmp_path,
         monkeypatch,
