@@ -39,9 +39,11 @@ from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.record import FIXTURES, GOLDEN_DUMPS, storage_name_of
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from contextlib import ExitStack
 
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.types import ConversationSession
 
 _NAMES = TableNames("code")
 _AGNO_PARITY = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity"
@@ -1164,6 +1166,91 @@ def test_a_segment_tool_no_folded_message_names_stays_folded(tmp_path: Path) -> 
     assert (json.loads(data)["role"], json.loads(data)["tool_name"]) == ("tool", "probe")
 
 
+def _store_text_bytes(database: Path, sql: str, *parameters: object) -> None:
+    """Run ``sql``, whose ``CAST(? AS TEXT)`` stores bytes as text without checking them, as worker code could."""
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute(sql, parameters)
+
+
+def test_a_run_row_whose_data_is_not_utf8_converts_with_replacement_characters(tmp_path: Path) -> None:
+    """SQLite stores any bytes as text; a run's JSON that is not UTF-8 reads with U+FFFD, and the session converts."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0", content="answer r0"), run_index=0)
+    _insert_run(database, _run("r1"), run_index=1)
+    stored = json.dumps(_run("r0", content="answer r0").to_dict()).encode().replace(b'"answer r0"', b'"answer \x80"')
+    _store_text_bytes(database, "UPDATE code_sessions_runs SET run_data = CAST(? AS TEXT) WHERE run_id = 'r0'", stored)
+
+    store = _converted(database)
+
+    run = store.get_run("r0")
+    assert run is not None
+    assert run.content == "answer \ufffd"
+    assert _loaded_ids(store) == ["r0", "r1"]
+
+
+@pytest.mark.parametrize(
+    ("column", "stored", "read"),
+    [
+        ("metadata", b'{"note": "x\x80"}', lambda session: session.metadata == {"note": "x\ufffd"}),
+        (
+            "session_data",
+            b'{"session_state": {"note": "x\xff"}}',
+            lambda session: session.session_state == {"note": "x\ufffd"},
+        ),
+        ("agent_id", b"code\xfe", lambda session: session.owner_id == "code\ufffd"),
+    ],
+    ids=["metadata", "session-data", "owner"],
+)
+def test_session_text_that_is_not_utf8_is_stored_as_the_conversion_reads_it(
+    tmp_path: Path,
+    column: str,
+    stored: bytes,
+    read: Callable[[ConversationSession], bool],
+) -> None:
+    """A session column worker code stored as text that is not UTF-8 is rewritten with U+FFFD, so the session loads."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0)
+    _store_text_bytes(database, f"UPDATE code_sessions SET {column} = CAST(? AS TEXT)", stored)  # noqa: S608
+
+    store = _converted(database)
+
+    session = store.load_session(_SESSION, "agent")
+    assert session is not None
+    assert read(session)
+    assert [run.run_id for run in session.runs] == ["r0"]
+
+
+def test_a_session_whose_id_is_not_utf8_is_left_out(tmp_path: Path) -> None:
+    """No read can name a session whose id is not UTF-8, so it stays out and every other session converts."""
+    database = _agno_database(tmp_path, (_SESSION, "agent", "code"), ("odd", "agent", "code"))
+    _insert_run(database, _run("r0"), run_index=0)
+    _insert_run(database, _run("o0"), run_index=0, session_id="odd")
+    _store_text_bytes(
+        database,
+        "UPDATE code_sessions SET session_id = CAST(? AS TEXT) WHERE session_id = 'odd'",
+        b"odd\x80",
+    )
+
+    store = _converted(database)
+
+    assert _query(database, 'SELECT session_id FROM "code_sessions"') == [(_SESSION,)]
+    assert _loaded_ids(store) == ["r0"]
+    assert set(_seqs(database)) == {"r0"}
+
+
+def test_a_session_whose_text_holds_a_replacement_character_converts_unchanged(tmp_path: Path) -> None:
+    """U+FFFD stored as UTF-8 is text like any other: the session keeps its id and metadata."""
+    database = _agno_database(tmp_path, ("s\ufffd", "agent", "code"))
+    _insert_run(database, _run("r0"), run_index=0, session_id="s\ufffd")
+    _store_raw(database, "code_sessions", "metadata", '{"note": "\ufffd"}', session_id="s\ufffd")
+
+    store = _converted(database)
+
+    session = store.load_session("s\ufffd", "agent")
+    assert session is not None
+    assert (session.metadata, [run.run_id for run in session.runs]) == ({"note": "\ufffd"}, ["r0"])
+
+
 def test_removed_runs_stay_removed(tmp_path: Path) -> None:
     """A run a cut removed before the conversion still writes nothing when a late save stores it."""
     database = _agno_database(tmp_path)
@@ -1176,6 +1263,25 @@ def test_removed_runs_stay_removed(tmp_path: Path) -> None:
     assert session is not None
     assert store.save_run(session, _run("cut"), record_usage=False) == "removed"
     assert store.get_run("cut") is None
+
+
+def test_a_removed_run_whose_id_is_not_utf8_is_stored_as_the_conversion_reads_it(tmp_path: Path) -> None:
+    """A removed run id worker code stored as text that is not UTF-8 is copied with U+FFFD, so its session still loads."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0)
+    _store_text_bytes(
+        database,
+        "INSERT INTO code_sessions_removed_runs VALUES (CAST(? AS TEXT), ?), (CAST(? AS TEXT), ?)",
+        b"cut\x80",
+        _SESSION,
+        b"cut\x81",
+        _SESSION,
+    )
+
+    store = _converted(database)
+
+    assert _query(database, 'SELECT run_id FROM "code_sessions_log_removed"') == [("cut\ufffd",)]
+    assert _loaded_ids(store) == ["r0"]
 
 
 @pytest.mark.parametrize("dump", GOLDEN_DUMPS, ids=lambda dump: dump.stem)

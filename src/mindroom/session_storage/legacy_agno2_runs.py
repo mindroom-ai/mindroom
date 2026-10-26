@@ -41,6 +41,8 @@ def decode_session_json(raw_value: object) -> object:
 _SURROGATE_ESCAPES = re.compile(
     r"\\\\|\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\u[dD][89a-fA-F][0-9a-fA-F]{2}",
 )
+# Text without this holds no surrogate escape, so it skips the substitution.
+_SURROGATE_ESCAPE_START = re.compile(r"\\u[dD]")
 
 
 def decode_json(text: str | bytes | bytearray) -> object:
@@ -51,7 +53,7 @@ def decode_json(text: str | bytes | bytearray) -> object:
     """
     if not isinstance(text, str):
         text = bytes(text).decode(json.detect_encoding(text), "replace")
-    if "\\ud" in text or "\\uD" in text:
+    if _SURROGATE_ESCAPE_START.search(text):
         text = _SURROGATE_ESCAPES.sub(_kept_or_replaced, text)
     return json.loads(text)
 

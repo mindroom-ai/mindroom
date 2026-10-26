@@ -75,6 +75,7 @@ BASE  # template parameter field, also set by its derived default (src/mindroom/
 source_plugin  # unused variable (src/mindroom/hooks/context.py)
 start_new_session  # unused variable (src/mindroom/knowledge/refresh_runner.py)
 _.row_factory  # sqlite row-name access (src/mindroom/event_journal/sqlite_backend.py, src/mindroom/script_runs/store.py, src/mindroom/oauth/credential_store.py, src/mindroom/mcp_gateway/store.py, src/mindroom/debug_report.py, src/mindroom/usage/stats_storage.py)
+_.text_factory  # sqlite text decoding with replacement characters (src/mindroom/session_storage/legacy_agno3_conversion.py)
 _.PAUSE  # configured on the optional PyAutoGUI module (src/mindroom/desktop/provider.py)
 hash  # Mem0 result TypedDict field retained from provider payloads (src/mindroom/memory/_shared.py)
 _._refresh_token  # google-auth stores refresh token in a read-only-property backing field (src/mindroom/oauth/client.py)
