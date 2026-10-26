@@ -19,7 +19,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from time import time
-from typing import TYPE_CHECKING, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, NON_VISIBLE_RUN_STATUS_VALUES
 from mindroom.session_storage.store import (
@@ -32,7 +32,6 @@ from mindroom.session_storage.store import (
     store_fold,
     summary_event_sets,
 )
-from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
@@ -43,7 +42,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.schema import TableNames
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import SessionKind
+    from mindroom.session_storage.types import ConversationSession
 
 type _Key = tuple[int, int]
 
@@ -131,6 +130,7 @@ def append_summary(
     summary: str,
     fold: Fold | None = None,
     session: ConversationSession | None = None,
+    initial_session: ConversationSession | None = None,
 ) -> int | None:
     """Append one summary row after the newest covered run, unless its input went stale; return its id.
 
@@ -138,9 +138,9 @@ def append_summary(
     row, a covered run is gone or has another ``seq`` or status than was read, or a cut removed the fold's running run
     or its team run. The row's event sets come from the covered runs as they are stored now, so metadata linked during
     the summary call counts, and for a fold also from the running run's live metadata, which the row keeps as its
-    provenance. A fold then stores what it took out of its run (``store_fold``), creating the session row first when
-    no write has yet, as on a first turn whose summary call reported no usage. ``session``, when given, then holds the
-    runs and summary a load returns.
+    provenance. A fold then stores what it took out of its run (``store_fold``). ``initial_session``, when given, is
+    the empty session row the append creates first when no write has yet, as a first turn's fold needs when its
+    summary call reported no usage. ``session``, when given, then holds the runs and summary a load returns.
     """
     with _write_transaction(storage, session_id, session) as (connection, tables):
         latest = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
@@ -165,8 +165,9 @@ def append_summary(
             # The running run's events count even when it later ends paused, cancelled, or failed.
             run_metadata.append(live)
             provenance = (fold.run.run_id, _encoded(source_event_ids(live)), _encoded(seen_event_ids(live)))
+        if initial_session is not None:
             # The summary row references the session row, which a first turn's fold may be the first to need.
-            ensure_session_row(connection, tables.names, _scope_session(session_id, scope_key))
+            ensure_session_row(connection, tables.names, initial_session)
         event_ids, seen = summary_event_sets(run_metadata)
         (row_id,) = connection.execute(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, through, summary, event_ids, seen_event_ids, "  # noqa: S608
@@ -377,12 +378,6 @@ def _holds(answered: Collection[str], seen: Collection[str], event_id: str, matc
 def _barrier_key(rows: Sequence[_SummaryRow]) -> _Key:
     """Return the key of the scope's latest barrier, or ``(0, 0)`` without one; nothing behind it counts."""
     return next((row.key for row in reversed(rows) if row.summary is None), (0, 0))
-
-
-def _scope_session(session_id: str, scope_key: str) -> ConversationSession:
-    """Return the empty session of the scope ``scope_key`` (``<kind>:<id>``) that a fold creates when none is stored."""
-    kind, _, owner_id = scope_key.partition(":")
-    return ConversationSession(session_id=session_id, kind=cast("SessionKind", kind), owner_id=owner_id)
 
 
 def _encoded(event_ids: Collection[str]) -> str:

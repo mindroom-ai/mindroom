@@ -128,6 +128,7 @@ def _fold(
         covered=covered,
         summary=summary,
         fold=Fold(run=run, messages=tuple(folded), member_run_ids=frozenset(members)),
+        initial_session=_session("team" if scope_key == _TEAM else "agent"),
     )
 
 

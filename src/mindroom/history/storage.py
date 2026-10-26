@@ -485,6 +485,7 @@ def append_fold(
         summary=summary,
         fold=fold,
         session=session,
+        initial_session=first_scope_session(scope, session.session_id),
     )
     return row_id is not None
 

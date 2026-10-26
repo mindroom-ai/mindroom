@@ -28,6 +28,7 @@ from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
     _with_scope_state,
     append_compaction_chunk,
+    first_scope_session,
     read_chunk_basis,
 )
 from mindroom.history.types import (
@@ -593,6 +594,7 @@ def store_fold(
             messages=tuple(Message(role="tool", tool_call_id=call_id) for call_id in tool_call_ids),
             member_run_ids=frozenset(),
         ),
+        initial_session=first_scope_session(scope, session_id),
     )
     assert row_id is not None
     return row_id
