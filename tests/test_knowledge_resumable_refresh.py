@@ -617,10 +617,9 @@ def _api_error() -> Exception:
 async def test_interrupted_cold_build_resumes_same_candidate_without_reembedding(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A killed build resumes its candidate and only embeds what it still owes."""
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=1\n", encoding="utf-8")
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 6)
     config = _config(tmp_path, docs_path)
@@ -629,6 +628,7 @@ async def test_interrupted_cold_build_resumes_same_candidate_without_reembedding
     interrupt_after = 3
     indexed_before_interrupt: list[str] = []
     manager = _manager(config)
+    assert manager._max_concurrent_file_indexes == 1
     original_index = KnowledgeManager._index_file_locked
 
     async def _stop_midway(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
@@ -1377,14 +1377,13 @@ def test_refresh_embedder_embeds_chunks_as_documents() -> None:
 @pytest.mark.asyncio
 async def test_large_corpus_keeps_live_tasks_bounded(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Live indexing tasks stay bounded no matter how large the corpus is."""
     docs_path = tmp_path / "docs"
     file_count = 400
     _write_corpus(docs_path, file_count)
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=4\n", encoding="utf-8")
     config = _config(tmp_path, docs_path)
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "4")
 
     manager = _manager(config)
     peak_tasks = 0
@@ -1729,7 +1728,7 @@ async def test_scale_refresh_resumes_after_ninety_percent_and_stays_bounded(
     every file and created a second candidate collection.
     """
     monkeypatch.setattr(knowledge_manager_module, "_PROGRESS_LOG_INTERVAL_FILES", 10_000)
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=1\n", encoding="utf-8")
     docs_path = tmp_path / "docs"
     file_count = 500
     _write_corpus(docs_path, file_count)
@@ -1747,10 +1746,12 @@ async def test_scale_refresh_resumes_after_ninety_percent_and_stays_bounded(
         indexed += 1
         return await original_index(self, prepared, **kwargs)
 
+    manager = _manager(config)
+    assert manager._max_concurrent_file_indexes == 1
     KnowledgeManager._index_file_locked = _stop_at_ninety_percent  # type: ignore[method-assign]
     try:
         with pytest.raises(asyncio.CancelledError):
-            await _manager(config).reindex_all()
+            await manager.reindex_all()
     finally:
         KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
 
@@ -1841,7 +1842,6 @@ async def test_candidate_progress_reports_real_outstanding_work(
 @pytest.mark.asyncio
 async def test_batch_failure_never_leaves_stragglers_writing_after_compaction(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One failing file must not strand its siblings past the batch that owns them.
 
@@ -1850,7 +1850,7 @@ async def test_batch_failure_never_leaves_stragglers_writing_after_compaction(
     refresh's ``finally`` had already compacted and unlinked the journal --
     silently losing files that had genuinely finished.
     """
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "4")
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=4\n", encoding="utf-8")
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 4)
     config = _config(tmp_path, docs_path)
@@ -3927,12 +3927,14 @@ async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished
     condemned any candidate holding vectors would throw away every file the
     refresh went on to embed.
     """
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=1\n", encoding="utf-8")
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 4)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
-    await _manager(config).reindex_all()
+    manager = _manager(config)
+    assert manager._max_concurrent_file_indexes == 1
+    await manager.reindex_all()
 
     for index, name in enumerate(names):
         (docs_path / name).write_text(f"revised {index}", encoding="utf-8")

@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.credentials.sync import get_embedder_api_key, get_ollama_host
+from mindroom.credentials.sync import get_embedder_api_key, get_ollama_api_key, get_ollama_host
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
@@ -74,6 +74,7 @@ def resolve_embedder_settings(config: Config, runtime_paths: RuntimePaths) -> _R
             model=embedder_config.model,
             host=get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or OLLAMA_HOST_DEFAULT,
             dimensions=embedder_config.dimensions,
+            api_key=get_ollama_api_key(runtime_paths),
         )
     return _ResolvedEmbedderSettings(
         provider=provider,
@@ -111,7 +112,7 @@ def create_configured_embedder(
 
         # The resolver always resolves an Ollama host; only the other providers leave it unset.
         assert settings.host is not None
-        return OllamaEmbedder(model=settings.model, host=settings.host)
+        return OllamaEmbedder(model=settings.model, host=settings.host, api_key=settings.api_key)
 
     if settings.provider == "sentence_transformers":
         return create_sentence_transformers_embedder(runtime_paths, settings.model)

@@ -531,8 +531,8 @@ class TestMemoryTools:
 
         assert result.splitlines() == [
             f"Semantic memory search unavailable: {rejection.value}.",
-            "Repair the embedder credential: the Ollama embedder sends only the OLLAMA_API_KEY environment variable "
-            "of the MindRoom process, so set it there and restart MindRoom.",
+            "Repair the embedder credential: the Ollama embedder sends only OLLAMA_API_KEY, "
+            "so set it in the environment of the MindRoom process and restart MindRoom.",
         ]
 
     @pytest.mark.asyncio
