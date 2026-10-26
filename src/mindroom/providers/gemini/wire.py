@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Gemini wire format: request contents, function declarations, schema conversion, and stream parsing.
+"""Gemini wire format: request contents, function declarations, and stream parsing.
 
 Request values are plain dicts in google-genai's field names.
 The SDK validates them into its own types before it serializes the request.
