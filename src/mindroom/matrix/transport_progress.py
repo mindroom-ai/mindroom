@@ -32,6 +32,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    UNFINISHED_REPLY_STATUSES,
 )
 from mindroom.event_journal import replacement_target, visible_content
 
@@ -46,18 +47,24 @@ if TYPE_CHECKING:
 _TRANSPORT_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 
 
-def is_unfinished_stream(content: Mapping[str, object]) -> bool:
-    """Return whether one revision's content says its stream will send another revision."""
-    return content.get(STREAM_STATUS_KEY) in _TRANSPORT_STREAM_STATUSES
-
-
 def is_transport_progress_revision(event: ProjectedEvent, *, self_sender: str) -> bool:
     """Return whether one event is this bot's own still-running streaming edit."""
     if event.sender != self_sender:
         return False
     if replacement_target(event.content) is None:
         return False
-    return is_unfinished_stream(visible_content(event.content))
+    return visible_content(event.content).get(STREAM_STATUS_KEY) in _TRANSPORT_STREAM_STATUSES
+
+
+def is_unfinished_reply(content: Mapping[str, object]) -> bool:
+    """Return whether one shown revision says its reply will be revised again.
+
+    Wider than transport: a reply waiting for a tool approval is unfinished,
+    but its pause is content the conversation keeps. Anyone can write a
+    status, so a value that is not text is not one.
+    """
+    status = content.get(STREAM_STATUS_KEY)
+    return isinstance(status, str) and status in UNFINISHED_REPLY_STATUSES
 
 
 def is_transport_progress_source(source: Mapping[str, object], *, self_sender: str) -> bool:
@@ -68,4 +75,7 @@ def is_transport_progress_source(source: Mapping[str, object], *, self_sender: s
     if not isinstance(content, dict):
         return False
     message_content = cast("Mapping[str, object]", content)
-    return replacement_target(message_content) is not None and is_unfinished_stream(visible_content(message_content))
+    return (
+        replacement_target(message_content) is not None
+        and visible_content(message_content).get(STREAM_STATUS_KEY) in _TRANSPORT_STREAM_STATUSES
+    )

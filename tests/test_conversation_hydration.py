@@ -15,6 +15,7 @@ import pytest
 
 from mindroom.attachments.storage import register_thread_history_media_attachments
 from mindroom.constants import (
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -1699,6 +1700,23 @@ class ParentFirstWalk(FakeClient):
         return iter(sorted(sources, key=position, reverse=True))
 
 
+@dataclass
+class RecursionWithoutEdits(FakeClient):
+    """A homeserver whose recursive walks return no edits, while its direct edit lookups do."""
+
+    def _ordered_relations(
+        self,
+        event_id: str,
+        direction: nio.MessageDirection,
+    ) -> Iterator[dict[str, Any]]:
+        """Return stored relations in server order, without any edit."""
+        return (
+            source
+            for source in super()._ordered_relations(event_id, direction)
+            if (source["content"].get("m.relates_to") or {}).get("rel_type") != "m.replace"
+        )
+
+
 def streamed_reply_client(*endings: dict[str, Any], client_type: type[FakeClient] = FakeClient) -> FakeClient:
     """Return a thread whose recursive walk holds a placeholder reply but not how it ended.
 
@@ -1740,7 +1758,12 @@ class TestEditsTheThreadWalkMissed:
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
     async def test_a_long_ending_the_walk_missed_is_read_from_its_attachment(self, alice: PrincipalStore) -> None:
-        """An ending too long for one event is found the same way, and its attachment is what is read."""
+        """An ending too long for one event is found the same way, and its attachment is what is read.
+
+        Reading the attachment refetches the reply, and that refetch must not
+        trust a recursive walk either: it would reduce the reply to its
+        placeholder and settle it there.
+        """
         whole = "the whole answer, far too long for a single Matrix event"
         preview = {
             "msgtype": "m.file",
@@ -1761,7 +1784,7 @@ class TestEditsTheThreadWalkMissed:
                 "m.relates_to": {"rel_type": "m.replace", "event_id": "$answer"},
             },
         }
-        client = streamed_reply_client(ending)
+        client = streamed_reply_client(ending, client_type=RecursionWithoutEdits)
         client.sidecars["mxc://s/ending"] = json.dumps(
             build_edit_event_content(
                 event_id="$answer",
@@ -1776,6 +1799,42 @@ class TestEditsTheThreadWalkMissed:
 
         assert [message.content["body"] for message in page.messages] == ["the question", whole]
         assert [message.revision_event_id for message in page.messages] == ["$root", "$ending"]
+
+    async def test_a_reply_the_walk_left_waiting_for_an_approval_shows_the_ending(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reply paused for a tool approval is unfinished too, though its pause is not transport."""
+        waiting = stream_raw(
+            "$waiting",
+            "Waiting for approval to run a tool",
+            STREAM_STATUS_APPROVAL_PENDING,
+            ts=2_050,
+            replaces="$answer",
+        )
+        client = streamed_reply_client(waiting, completed_ending())
+        client.relations["$root"].append(waiting)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert client.relation_calls == 2
+
+    @pytest.mark.parametrize("status", [[], {}], ids=["list", "object"])
+    async def test_a_malformed_stream_status_from_another_participant_fails_nothing(
+        self,
+        alice: PrincipalStore,
+        status: object,
+    ) -> None:
+        """Anyone can write a status, so one that is not text is not a stream and costs no lookup."""
+        message = raw("$odd", "an ordinary message", ts=2_000, thread_id="$root")
+        message["content"][STREAM_STATUS_KEY] = status
+        client = FakeClient(events={"$root": raw("$root", "the question")}, relations={"$root": [message]})
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "an ordinary message"]
+        assert client.relation_calls == 1
 
     @pytest.mark.parametrize("reader_sender", [ALICE, BOT], ids=["another_participant", "its_author"])
     async def test_a_prompt_reads_the_ending_the_walk_missed(
@@ -2432,8 +2491,8 @@ class TestPointRefetch:
     ) -> None:
         """A walk stopped before any of the sender's edits cannot vouch for the original.
 
-        Relations arrive newest first, so enough reactions sent after the
-        surviving edit end the walk before it. Installing the original as
+        Edits arrive newest first, so enough edits by someone else sent after
+        the surviving edit end the walk before it. Installing the original as
         though it had never been edited would let any room member roll the
         message back. An edit by the sender found before the ceiling is still
         their newest and needs no notice.
@@ -2451,23 +2510,16 @@ class TestPointRefetch:
             _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
             _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
         )
-        reactions = [
-            {
-                "event_id": f"$reaction{index}",
-                "sender": BOB,
-                "origin_server_ts": 5_000 + index,
-                "type": "m.reaction",
-                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$m", "key": str(index)}},
-            }
-            for index in range(3)
-        ]
         client = FakeClient(
             events={"$m": raw("$m", "first")},
             relations={
                 "$m": [
                     raw("$e1", "second", ts=2_000, replaces="$m"),
                     raw("$e2", "third", ts=3_000, replaces="$m", redacted=True),
-                    *reactions,
+                    *(
+                        raw(f"$forged{index}", "forged", sender=BOB, ts=5_000 + index, replaces="$m")
+                        for index in range(3)
+                    ),
                 ],
             },
         )

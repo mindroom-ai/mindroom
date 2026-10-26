@@ -69,7 +69,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, without_sidecar_reference
-from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_stream
+from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -1040,11 +1040,12 @@ class ConversationHydrator:
         stopping just after admitting a message keeps its edit tail.
 
         The damage that matters has one shape. A streamed reply missing its
-        ending is installed at its placeholder, and prompts drop a placeholder
-        as nothing to read, so a model loses the reply instead of reading an
-        older revision of it. The walk can see that for free: the newest
-        revision it holds of such a message still promises another. Those
-        messages, and only those, get the lookup the root gets, on any server.
+        ending is installed at its placeholder or at its wait for a tool
+        approval, and prompts drop a placeholder as nothing to read, so a model
+        loses the reply instead of reading an older revision of it. The walk
+        can see that for free: the newest revision it holds of such a message
+        still says the reply is unfinished. Those messages, and only those, get
+        the lookup the root gets, on any server.
 
         A user's edit of an ordinary message is not covered. Nothing in the
         message says an edit is missing, so covering it would cost one lookup
@@ -1054,11 +1055,11 @@ class ConversationHydrator:
         Lookups run in walk order, newest first, and stop at ``max_requests``,
         because each is at least one request. Each walks one message's direct
         edits only and is held to the event ceiling, like the root's. On a
-        server whose walk is whole, the only messages that qualify are streams
-        still running or cut off for good, and a lookup that finds no ending
-        leaves them as the server holds them. Stopping at the ceiling, or
-        meeting an edit nobody can read, leaves the thread incomplete, because
-        it still holds messages nothing vouched for.
+        server whose walk is whole, the only messages that qualify are replies
+        still running, waiting for an approval, or cut off for good, and a
+        lookup that finds no ending leaves them as the server holds them.
+        Stopping at the ceiling, or meeting an edit nobody can read, leaves the
+        thread incomplete, because it still holds messages nothing vouched for.
         """
         edits: defaultdict[str, list[ProjectedEvent]] = defaultdict(list)
         for event in events:
@@ -1069,7 +1070,7 @@ class ConversationHydrator:
             for event in events
             if _is_logical_message(event)
             and event.event_id not in edits_fetched
-            and is_unfinished_stream(_reduce_current_revision(event, edits[event.event_id]).content)
+            and is_unfinished_reply(_reduce_current_revision(event, edits[event.event_id]).content)
         ]
         seen = {event.event_id for event in events}
         found: list[ProjectedEvent] = []
@@ -1134,13 +1135,12 @@ class ConversationHydrator:
         one -- it drops an original and keeps edits nothing will claim, rather
         than keeping a message and dropping the edits that supersede it.
 
-        ``window_messages`` is ``None`` for a point refetch, which is one logical
-        message and has no window: a threaded reply among its relations must not
-        end the walk before the edit it came for arrives.
+        ``window_messages`` is ``None`` for an edits-only lookup, which is one
+        logical message and has no window.
 
-        ``edits_only`` walks just the event's direct ``m.replace`` relations,
-        for a message whose edits a windowed walk of the whole tree may never
-        reach.
+        ``edits_only`` walks just the event's direct ``m.replace`` relations.
+        That is every relation a reduction of one message reads, and a lookup
+        a recursive walk can neither reorder nor drop edits from.
         """
         events: list[ProjectedEvent] = []
         admitted = 0
@@ -1376,11 +1376,14 @@ class ConversationHydrator:
             # projecting the redaction would bypass.
             return 0 if await self.store.drop_refetched_message(request) else None
         unreadable = _UnreadableHistory(revision_of=(request.logical_event_id, projected.sender))
+        # Its direct edits, not its relation tree: they are all the reduction
+        # reads, and a recursive walk can drop them.
         relations = await self._fetch_relations(
             request.room_id,
             request.logical_event_id,
             window_messages=None,
             unreadable=unreadable,
+            edits_only=True,
         )
         revision = _reduce_current_revision(projected, relations.events)
         content = await self._resolved_content(revision.event_id, revision.content)
@@ -1403,10 +1406,10 @@ class ConversationHydrator:
             and revision.event_id == request.logical_event_id
             and request.revision_event_id != request.logical_event_id
         ):
-            # Relations arrive newest first, so a sender's edit found before the
+            # Edits arrive newest first, so a sender's edit found before the
             # ceiling is still their newest. Finding none proves nothing once
             # the screen held an edit, because anyone in the room can push the
-            # sender's surviving edits past the ceiling with relations of their
+            # sender's surviving edits past the ceiling with edits of their
             # own. The original gets the same notice rather than passing as
             # unedited, and the debt still settles: another walk stops there too.
             content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
