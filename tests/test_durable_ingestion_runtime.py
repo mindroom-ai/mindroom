@@ -1145,16 +1145,10 @@ async def test_sliding_join_of_an_unconfigured_room_keeps_it_subscribed_until_ni
         join = asyncio.create_task(AgentBot.change_local_membership(bot, ROOM, "join"))
         try:
             await asyncio.wait_for(subscribed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-            # Room setup refreshes the configured subscriptions while the join waits for the room's state.
-            refresh = asyncio.create_task(bot.ensure_rooms())
-            # A refresh that subscribed the configured rooms alone would drop the joined room within these steps.
-            for _ in range(100):
-                if refresh.done():
-                    break
-                await asyncio.sleep(0)
+            # Room setup's refresh finishes while the join still waits for the room's state, and keeps the room.
+            await asyncio.wait_for(bot.ensure_rooms(), timeout=SETTLE_TIMEOUT_SECONDS)
             release.set()
             assert await asyncio.wait_for(join, timeout=SETTLE_TIMEOUT_SECONDS) is True
-            await asyncio.wait_for(refresh, timeout=SETTLE_TIMEOUT_SECONDS)
             # Once nio can send to the joined room, room setup's refresh no longer subscribes it.
             await bot.ensure_rooms()
             session = bot._ingestion_session
