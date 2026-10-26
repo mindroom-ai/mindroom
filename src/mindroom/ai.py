@@ -15,7 +15,7 @@ from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
 from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
-from mindroom.agent_loop.run import own_answers, run_agent
+from mindroom.agent_loop.run import own_answers, paused_content, run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
@@ -476,12 +476,17 @@ def _attach_blocking_pause_presentation(
     *,
     show_tool_calls: bool,
 ) -> PausedAttempt:
-    """Render a blocking pause once, before it crosses the approval boundary."""
+    """Render a blocking pause once, before it crosses the approval boundary.
+
+    A run that paused without text of its own holds the paused notice as its content (``paused_content``), which the
+    pause does not show, as a pause collected from the run's events does not: the approval card says what it waits for.
+    """
     presentation = CollectedStreamPresentation(
         show_tool_calls=show_tool_calls,
         track_hidden_tools=True,
     )
-    presentation.append_text(_extract_response_content(record, show_tool_calls=False))
+    content = _extract_response_content(record, show_tool_calls=False)
+    presentation.append_text("" if content == paused_content(record) else content)
     # A paused call stays started: a call waiting for approval, or a delegation that still waits for its child,
     # or for its turn after a sibling's, until the driver answers it.
     answered = answered_delegation_calls(record)
