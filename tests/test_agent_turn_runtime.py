@@ -1243,7 +1243,7 @@ async def _respond_through_runner(
     request: ResponseRequest,
     *,
     streaming: bool,
-) -> tuple[Any, list[str]]:
+) -> tuple[Any, str | None]:
     """Run one reply through the runner's turn, in its reply span, and return the outcome and the last attempt's run id."""
     runtime = await runner.prepare_response_runtime(request)
     recorder = agent_turn_recorder_for_test(runner, request, runtime)
