@@ -17,7 +17,7 @@ from mindroom.llm.provider import ModelRequest, ToolSpec, complete
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_inputs import MediaInputs
-from mindroom.session_storage.codec import run_from_row
+from mindroom.session_storage.legacy_agno3_schema import run_from_row
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
 from tests.providers.golden_support import Wire, hide_provider_environment
 
