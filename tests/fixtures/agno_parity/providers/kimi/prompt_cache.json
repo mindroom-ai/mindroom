@@ -22,7 +22,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -103,6 +102,8 @@
   },
   "request": {
     "body": {
+      "model": "k3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -113,9 +114,7 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "k3",
       "prompt_cache_key": "parity-cache-key",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

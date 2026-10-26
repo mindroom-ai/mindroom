@@ -25,7 +25,7 @@ from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_access import ToolDescriptor, ToolKey, UnknownToolError, validate_tool_arguments
+from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, validate_tool_arguments
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.worker_routing import tool_execution_identity
@@ -71,11 +71,6 @@ class DeferredAgentToolkit:
     materialize: Callable[[], Awaitable[AdaptedToolkit]]
 
 
-def _eager_toolkit(function: ToolFunction) -> str:
-    """Return the toolkit an eager ``function`` is reached under: its authored toolkit, or ``agent`` if generated."""
-    return function.toolkit or "agent"
-
-
 @dataclass(frozen=True, slots=True)
 class PreparedAgentToolBinding:
     """A prepared function, the catalog owning its exact live agent turn, and its toolkit's instructions."""
@@ -89,28 +84,46 @@ class PreparedAgentToolBinding:
     def approval_toolkit(self) -> str:
         """Return the toolkit an approval of this function's calls names: its authored toolkit, ``agent`` if generated.
 
-        A resumed approval rebuilds the agent with that toolkit attached, so it reaches the function under this name
-        even when this binding reached it under a deferred toolkit's registered name, which differs for an implied tool.
+        It differs from the toolkit this binding is reached under for an implied or preset tool. A resumed approval
+        rebuilds the agent with that toolkit attached and finds the function's binding by it (``approved_binding``).
         """
-        return _eager_toolkit(self.function)
+        return self.function.toolkit or "agent"
 
 
 @dataclass(frozen=True, slots=True)
-class AgentToolCallEvent:
-    """One step of a CLI call; ``media`` holds what a successful call returned beside its text."""
+class AgentToolCallStep:
+    """A CLI call started or ended, with the call as reported then; an ended call carries its result and error flag.
 
-    kind: Literal["started", "media", "waiting", "continuation_required", "completed", "failed"]
-    call_id: str
+    ``continuation_required`` ends a call after which the run stops, so the next attempt runs with what it did.
+    """
+
+    kind: Literal["started", "continuation_required", "completed"]
     key: ToolKey
-    call: ReportedCall | None = None
-    requirement: RunRequirement | None = None
-    media: ToolValue | None = None
+    call: ReportedCall
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolCallWaiting:
+    """A CLI call that waits for ``requirement``: a person's confirmation or its execution elsewhere."""
+
+    requirement: RunRequirement
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolCallMedia:
+    """The media a successful CLI call returned beside its text."""
+
+    media: ToolValue
+
+
+type AgentToolCallEvent = AgentToolCallStep | AgentToolCallWaiting | AgentToolCallMedia
 
 
 @dataclass
 class PreparedAgentToolCatalog:
-    """One turn's catalog of the agent's tools, each under the toolkit it was authored in.
+    """One turn's catalog of the agent's tools, each under the registered tool it comes from.
 
+    ``runtime_context`` is the agent's own, under which the functions generated for its build run.
     ``run`` is the turn's run identity, whose session holds the state its calls share and receives the catalog's
     checkpoints and delegations; ``store`` is the store they write, and ``record`` is the run itself once known: the live run after its first
     tool batch is planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy,
@@ -119,7 +132,6 @@ class PreparedAgentToolCatalog:
     it closes.
     """
 
-    agent_name: str
     run: RunContext
     runtime_context: ToolRuntimeContext
     store: ConversationStore | None
@@ -197,7 +209,7 @@ class PreparedAgentToolCatalog:
         *,
         include: Callable[[ToolFunction], bool] | None = None,
     ) -> None:
-        """Bind the run's functions under the toolkit each is offered from; skip functions ``include`` rejects.
+        """Bind the run's functions under the registered tool each comes from; skip functions ``include`` rejects.
 
         ``toolkits`` are a run's, which offer each function name once. A function that names no toolkit was
         generated for the agent, such as the knowledge search and the skill readers, and is reached as ``agent``.
@@ -225,14 +237,14 @@ class PreparedAgentToolCatalog:
         functions: Sequence[ToolFunction],
         namespace: str | None = None,
     ) -> None:
-        """Bind ``functions`` of ``toolkit`` under ``namespace``, or each under its own toolkit, as ``agent`` for none."""
+        """Bind ``functions`` of ``toolkit`` under ``namespace``, or each under its registered tool, ``agent`` for none."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
         instructions = (toolkit.guidance,) if toolkit.guidance else ()
         for function in functions:
-            if namespace is None and function.toolkit == "agent":
+            if namespace is None and function.registered_toolkit == "agent":
                 msg = "The agent toolkit namespace is reserved for generated functions"
                 raise ValueError(msg)
-            key = ToolKey(namespace or _eager_toolkit(function), function.name)
+            key = ToolKey(namespace or function.registered_toolkit or "agent", function.name)
             if key in bindings or key in self._bindings:
                 msg = f"Duplicate qualified tool: {key.toolkit}.{key.function}"
                 raise ValueError(msg)
@@ -272,9 +284,8 @@ class PreparedAgentToolCatalog:
                 with self.execution_context():
                     toolkit = await deferred.materialize()
                 await connect_toolkits((toolkit,), self._closes)
-                # Every function a deferred toolkit materializes is reached under the deferred toolkit's registered
-                # name, not the function's authored ``toolkit``, which differs for an implied tool; an approval of
-                # one names the authored toolkit (``approval_toolkit``).
+                # A deferred toolkit's functions are reached under the name it was listed under, which an agent's
+                # build gives as the registered tool they come from.
                 self._prepare(toolkit, toolkit.functions, deferred.name)
                 del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
@@ -287,20 +298,25 @@ class PreparedAgentToolCatalog:
                 raise UnknownToolError(msg)
             return binding
 
-    async def describe(
-        self,
-        key: ToolKey,
-        *,
-        check_current: Callable[[], None] | None = None,
-    ) -> ToolDescriptor:
-        """Return the actual prepared schema and toolkit instructions."""
-        binding = await self.bind(key, check_current=check_current)
-        return ToolDescriptor(
-            key,
-            binding.function.description or "",
-            dict(binding.function.parameters),
-            binding.instructions,
+    def approved_binding(self, toolkit: str, function: str) -> PreparedAgentToolBinding:
+        """Return the binding of ``function`` whose calls an approval naming ``toolkit`` approves.
+
+        A resumed approval names the toolkit it approved (``approval_toolkit``), which its rebuilt agent attaches,
+        so the function is bound here already, under the registered tool it comes from.
+        """
+        self._check_open()
+        binding = next(
+            (
+                binding
+                for binding in self._bindings.values()
+                if binding.key.function == function and binding.approval_toolkit == toolkit
+            ),
+            None,
         )
+        if binding is None:
+            msg = f"No function {function!r} approved under toolkit {toolkit!r}"
+            raise UnknownToolError(msg)
+        return binding
 
     async def close(self) -> None:
         """Refuse new work, wait for the operation that currently holds the catalog, then close what it connected."""
@@ -314,9 +330,9 @@ def _failure(
     call_id: str,
     arguments: dict[str, object],
     message: str,
-) -> AgentToolCallEvent:
+) -> AgentToolCallStep:
     call = ReportedCall(call_id, binding.key.function, arguments, result=message, is_error=True)
-    return AgentToolCallEvent("failed", call_id, binding.key, call=call)
+    return AgentToolCallStep("completed", binding.key, call)
 
 
 def _check_resolves(
@@ -419,18 +435,12 @@ async def _execute_agent_tool_call(
         if execution is not None and execution.is_paused:
             if execution.external_execution_required:
                 catalog._call_count += 1
-            yield AgentToolCallEvent(
-                "waiting",
-                call_id,
-                binding.key,
-                call=execution.call,
-                requirement=RunRequirement(execution),
-            )
+            yield AgentToolCallWaiting(RunRequirement(execution))
             return
         catalog._call_count += 1
         call = ReportedCall(call_id, binding.key.function, deepcopy(arguments))
         # The start reports a copy, so a consumer that edits its arguments changes neither the call nor its completion.
-        yield AgentToolCallEvent("started", call_id, binding.key, call=deepcopy(call))
+        yield AgentToolCallStep("started", binding.key, deepcopy(call))
         function = binding.function
         if shell_leaf is not None:
 
@@ -458,10 +468,9 @@ async def _execute_agent_tool_call(
         finally:
             await _settle_call(binding, tracker)
         if outcome.images or outcome.audios or outcome.videos or outcome.files:
-            yield AgentToolCallEvent("media", call_id, binding.key, media=outcome)
-        kind = "continuation_required" if outcome.stop_after_call else "failed" if outcome.is_error else "completed"
-        call = replace(call, result=outcome.content, is_error=outcome.is_error)
-        yield AgentToolCallEvent(kind, call_id, binding.key, call=call)
+            yield AgentToolCallMedia(outcome)
+        kind = "continuation_required" if outcome.stop_after_call else "completed"
+        yield AgentToolCallStep(kind, binding.key, replace(call, result=outcome.content, is_error=outcome.is_error))
 
 
 async def _settle_call(binding: PreparedAgentToolBinding, tracker: SyncToolCompletionTracker) -> None:
@@ -479,6 +488,9 @@ async def _settle_call(binding: PreparedAgentToolBinding, tracker: SyncToolCompl
 
 __all__ = [
     "AgentToolCallEvent",
+    "AgentToolCallMedia",
+    "AgentToolCallStep",
+    "AgentToolCallWaiting",
     "DeferredAgentToolkit",
     "PreparedAgentToolBinding",
     "PreparedAgentToolCatalog",

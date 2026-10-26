@@ -1,7 +1,7 @@
 """The compaction summary request is the ``compaction_summary`` prompt golden's, byte for byte, from production code.
 
 The golden's first turn calls ``compact_context`` and stores its run; the next reply compacts that run before it
-answers, with one non-streaming summary request. Here the run the first turn stores is seeded from the golden's own
+answers, with one summary request. Here the run the first turn stores is seeded from the golden's own
 requests, and the runtime's pre-reply compaction (summarizer loading through the provider registry, the summary input,
 and the summary call) sends the summary request to the recorder the prompt goldens were captured with.
 """
@@ -99,7 +99,6 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
         )
 
     summary_request = golden["requests"][-1]
-    assert summary_request["stream"] is False
     requests = normalize([call_dict(call) for call in recorder.ordered_calls()], tmp_path)
     assert requests == [summary_request]
     assert render(requests) == render([summary_request])

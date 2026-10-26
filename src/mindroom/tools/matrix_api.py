@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     icon="MessageSquare",
     icon_color="text-emerald-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_api",
     helper_text=(
         "Search uses action='search' with required `search_term`. "
         "`room_id` defaults to the current room. "

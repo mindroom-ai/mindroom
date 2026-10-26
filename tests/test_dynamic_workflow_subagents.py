@@ -50,8 +50,8 @@ def _config(
         },
         defaults=DefaultsConfig(tools=[]),
         models={
-            "default": ModelConfig(provider="test", id="default-model"),
-            "haiku": ModelConfig(provider="test", id="haiku-model"),
+            "default": ModelConfig(provider="openai", id="default-model"),
+            "haiku": ModelConfig(provider="openai", id="haiku-model"),
         },
         tool_approval={
             "default": approval_default,

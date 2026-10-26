@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import atexit
+import contextvars
 import logging
 import logging.config
+import logging.handlers
 import os
+import queue
 import sys
 import traceback
 from datetime import UTC, datetime
@@ -202,6 +206,84 @@ def _build_logger_levels(
     return handler_level, loggers
 
 
+# Several minutes of busy logging at tens of records a second, in a few tens of megabytes at most.
+_MAX_QUEUED_LOG_FILE_RECORDS = 10_000
+
+
+class _LogFile(logging.FileHandler):
+    """A log file whose failed reopen is reported like a failed write, so it cannot end the writer thread."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Append the record, reopening the file first if it was closed."""
+        try:
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
+
+
+class _QueuedFileHandler(logging.handlers.QueueHandler):
+    """Format records on the logging thread and append them to the log file from a writer thread.
+
+    A log directory on a network file system can stall writes for minutes, and a write on the event loop would stall
+    every agent with it. Formatting stays on the logging thread, so records keep their bound context and timestamps.
+    The queue is capped so a long stall cannot grow memory without limit: from the cap until the writer has caught up,
+    records skip the file only, stderr still gets them, and a note in the file says how many it skipped.
+    """
+
+    def __init__(self, filename: str, mode: str, encoding: str) -> None:
+        # Unlike `queue.Queue`, `SimpleQueue` is reentrant, so a finalizer that logs during a put cannot deadlock it.
+        super().__init__(queue.SimpleQueue())
+        self._file = _LogFile(filename, mode=mode, encoding=encoding)
+        self._dropped_records = 0
+        # A later `dictConfig`, such as uvicorn's, drops this handler from the list `logging.shutdown` closes at exit.
+        atexit.register(self.close)
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        """Queue the formatted record, or count it as dropped from the cap until the writer has caught up."""
+        queued_records = cast("queue.SimpleQueue[logging.LogRecord]", self.queue).qsize()
+        if queued_records >= _MAX_QUEUED_LOG_FILE_RECORDS or (self._dropped_records and queued_records):
+            self._dropped_records += 1
+            return
+        if self.listener is None:
+            # Any `dictConfig` closes every handler, even one it leaves on the root logger, and a closed `FileHandler`
+            # reopens on its next record; this writer starts again the same way.
+            listener = logging.handlers.QueueListener(self.queue, self._file)
+            listener.start()
+            self.listener = listener
+        self._queue_dropped_records_note()
+        self.queue.put_nowait(record)
+
+    def _queue_dropped_records_note(self) -> None:
+        """Queue a note where the file skipped records, if it skipped any since the last note."""
+        if not self._dropped_records:
+            return
+        note = logging.makeLogRecord(
+            {
+                "name": __name__,
+                "levelno": logging.WARNING,
+                "levelname": "WARNING",
+                "msg": "Log file dropped records while its writes were stalled",
+                "dropped_records": self._dropped_records,
+            },
+        )
+        self._dropped_records = 0
+        # An empty context keeps the bound fields of whichever task logged next off the note.
+        self.queue.put_nowait(contextvars.Context().run(self.prepare, note))
+
+    def close(self) -> None:
+        """Write every queued record, then close the file."""
+        self.acquire()
+        try:
+            if self.listener is not None:
+                self._queue_dropped_records_note()
+                self.listener.stop()
+                self.listener = None
+            self._file.close()
+        finally:
+            self.release()
+        super().close()
+
+
 _current_log_file: Path | None = None
 
 
@@ -319,7 +401,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     if log_file is not None:
         handlers["file"] = {
             "level": handler_level,
-            "class": "logging.FileHandler",
+            "()": _QueuedFileHandler,
             "filename": str(log_file),
             "mode": "a",
             "encoding": "utf-8",

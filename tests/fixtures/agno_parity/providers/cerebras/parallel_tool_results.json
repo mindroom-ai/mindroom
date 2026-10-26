@@ -72,7 +72,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -149,6 +148,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -191,8 +192,6 @@
           "content": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]"
         }
       ],
-      "model": "gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

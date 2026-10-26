@@ -134,7 +134,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["redshift-connector"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/redshift",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#redshift",
     function_names=(
         "describe_table",
         "export_table_to_path",

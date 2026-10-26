@@ -53,7 +53,7 @@ async def request_compaction_before_next_reply(
     )
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity(entity_name).compaction_config,
+        compaction_config=config.resolve_entity(entity_name).history_settings.compaction_config,
         has_authored_compaction_config=True,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,

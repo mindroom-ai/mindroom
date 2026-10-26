@@ -81,7 +81,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -160,6 +159,8 @@
   },
   "request": {
     "body": {
+      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -197,8 +198,6 @@
           "content": "And for the evening?"
         }
       ],
-      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

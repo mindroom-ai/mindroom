@@ -98,7 +98,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -179,6 +178,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "include": [
         "reasoning.encrypted_content"
       ],
@@ -216,12 +217,10 @@
           "output": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {
         "effort": "medium"
       },
       "store": false,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",

@@ -1001,8 +1001,8 @@ class OAuthProvider:
         # LEGACY_COMPAT: OAuth credentials stored without a `token_uri` endpoint binding.
         # Legacy format: stored credentials whose mapping has no `token_uri`, produced by plugin `token_exchanger` or
         # `token_parser` results that core did not stamp; built-in parsers have written `token_uri` since v2026.5.3.
-        # Last legacy release: v2026.9.358 for unstamped plugin output (unversioned external input); the unreleased
-        # replacement stamps the authorization-bound endpoint on every exchange and refresh result.
+        # Last legacy release: v2026.9.361 for unstamped plugin output (unversioned external input); the replacement,
+        # v2026.9.362, stamps the authorization-bound endpoint on every exchange and refresh result.
         # Handling: reject before building a client or sending the refresh token; the lifecycle deletes the
         # credential, logs `token_endpoint_changed`, and the user reconnects.
         # Coverage: tests/test_mcp_oauth.py::test_mcp_oauth_refresh_rejects_token_endpoint_discovered_after_authorization

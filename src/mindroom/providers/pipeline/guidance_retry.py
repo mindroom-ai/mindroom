@@ -26,7 +26,7 @@ __all__ = ["MALFORMED_FUNCTION_CALL_GUIDANCE", "guidance_retry_stream"]
 
 logger = get_logger(__name__)
 
-# Model-visible text, kept as main behaves.
+# The user message a resent request ends with after a malformed function call; the model reads it.
 MALFORMED_FUNCTION_CALL_GUIDANCE = """The previous function call was malformed. Please try again with a valid function call.
 
 Guidelines:

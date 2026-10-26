@@ -1604,6 +1604,12 @@ class DeliveryGateway:
         await self._after_reply_commit(recorded)
         return True
 
+    async def stop_reply_by_id(self, reply_id: str, receipt_order: int) -> None:
+        """Record a Stop on one reply, even before Matrix acknowledged its event, and run what it left."""
+        recorded = await self.deps.outbox.replies.stop(reply_id, receipt_order=receipt_order, now_ns=time.time_ns())
+        if recorded is not None:
+            await self._after_reply_commit(recorded)
+
     async def accepts_reply_stop(self, event_id: str, room_id: str) -> bool:
         """Return whether a Stop reaction on this event reaches a running reply or a pending create."""
         return await self.deps.outbox.replies.accepts_stop(event_id, room_id)

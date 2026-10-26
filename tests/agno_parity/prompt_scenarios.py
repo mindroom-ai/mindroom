@@ -166,7 +166,6 @@ class ModelCall:
     model_provider: str
     # Models in the order MindRoom built them, which is deterministic where concurrent calls are not.
     model_index: int
-    stream: bool
     messages: list[OwnedMessage]
     tools: list[ToolSpec]
     tool_choice: ToolChoice | None
@@ -203,7 +202,6 @@ class Recorder:
             model_id=adapter.identity.id,
             model_provider=adapter.identity.provider,
             model_index=index,
-            stream=request.stream,
             messages=deepcopy(list(request.messages)),
             tools=list(request.tools),
             tool_choice=request.tool_choice,
@@ -310,7 +308,6 @@ def call_dict(call: ModelCall) -> dict[str, Any]:
     """Return one recorded request as the prompt goldens record it."""
     return {
         "model": {"id": call.model_id, "provider": call.model_provider},
-        "stream": call.stream,
         "messages": [turn_message(message) for message in call.messages],
         "tools": [tool_definition(tool) for tool in call.tools],
         "tool_choice": call.tool_choice,
@@ -1172,8 +1169,11 @@ _COMPACTION_SUMMARY_TEXT = "Alice asked the assistant to compact the conversatio
 
 
 def answer_compaction(call: ModelCall) -> OwnedMessage:
-    """Call compact_context on the first turn, summarize on the summary request, and answer the rest."""
-    if not call.stream:
+    """Call compact_context on the first turn, summarize on the summary request, and answer the rest.
+
+    The summary request is the only one that offers no tools.
+    """
+    if not call.tools:
         return OwnedMessage(role="assistant", content=_COMPACTION_SUMMARY_TEXT)
     if not _answers_tools(call) and _COMPACT_PROMPT in _last_user_text(call):
         return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_compact", "compact_context", {})])
@@ -1203,7 +1203,7 @@ def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
 async def _run_compaction_summary(root: Path) -> ScenarioOutput:
     first, follow_up = _compaction_turns(root)
     await _agent_turn(first)
-    # The next reply in the scope compacts its history first, with a non-streaming summary request.
+    # The next reply in the scope compacts its history first, with a summary request.
     await _agent_turn(follow_up)
     return ScenarioOutput(first.input)
 
@@ -1440,14 +1440,14 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     "participation_decision": Scenario(
         "Participation check of an agent with participation config and no judgment backend: the reply model's "
-        "non-streaming decision request with tool_choice none and the decision prompt appended, then the reply.",
+        "decision request with tool_choice none and the decision prompt appended, then the reply.",
         _run_participation_decision,
         answer_participation,
         turn=_participation_turn,
     ),
     "compaction_summary": Scenario(
-        "History compaction: a turn calls compact_context, so the next reply first sends the non-streaming summary "
-        "request, then replies with the summary in place of the compacted run.",
+        "History compaction: a turn calls compact_context, so the next reply first sends the summary request, then "
+        "replies with the summary in place of the compacted run.",
         _run_compaction_summary,
         answer_compaction,
         turn=lambda root: _compaction_turns(root)[0],

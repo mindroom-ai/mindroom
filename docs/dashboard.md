@@ -42,6 +42,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Tools** - configured tools (green badge) and tools that need no setup
 - **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](tools/dynamic-tools.md))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
+- **Personal agents** - a read-only list of the agents generated from [`personal_agents`](personal-agents.md) templates, with each owner, Matrix ID, template, and status; edit the templates under Settings → Personal rooms
 
 ### Teams
 
@@ -177,6 +178,7 @@ The dashboard uses the backend REST API under `/api/`, with the same authenticat
 | PUT | `/api/config/raw` | Replace raw `config.yaml` text |
 | GET | `/api/config/schema` | Configuration JSON schema used by Settings and More settings |
 | GET | `/api/config/agents` | List agents |
+| GET | `/api/config/personal-agents` | List generated personal agents |
 | POST | `/api/config/agents` | Create agent |
 | PUT | `/api/config/agents/{id}` | Update agent |
 | DELETE | `/api/config/agents/{id}` | Delete agent |

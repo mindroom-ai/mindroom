@@ -80,9 +80,9 @@ def _config(
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         models={
-            "default": ModelConfig(provider="test", id="default-model"),
-            "haiku": ModelConfig(provider="test", id="haiku-model"),
-            "sonnet": ModelConfig(provider="test", id="sonnet-model"),
+            "default": ModelConfig(provider="openai", id="default-model"),
+            "haiku": ModelConfig(provider="openai", id="haiku-model"),
+            "sonnet": ModelConfig(provider="openai", id="sonnet-model"),
         },
     )
 

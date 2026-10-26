@@ -45,7 +45,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["py-trello"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/trello",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#trello",
     function_names=(
         "create_board",
         "create_card",

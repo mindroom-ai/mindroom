@@ -174,7 +174,7 @@ class TestBuildAgentStatusMessage:
             },
             models={
                 "very_long_model_name": ModelConfig(
-                    provider="provider",
+                    provider="openrouter",
                     id="model_id",
                 ),
             },
@@ -184,7 +184,7 @@ class TestBuildAgentStatusMessage:
         status = build_agent_status_message("agent", config)
 
         # Just verify it builds without error and includes expected parts
-        assert "Model: provider/model_id" in status
+        assert "Model: openrouter/model_id" in status
         assert "A" * 100 in status  # Role truncated to 100 chars
         assert "8 tools available" in status
 

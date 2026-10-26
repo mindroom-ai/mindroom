@@ -523,7 +523,7 @@ def _configured_team_test_config(runtime_root: Path) -> Config:
                         rooms=["!test:localhost"],
                     ),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         ),
         runtime_root,
@@ -573,7 +573,7 @@ def _approval_reload_config(tmp_path: Path, *, include_code: bool) -> Config:
     return _runtime_bound_config(
         Config(
             agents=agents,
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
@@ -877,7 +877,7 @@ class AgentBotTestBase:
                         "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
                     },
                     teams={},
-                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    models={"default": ModelConfig(provider="openai", id="test-model")},
                 ),
             ),
             runtime_root,

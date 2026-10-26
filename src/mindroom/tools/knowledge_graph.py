@@ -23,6 +23,7 @@ register_builtin_tool_metadata(
             "Look up facts, entities, and their sources in the agent's knowledge graph, and with knowledge_graph_edits "
             "delete wrong facts and entities, merge duplicates, and rewrite summaries"
         ),
+        docs_url="https://docs.mindroom.chat/knowledge-graph/#the-knowledge_graph-tool",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

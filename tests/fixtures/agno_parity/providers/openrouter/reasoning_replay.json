@@ -51,7 +51,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": []
   },
@@ -78,6 +77,8 @@
   },
   "request": {
     "body": {
+      "model": "z-ai/glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -104,8 +105,6 @@
           "content": "And for the evening?"
         }
       ],
-      "model": "z-ai/glm-5.3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       }

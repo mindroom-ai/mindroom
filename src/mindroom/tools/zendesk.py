@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Zendesk",
     description="Customer support platform for searching help center articles",
-    category=ToolCategory.DEVELOPMENT,  # From others/ category
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires username, password, company_name
     setup_type=SetupType.API_KEY,  # Uses username/password authentication
     icon="SiZendesk",  # React icon for help/support
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/zendesk",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#zendesk",
     function_names=("search_zendesk",),
 )
 def zendesk_tools() -> type[ZendeskTools]:

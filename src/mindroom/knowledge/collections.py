@@ -224,7 +224,7 @@ def delete_source_path_vectors(collection: KnowledgeCollection, relative_paths: 
 def _source_content_hash(source_metadata: Mapping[str, Any]) -> str:
     """Return the hash every row of one file version carries, from the file's identity and signature.
 
-    The input is the sorted metadata JSON, a colon, and the path, the order Agno's content hash used.
+    The input is the sorted metadata JSON, a colon, and the path, which rows indexed by earlier releases hashed too.
     """
     return hashlib.sha256(
         ":".join([json.dumps(source_metadata, sort_keys=True), source_metadata[SOURCE_PATH_KEY]]).encode(),

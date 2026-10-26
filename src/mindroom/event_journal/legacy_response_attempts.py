@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 # Legacy format: approval_continuations without a span_id column, keeping their entity in an entity_name column and
 # their pending sources in approval_continuation_sources; v2026.9.138 through v2026.10.227 also kept their reply's
 # identity in response_attempts and response_attempt_sources.
-# Last legacy release: v2026.10.227; replacement: the unreleased durable reply messages name the paused span in
+# Last legacy release: v2026.10.227; replacement: the durable reply messages of v2026.10.228 name the paused span in
 # approval_continuations.span_id and read the reply's identity and held sources from the reply's records.
 # Handling: an upgrade cannot guarantee that no approval is pending, so the schema upgrade cancels every such approval:
 # it deletes the continuation with its calls and card records, and settles its pending sources unanswered. A click on

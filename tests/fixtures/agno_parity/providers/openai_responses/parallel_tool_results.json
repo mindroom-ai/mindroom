@@ -80,7 +80,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -162,6 +161,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "type": "function_call_output",
@@ -174,11 +175,9 @@
           "output": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]"
         }
       ],
-      "model": "gpt-6-astra",
       "previous_response_id": "resp_parity",
       "reasoning": {},
       "store": true,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",

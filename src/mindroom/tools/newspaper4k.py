@@ -45,7 +45,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["newspaper4k", "lxml_html_clean"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#newspaper",
     function_names=("get_article_data", "read_article"),
 )
 def newspaper4k_tools() -> type[Newspaper4kTools]:

@@ -21,7 +21,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -308,6 +307,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6.1-sol",
+      "stream": true,
       "include": [
         "reasoning.encrypted_content"
       ],
@@ -322,10 +323,8 @@
         }
       ],
       "instructions": "You are a helpful assistant.",
-      "model": "gpt-6.1-sol",
       "reasoning": {},
       "store": false,
-      "stream": true,
       "tools": [
         {
           "name": "calendar_create_event",

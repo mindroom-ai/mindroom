@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import threading
 import time
@@ -46,6 +47,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -504,6 +506,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["error_type"] == "ValueError"
     assert isinstance(records[0]["timing"]["result_ready_ms"], float)
     assert isinstance(records[0]["timing"]["tool_body_ms"], float)
+    assert records[0]["duration_ms"] == records[0]["timing"]["result_ready_ms"]
     assert records[0]["arguments"] == {
         "api_key": "***redacted***",
         "nested": [{"refresh_token": "***redacted***"}],
@@ -835,6 +838,49 @@ async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_call_s_record_and_after_hooks_read_one_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored row's duration and ready time and the after-call hooks' duration are the time the result was ready."""
+    durations: list[float] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def allow(_ctx: ToolBeforeCallContext) -> None:
+        return None
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def observe(ctx: ToolAfterCallContext) -> None:
+        durations.append(ctx.duration_ms)
+
+    # Each clock reading is one second after the last, so every measured phase is a whole number of seconds.
+    ticks = itertools.count()
+    monkeypatch.setattr(tool_hooks, "time", SimpleNamespace(perf_counter=lambda: float(next(ticks))))
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [allow, observe])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+
+    async def next_func(**kwargs: object) -> str:
+        return str(kwargs["path"])
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        assert await bridge("read_file", next_func, {"path": "notes.txt"}) == "notes.txt"
+
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    timing = record["timing"]
+    assert set(timing) == {"before_hooks_ms", "tool_body_ms", "result_ready_ms"}
+    assert 0 < timing["before_hooks_ms"] < timing["result_ready_ms"]
+    assert 0 < timing["tool_body_ms"] < timing["result_ready_ms"]
+    assert durations == [record["duration_ms"]] == [timing["result_ready_ms"]]
+
+
+@pytest.mark.asyncio
 async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Path) -> None:
     """Debug logging failures should not turn successful tools into failed calls."""
     seen: list[object] = []
@@ -865,6 +911,58 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 
     assert result == {"echo": "notes.txt"}
     assert seen == [{"echo": "notes.txt"}]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_as_its_text(tmp_path: Path) -> None:
+    """The caller receives the failed outcome, so the call fails; the observers read its text, as a declined call's.
+
+    The after-call hooks and the tool-call log receive the text, as they did when the tool returned it as an ordinary
+    value. The reply's record of the call receives the outcome itself, so it keeps that the call failed.
+    """
+    seen: list[tuple[object, BaseException | None, bool]] = []
+    finished: list[object] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after_call(ctx: ToolAfterCallContext) -> None:
+        seen.append((ctx.result, ctx.error, ctx.blocked))
+
+    class _Recorder:
+        async def started(self, tool_name: str, _args: Mapping[str, object]) -> str:
+            return tool_name
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: Mapping[str, object], result: object) -> None:
+            finished.append(result)
+
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [after_call])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    refusal = ToolOutcome(
+        content="❌ Scheduled call `task-1` did not run: its approval was already used.",
+        is_error=True,
+    )
+
+    async def next_func(**_kwargs: object) -> ToolOutcome:
+        return refusal
+
+    with (
+        tool_runtime_context(runtime_context),
+        tool_execution_identity(_execution_identity()),
+        recording_tool_calls(_Recorder()),
+    ):
+        result = await bridge("run_scheduled_call", next_func, {"task_id": "task-1"})
+
+    assert result is refusal
+    assert seen == [(refusal.content, None, False)]
+    assert finished == [refusal]
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert record["result"] == refusal.content
 
 
 @pytest.mark.asyncio

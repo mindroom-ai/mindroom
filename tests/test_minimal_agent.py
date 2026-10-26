@@ -669,7 +669,7 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
             metadata = catalog.metadata()
             assert any(item["toolkit"] == "calculator" and item.get("deferred") for item in metadata)
             binding = await catalog.bind(ToolKey("calculator", "add"))
-            assert binding.catalog.agent_name == "helper"
+            assert binding.catalog.runtime_context.agent_name == "helper"
             assert binding.function.name == "add"
             assert any(item["toolkit"] == "duckduckgo" and item.get("deferred") for item in catalog.metadata())
         finally:
@@ -796,6 +796,70 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     replayed_ids = {call["id"] for message in replay for call in message.tool_calls or ()}
     assert any(message.tool_call_id in replayed_ids for message in replay), replay
     assert all("add" not in str(message.tool_calls or []) for message in replay)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize(
+    ("tools", "roster"),
+    [
+        (
+            ["openclaw_compat"],
+            "attachments, browser, coding, duckduckgo, matrix_message, matrix_room, scheduler, shell, website",
+        ),
+        (["shell", "matrix_message"], "attachments, matrix_message, matrix_room, shell"),
+    ],
+    ids=["preset", "implied"],
+)
+async def test_every_cli_toolkit_answers_to_its_own_tool_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    roster: str,
+) -> None:
+    """Bash runs the shell a preset brings in, and the prompt lists each toolkit by the name the CLI calls it."""
+    runtime = _runtime_context(tmp_path)
+    runtime.config.agents["helper"] = AgentConfig(display_name="Helper", tools=tools, memory_backend="file")
+    registry = TurnToolRegistry()
+    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
+    persist_entity_accounts(runtime.config, runtime.runtime_paths)
+    offered: set[str] = set()
+
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
+        owner = shell_cli_owner(registry)
+        offered.update(str(item["toolkit"]) for item in owner.catalog.metadata())
+        call_id = uuid4()
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(
+                operation="tools.call",
+                toolkit="attachments",
+                function="list_attachments",
+                arguments={},
+                call_id=call_id,
+            ),
+        )
+        receipt = await settled_receipt(owner, str(call_id))
+        assert receipt["status"] == "completed", receipt
+        return "listed"
+
+    provider = ScriptedProvider(steps=[[("bash", {"command": "list my attachments"})]])
+    provider.install(monkeypatch)
+    install_scripted_shell(monkeypatch, run_shell_command)
+    with tool_runtime_context(runtime):
+        result = await ai.ai_response(
+            replace(_turn_context(), agent_mode="minimal", run_id=None),
+            prompt="list my attachments",
+            runtime_paths=runtime.runtime_paths,
+            config=runtime.config,
+            execution_identity=build_execution_identity_from_runtime_context(runtime),
+        )
+    assert "done" in str(result)
+    assert offered_tools(provider.requests[0]) == ["bash"]
+    assert f"Toolkits callable through mindroom-agent: {roster}\n" in str(provider.requests[0].messages[0].content)
+    assert set(roster.split(", ")) <= offered
+    # A preset offers no functions of its own.
+    assert "openclaw_compat" not in offered
 
 
 @pytest.mark.asyncio

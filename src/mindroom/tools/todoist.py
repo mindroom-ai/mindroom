@@ -36,7 +36,7 @@ logger = get_logger(__name__)
         ),
     ],
     dependencies=["todoist-api-python"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/todoist",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#todoist",
     function_names=(
         "close_task",
         "create_task",

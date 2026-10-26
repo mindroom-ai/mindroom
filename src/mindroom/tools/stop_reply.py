@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     icon="MessageSquare",
     icon_color="text-red-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply",
     function_names=("stop_agent_reply",),
 )
 def stop_reply_tools() -> type[StopReplyTools]:

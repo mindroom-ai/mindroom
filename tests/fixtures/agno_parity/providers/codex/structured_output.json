@@ -44,7 +44,6 @@
       "model": "mindroom.routing:_RoutingSuggestion"
     },
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -72,6 +71,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6.1-sol",
+      "stream": true,
       "include": [
         "reasoning.encrypted_content"
       ],
@@ -86,10 +87,8 @@
         }
       ],
       "instructions": "You are a helpful assistant.",
-      "model": "gpt-6.1-sol",
       "reasoning": {},
       "store": false,
-      "stream": true,
       "text": {
         "format": {
           "type": "json_schema",

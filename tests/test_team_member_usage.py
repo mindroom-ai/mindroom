@@ -23,8 +23,8 @@ from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import gated, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
-from tests.team_runtime.squad import approval, collect, resume_team, scripted, start_team, team_spec
-from tests.team_runtime.squad import member as team_member
+from tests.teams.squad import approval, collect, resume_team, scripted, start_team, team_spec
+from tests.teams.squad import member as team_member
 
 if TYPE_CHECKING:
     from pathlib import Path

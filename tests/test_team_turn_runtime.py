@@ -34,7 +34,7 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -70,7 +70,6 @@ from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.scripted_agent_helpers import registered_toolkit
-from tests.team_runtime.squad import member as squad_member
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
@@ -86,6 +85,7 @@ from tests.team_turn_helpers import (
     rendered,
     squad_turn,
 )
+from tests.teams.squad import member as squad_member
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
@@ -362,7 +362,7 @@ async def test_a_blocking_team_reply_renders_each_finished_member_run_then_the_c
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_reply_sends_non_streaming_requests_and_renders_the_member_and_consensus_document(
+async def test_a_blocking_team_reply_renders_the_member_and_consensus_document(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -376,7 +376,6 @@ async def test_a_blocking_team_reply_sends_non_streaming_requests_and_renders_th
     text = await team.respond(show_tool_calls=False)
 
     assert text == f"{HEADER}**Checker**: Checked.\n\n\n**Team Consensus**:\n\nAll good."
-    assert all(not request.stream for request in team.models["default"].requests)
     record, members = team.stored_runs()
     assert record.status is RunStatus.completed
     assert [member.agent_id for member in members] == ["checker"]
@@ -762,7 +761,7 @@ _TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch 
         ),
     ],
 )
-async def test_a_blocking_team_pause_shows_its_runs_records_with_agno_s_paused_notices(
+async def test_a_blocking_team_pause_shows_its_runs_records_with_their_paused_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     show_tool_calls: bool,
@@ -771,7 +770,7 @@ async def test_a_blocking_team_pause_shows_its_runs_records_with_agno_s_paused_n
     consensus_slot: str,
     separators: list[str] | None,
 ) -> None:
-    """A blocking pause renders its runs' records, as the Agno-backed blocking pause did, not its events' document.
+    """A blocking pause renders its runs' records, not its events' document.
 
     Each slot holds its run's text first, the member's and the leader's paused notices included, and then the run's
     tool calls, the member's gated call still pending. The snapshot the resume continues holds the same slots.
@@ -1704,7 +1703,6 @@ async def test_a_member_keeps_its_hooks_across_its_delegation_continuation(
     )
     team.models["writer-model"] = ScriptedModel(
         [_cut_off("cut-1"), _cut_off("cut-2"), _delegate_to_helper("Dig"), _cut_off("cut-3"), answer("Rebuilt.")],
-        capabilities=Capabilities(claude_family=True),
     )
 
     await team.stream()
@@ -1831,11 +1829,11 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_continues_after_a_member_s_delegation_with_streamed_leader_requests(
+async def test_a_blocking_team_continues_after_a_member_s_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The team's continuation after a member's delegation streams even in a blocking turn, as Agno's did."""
+    """A blocking team turn continues its leader once a member's own delegation finished."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -1847,7 +1845,7 @@ async def test_a_blocking_team_continues_after_a_member_s_delegation_with_stream
     text = await team.respond(show_tool_calls=False)
 
     assert text.endswith("**Team Consensus**:\n\nConsensus.")
-    assert [request.stream for request in team.models["default"].requests] == [False, True]
+    assert len(team.models["default"].requests) == 2
 
 
 @pytest.mark.asyncio

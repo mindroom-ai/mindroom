@@ -91,7 +91,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["neo4j"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/neo4j",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#neo4j",
     function_names=("get_schema", "list_labels", "list_relationship_types", "run_cypher_query"),
 )
 def neo4j_tools() -> type[Neo4jTools]:

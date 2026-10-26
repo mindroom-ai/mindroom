@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, cast, get_args
 from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import httpx
+import httpx2
 import pytest
 import structlog
 import typer
@@ -62,6 +63,7 @@ from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import load_config_yaml, normalize_console_output
+from tests.providers.golden_support import httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -3608,7 +3610,7 @@ def _record_doctor_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, 
     return requests
 
 
-def _vertex_ok(_request: httpx.Request) -> httpx.Response:
+def _vertex_ok(_request: httpx2.Request) -> httpx.Response:
     message = {
         "id": "msg_1",
         "type": "message",
@@ -3619,21 +3621,21 @@ def _vertex_ok(_request: httpx.Request) -> httpx.Response:
         "stop_sequence": None,
         "usage": {"input_tokens": 5, "output_tokens": 1},
     }
-    return httpx.Response(200, json=message)
+    return streamed_reply(message)
 
 
 def _vertex_wire(
     monkeypatch: pytest.MonkeyPatch,
-    respond: Callable[[httpx.Request], httpx.Response],
-) -> list[httpx.Request]:
+    respond: Callable[[httpx2.Request], httpx.Response],
+) -> list[httpx2.Request]:
     """Answer the model requests doctor sends through the shared model HTTP client, recording each one."""
-    requests: list[httpx.Request] = []
+    requests: list[httpx2.Request] = []
 
-    def record(request: httpx.Request) -> httpx.Response:
+    def record(request: httpx2.Request) -> httpx.Response:
         requests.append(request)
         return respond(request)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(record))
+    client = httpx2.AsyncClient(transport=httpx2_transport(record))
     monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", client.send)
     return requests
 
@@ -4009,7 +4011,7 @@ class TestDoctor:
         assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
         [request] = requests
         assert request.url.path == (
-            "/v1/projects/mindroom-test/locations/us-central1/publishers/anthropic/models/claude-sonnet-5:rawPredict"
+            "/v1/projects/mindroom-test/locations/us-central1/publishers/anthropic/models/claude-sonnet-5:streamRawPredict"
         )
         assert request.headers["authorization"] == "Bearer ambient-token"
         assert request.extensions["timeout"]["read"] == 10
@@ -4072,8 +4074,8 @@ class TestDoctor:
         assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
         assert "vertexai_claude connection valid for claude-haiku-4-5" in result.output
         assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == [
-            "claude-sonnet-5:rawPredict",
-            "claude-haiku-4-5:rawPredict",
+            "claude-sonnet-5:streamRawPredict",
+            "claude-haiku-4-5:streamRawPredict",
         ]
 
     def test_vertexai_claude_missing_env_is_warning(
@@ -4195,10 +4197,10 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
         _ambient_google_credentials(monkeypatch)
 
-        def respond(request: httpx.Request) -> httpx.Response:
+        def respond(request: httpx2.Request) -> httpx.Response:
             if failure == "offline":
                 message = "unreachable"
-                raise httpx.ConnectError(message, request=request)
+                raise httpx2.ConnectError(message, request=request)
             error = {"type": "error", "error": {"type": "permission_error", "message": "denied"}}
             return httpx.Response(403, json=error)
 

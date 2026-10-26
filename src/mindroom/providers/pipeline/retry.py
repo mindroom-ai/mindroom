@@ -1,4 +1,4 @@
-"""Bounded retries for transient provider failures in streamed requests, and the stream idle limit.
+"""Bounded retries for transient provider failures, and the stream idle limit.
 
 SDK HTTP retries cannot recover errors delivered inside an established SSE stream, so a failed request
 is reissued here until the attempt committed: produced output the caller could have shown, or started a hosted
@@ -107,11 +107,9 @@ def retrying_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, reissuing it after a retryable failure that came before the attempt committed.
 
-    A request whose caller retries it itself passes through unchanged. So does a non-streaming request, which the
-    SDK's HTTP retries cover, except on a route that only streams: it streams every request, so each one gets the
-    stream's retries and idle limit.
+    A request whose caller retries it itself passes through unchanged, without the idle limit.
     """
-    if request.overrides.caller_retries or (not request.stream and not inner.capabilities.streams_only):
+    if request.overrides.caller_retries:
         return inner.stream(request)
     reissue = partial(_reissue, request=request, budget=_RetryBudget(), model_id=inner.identity.id)
     next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider_name)

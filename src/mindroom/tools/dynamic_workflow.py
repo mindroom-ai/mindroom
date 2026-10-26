@@ -16,6 +16,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Dynamic Workflows",
         description="Create, update, run, and inspect reusable multi-agent Dynamic Workflows",
+        docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

@@ -81,7 +81,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/bitbucket",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#bitbucket",
     helper_text=(
         "For Bitbucket Cloud, [create a scoped API token]"
         "(https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) "

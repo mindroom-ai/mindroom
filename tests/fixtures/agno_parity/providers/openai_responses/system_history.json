@@ -44,7 +44,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": []
   },
@@ -73,17 +72,17 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "role": "user",
           "content": "And for the evening?"
         }
       ],
-      "model": "gpt-6-astra",
       "previous_response_id": "resp_parity",
       "reasoning": {},
-      "store": true,
-      "stream": true
+      "store": true
     },
     "headers": {
       "accept": "application/json",

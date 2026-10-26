@@ -186,7 +186,6 @@ def _reply(
     *,
     tools: Sequence[str] = (PROBE_TOOL,),
     approval_rules: Sequence[ApprovalRuleConfig] = (),
-    capabilities: Capabilities | None = None,
     plugins: Sequence[object] = (),
     max_tool_calls_per_turn: int | None = None,
     context_window: int | None = None,
@@ -213,7 +212,7 @@ def _reply(
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     if approval_rules:
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
-    model = ScriptedModel([list(turn) for turn in turns], capabilities=capabilities or Capabilities())
+    model = ScriptedModel([list(turn) for turn in turns])
     install_model_providers(monkeypatch, {"default": model})
     if plugins:
         monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: list(plugins))
@@ -394,7 +393,7 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
     assert len(reply.model.requests) == 2
     assert reply.model.requests[1].messages[-1].role == "tool"
     assert reply.model.requests[1].messages[-1].content == "touched a"
-    assert all(request.tool_choice is None and request.stream for request in reply.model.requests)
+    assert all(request.tool_choice is None for request in reply.model.requests)
     record = _stored(reply)
     assert record.status is RunStatus.completed
     assert record.content == "The probe answered."
@@ -408,12 +407,12 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_reply_sends_non_streaming_requests_and_returns_the_text(
+async def test_a_blocking_reply_runs_the_same_loop_and_returns_the_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The blocking path runs the same loop with ``stream=False`` requests and the tool trace in the text."""
+    """The blocking path runs the same loop and returns the text with the tool trace in it."""
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Done.")])
 
     text = await _respond(reply)
@@ -421,7 +420,6 @@ async def test_a_blocking_reply_sends_non_streaming_requests_and_returns_the_tex
     assert text.startswith("Done.")
     assert "touch" in text
     assert probe.calls == ["a"]
-    assert all(request.stream is False for request in reply.model.requests)
     assert _stored(reply).status is RunStatus.completed
 
 
@@ -820,7 +818,6 @@ async def test_a_silent_participation_decision_ends_the_reply_before_any_model_r
     assert gate.is_declined
     [decision] = reply.model.requests
     assert decision.tool_choice == "none"
-    assert decision.stream is False
     assert reply.storage.list_runs(SESSION_ID) == []
     assert reply.recorder.outcome == "skipped"
 
@@ -854,7 +851,7 @@ async def test_an_approving_participation_decision_reuses_the_reply_prefix(
     assert decision.messages[-1].role == "user"
     assert "Offer concise technical help." in str(decision.messages[-1].content)
     assert decision.tools == answer_request.tools
-    assert (decision.tool_choice, decision.stream) == ("none", False)
+    assert decision.tool_choice == "none"
     assert answer_request.tool_choice is None
     record = _stored(reply)
     assert record.content == "Useful answer"
@@ -982,7 +979,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
         "mid_turn_compaction_hook",
         "approval_receipt_hook",
     ]
-    assert hooks.answer_tool_calls is None
+    assert hooks.answer_tool_calls is not None
     assert hooks.rewrite_tool_calls is None
     # This agent offers no scheduler, so its calls run without the live-function binding step.
     assert [middleware.__name__ for middleware in hooks.tool_middleware] == ["middleware"]
@@ -990,7 +987,6 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     assert len(hooks.on_resume_entry) == 1
     assert hooks.on_loop_end is not None
     assert captured["request_template"].native_compaction is None
-    assert captured["request_template"].stream is True
 
 
 @dataclass(frozen=True)
@@ -1108,12 +1104,11 @@ async def test_a_cut_off_response_answers_its_calls_without_running_them(
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """On a Claude route, calls of a response the output limit cut off are answered, not run, and the model retries."""
+    """On any route, calls of a response the output limit cut off are answered, not run, and the model retries."""
     reply = _reply(
         tmp_path,
         monkeypatch,
         [_cut_off(tool_call("touch", "call_1", label="huge")), answer("Split into parts.")],
-        capabilities=Capabilities(claude_family=True),
     )
 
     chunks = await _stream(reply)
@@ -1137,7 +1132,6 @@ async def test_a_third_cut_off_response_fails_the_run(
         tmp_path,
         monkeypatch,
         [_cut_off(tool_call("touch", f"call_{index}", label="huge")) for index in range(3)],
-        capabilities=Capabilities(claude_family=True),
     )
 
     chunks = await _stream(reply)

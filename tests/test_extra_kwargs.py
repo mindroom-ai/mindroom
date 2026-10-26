@@ -7,11 +7,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import render_transient_context
@@ -32,8 +32,8 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
-from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
-from tests.providers.golden_support import Wire
+from tests.providers.anthropic_family_support import claude_turn, route_provider, sse_reply
+from tests.providers.golden_support import Wire, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
@@ -188,7 +188,7 @@ async def test_model_params_mask_credentials_nested_in_request_params_and_extra_
     )
     provider = build_model_provider(config, _runtime_paths(tmp_path, OPENROUTER_API_KEY="openrouter-key"))
 
-    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
+    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
 
     [request] = chat_wire.requests
     assert request.headers["authorization"] == "Bearer nested-header-secret"
@@ -277,13 +277,13 @@ async def test_transient_context_takes_no_marker_so_the_next_turn_reuses_the_pro
     transient = render_transient_context(
         ("<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>",),
     )
-    wire = Wire(json_reply([{"type": "text", "text": "A1"}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "A1"}]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"extended_cache_time": False})
     system = Message(role="system", content="Stable system")
     for history in ([], [Message(role="user", content="Q1"), Message(role="assistant", content="A1")]):
         prompt = Message(role="user", content="Q2" if history else "Q1")
         context = Message(role="user", content=transient)
-        await claude_turn(provider, ModelRequest(messages=[system, *history, prompt, context], stream=False))
+        await claude_turn(provider, ModelRequest(messages=[system, *history, prompt, context]))
 
     current = wire.body(0)["messages"][0]["content"]
     assert current[0]["cache_control"] == _FIVE_MINUTES
@@ -736,8 +736,8 @@ _COMPLETION = {
 
 @pytest.fixture
 def chat_wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
-    """Answer every request sent through the shared model HTTP client with a finished chat completion."""
-    wire = Wire(httpx.Response(200, json=_COMPLETION))
+    """Answer every request sent through the shared model HTTP client with a finished chat completion stream."""
+    wire = Wire(lambda _request: streamed_reply(_COMPLETION))
     monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
     return wire
 
@@ -746,7 +746,7 @@ async def _send(model_config: ModelConfig, runtime_paths: RuntimePaths) -> None:
     config = Config(models={"default": model_config})
     await complete(
         build_model_provider(config, runtime_paths),
-        ModelRequest(messages=[Message(role="user", content="Hi")], stream=False),
+        ModelRequest(messages=[Message(role="user", content="Hi")]),
     )
 
 
@@ -875,26 +875,38 @@ def test_a_retired_agno_model_field_fails_config_load_and_names_the_model(
     )
 
 
+_NOT_A_MAPPING = "extra_kwargs.client_params must be a mapping, not str"
+_NESTED_NOT_A_STRING = "extra_kwargs.client_params.base_url must be a string, not int"
+
+
 @pytest.mark.parametrize(
-    ("extra_kwargs", "error"),
+    ("provider", "extra_kwargs", "error"),
     [
-        ({"client_params": "http://127.0.0.1:9/v1"}, "extra_kwargs.client_params must be a mapping, not str"),
-        ({"base_url": 9}, "extra_kwargs.base_url must be a string, not int"),
-        ({"client_params": {"base_url": 9}}, "extra_kwargs.client_params.base_url must be a string, not int"),
+        ("openai", {"client_params": "http://127.0.0.1:9/v1"}, _NOT_A_MAPPING),
+        ("openai", {"base_url": 9}, "extra_kwargs.base_url must be a string, not int"),
+        ("openai", {"client_params": {"base_url": 9}}, _NESTED_NOT_A_STRING),
+        ("openai", {"client_params": {"base_url": 0}, "base_url": "http://127.0.0.1:9/v1"}, _NESTED_NOT_A_STRING),
+        ("groq", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("codex", {"client_params": {"base_url": 9}}, _NESTED_NOT_A_STRING),
+        ("anthropic", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("google", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("ollama", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
     ],
 )
-def test_a_wrongly_typed_openai_endpoint_fails_config_load_and_names_the_model_and_key(
-    tmp_path: Path,
+def test_a_wrongly_typed_client_setting_fails_config_validation_at_the_model(
+    provider: str,
     extra_kwargs: dict[str, Any],
     error: str,
 ) -> None:
-    """Config load reads an ``openai`` model's endpoint to pick its API, so a wrongly typed one is a config error."""
-    data = {"models": {"default": {"provider": "openai", "id": "gpt-6-astra", "extra_kwargs": extra_kwargs}}}
+    """The type of ``client_params`` and the endpoints is checked with the model, whatever its provider."""
+    data = {"models": {"default": {"provider": provider, "id": "gpt-6-astra", "extra_kwargs": extra_kwargs}}}
 
-    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
-        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(data)
 
-    assert str(exc_info.value) == f"models.default: {error}"
+    assert iter_config_validation_messages(exc_info.value) == [
+        ("models → default → extra_kwargs", f"Value error, {error}"),
+    ]
 
 
 _OPENAI_ENDPOINT_ENV = {"OPENAI_BASE_URL": "http://127.0.0.1:9/v1"}

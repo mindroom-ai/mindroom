@@ -106,7 +106,7 @@ def _load_openbb_tools() -> type[OpenBBTools]:
         ),
     ],
     dependencies=["openbb"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/openbb",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#openbb",
     function_names=(
         "get_company_news",
         "get_company_profile",

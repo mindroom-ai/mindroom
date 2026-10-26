@@ -22,6 +22,13 @@ class VisibleToolSurface:
 
     runtime_tool_configs: tuple[EffectiveToolConfig, ...]
 
+    def toolkit_names(self, config: Config) -> list[str]:
+        """Return the toolkits an agent names on this surface, which the agent CLI and subagent tool lists use.
+
+        A preset has no functions of its own; its member toolkits are listed by their own names.
+        """
+        return [entry.name for entry in self.runtime_tool_configs if not config.is_tool_preset(entry.name)]
+
 
 @dataclass(frozen=True)
 class ToolDeferral:

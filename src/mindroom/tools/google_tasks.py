@@ -60,7 +60,7 @@ if TYPE_CHECKING:
         "google-auth-httplib2",
         "google-auth-oauthlib",
     ],
-    docs_url="https://developers.google.com/workspace/tasks/reference/rest",
+    docs_url="https://docs.mindroom.chat/tools/calendar-and-scheduling/#google_tasks",
     function_names=(
         "google_tasks_create_task",
         "google_tasks_delete_task",

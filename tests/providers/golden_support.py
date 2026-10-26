@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 from pydantic import BaseModel
 
 from mindroom.config.models import DebugConfig
@@ -82,6 +83,8 @@ _VOLATILE_HEADERS = frozenset(
 )
 _UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 GENERATED_ID = "<uuid4>"
+# A request as an httpx or an httpx2 client sent it; both packages give it the same fields.
+type SentRequest = httpx.Request | httpx2.Request
 _TIMING_METRIC_KEYS = ("duration", "time_to_first_token")
 # Every golden input key the harness turns into the owned request; a new key fails loudly instead of silently.
 _HANDLED_INPUT_KEYS = frozenset(
@@ -93,7 +96,6 @@ _HANDLED_INPUT_KEYS = frozenset(
         "output_schema",
         "portable_replay",
         "provider_tools_disabled",
-        "stream",
         "tool_choice",
         "tool_jobs",
         "tools",
@@ -127,19 +129,70 @@ class PacedBytes(httpx.AsyncByteStream):
             raise httpx.ReadError(msg)
 
 
+def _httpx2_error(error: httpx.TransportError) -> httpx2.TransportError:
+    """Return the httpx2 error of the same name, the one an httpx2 transport raises for this failure.
+
+    Raise it ``from None``: the SDKs see only httpx2 errors, so classification must not find the httpx one too.
+    """
+    return getattr(httpx2, type(error).__name__)(str(error))
+
+
+class _Httpx2Body(httpx2.AsyncByteStream):
+    """An httpx reply body read through httpx2, its transport failure raised as the httpx2 one."""
+
+    def __init__(self, body: httpx.AsyncByteStream) -> None:
+        self._body = body
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield the body's chunks."""
+        try:
+            async for chunk in self._body:
+                yield chunk
+        except httpx.TransportError as error:
+            raise _httpx2_error(error) from None
+
+    async def aclose(self) -> None:
+        """Close the body."""
+        await self._body.aclose()
+
+
+def httpx2_transport(handler: Callable[[httpx2.Request], httpx.Response | httpx2.Response]) -> httpx2.MockTransport:
+    """Answer the httpx2 requests the OpenAI and Claude SDKs send with ``handler``'s httpx replies and failures.
+
+    The reply builders here and the Gemini and Ollama SDKs use httpx, and httpx2 is its fork with the same API, so a
+    reply converts by its fields and a transport failure by its class name.
+    """
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        try:
+            reply = handler(request)
+        except httpx.TransportError as error:
+            raise _httpx2_error(error) from None
+        if isinstance(reply, httpx2.Response):
+            return reply
+        headers = reply.headers.multi_items()
+        if isinstance(reply.stream, httpx.ByteStream):
+            return httpx2.Response(reply.status_code, headers=headers, content=reply.read())
+        return httpx2.Response(reply.status_code, headers=headers, stream=_Httpx2Body(reply.stream))
+
+    return httpx2.MockTransport(respond)
+
+
 class Wire:
     """Records the requests providers send and answers each from a queue; the last answer repeats.
 
     A callable answer is called with the request, for replies that depend on it or must be built fresh.
+    ``client`` is the httpx2 client OpenAI and Claude models send through, and ``transport`` the httpx transport
+    Gemini and Ollama SDK clients take.
     """
 
-    def __init__(self, *replies: httpx.Response | Callable[[httpx.Request], httpx.Response]) -> None:
-        self.requests: list[httpx.Request] = []
+    def __init__(self, *replies: httpx.Response | Callable[[SentRequest], httpx.Response]) -> None:
+        self.requests: list[SentRequest] = []
         self.replies = list(replies)
         self.transport = httpx.MockTransport(self.respond)
-        self.client = httpx.AsyncClient(transport=self.transport)
+        self.client = httpx2.AsyncClient(transport=httpx2_transport(self.respond))
 
-    def respond(self, request: httpx.Request) -> httpx.Response:
+    def respond(self, request: SentRequest) -> httpx.Response:
         """Record ``request`` and return the next answer."""
         self.requests.append(request)
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
@@ -201,6 +254,105 @@ def ndjson_response(
     """Return a newline-delimited JSON stream, as Ollama sends; the options are those of ``sse_response``."""
     chunks = [json.dumps(event).encode() + b"\n" for event in events]
     return _streamed(chunks, "application/x-ndjson", status=status, pause_seconds=pause_seconds, drop=drop)
+
+
+def streamed_reply(reply: dict[str, Any]) -> httpx.Response:
+    """Return the stream a route sends for one finished reply body.
+
+    ``reply`` is a Chat completion, a Responses response, a Claude message, a Gemini response, or Ollama's done chunk.
+    """
+    if "choices" in reply:
+        return sse_response([*_chat_chunks(reply), "[DONE]"])
+    if reply.get("object") == "response":
+        return sse_response(responses_events(reply), named=True)
+    if reply.get("type") == "message":
+        return sse_response(claude_stream_events(reply), named=True)
+    if "candidates" in reply or "promptFeedback" in reply:
+        return sse_response([reply])
+    return ndjson_response([reply])
+
+
+def _chat_chunks(completion: dict[str, Any]) -> list[dict[str, Any]]:
+    choice = completion["choices"][0]
+    base = {key: value for key, value in completion.items() if key not in {"choices", "usage"}}
+    base["object"] = "chat.completion.chunk"
+    delta = {key: value for key, value in choice["message"].items() if key != "tool_calls" and value is not None}
+    if calls := choice["message"].get("tool_calls"):
+        delta["tool_calls"] = [{"index": index, **call} for index, call in enumerate(calls)]
+    chunks = [
+        {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+        {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]},
+    ]
+    if (usage := completion.get("usage")) is not None:
+        chunks.append({**base, "choices": [], "usage": usage})
+    return chunks
+
+
+def responses_events(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the events the Responses API streams for ``response``: its start, each output item, then its end."""
+    events: list[dict[str, Any]] = [
+        {"type": "response.created", "response": {**response, "output": [], "status": "in_progress", "usage": None}},
+    ]
+    for index, item in enumerate(response["output"]):
+        added = {**item, "arguments": ""} if item["type"] == "function_call" else item
+        events.append({"type": "response.output_item.added", "output_index": index, "item": added})
+        common = {"item_id": item.get("id"), "output_index": index, "content_index": 0}
+        if item["type"] == "function_call":
+            events.append({"type": "response.function_call_arguments.delta", **common, "delta": item["arguments"]})
+        if item["type"] == "message":
+            texts = [part["text"] for part in item["content"]]
+            events.extend(
+                {"type": "response.output_text.delta", **common, "delta": text, "logprobs": []} for text in texts
+            )
+        events.append({"type": "response.output_item.done", "output_index": index, "item": item})
+    ended = "response.completed" if response["status"] == "completed" else "response.incomplete"
+    events.append({"type": ended, "response": response})
+    return [{**event, "sequence_number": number} for number, event in enumerate(events)]
+
+
+def claude_stream_events(
+    message: dict[str, Any],
+    *,
+    context_management: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return the events the Messages API streams for ``message``: a start, deltas per block, the stop reason, the stop.
+
+    A ``tool_use`` block may name the ``partial_json`` its arguments stream as, and another block the ``deltas`` it
+    streams; both helper-only keys stay out of the streamed block. ``context_management`` is the context editing the
+    response applied, which arrives with the stop reason.
+    """
+    usage = message["usage"]
+    start = {**message, "content": [], "stop_reason": None, "usage": {**usage, "output_tokens": 1}}
+    events: list[dict[str, Any]] = [{"type": "message_start", "message": start}]
+    for index, authored in enumerate(message["content"]):
+        # Popping the helper-only keys below must leave the caller's blocks reusable.
+        block = dict(authored)
+        if block["type"] == "text":
+            opened, deltas = {**block, "text": ""}, [{"type": "text_delta", "text": block["text"]}]
+        elif block["type"] == "tool_use":
+            partial_json = block.pop("partial_json", None)
+            arguments = json.dumps(block["input"]) if partial_json is None else partial_json
+            opened, deltas = {**block, "input": {}}, [{"type": "input_json_delta", "partial_json": arguments}]
+        elif block["type"] == "thinking":
+            opened = {**block, "thinking": "", "signature": ""}
+            deltas = [
+                {"type": "thinking_delta", "thinking": block["thinking"]},
+                {"type": "signature_delta", "signature": block["signature"]},
+            ]
+        else:
+            # Other blocks arrive whole, unless the block names deltas of its own.
+            deltas = block.pop("deltas", [])
+            opened = block
+        events.append({"type": "content_block_start", "index": index, "content_block": opened})
+        events.extend({"type": "content_block_delta", "index": index, "delta": delta} for delta in deltas)
+        events.append({"type": "content_block_stop", "index": index})
+    stop = {"stop_reason": message["stop_reason"], "stop_sequence": message.get("stop_sequence")}
+    applied = {} if context_management is None else {"context_management": context_management}
+    events.append(
+        {"type": "message_delta", "delta": stop, "usage": {"output_tokens": usage["output_tokens"]}, **applied},
+    )
+    events.append({"type": "message_stop"})
+    return events
 
 
 def encoded_response(response_raw: dict[str, Any]) -> httpx.Response:
@@ -269,8 +421,8 @@ def scrub_generated_ids(value: object) -> Any:  # noqa: ANN401 - arbitrary JSON
     return value
 
 
-def normalized_request(request: httpx.Request) -> dict[str, Any]:
-    """Return the method, URL, stable headers, and JSON body of one SDK request, as C1 recorded them."""
+def normalized_request(request: SentRequest) -> dict[str, Any]:
+    """Return the method, URL, stable headers, and JSON body of one SDK request, as the provider goldens record them."""
     headers = {
         name: value
         for name, value in sorted(request.headers.items())
@@ -368,7 +520,6 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
         tools=tools,
         tool_choice=tool_choice,
         output_schema=output_schema_from_golden(case_input["output_schema"]),
-        stream=case_input["stream"],
         deferred_tools=DeferredTools()
         if deferred is None
         else DeferredTools(names=frozenset(deferred["tool_names"]), portable=deferred["mode"] == "portable"),

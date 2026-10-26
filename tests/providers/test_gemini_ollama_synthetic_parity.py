@@ -1,9 +1,8 @@
-"""The owned Gemini, Ollama, and synthetic adapters reproduce what the Agno-backed provider layer produced.
+"""The Gemini, Ollama, and synthetic adapters reproduce their provider goldens and pinned streams.
 
-For Gemini, Gemini on Vertex AI, and Ollama, each C1 golden's request (method, URL, kept headers, JSON body)
+For Gemini, Gemini on Vertex AI, and Ollama, each provider golden's request (method, URL, kept headers, JSON body)
 and parsed reply (message dict, usage, stored stop reason) must match, with the request sent through the
-production pipeline stages; non-streaming goldens are sent as the non-streaming provider call they recorded.
-The synthetic model has no golden, so its streamed plans are pinned from ``SyntheticModel`` for the same inputs.
+production pipeline stages. The synthetic model has no golden, so each case pins the plan it streams for its inputs.
 """
 
 from __future__ import annotations
@@ -71,9 +70,7 @@ def _chunks_reporting_usage(golden: Golden) -> int:
     """Count the reply's chunks that carry usage: Ollama's done chunk, and each Gemini chunk with a candidate."""
     raw = golden.data["response_raw"]
     if golden.family == "ollama":
-        return sum(1 for chunk in raw.get("ndjson", []) if chunk["done"])
-    if "json" in raw:
-        return int("usageMetadata" in raw["json"])
+        return sum(1 for chunk in raw["ndjson"] if chunk["done"])
     return sum(1 for event in raw["sse"] if event["data"].get("candidates") and "usageMetadata" in event["data"])
 
 
@@ -86,8 +83,7 @@ async def test_stream_events_match_the_finished_message(
 ) -> None:
     """A stream's deltas add up to the finished message, and usage is final once, as the message's own metrics.
 
-    A whole reply yields no deltas. Every chunk that carries usage reports it as a partial report, and the final
-    report replaces the last of them.
+    Every chunk that carries usage reports it as a partial report, and the final report replaces the last of them.
     """
     hide_provider_environment(monkeypatch)
 
@@ -101,12 +97,9 @@ async def test_stream_events_match_the_finished_message(
     calls = [event.call for event in result.events if isinstance(event, ToolCallReady)]
     reports = [event for event in result.events if isinstance(event, UsageReported)]
     final = [report.usage for report in reports if report.final]
-    if golden.data["input"]["stream"]:
-        assert text == (message.content or "")
-        assert reasoning == (message.reasoning_content or "")
-        assert calls == (message.tool_calls or [])
-    else:
-        assert (text, reasoning, calls) == ("", "", [])
+    assert text == (message.content or "")
+    assert reasoning == (message.reasoning_content or "")
+    assert calls == (message.tool_calls or [])
     assert len(final) == 1
     assert final[0] is message.metrics
     assert comparable_metrics(final[0]) == golden.data["parsed"]["metrics"]
@@ -118,9 +111,8 @@ async def test_stream_events_match_the_finished_message(
 
 
 # ---------------------------------------------------------------------------
-# Synthetic: no C1 golden exists, so each case pins what the Agno-backed SyntheticModel (synthetic_model.py)
-# streamed for the same settings and messages: chunk count, text length, a sha256 prefix of the text, and the
-# shell call id.
+# Synthetic: no provider golden exists, so each case pins what the synthetic model streams for its settings and
+# messages: chunk count, text length, a sha256 prefix of the text, and the shell call id.
 # ---------------------------------------------------------------------------
 
 SHELL = ToolSpec(
@@ -146,7 +138,7 @@ def _shell_call(call_id: str) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class SyntheticCase:
-    """One synthetic request and what SyntheticModel streamed for it."""
+    """One synthetic request and what the synthetic model streams for it."""
 
     extra_kwargs: dict[str, object]
     messages: list[Message]
@@ -228,7 +220,7 @@ def _text(events: list[StreamEvent]) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", list(SYNTHETIC_CASES))
-async def test_synthetic_streams_what_the_agno_backed_model_streamed(name: str, tmp_path: Path) -> None:
+async def test_synthetic_streams_the_pinned_plan_of_each_case(name: str, tmp_path: Path) -> None:
     """The same seed, settings, and user messages produce the same chunks, text, and shell call."""
     case = SYNTHETIC_CASES[name]
 

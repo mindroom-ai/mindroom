@@ -68,7 +68,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["notion-client"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/notion",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#notion",
     helper_text="Create an integration at [Notion Developers](https://www.notion.so/my-integrations) and share the database with it",
     function_names=("create_page", "search_pages", "update_page"),
 )

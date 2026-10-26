@@ -207,7 +207,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 6)
 
 
-async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts() -> None:
+async def test_unknown_tools_and_bad_arguments_answer_the_model_with_error_results() -> None:
     model = ScriptedModel(
         [
             calls(
@@ -221,7 +221,8 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts(
     )
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(add)), messages)
+    with capture_logs() as logs:
+        events, record = await _run(spec(model, toolkit(add)), messages)
 
     tool_messages = [message for message in messages if message.role == "tool"]
     assert [(m.tool_call_id, m.tool_call_error) for m in tool_messages] == [("c1", True), ("c2", True), ("c3", False)]
@@ -233,6 +234,8 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts(
     assert record.tools is not None
     assert [tool.tool_call_id for tool in record.tools] == ["c2", "c3"]
     assert model.requests[1].messages[-3:] == tuple(tool_messages)
+    # The run's agent is named on the warning for the tool it was not offered.
+    assert [entry["entity"] for entry in logs if entry["event"] == "tool_not_offered"] == ["code"]
 
 
 async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests() -> None:
@@ -316,8 +319,8 @@ async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_i
     assert (denial.tool_call_error, denial.stop_after_tool_call) == (True, True)
 
 
-async def test_a_batch_that_stops_the_run_skips_the_batch_hooks_as_agno_did() -> None:
-    """No later request reads what a batch hook adds after a stopping batch, so Agno fired none there."""
+async def test_a_batch_that_stops_the_run_skips_the_batch_hooks() -> None:
+    """No later request reads what a batch hook adds after a stopping batch, so none fires there."""
     batches: list[list[str | None]] = []
 
     async def after_batch(_messages: list[Message], results: Sequence[Message]) -> None:

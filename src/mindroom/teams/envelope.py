@@ -2,8 +2,8 @@
 
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
 turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply, its
-pause, and the text a stopped or failed blocking turn records render from the finished run's records, kept as main
-behaves: each member run's text in the order the runs ended, then the consensus; the reply delivers no tool trace.
+pause, and the text a stopped or failed blocking turn records render from the finished run's records: each member
+run's text in the order the runs ended, then the consensus; the reply delivers no tool trace.
 A streamed reply shows its trace through its chunks, keeps the configured member order, and adds each failed member
 run's reason when the team run ends, as a resumed reply does. ``run_prepared_team`` runs an OpenAI-compatible API
 team turn under the same leader hooks and storage.
@@ -28,7 +28,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_run_context,
-    render_prepared_team_messages_text,
+    render_prepared_messages_text,
 )
 from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.native import with_native_history
@@ -148,7 +148,7 @@ class PreparedTeamExecution:
     @property
     def prompt_text(self) -> str:
         """Return the prompt-visible text derived from the turn's messages."""
-        return render_prepared_team_messages_text(self.turn.in_request_order())
+        return render_prepared_messages_text(self.turn.in_request_order())
 
     def run_input(self, media: MediaInputs) -> list[Message]:
         """Return one attempt's request body, media on the prompt: the summary, the replayed history, then the turn."""
@@ -260,12 +260,16 @@ async def prepare_materialized_team_execution(
 
 @dataclass(frozen=True)
 class _LeaderRun:
-    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata."""
+    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata.
+
+    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
+    """
 
     spec: TeamSpec
     storage: RunStorage | None
     hooks: LoopHooks
     request_template: ModelRequest
+    stream: bool
     model_name: str
     metadata: dict[str, Any] | None
 
@@ -293,6 +297,7 @@ class _LeaderRun:
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
             request_template=self.request_template,
+            stream=self.stream,
         )
 
 
@@ -327,7 +332,8 @@ def _leader_run(
             ),
             entity_name=configured_team_name,
         ),
-        request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
+        request_template=with_native_history(ModelRequest(messages=()), history.native_history),
+        stream=stream,
         model_name=prepared.runtime_model_name,
         metadata=prepared.run_metadata,
     )
@@ -474,7 +480,7 @@ class _TeamTurn:
             ),
             prompt=prompt,
             model_prompt=None,
-            full_prompt=render_prepared_team_messages_text(run_input),
+            full_prompt=render_prepared_messages_text(run_input),
             metadata=metadata,
         )
 
@@ -737,8 +743,7 @@ class _TeamTurn:
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, rendered into the document it shows.
 
-        A blocking pause renders its runs' records, kept as main behaves; a streamed one freezes the document its
-        events built.
+        A blocking pause renders its runs' records; a streamed one freezes the document its events built.
         """
         paused = paused_attempt_from_response(
             record,
@@ -784,9 +789,9 @@ class _TeamTurn:
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
-        # its trace through its chunks. A blocking reply renders the finished runs, kept as main behaves; a streamed
-        # one records the document its events built and its failed member runs' reasons, in the configured order.
-        # The "No team response generated." fallback is display chrome, not replayable assistant text.
+        # its trace through its chunks. A blocking reply renders the finished runs (``format_team_response``); a
+        # streamed one records the document its events built and its failed member runs' reasons, in the configured
+        # order. The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
             body_text = format_team_response(record)
             leader_text = finished_run_text(record)

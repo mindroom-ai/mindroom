@@ -34,16 +34,6 @@ class ToolKey:
     function: str
 
 
-@dataclass(frozen=True, slots=True)
-class ToolDescriptor:
-    """Selected tool details loaded only when a caller asks for its schema."""
-
-    key: ToolKey
-    description: str
-    input_schema: dict[str, object]
-    instructions: tuple[str, ...]
-
-
 def tool_definition(tool: ToolSpec) -> dict[str, object]:
     """Return the name, description, and input schema the model is shown for one tool definition."""
     return {"name": tool.name, "description": tool.description or "", "parameters": dict(tool.parameters)}

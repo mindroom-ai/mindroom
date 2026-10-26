@@ -1,9 +1,9 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Chat Completions request bodies and response parsing for every OpenAI-compatible route.
 
-Three dialects keep each route's request bytes as main sends them: ``openai`` (OpenAI, Azure, OpenRouter,
-DeepSeek, Z.ai, llama.cpp, Kimi), ``groq``, and ``cerebras``. Functions here are pure: they build the SDK
-call from canonical messages and fold SDK chunks or completions into one finished turn.
+Three dialects shape the request bodies: ``openai`` (OpenAI, Azure, OpenRouter, DeepSeek, Z.ai, llama.cpp,
+Kimi), ``groq``, and ``cerebras``. Functions here are pure: they build the SDK
+call from canonical messages and fold SDK chunks, or Groq's whole structured reply, into one finished turn.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.llm.messages import split_thinking, tool_result_view
+from mindroom.llm.messages import tool_result_view
 from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.providers.openai.errors import error_body_error
+from mindroom.providers.assistant_turn import ThinkTagSplitter
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import chat_call_id, reformat_tool_call_ids
@@ -44,7 +44,6 @@ __all__ = [
     "chat_request_kwargs",
     "chat_stop_reason",
     "function_definition",
-    "parse_chat_completion",
     "sdk_call_kwargs",
 ]
 
@@ -54,6 +53,9 @@ type _SDKEndpoint = Literal["chat", "responses"]
 
 # Groq Compound runs hosted tools on its own, which a decision that must not run tools cannot allow.
 _GROQ_COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compound-beta", "compound-beta-mini"})
+# Groq does not stream structured output (https://console.groq.com/docs/structured-outputs), so its requests for
+# structured output ask for the whole reply.
+_WHOLE_STRUCTURED_REPLY_DIALECTS: frozenset[ChatDialect] = frozenset({"groq"})
 # Cerebras rejects parallel tool calls on this model.
 _CEREBRAS_SERIAL_TOOL_MODEL = "llama-4-scout-17b-16e-instruct"
 _SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
@@ -75,6 +77,10 @@ class ChatWire:
     """
 
     route: str
+    # TODO(simplify): the ``groq`` and ``cerebras`` dialects format messages, tools, parameters, and usage by rules of
+    # their own, and neither reads reasoning. Collapse them into ``openai``, with per-route data for real API
+    # differences (#3113). Models would notice changed Groq and Cerebras request bodies, and stored runs would record
+    # their reasoning.
     dialect: ChatDialect
 
 
@@ -192,7 +198,7 @@ def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSe
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
-    """Return the function definition OpenAI-family wires send: its set fields, in the order main sends them."""
+    """Return the function definition OpenAI-family wires send: its set fields, always in this order."""
     fields = {
         "name": tool.name,
         "description": tool.description,
@@ -399,11 +405,10 @@ def chat_request_kwargs(
     tool_choice: ToolChoice | None,
     output_schema: type[BaseModel] | None,
     structured_output: StructuredOutput,
-    stream: bool,
     settings: ChatSettings,
     wire: ChatWire,
 ) -> dict[str, Any]:
-    """Return the ``chat.completions.create`` keyword arguments for one request.
+    """Return the ``chat.completions.create`` keyword arguments for one request, streamed unless the dialect cannot.
 
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
@@ -419,7 +424,7 @@ def chat_request_kwargs(
     )
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire)
     params = {"model": model_id, "messages": _chat_messages(messages, wire, settings), **disable_tool_selection(params)}
-    if stream:
+    if output_schema is None or wire.dialect not in _WHOLE_STRUCTURED_REPLY_DIALECTS:
         params["stream"] = True
         if wire.dialect == "openai":
             params["stream_options"] = {"include_usage": True}
@@ -502,7 +507,7 @@ def _completed_tool_calls(calls: list[dict[str, Any]], dialect: ChatDialect) -> 
 
 
 def _reply_metadata(reply: ChatCompletion | ChatCompletionChunk) -> dict[str, Any]:
-    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply carried, kept as main stores them."""
+    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply or chunk carried, for stored provider data."""
     data: dict[str, Any] = {}
     if reply.id:
         data["id"] = reply.id
@@ -527,13 +532,18 @@ def _usage_metrics(usage: CompletionUsage, wire: ChatWire) -> MessageMetrics:
 
 @dataclass(slots=True)
 class ChatStream:
-    """Fold streamed Chat Completions chunks into deltas and one finished turn."""
+    """Fold streamed Chat Completions chunks, or a whole reply, into deltas and one finished turn.
+
+    The ``openai`` dialect also moves reasoning a model writes inline as a leading ``<think>`` block out of the
+    reply text (``ThinkTagSplitter``), as servers without a reasoning parser send it.
+    """
 
     wire: ChatWire
     parts: ChatTurnParts = field(default_factory=ChatTurnParts)
     _content: list[str] = field(default_factory=list)
     _reasoning: list[str] = field(default_factory=list)
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
+    _think: ThinkTagSplitter = field(default_factory=ThinkTagSplitter)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
         """Fold one chunk and return the events it carried: a partial report of usage it carried, then its deltas.
@@ -553,14 +563,32 @@ class ChatStream:
                     events.extend(self._add_reasoning(_extra(delta)))
         return events
 
-    def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
+    def add_reply(self, reply: ChatCompletion) -> list[StreamEvent]:
+        """Fold the whole reply to a request the dialect does not stream, and return its text.
+
+        Only a request for structured output goes unstreamed, and it offers no tools, so its reply carries only text.
+        """
+        if reply.usage is not None:
+            self.parts.usage = _usage_metrics(reply.usage, self.wire)
+        choice = reply.choices[0]
+        self.parts.finish_reason = choice.finish_reason
+        return self._add_content(reply, choice.message.content)
+
+    def _add_content(self, chunk: ChatCompletion | ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
         # Cerebras skips empty content deltas; the other dialects keep them, with their reply metadata.
         if content is None or (not content and self.wire.dialect == "cerebras"):
             return []
-        self._content.append(content)
-        if self.wire.dialect == "openai":
-            _merge_provider_data(self.parts.provider_data, _reply_metadata(chunk))
-        return [TextDelta(content)] if content else []
+        if self.wire.dialect != "openai":
+            self._content.append(content)
+            return [TextDelta(content)] if content else []
+        _merge_provider_data(self.parts.provider_data, _reply_metadata(chunk))
+        return self._add_text(self._think.add(content))
+
+    def _add_text(self, deltas: list[TextDelta | ReasoningDelta]) -> list[StreamEvent]:
+        """Record the reply text and inline reasoning the think-tag splitter released."""
+        for delta in deltas:
+            (self._content if isinstance(delta, TextDelta) else self._reasoning).append(delta.text)
+        return list(deltas)
 
     def _add_reasoning(self, fields: Mapping[str, Any]) -> list[StreamEvent]:
         if self.wire.route == "openrouter" and (details := fields.get("reasoning_details")):
@@ -610,60 +638,13 @@ class ChatStream:
         self.parts.usage = metrics if self.parts.usage is None else self.parts.usage + metrics
         return [UsageReported(self.parts.usage, final=False)]
 
-    def finish(self) -> ChatTurnParts:
-        """Return the finished turn; the stream must be fully consumed first."""
+    def finish(self) -> list[StreamEvent]:
+        """End the consumed stream and return the text it held back; ``parts`` then holds the finished turn."""
+        events = self._add_text(self._think.finish())
         self.parts.content = "".join(self._content) or None
         self.parts.reasoning = "".join(self._reasoning) or None
         calls = [self._calls[index] for index in sorted(self._calls)]
         if self.wire.dialect == "cerebras":
             calls = [call for call in calls if call.get("id") and call["function"].get("name")]
         self.parts.tool_calls = _completed_tool_calls(calls, self.wire.dialect)
-        return self.parts
-
-
-def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]:  # noqa: ANN401 - SDK message model
-    if wire.dialect != "cerebras":
-        return _completed_tool_calls([call.model_dump() for call in message.tool_calls or []], wire.dialect)
-    return _completed_tool_calls(
-        [
-            {
-                "id": call.id,
-                "type": call.type,
-                "function": {"name": call.function.name, "arguments": call.function.arguments},
-            }
-            for call in message.tool_calls or []
-        ],
-        wire.dialect,
-    )
-
-
-def parse_chat_completion(completion: ChatCompletion, wire: ChatWire, *, provider: str) -> ChatTurnParts:
-    """Read one non-streamed completion into a finished turn.
-
-    A gateway such as OpenRouter answers a failed upstream with HTTP 200 and an ``error`` body instead of choices,
-    which raises as the error it names, as a stream's error chunk does.
-    """
-    if (error := _extra(completion).get("error")) is not None:
-        raise error_body_error(error, provider=provider, default_message="The provider returned an error")
-    choice = completion.choices[0]
-    message = choice.message
-    parts = ChatTurnParts(
-        content=message.content,
-        finish_reason=choice.finish_reason,
-        tool_calls=_completion_tool_calls(message, wire),
-        usage=_usage_metrics(completion.usage, wire) if completion.usage is not None else None,
-    )
-    if wire.dialect != "openai":
-        return parts
-    if parts.content:
-        parts.reasoning, parts.content = split_thinking(parts.content)
-    message_extra = _extra(message)
-    if isinstance(reasoning_field := _reasoning_field(message_extra), str):
-        parts.reasoning = reasoning_field
-    parts.provider_data = _reply_metadata(completion)
-    if wire.route == "openrouter" and (details := message_extra.get("reasoning_details")):
-        parts.provider_data["reasoning_details"] = details
-    # TODO(simplify): Only a blocking reply stores its finish_reason in provider_data, and nothing reads it.
-    # Store it on neither path. Stored data.
-    parts.provider_data["finish_reason"] = choice.finish_reason
-    return parts
+        return events

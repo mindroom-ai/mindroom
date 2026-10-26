@@ -37,10 +37,8 @@ from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, Compacti
 from mindroom.history.summary_input import build_summary_input, messages_for_runs
 from mindroom.history.types import (
     CompactionLifecycleProgress,
-    HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
-    ResolvedHistorySettings,
 )
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -1102,10 +1100,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
     )
     session = _session("session-1", runs=[first_run, second_run])
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     summary_input_budget = next(
         budget
         for budget in range(1, 5_000)
@@ -2037,10 +2032,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
     )
     working_session = _session("session-1", runs=[first_run, second_run])
     seed_session(storage, working_session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     before_tokens = estimate_prompt_visible_history_tokens(
         session=working_session,
         scope=scope,

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from openai.types import CompletionUsage
 
 from mindroom.budgets import pricing as pricing_module
 from mindroom.budgets.pricing import (
@@ -22,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
+from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
@@ -200,13 +203,47 @@ def test_price_table_reports_a_priced_model_it_could_not_build(tmp_path: Path) -
     assert table == _PriceTable(prices={}, complete=False)
 
 
+def test_openai_memory_extraction_is_priced_by_the_chat_completions_entry_of_its_model(tmp_path: Path) -> None:
+    """Mem0 extracts memories over Chat Completions, so its usage costs what that route's entry for the model costs."""
+    config = Config(
+        models={
+            "luna": ModelConfig(
+                provider="openai",
+                id="gpt-6-luna",
+                api="chat_completions",
+                api_key="key",
+                pricing=ModelPricing(input=0.2, output=1.25),
+            ),
+        },
+    )
+    usage = CompletionUsage(prompt_tokens=1_000_000, completion_tokens=0, total_tokens=1_000_000)
+    create = MagicMock(return_value=SimpleNamespace(usage=usage))
+    llm = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-6-luna"),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+    )
+    install_mem0_usage_capture(llm, "openai")
+    with counted_mem0_usage() as calls:
+        llm.client.chat.completions.create()
+    extraction = mem0_usage_run(calls)
+    assert extraction is not None
+
+    cost = run_cost_usd(
+        extraction.metrics,
+        model_provider=extraction.model_provider,
+        model_id=extraction.model,
+        prices=_price_table(config, _paths(tmp_path)).prices,
+    )
+
+    assert cost == pytest.approx(0.2)
+
+
 _GPT_X = PricedModel(ModelPricing(input=2.0, output=8.0), input_includes_cache=True)
 
 
 def test_single_model_run_is_priced_from_usage() -> None:
     cost = run_cost_usd(
-        None,
-        {"input_tokens": 1_000_000, "output_tokens": 100_000, "total_tokens": 1_100_000},
+        RunMetrics(tokens=TokenCounts(input_tokens=1_000_000, output_tokens=100_000, total_tokens=1_100_000)),
         model_provider="OpenAI",
         model_id="gpt-x",
         prices={("OpenAI", "gpt-x"): _GPT_X},
@@ -231,7 +268,7 @@ def test_team_details_are_priced_per_model() -> None:
         ("P", "b"): PricedModel(ModelPricing(input=10, output=10), input_includes_cache=True),
     }
 
-    cost = run_cost_usd(metrics, metrics.to_dict(), model_provider="P", model_id="a", prices=prices)
+    cost = run_cost_usd(metrics, model_provider="P", model_id="a", prices=prices)
 
     assert cost == pytest.approx(11.0)
 
@@ -251,7 +288,7 @@ def test_summed_team_metrics_keep_each_member_model_priced() -> None:
         ("P", "b"): PricedModel(ModelPricing(input=10, output=10), input_includes_cache=True),
     }
 
-    assert run_cost_usd(leader + member, None, model_provider="P", model_id="a", prices=prices) == pytest.approx(11.0)
+    assert run_cost_usd(leader + member, model_provider="P", model_id="a", prices=prices) == pytest.approx(11.0)
 
 
 def test_partly_priced_details_charge_only_priced_models() -> None:
@@ -265,19 +302,19 @@ def test_partly_priced_details_charge_only_priced_models() -> None:
     )
     prices = {("P", "a"): PricedModel(ModelPricing(input=1, output=1), input_includes_cache=True)}
 
-    assert run_cost_usd(metrics, None, model_provider="P", model_id="a", prices=prices) == pytest.approx(1.0)
+    assert run_cost_usd(metrics, model_provider="P", model_id="a", prices=prices) == pytest.approx(1.0)
 
 
 def test_unpriced_run_has_no_cost() -> None:
-    usage = {"input_tokens": 1_000, "output_tokens": 10}
+    metrics = RunMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10))
 
-    assert run_cost_usd(None, usage, model_provider="Ollama", model_id="qwen", prices={}) is None
+    assert run_cost_usd(metrics, model_provider="Ollama", model_id="qwen", prices={}) is None
 
 
 def test_run_without_usage_has_no_cost() -> None:
     prices = {("OpenAI", "gpt-x"): _GPT_X}
 
-    assert run_cost_usd(None, None, model_provider="OpenAI", model_id="gpt-x", prices=prices) is None
+    assert run_cost_usd(None, model_provider="OpenAI", model_id="gpt-x", prices=prices) is None
 
 
 @pytest.mark.parametrize(

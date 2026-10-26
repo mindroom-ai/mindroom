@@ -31,7 +31,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/linear",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#linear",
     function_names=(
         "create_issue",
         "get_high_priority_issues",

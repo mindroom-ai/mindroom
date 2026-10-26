@@ -57,7 +57,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/zoom",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#zoom",
     function_names=(
         "delete_meeting",
         "get_meeting",

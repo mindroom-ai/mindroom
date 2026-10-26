@@ -33,10 +33,8 @@ from mindroom.history.summary_call import (
 )
 from mindroom.history.summary_input import _compaction_replay_messages, build_summary_input
 from mindroom.history.types import (
-    HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
-    ResolvedHistorySettings,
 )
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
@@ -53,6 +51,7 @@ from tests.history_helpers import (
     _completed_run,
     _make_config,
     _session,
+    replay_settings,
 )
 
 
@@ -93,7 +92,7 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_the_summary_request_is_one_call_without_provider_retries_thinking_or_cache() -> None:
-    """The request is sent once, without streaming or tools, leaving the transport timeout to the route."""
+    """The request is sent once, without tools, leaving the transport timeout to the route."""
     model = summary_model()
 
     await generate_compaction_summary(
@@ -105,7 +104,6 @@ async def test_the_summary_request_is_one_call_without_provider_retries_thinking
     )
 
     [request] = model.requests
-    assert request.stream is False
     assert request.tools == ()
     assert request.tool_choice is None
     assert request.overrides == RequestOverrides(caller_retries=True, prompt_cache=False, disable_thinking=True)
@@ -600,6 +598,22 @@ def test_build_summary_input_preserves_previous_summary_text() -> None:
     assert "run-1 answer" in summary_input
 
 
+def test_build_summary_input_renders_a_block_list_one_block_per_line() -> None:
+    """A message stored as content blocks reaches the summary input with each block serialized on its own line."""
+    blocks = [{"type": "text", "text": "first block"}, {"type": "text", "text": "second block"}]
+    run = _completed_run("run-1", messages=[Message(role="user", content=blocks)])
+
+    summary_input, _ = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=1_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
+    )
+
+    assert '{"text":"first block","type":"text"}\n{"text":"second block","type":"text"}' in summary_input
+
+
 def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> None:
     run = _completed_run(
         "run-1",
@@ -613,7 +627,7 @@ def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> N
 
     replay_messages = _compaction_replay_messages(
         run,
-        ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        replay_settings(),
     )
 
     assert [(message.role, message.content) for message in replay_messages] == [
@@ -639,7 +653,7 @@ def test_build_summary_input_skips_replayed_history_copies() -> None:
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        history_settings=replay_settings(),
         max_input_tokens=1_000,
         token_estimator=estimate_compaction_input_tokens,
     )
@@ -664,7 +678,7 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        history_settings=replay_settings(),
         max_input_tokens=1_000,
         token_estimator=estimate_compaction_input_tokens,
     )
@@ -699,10 +713,7 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=1,
-        ),
+        history_settings=replay_settings(max_tool_calls_from_history=1),
         max_input_tokens=1_000,
         token_estimator=estimate_compaction_input_tokens,
     )
@@ -820,3 +831,32 @@ def test_each_tool_result_names_its_own_call_in_the_summary_input() -> None:
     args = summary_input[summary_input.rindex("<tool_args>", 0, write_result) : write_result]
     assert "a.txt" in args
     assert "x" * 300 not in args
+
+
+@pytest.mark.parametrize("max_input_tokens", [100_000, 300], ids=["whole", "excerpt"])
+def test_a_failed_tool_result_is_marked_in_the_summary_input(max_input_tokens: int) -> None:
+    """A summary can tell a call that failed from one that returned, whether its run is summarized whole or cut short."""
+    run = _completed_run(
+        "run-failed-call",
+        messages=[
+            Message(
+                role="tool",
+                tool_call_id="c1",
+                tool_name="shell",
+                content="make: *** No rule to make target 'deploy'.",
+                tool_call_error=True,
+            ),
+            Message(role="tool", tool_call_id="c2", tool_name="shell", content="y" * 4_000, tool_call_error=False),
+        ],
+    )
+
+    summary_input, _included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=max_input_tokens,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
+    )
+
+    assert '<message role="tool" tool_call_id="c1" tool_name="shell" error="true">\nmake: *** No rule' in summary_input
+    assert '<message role="tool" tool_call_id="c2" tool_name="shell">\nyyy' in summary_input

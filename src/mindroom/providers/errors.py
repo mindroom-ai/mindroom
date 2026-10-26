@@ -100,8 +100,6 @@ _CONTEXT_WINDOW_MARKERS = (
     "exceeds the model",
     "available context size",
 )
-# A timeout as the HTTP client raises it, or as aiohttp and the socket layer raise it.
-_TRANSPORT_TIMEOUTS = (httpx.TimeoutException, TimeoutError)
 
 
 class CliLoginError(ValueError):
@@ -190,15 +188,26 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
     cannot be found or loaded stay a configuration error, and any other CLI login failure is the adapter's to map.
     """
     import aiohttp  # noqa: PLC0415 - google-genai's transport, loaded only once a request fails
+    import httpx2  # noqa: PLC0415 - the OpenAI and Claude SDKs' transport, loaded only once a request fails
     from google.auth import exceptions as google_auth  # noqa: PLC0415 - loaded only once a request fails
 
     chain = list(_visible_chain(error))
-    transport = (httpx.TransportError, ConnectionError, TimeoutError, aiohttp.ClientError, google_auth.TransportError)
+    transport = (
+        httpx.TransportError,
+        httpx2.TransportError,
+        ConnectionError,
+        TimeoutError,
+        aiohttp.ClientError,
+        google_auth.TransportError,
+    )
     if any(
         isinstance(cause, transport) or (isinstance(cause, google_auth.RefreshError) and cause.retryable)
         for cause in chain
     ):
-        timed_out = any(isinstance(cause, _TRANSPORT_TIMEOUTS) for cause in chain)
+        # A timeout as either HTTP client raises it, or as aiohttp and the socket layer raise it: the OpenAI and
+        # Claude SDKs send through httpx2, the Gemini and Ollama SDKs and the CLI login refreshes through httpx.
+        timeouts = (httpx.TimeoutException, httpx2.TimeoutException, TimeoutError)
+        timed_out = any(isinstance(cause, timeouts) for cause in chain)
         code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
         return ProviderUnavailable(failure_text(error), provider=provider, code=code)
     if any(isinstance(cause, google_auth.RefreshError) for cause in chain):

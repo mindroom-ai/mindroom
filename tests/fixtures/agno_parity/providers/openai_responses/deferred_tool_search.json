@@ -26,7 +26,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -162,6 +161,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "role": "developer",
@@ -172,10 +173,8 @@
           "content": "Where is order A-1001?"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
       "store": true,
-      "stream": true,
       "tools": [
         {
           "type": "tool_search"

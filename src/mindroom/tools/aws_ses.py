@@ -59,7 +59,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["boto3"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/aws_ses",
+    docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#aws_ses",
     function_names=("send_email",),
 )
 def aws_ses_tools() -> type[AWSSESTool]:

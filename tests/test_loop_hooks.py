@@ -8,8 +8,7 @@ from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.config.main import Config
-from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
-from mindroom.llm.provider import Capabilities, DeferredTools, ModelRequest
+from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
 from mindroom.participation import ParticipationGate
@@ -18,7 +17,8 @@ from mindroom.teams.members import BuiltTeam
 from mindroom.tool_jobs.execution import JobActor
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
-from tests.team_runtime.squad import team_spec
+from tests.history_helpers import replay_settings
+from tests.teams.squad import team_spec
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -47,8 +47,8 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
         runtime_paths,
     )
-    model = ScriptedModel([], capabilities=Capabilities(claude_family=True))
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    model = ScriptedModel([])
+    settings = replay_settings()
     build = AgentBuild(
         spec=AgentSpec(id="general", name="General", model=model, system_message=None, toolkits=()),
         prompt=PromptSpec(role="test", instructions=()),
