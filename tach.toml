@@ -5340,6 +5340,23 @@ depends_on = [
     "mindroom.tool_system.plugins",
 ]
 
+# The supported plugin import surface; MindRoom's own modules import the owning modules instead.
+[[modules]]
+path = "mindroom.plugin_api"
+depends_on = [
+    "mindroom.agent_loop.helper",
+    "mindroom.constants",
+    "mindroom.file_access",
+    "mindroom.hooks",
+    "mindroom.path_confinement",
+    "mindroom.providers.registry",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = []
+
 [[modules]]
 path = "mindroom.plugin_check"
 depends_on = [

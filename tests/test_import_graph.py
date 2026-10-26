@@ -135,6 +135,34 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     "mindroom.tool_system.metadata": _REGISTRY_ROOTS,
     "mindroom.tool_system.catalog": _REGISTRY_ROOTS,
     "mindroom.tool_system.registration": _CONFIG_LAYER_ROOTS,
+    # Plugins import their entry points without Agno: the registry footprint plus the OAuth helpers' clients
+    # (authlib, requests, and the httpx transport tree) and the provider registry's httpx2 client and tiktoken.
+    "mindroom.plugin_api": _REGISTRY_ROOTS
+    | frozenset(
+        {
+            "anyio",
+            "attrs",
+            "authlib",
+            "certifi",
+            "chardet",
+            "charset_normalizer",
+            "h11",
+            "h2",
+            "hpack",
+            "httpcore",
+            "httpx2",
+            "hyperframe",
+            "outcome",
+            "requests",
+            "sniffio",
+            "socks",
+            "sortedcontainers",
+            "tiktoken",
+            "tiktoken_ext",
+            "trio",
+            "urllib3",
+        },
+    ),
     "mindroom.tools": _TOOLS_ROOTS,
     # The sandbox runner is the API server for worker tool execution: fastapi
     # and its dependency tree on top of the full registry footprint.
