@@ -1028,6 +1028,7 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.knowledge_graph.clients",
+    "mindroom.knowledge.chunk_context",
     "mindroom.history.mid_turn_compaction",
 ]
 
@@ -6202,6 +6203,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
+    "mindroom.knowledge.chunk_context",
     "mindroom.path_confinement",
     "mindroom.knowledge.chunking",
     "mindroom.constants",
@@ -6307,6 +6309,11 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.chunk_context"
+depends_on = ["mindroom.agent_loop.helper", "mindroom.helper_usage", "mindroom.providers.registry"]
+visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.rerank"

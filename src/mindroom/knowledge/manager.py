@@ -42,6 +42,7 @@ from mindroom.knowledge.candidate_checkpoint import (
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
+from mindroom.knowledge.chunk_context import chunk_contexts
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.collections import (
     SOURCE_DIGEST_KEY,
@@ -987,12 +988,40 @@ class KnowledgeManager:
             file_path = files[end]
             end += 1
             prepared_file = await self._prepare_file(file_path, vanished_files=vanished_files)
+            if prepared_file is not None:
+                prepared_file = await self._with_chunk_contexts(prepared_file)
             if prepared_file is None:
                 await on_file_result(file_path)
                 continue
             prepared.append(prepared_file)
             text_bytes += prepared_file.text_bytes()
         return prepared, end
+
+    async def _with_chunk_contexts(self, prepared: _PreparedFile) -> _PreparedFile | None:
+        """Prefix each chunk with the context the base's ``chunk_context_model`` writes; None when that fails.
+
+        A single-chunk file is its own document, so there is nothing to situate it in.
+        """
+        model_name = self.config.get_knowledge_base_config(self.base_id).chunk_context_model
+        if model_name is None or len(prepared.chunks) < 2:
+            return prepared
+        try:
+            contexts = await chunk_contexts(
+                self.config,
+                self.runtime_paths,
+                model_name,
+                [chunk.text for chunk in prepared.chunks],
+            )
+        except Exception as exc:
+            self._record_file_failure(prepared.path, exc)
+            return None
+        return replace(
+            prepared,
+            chunks=tuple(
+                replace(chunk, text=f"{context}\n\n{chunk.text}" if context else chunk.text)
+                for chunk, context in zip(prepared.chunks, contexts, strict=True)
+            ),
+        )
 
     async def _reindex_files_locked(
         self,
@@ -1235,7 +1264,11 @@ class KnowledgeManager:
         bounded by the in-flight file rather than the whole copied corpus.
         """
         collection = open_collection(self._collections, checkpoint.collection)
-        return collection.exists() and not checkpoint.completed and collection.has_rows()
+        if not collection.exists():
+            return False
+        # Probed even when claims exist: the read is also what proves the file is still a readable collection.
+        has_rows = collection.has_rows()
+        return not checkpoint.completed and has_rows
 
     async def _inspect_candidate_shape(
         self,

@@ -140,6 +140,13 @@ class KnowledgeBaseConfig(BaseModel):
         ge=0,
         description="Number of overlapping characters between adjacent chunks",
     )
+    chunk_context_model: str | None = Field(
+        default=None,
+        description=(
+            "Model that writes a short context for each chunk of a multi-chunk file before it is indexed "
+            "(contextual retrieval); costs one model call per chunk of each changed file"
+        ),
+    )
     include_extensions: list[str] | None = Field(
         default=None,
         description="Optional file extensions to index instead of the default text-like set, for example ['.md', '.py']",

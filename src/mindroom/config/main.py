@@ -2224,6 +2224,15 @@ class Config(BaseModel):
             raise ValueError(msg)
 
     @model_validator(mode="after")
+    def validate_knowledge_chunk_context_models(self) -> Config:
+        """Validate that every knowledge base's chunk context model is a configured model."""
+        for base_id, base in self.knowledge_bases.items():
+            if base.chunk_context_model is not None and base.chunk_context_model not in self.models:
+                msg = f"Unknown chunk_context_model for knowledge base {base_id!r}: {base.chunk_context_model!r}"
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_knowledge_graph(self) -> Config:
         """Validate the graph's model once any agent enables the graph."""
         settings = self.knowledge_graph
