@@ -59,9 +59,11 @@ async def chunk_contexts(
         await record_system_usage(response.record, runtime_paths=runtime_paths, kind="knowledge_chunk_context")
         return str(response.content).strip()
 
+    # The first call runs alone, so providers that cache prompt prefixes can serve the shared document to the rest.
+    first = await context_for(0)
     try:
         async with asyncio.TaskGroup() as group:
-            tasks = [group.create_task(context_for(index)) for index in range(len(chunks))]
+            tasks = [group.create_task(context_for(index)) for index in range(1, len(chunks))]
     except ExceptionGroup as failures:
         raise failures.exceptions[0] from None
-    return [task.result() for task in tasks]
+    return [first, *(task.result() for task in tasks)]
