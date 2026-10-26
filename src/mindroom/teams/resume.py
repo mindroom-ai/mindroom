@@ -233,13 +233,12 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     for requirement in paused.requirements:
         if member_delegation_card(requirement, member_names):
             continue
-        member_id = requirement.member_agent_id
-        scope = (
-            "team"
-            if member_id is None
-            else f"agent:{presentation.resolve_member_id(member_id, requirement.member_display_name)}"
-        )
-        presentation.start_tool(scope, requirement.tool_execution.call)
+        call = requirement.tool_execution.call
+        if requirement.member_agent_id is None:
+            presentation.start_tool("team", call)
+        else:
+            member_id = presentation.resolve_member_id(requirement.member_agent_id, requirement.member_display_name)
+            presentation.start_member_tool(member_id, call)
     return replace(
         paused,
         response_text=presentation.render_body(),
