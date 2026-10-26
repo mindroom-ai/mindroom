@@ -1194,9 +1194,10 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.providers.google_adc"
-depends_on = ["mindroom.startup_errors"]
+depends_on = ["mindroom.constants", "mindroom.startup_errors"]
 visibility = [
     "mindroom.providers.anthropic.messages",
+    "mindroom.providers.gemini",
 ]
 
 [[modules]]
@@ -8012,6 +8013,7 @@ depends_on = [
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.google_adc",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]

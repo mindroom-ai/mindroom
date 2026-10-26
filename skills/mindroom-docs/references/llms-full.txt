@@ -2079,6 +2079,8 @@ For Ollama, you can also set:
 
 ```bash
 OLLAMA_HOST=http://localhost:11434
+# Optional key for a server that requires one, sent by models that configure no api_key:
+# OLLAMA_API_KEY=...
 ```
 
 For Vertex AI Claude, set these instead of an API key:
@@ -2094,7 +2096,6 @@ For `claude-sonnet-5-5`, use the [global endpoint or a supported multi-region en
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 For Gemini on Vertex AI (`provider: google` with `extra_kwargs.vertexai: true`), authenticate the same way and set `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, or pass `extra_kwargs.project_id` and `extra_kwargs.location`.
-Gemini reads these variables and `GOOGLE_APPLICATION_CREDENTIALS` only from the process environment, not from `.env`.
 
 `OPENAI_BASE_URL` is described in [Configuration — Model Providers](https://docs.mindroom.chat/configuration/#model-providers).
 
@@ -2442,9 +2443,9 @@ It applies to every model request, also when `defaults.enable_streaming` is off,
 
 By default the limit is 300 seconds for hosted providers on their built-in endpoint.
 Local servers can stay silent for minutes while a request waits in a queue or a model loads, so `ollama`, `llama_cpp`, and any model with a configured endpoint get no limit unless you set one.
-A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one read from `OPENAI_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, or `ANTHROPIC_VERTEX_BASE_URL`.
+A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one read from `OPENAI_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, `ANTHROPIC_BASE_URL`, or `ANTHROPIC_VERTEX_BASE_URL`.
 Set the limit explicitly for a hosted service behind a custom endpoint, such as OrcaRouter or the Z.ai coding endpoint.
-Endpoint variables that only a provider SDK reads, such as `ANTHROPIC_BASE_URL`, are not detected; set `0` when one points at a local server.
+Endpoint variables that only a provider SDK reads, such as `GOOGLE_GEMINI_BASE_URL`, are not detected; set `0` when one points at a local server.
 For a local model, pick a value above its slowest queue wait plus model load; set `0` to turn the limit off for a hosted model:
 
 ```yaml

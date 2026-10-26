@@ -10,7 +10,6 @@ discovers once.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -33,7 +32,6 @@ from anthropic.types.beta import (
     BetaToolUseBlock,
 )
 
-from mindroom.constants import runtime_env_path
 from mindroom.credentials.sync import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
@@ -86,7 +84,7 @@ from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as
 from mindroom.providers.credentials import model_api_key
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
-from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
+from mindroom.providers.google_adc import load_ambient_google_credentials, runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
@@ -129,20 +127,18 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | N
 
     Stored native-compaction checkpoints and the media limits learned from provider errors are keyed by it.
 
-    It reads the route's values with ``client_params`` over them, as the client does, and unset Vertex values
-    fall back to the process environment the SDK reads, so the identity matches the client the SDK would build.
+    It reads the route's values, which the builder filled from the runtime env, with ``client_params`` over them,
+    as the client does.
     """
     client_params = settings.client_params or {}
     if route == "anthropic":
-        base_url = client_params.get("base_url") or os.environ.get("ANTHROPIC_BASE_URL") or ANTHROPIC_BASE_URL_DEFAULT
-        return str(base_url).rstrip("/")
+        return str(client_params.get("base_url") or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
     if route == "vertexai_claude":
-        params = {**_route_client_kwargs(route, settings), **client_params}
-        region = params["region"] or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])
-        project = params["project_id"] or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"])
+        region = client_params.get("region") or settings.region
+        project = client_params.get("project_id") or settings.project_id
         base_url = (
-            params["base_url"]
-            or os.environ.get(ENDPOINT_VARIABLES["vertexai_claude"])
+            client_params.get("base_url")
+            or settings.base_url
             or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
         )
         return f"{str(base_url).rstrip('/')}|{project}|{region}"
@@ -594,6 +590,15 @@ def _claude_capabilities(
     )
 
 
+def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Fill the direct route's key and, unless ``client_params`` sets one, its endpoint from the runtime env."""
+    kwargs: dict[str, Any] = {**authored, "api_key": api_key} if api_key else dict(authored)
+    client_params = kwargs.get("client_params") or {}
+    if "base_url" not in client_params and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["anthropic"])):
+        kwargs["client_params"] = {**client_params, "base_url": base_url}
+    return kwargs
+
+
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Fill Vertex project, region, endpoint, and Google credentials from the runtime env; a key is ignored."""
     kwargs = {key: value for key, value in authored.items() if key != "api_key"}
@@ -605,13 +610,9 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
         kwargs["region"] = region
     if "base_url" not in kwargs and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["vertexai_claude"])):
         kwargs["base_url"] = base_url
-    client_params = dict(kwargs.get("client_params") or {})
-    if "credentials" not in client_params and (
-        credentials_path := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    ):
-        client_params["credentials"] = load_google_application_credentials(str(credentials_path))
-    if client_params:
-        kwargs["client_params"] = client_params
+    client_params = kwargs.get("client_params") or {}
+    if "credentials" not in client_params and (credentials := runtime_application_credentials(runtime_paths)):
+        kwargs["client_params"] = {**client_params, "credentials": credentials}
     return kwargs
 
 
@@ -682,8 +683,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     route = cast("ClaudeRouteKind", provider_route(model_config.provider))
     authored = dict(model_config.extra_kwargs or {})
     if route == "anthropic":
-        if api_key := model_api_key(model_config, runtime_paths):
-            authored["api_key"] = api_key
+        authored = _anthropic_kwargs(authored, model_api_key(model_config, runtime_paths), runtime_paths)
     elif route == "vertexai_claude":
         authored = _vertex_kwargs(authored, runtime_paths)
     else:

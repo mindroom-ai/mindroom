@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from ollama import AsyncClient
 
-from mindroom.credentials.sync import get_ollama_host
+from mindroom.credentials.sync import get_ollama_host, get_secret_from_env
 from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.messages import tool_result_view
 from mindroom.llm.provider import (
@@ -55,6 +55,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _PROVIDER = "Ollama"
+# The runtime env variable holding the key a server that requires one gets when the model configures none.
+_API_KEY_VARIABLE = "OLLAMA_API_KEY"
 # Remote images are downloaded up to this size; a larger one is left to the media fallback's note.
 _IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 
@@ -290,8 +292,9 @@ def _stop_reason(reply: _OllamaReply) -> StopReason | None:
 
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> OllamaProvider:
-    """Build the adapter for an ``ollama`` model config."""
-    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": model_config.configured_api_key()}
+    """Build the adapter for an ``ollama`` model config; without a key of its own it sends ``OLLAMA_API_KEY``."""
+    api_key = model_config.configured_api_key() or get_secret_from_env(_API_KEY_VARIABLE, runtime_paths=runtime_paths)
+    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": api_key}
     settings = settings_from_extra_kwargs(OllamaSettings, extra_kwargs, provider=model_config.provider)
     # ``client_params`` wins over every client option, so its ``host`` is the server requests reach.
     host = str(

@@ -37,7 +37,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.providers import credentials as provider_credentials
-from mindroom.providers import remote_media, synthetic_adapter
+from mindroom.providers import google_adc, remote_media, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
 from mindroom.providers.gemini import wire as gemini_wire
@@ -179,30 +179,55 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
     assert requested == ["gemini"]
 
 
-def test_gemini_passes_the_environment_key_project_and_location_as_explicit_client_arguments(
+def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runtime_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The SDK ranks an explicit argument above its own environment reads, so these variables stay explicit, as in Agno."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-project")
-    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west4")
+    """A Vertex AI model the config gives no project, location, or credentials takes them from ``.env``."""
+    credentials = Credentials(token="env-token")  # noqa: S106 - synthetic SDK credential
+    loaded: list[str] = []
+
+    def load(path: str) -> Credentials:
+        loaded.append(path)
+        return credentials
+
+    monkeypatch.setattr(google_adc, "_load_google_application_credentials", load)
+    (tmp_path / ".env").write_text(
+        "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
+        encoding="utf-8",
+    )
     runtime_paths = runtime_paths_for(tmp_path)
 
-    api = gemini_adapter.build_provider(ModelConfig(provider="google", id="gemini-3.8-flash"), runtime_paths)
     vertex = gemini_adapter.build_provider(
         ModelConfig(**_config({"provider": "gemini", "id": "gemini-3.8-flash"}, vertexai=True)),
         runtime_paths,
     )
 
-    assert api._client_params() == {"api_key": "env-key"}
-    assert vertex._client_params() == {"vertexai": True, "project": "env-project", "location": "europe-west4"}
+    assert vertex._client_params() == {
+        "vertexai": True,
+        "project": "env-project",
+        "location": "europe-west4",
+        "credentials": credentials,
+    }
+    assert loaded == [str((tmp_path / "adc.json").resolve())]
+    authored = Credentials(token="authored-token")  # noqa: S106 - synthetic SDK credential
+    configured = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI_VERTEX, client_params={"credentials": authored})),
+        runtime_paths,
+    )
+    assert configured._client_params() == {
+        "vertexai": True,
+        "project": "test-project",
+        "location": "us-central1",
+        "credentials": authored,
+    }
+    assert len(loaded) == 1
 
 
 @pytest.mark.asyncio
-async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """GOOGLE_GENAI_USE_VERTEXAI=true sends a model without ``vertexai`` to Vertex AI, as Agno's Gemini did."""
-    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path) -> None:
+    """``GOOGLE_GENAI_USE_VERTEXAI`` in ``.env`` sends a model without ``vertexai`` to Vertex AI."""
+    (tmp_path / ".env").write_text("GOOGLE_GENAI_USE_VERTEXAI=true\n", encoding="utf-8")
     seen: list[httpx.Request] = []
 
     def respond(http_request: httpx.Request) -> httpx.Response:
@@ -219,6 +244,18 @@ async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, mo
     _completed([event async for event in adapter.stream(_request())])
 
     assert "/projects/test-project/locations/us-central1/" in str(seen[0].url)
+
+
+def test_ollama_sends_the_runtime_env_key_unless_the_model_has_its_own(tmp_path: Path) -> None:
+    """``OLLAMA_API_KEY`` in ``.env`` authenticates a model that configures no key."""
+    (tmp_path / ".env").write_text("OLLAMA_API_KEY=env-key\n", encoding="utf-8")
+    runtime_paths = runtime_paths_for(tmp_path)
+
+    shared = build_ollama_provider(ModelConfig(**OLLAMA), runtime_paths)
+    own = build_ollama_provider(ModelConfig(**OLLAMA, api_key="own-key"), runtime_paths)
+
+    assert shared._client_params()["headers"] == {"authorization": "Bearer env-key"}
+    assert own._client_params()["headers"] == {"authorization": "Bearer own-key"}
 
 
 def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -> None:

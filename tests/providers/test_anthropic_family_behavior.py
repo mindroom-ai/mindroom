@@ -1110,6 +1110,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
             None,
         )
         assert vertex.settings.base_url == "https://vertex-gateway.example/v1"
+        assert vertex.identity.endpoint == "https://vertex-gateway.example/v1|env-project|europe-west1"
         assert (
             provider_for(
                 {"provider": "vertexai_claude", "id": "claude-sonnet-5-5"},
@@ -1118,6 +1119,27 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
             ).settings.region
             is None
         )
+
+
+def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_set_none(tmp_path: Path) -> None:
+    """``ANTHROPIC_BASE_URL`` from the runtime env is the direct route's endpoint unless the model configures one."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_BASE_URL": "https://env-gateway.example/"},
+    )
+    own = {"client_params": {"base_url": "https://own-gateway.example"}}
+    with isolated_provider_environment():
+        from_env = build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k"), runtime_paths)
+        configured = build_provider(
+            ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=own),
+            runtime_paths,
+        )
+    assert from_env.identity.endpoint == "https://env-gateway.example"
+    assert configured.identity.endpoint == "https://own-gateway.example"
+    assert configured.settings.client_params == own["client_params"]
 
 
 @pytest.mark.asyncio
@@ -1156,6 +1178,11 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
     assert str(wire.requests[-1].url) == (
         "https://vertex.example/v1/projects/params-project/locations/eu/publishers/anthropic/models/"
         "claude-sonnet-5-5:streamRawPredict"
+    )
+    # The endpoint identity names the endpoint the client reaches.
+    assert (direct.identity.endpoint, vertex.identity.endpoint) == (
+        "https://gateway.example/anthropic",
+        "https://vertex.example/v1|params-project|eu",
     )
 
     bedrock = route_provider(

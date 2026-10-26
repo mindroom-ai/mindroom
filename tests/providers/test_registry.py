@@ -376,6 +376,7 @@ _VERTEX_CREDENTIALS = {"credentials": Credentials(token="registry-google-token")
         ({"provider": "openai", "api": "responses", "id": "gpt-6-astra"}, "OPENAI_BASE_URL", "https://proxy.test/v1"),
         ({"provider": "groq", "id": "openai/gpt-oss-120b"}, "GROQ_BASE_URL", "https://proxy.test"),
         ({"provider": "cerebras", "id": "gpt-oss-120b"}, "CEREBRAS_BASE_URL", "https://proxy.test"),
+        ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, "ANTHROPIC_BASE_URL", "https://proxy.test"),
         (
             {
                 "provider": "vertexai_claude",
@@ -386,7 +387,7 @@ _VERTEX_CREDENTIALS = {"credentials": Credentials(token="registry-google-token")
             "https://proxy.test/v1",
         ),
     ],
-    ids=["openai-chat", "openai-responses", "groq", "cerebras", "vertexai_claude"],
+    ids=["openai-chat", "openai-responses", "groq", "cerebras", "anthropic", "vertexai_claude"],
 )
 async def test_an_endpoint_the_runtime_env_sets_has_no_idle_limit_by_default(
     fields: dict[str, Any],

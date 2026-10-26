@@ -6,10 +6,13 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from mindroom.constants import runtime_env_path
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials as GoogleCredentials
+
+    from mindroom.constants import RuntimePaths
 
 _GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
@@ -39,7 +42,7 @@ def load_ambient_google_credentials() -> tuple[GoogleCredentials, str | None]:
     return cast("GoogleCredentials", credentials), project_id
 
 
-def load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
+def _load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
     """Load Google ADC credentials for Vertex-backed model clients."""
     if not Path(credentials_path).is_file():
         msg = (
@@ -66,3 +69,9 @@ def load_google_application_credentials(credentials_path: str) -> GoogleCredenti
     except Exception as exc:
         msg = f"Failed to load GOOGLE_APPLICATION_CREDENTIALS at {credentials_path}: {exc}"
         raise _GoogleApplicationCredentialsError(msg) from exc
+
+
+def runtime_application_credentials(runtime_paths: RuntimePaths) -> GoogleCredentials | None:
+    """Return the credentials ``GOOGLE_APPLICATION_CREDENTIALS`` names in the runtime env, or None when it is unset."""
+    credentials_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+    return None if credentials_path is None else _load_google_application_credentials(str(credentials_path))

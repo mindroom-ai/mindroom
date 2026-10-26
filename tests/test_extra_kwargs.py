@@ -642,6 +642,20 @@ def test_vertex_claude_loads_the_runtime_application_credentials(
     assert provider.settings.client_params == {"credentials": fake_credentials}
 
 
+def test_vertex_claude_keeps_its_configured_credentials_over_the_runtime_file(tmp_path: Path) -> None:
+    """Credentials a model passes in ``client_params`` win, so the runtime ``GOOGLE_APPLICATION_CREDENTIALS`` is unread."""
+    runtime_paths = _runtime_paths(tmp_path, GOOGLE_APPLICATION_CREDENTIALS=str(tmp_path / "missing.json"))
+    configured = object()
+    model_config = _vertex_config()
+    model_config = model_config.model_copy(
+        update={"extra_kwargs": {**(model_config.extra_kwargs or {}), "client_params": {"credentials": configured}}},
+    )
+
+    provider = build_claude_provider(model_config, runtime_paths)
+
+    assert provider.settings.client_params == {"credentials": configured}
+
+
 @pytest.mark.parametrize(
     ("content", "message"),
     [
