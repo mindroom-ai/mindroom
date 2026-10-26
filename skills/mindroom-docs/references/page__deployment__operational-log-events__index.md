@@ -119,6 +119,21 @@ alert if  sum(metric) over 15 minutes >= 5 for any agent
 Read the `await_chain` snapshots to see where each task is waiting.
 Reports for every entity at once usually point at the homeserver or at a saturated event loop, so check `event_loop_scheduler_lag_summary` as well.
 
+### `conversation_converted`
+
+Logged once for each conversation database the first start after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) converts, or that converts at its first use later, such as a restored backup.
+
+| Field | Meaning |
+|-------|---------|
+| `path` | The converted database file |
+| `runs` | Runs in the converted database |
+| `messages` | Stored messages in the converted database |
+| `compacted` | Whether the file was compacted to return the space its old tables used |
+| `duration_seconds` | Time the conversion and compaction took |
+
+`compacted` is `false` when compacting would return little or the directory lacked free space of about twice the converted data; a `conversation_compaction_failed` warning names the database when compacting failed, and the conversion still stands.
+A database that could not convert at startup logs `conversation_conversion_skipped_store` instead.
+
 ### `tool_call_limit_reached`
 
 Each agent or team run has a tool-call budget, normally the entity's [`max_tool_calls_per_turn`](https://docs.mindroom.chat/configuration/agents/#configuration-options).

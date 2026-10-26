@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 import sys
 import time
@@ -53,7 +54,7 @@ from mindroom.session_storage.store import (
     upsert_run,
 )
 from mindroom.usage.legacy_usage_storage import seed_usage_ledger
-from mindroom.usage.storage import quote_identifier
+from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME, quote_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -67,6 +68,8 @@ logger = get_logger(__name__)
 
 # Startup skips a locked database at once; its owner converts it with the full timeout when it next opens it.
 _STARTUP_LOCK_TIMEOUT_SECONDS = 0.0
+# The dropped Agno tables leave their pages free; compacting the file pays off once they are a quarter of it.
+_COMPACT_FREE_SHARE = 0.25
 
 
 def migrate_conversation_database(path: Path, names: TableNames, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
@@ -75,24 +78,67 @@ def migrate_conversation_database(path: Path, names: TableNames, *, timeout: flo
     A database with ``<s>_log_meta`` costs one read. Any other gets, in one ``BEGIN IMMEDIATE``: the backup when it
     holds any table, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2 blob runs and
     positions), the conversion, the drop of the Agno tables and dead columns, and the v2 tables and meta row. A file
-    in write-ahead-log mode returns to the rollback journal first, which checkpoints its log.
+    in write-ahead-log mode returns to the rollback journal first, which checkpoints its log. A converted file is then
+    compacted when that pays off (``_compact``), and its conversion is logged.
     """
     with ExitStack() as descriptors, closing(_connect_by_name(path, timeout)) as connection:
         if _is_converted(connection, names):
             return
         _leave_wal_mode(connection, path)
+        started = time.monotonic()
         connection.execute("BEGIN IMMEDIATE")
+        converted: tuple[int, int] | None = None
         try:
             # Asked again under the lock: another opener may have converted the file while this one waited, and backing
             # up the converted file would replace the original's backup.
             if not _is_converted(connection, names):
                 # SQLite keeps whatever bytes worker code stores as text; the conversion's own connection reads them.
                 connection.text_factory = _TEXT_WITH_REPLACEMENT_CHARACTERS
-                _convert(connection, AgnoTableNames(names.storage_name), path, descriptors)
+                if _convert(connection, AgnoTableNames(names.storage_name), path, descriptors):
+                    converted = connection.execute(
+                        f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
+                        f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
+                    ).fetchone()
         except BaseException:
             connection.rollback()
             raise
         connection.commit()
+        if converted is None:
+            return
+        compacted = _compact(connection, path)
+        logger.info(
+            "conversation_converted",
+            path=str(path),
+            runs=converted[0],
+            messages=converted[1],
+            compacted=compacted,
+            duration_seconds=round(time.monotonic() - started, 3),
+        )
+
+
+def _compact(connection: sqlite3.Connection, path: Path) -> bool:
+    """``VACUUM`` the converted file once the dropped tables left a quarter of it free and its directory has room.
+
+    ``VACUUM`` writes a rollback journal of the compacted size beside the file and a temporary copy of the same size,
+    which shares the directory's filesystem unless SQLite's temporary directory lies elsewhere, so it needs twice the
+    live pages free beyond what the conversion's own check covered. Without that room the file keeps its free pages,
+    which later writes reuse. Returns whether the file was compacted.
+    """
+    page_size, pages, free = (
+        connection.execute(f"PRAGMA {pragma}").fetchone()[0] for pragma in ("page_size", "page_count", "freelist_count")
+    )
+    if free < pages * _COMPACT_FREE_SHARE:
+        return False
+    status = os.statvfs(path.parent)
+    if status.f_bavail * status.f_frsize < 2 * (pages - free) * page_size:
+        return False
+    try:
+        connection.execute("VACUUM")
+    except sqlite3.Error as error:
+        # The conversion is committed, and a failed VACUUM leaves the file as it was, so the open goes on.
+        logger.warning("conversation_compaction_failed", path=str(path), error=str(error))
+        return False
+    return True
 
 
 async def migrate_conversation_storage(runtime_paths: RuntimePaths) -> None:
@@ -105,6 +151,10 @@ def _migrate_databases(runtime_paths: RuntimePaths) -> None:
     directories = [*_directories(root / "agents"), *_directories(root / "teams")]
     for scope in _directories(root / "private_instances"):
         directories.extend(_directories(scope))
+    # The system usage store, which records internal provider calls, is a conversation database of its own.
+    system = root / SYSTEM_USAGE_STORAGE_NAME
+    if not system.is_symlink() and system.is_dir():
+        directories.append(system)
     for directory in directories:
         names = TableNames(directory.name)
         path = names.database_path(directory)
@@ -177,8 +227,11 @@ def _leave_wal_mode(connection: sqlite3.Connection, path: Path) -> None:
         raise RuntimeError(msg)
 
 
-def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, descriptors: ExitStack) -> None:
-    """Convert the database in the caller's write transaction; one without a sessions table only gets the v2 tables."""
+def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, descriptors: ExitStack) -> bool:
+    """Convert the database in the caller's write transaction; one without a sessions table only gets the v2 tables.
+
+    Returns whether the file held any table, so a new or empty file, which only gets the v2 tables, reports none.
+    """
     tables = table_names(connection)
     if tables:
         write_conversion_backup(connection, path, descriptors)
@@ -193,7 +246,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     for statement in log_schema_sql(names):
         connection.execute(statement)
     if names.sessions not in tables:
-        return
+        return bool(tables)
     seqs = count(1)
     for (session_id,) in connection.execute(
         f"SELECT session_id FROM {quote_identifier(names.sessions)} ORDER BY session_id",  # noqa: S608
@@ -206,6 +259,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     _drop_agno_tables(connection, names)
     _drop_dead_session_columns(connection, names)
     _write_meta(connection, names, next(seqs))
+    return True
 
 
 def _session_text_as_utf8(connection: sqlite3.Connection, names: AgnoTableNames) -> None:

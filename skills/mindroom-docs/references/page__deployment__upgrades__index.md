@@ -6,7 +6,8 @@ Always back up configuration and persistent storage before replacing the running
 
 ## Upgrading to conversation storage v2
 
-The first start after this upgrade converts the conversation database of every agent and team, private instances included, to a new layout before any agent comes online.
+The first start after this upgrade converts the conversation database of every agent and team, private instances included, and the internal usage database under `system/`, to a new layout before any agent comes online.
+Each converted database logs one `conversation_converted` record (see [Events](https://docs.mindroom.chat/deployment/operational-log-events/#conversation_converted)).
 Meanwhile `/api/health` answers `200` and `/api/ready` answers `503` with the detail `Converting conversation storage`; the process becomes ready only after the conversion and the rest of startup finish.
 The conversion is one-way, and downgrading afterwards is not supported.
 
@@ -22,7 +23,8 @@ Conversation history, compaction summaries, pending tool approvals, and usage re
 Before converting a database, MindRoom copies it byte for byte to `<name>.db.pre-storage-v2` beside it and never deletes that copy.
 A stored run whose data cannot be read is left out of the converted database, logged as `conversation_run_left_out` with its run ID, and kept in the backup.
 A crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
-A converted database keeps the disk space its old tables used until later writes reuse it; with MindRoom stopped, `sqlite3 <name>.db VACUUM` returns that space.
+Right after converting a database, MindRoom compacts it to return the space its old tables used, when its directory has free space of about twice the converted data.
+Without that space the file keeps it until later writes reuse it; with MindRoom stopped, `sqlite3 <name>.db VACUUM` returns it.
 
 ### Downgrading
 

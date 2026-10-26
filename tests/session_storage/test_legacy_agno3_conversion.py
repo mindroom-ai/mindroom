@@ -13,6 +13,7 @@ import sys
 import time
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -35,6 +36,7 @@ from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_sc
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
+from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME
 from tests.llm.agno_dict_helpers import DROPPED_RUN_KEYS, DROPPED_TOOL_EXECUTION_KEYS, expected_run_dict
 from tests.session_storage.agno_layout import write_agno_database
 from tests.storage_oracle.determinism import deterministic
@@ -1674,10 +1676,116 @@ def test_a_database_without_a_sessions_table_only_gets_the_v2_tables(tmp_path: P
             with closing(sqlite3.connect(database)) as connection:
                 connection.execute(prepare)
 
-        migrate_conversation_database(database, _NAMES)
+        with capture_logs() as logs:
+            migrate_conversation_database(database, _NAMES)
 
         assert {_NAMES.log_meta, _NAMES.log_runs, _NAMES.usage} <= _tables(database)
         assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").exists() == (name == "other")
+        assert _skipped(logs, "conversation_converted") == ([str(database)] if name == "other" else [])
+
+
+def _database_of_large_runs(root: Path, count: int) -> Path:
+    """Create an Agno-layout database whose runs fill most of it, so dropping the Agno tables frees most of the file."""
+    database = _agno_database(root)
+    for index in range(count):
+        run = _run(f"r{index}")
+        run.messages = [Message(role="user", content="x" * 4000, id=f"r{index}.u", created_at=100)]
+        _insert_run(database, run, run_index=index)
+    return database
+
+
+def _free_pages(database: Path) -> int:
+    [(free,)] = _query(database, "PRAGMA freelist_count")
+    return free
+
+
+def test_a_conversion_is_logged_and_compacts_what_the_agno_tables_left_free(tmp_path: Path) -> None:
+    """The converted file returns the dropped tables' pages, and one INFO record names it, its rows, and its time."""
+    database = _database_of_large_runs(tmp_path, 40)
+    before = database.stat().st_size
+
+    with capture_logs() as logs:
+        migrate_conversation_database(database, _NAMES)
+
+    [entry] = [entry for entry in logs if entry["event"] == "conversation_converted"]
+    assert entry["log_level"] == "info"
+    assert {key: entry[key] for key in ("path", "runs", "messages", "compacted")} == {
+        "path": str(database),
+        "runs": 40,
+        "messages": 40,
+        "compacted": True,
+    }
+    assert entry["duration_seconds"] >= 0
+    assert _free_pages(database) == 0
+    assert database.stat().st_size < before
+    assert _converted(database).get_run("r39") is not None
+
+
+def test_a_conversion_that_frees_little_of_the_file_keeps_its_free_pages(tmp_path: Path) -> None:
+    """Below a quarter of the file free, compacting would not pay off, so the converted file is left as it is."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute(
+            f'UPDATE "{_NAMES.sessions}" SET session_data = ?',  # noqa: S608
+            (json.dumps({"session_state": {"notes": "x" * 400_000}}),),
+        )
+
+    with capture_logs() as logs:
+        migrate_conversation_database(database, _NAMES)
+
+    [entry] = [entry for entry in logs if entry["event"] == "conversation_converted"]
+    assert entry["compacted"] is False
+    [(pages,)] = _query(database, "PRAGMA page_count")
+    assert 0 < _free_pages(database) < pages / 4
+
+
+def test_a_conversion_without_room_to_compact_keeps_its_free_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compacting needs twice the live pages free beside the file; without them the converted file stays as it is."""
+    database = _database_of_large_runs(tmp_path, 40)
+    statvfs = os.statvfs
+
+    def free_space(target: int | Path) -> Any:  # noqa: ANN401
+        # The backup's check asks through the directory's descriptor and passes; the compaction asks by path.
+        return statvfs(target) if isinstance(target, int) else SimpleNamespace(f_bavail=0, f_frsize=1)
+
+    monkeypatch.setattr(os, "statvfs", free_space)
+    with capture_logs() as logs:
+        migrate_conversation_database(database, _NAMES)
+
+    assert [entry["compacted"] for entry in logs if entry["event"] == "conversation_converted"] == [False]
+    assert _free_pages(database) > 0
+
+
+class _RefusesVacuum(sqlite3.Connection):
+    def execute(self, sql: str, *parameters: Any) -> sqlite3.Cursor:  # noqa: ANN401
+        if sql == "VACUUM":
+            msg = "database or disk is full"
+            raise sqlite3.OperationalError(msg)
+        return super().execute(sql, *parameters)
+
+
+def test_a_failed_compaction_is_logged_and_keeps_the_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The conversion is committed before compacting, so a failed ``VACUUM`` leaves a converted file that opens."""
+    database = _database_of_large_runs(tmp_path, 40)
+
+    def connect(path: Path, *, timeout: float) -> sqlite3.Connection:
+        return sqlite3.connect(path, timeout=timeout, isolation_level=None, factory=_RefusesVacuum)
+
+    monkeypatch.setattr(legacy_agno3_conversion, "connect_conversation_database", connect)
+    with capture_logs() as logs:
+        migrate_conversation_database(database, _NAMES)
+
+    assert _skipped(logs, "conversation_compaction_failed") == [str(database)]
+    assert [entry["compacted"] for entry in logs if entry["event"] == "conversation_converted"] == [False]
+    assert _is_converted(database)
+    assert _free_pages(database) > 0
 
 
 # The startup sweep.
@@ -1704,7 +1812,8 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     """Every store under the state root converts; a linked, unreadable, locked, or too large one is logged and skipped."""
     paths, root = _runtime(tmp_path)
     converted = [
-        _store_at(root / relative) for relative in ("agents/code", "private_instances/scope/code", "teams/code")
+        _store_at(root / relative)
+        for relative in ("agents/code", "private_instances/scope/code", "teams/code", SYSTEM_USAGE_STORAGE_NAME)
     ]
     # Linked in under the name of the database it holds, so following the link would reach it.
     outside = _store_at(tmp_path / "outside/alias")
