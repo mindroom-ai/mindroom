@@ -1604,6 +1604,22 @@ async def test_client_params_override_the_configured_client_options(
 
 
 @pytest.mark.asyncio
+async def test_a_client_params_key_needs_no_shared_key(tmp_path: Path) -> None:
+    """The client sends ``client_params.api_key`` over every other key, so the shared one may be unset."""
+    model_config = {
+        "provider": "openai",
+        "id": "gpt-4.1",
+        "api": "chat_completions",
+        "extra_kwargs": {"client_params": {"base_url": "http://proxy.test/v1", "api_key": "proxy-key"}},
+    }
+    built = _Built(tmp_path, model_config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert built.requests[0].headers["authorization"] == "Bearer proxy-key"
+
+
+@pytest.mark.asyncio
 async def test_an_azure_model_sends_with_its_configured_timeout_and_retries(tmp_path: Path) -> None:
     """``timeout`` and ``max_retries`` set in ``extra_kwargs`` reach the Azure client, as on the other routes."""
     model_config = {

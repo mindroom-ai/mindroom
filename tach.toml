@@ -6452,7 +6452,13 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential", "uses_alternative_auth"]
+expose = [
+    "dashboard_api_key",
+    "missing_model_api_key_provider",
+    "model_uses_own_credential",
+    "own_api_key",
+    "uses_alternative_auth",
+]
 from = ["mindroom.providers.credentials"]
 
 [[interfaces]]

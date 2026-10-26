@@ -329,6 +329,32 @@ def test_doctor_checks_a_provider_key_at_the_endpoint_the_runtime_calls(
     assert probed == [url]
 
 
+def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_client_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model whose ``client_params`` set an endpoint and a key sends that key there, never the shared one."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=shared\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent: list[tuple[str, dict[str, str]]] = []
+
+    def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
+        sent.append((url, headers))
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    client_params = {"base_url": "https://proxy.example/v1", "api_key": "proxy-key"}
+    config = Config(
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-6-astra", extra_kwargs={"client_params": client_params}),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_single_provider("openai", config, runtime_paths) == (1, 0, 0)
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer shared"})]
+
+
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A healthy embedding round-trip counts as a pass."""
     monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)

@@ -33,6 +33,11 @@ def test_missing_model_api_key_provider_honors_model_credentials(tmp_path: Path)
             "keyed": ModelConfig(provider="openai", id="gpt-6-astra", api_key="sk-config"),
             "dashboard": ModelConfig(provider="openai", id="gpt-6-astra"),
             "token": ModelConfig(provider="anthropic", id="claude-sonnet-5", extra_kwargs={"auth_token": "tok"}),
+            "client": ModelConfig(
+                provider="openai",
+                id="gpt-6-astra",
+                extra_kwargs={"client_params": {"api_key": "sk-client"}},
+            ),
             "unkeyed": ModelConfig(provider="openai", id="gpt-6-astra"),
         },
     )
