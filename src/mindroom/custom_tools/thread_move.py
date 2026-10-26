@@ -32,7 +32,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.media import MATRIX_MEDIA_MSGTYPES
+from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
@@ -117,7 +117,7 @@ def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
     # No source kind: the relay is attributed in prompts but never becomes a human turn.
     content.setdefault(ORIGINAL_SENDER_KEY, sender)
     body = str(content.get("body", ""))
-    if content.get("msgtype") in MATRIX_MEDIA_MSGTYPES:
+    if is_matrix_media_msgtype(content.get("msgtype")):
         # With a filename present, clients show the body as the caption.
         content["filename"] = content.get("filename") or body
     # A leading tool marker must stay a line of its own to remain recognizable display chrome.

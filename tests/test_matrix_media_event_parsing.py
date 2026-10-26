@@ -194,6 +194,18 @@ async def test_non_message_event_with_media_extensions_keeps_event_type(
     _assert_synthetic_secrets_absent(caplog)
 
 
+@pytest.mark.parametrize("msgtype", [[], {}, 5], ids=["list", "dict", "number"])
+def test_history_reparse_rejects_a_msgtype_that_is_not_text(msgtype: object) -> None:
+    """Any room member writes the msgtype, so a value that is not text parses as a bad event instead of raising."""
+    event_source = _encrypted_media_source()
+    content = event_source["content"]
+    assert isinstance(content, dict)
+    content["msgtype"] = msgtype
+
+    assert media_module.is_encrypted_media_event_source(event_source) is False
+    assert isinstance(parse_room_message_event(event_source), nio.BadEvent)
+
+
 @pytest.mark.asyncio
 async def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
     caplog: pytest.LogCaptureFixture,

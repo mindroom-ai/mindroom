@@ -28,7 +28,6 @@ from mindroom.constants import ATTACHMENT_IDS_KEY
 from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import (
-    MATRIX_MEDIA_MSGTYPES,
     AudioMessageEvent,
     FileOrVideoMessageEvent,
     ImageMessageEvent,
@@ -37,6 +36,7 @@ from mindroom.matrix.media import (
     is_file_or_video_message_event,
     is_image_message_event,
     is_matrix_media_dispatch_event,
+    is_matrix_media_msgtype,
     is_video_message_event,
     media_mime_type,
     media_payload_exceeds_limit,
@@ -173,7 +173,7 @@ def _attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list
     if attachment_ids:
         return attachment_ids
     msgtype = message.content.get("msgtype")
-    if msgtype not in MATRIX_MEDIA_MSGTYPES:
+    if not is_matrix_media_msgtype(msgtype):
         return []
     # Voice handling registers audio under its original event; thread history registers other media per revision.
     event_id = message.event_id if msgtype == "m.audio" else message.visible_event_id
