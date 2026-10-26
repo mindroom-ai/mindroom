@@ -37,10 +37,14 @@ class PublishedIndexReader:
             return KnowledgeCollection(path=Path(self.path), name=collection_name).exists()
 
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        """Embed under the caller's credentials, then search on a worker thread."""
+        """Embed under the caller's credentials, then run the hybrid search on a worker thread."""
         embedding = (await self.embedder.aembed([query], purpose="query"))[0]
-        return await asyncio.to_thread(self._search, embedding, limit)
+        return await asyncio.to_thread(self._search, query, embedding, limit)
 
-    def _search(self, embedding: Sequence[float], limit: int) -> list[SearchHit]:
+    def _search(self, query: str, embedding: Sequence[float], limit: int) -> list[SearchHit]:
         with read_collection(self.path, self.collection_name, self._published_metadata()) as collection_name:
-            return KnowledgeCollection(path=Path(self.path), name=collection_name).search(embedding, limit=limit)
+            return KnowledgeCollection(path=Path(self.path), name=collection_name).search(
+                embedding,
+                limit=limit,
+                query=query,
+            )

@@ -8,6 +8,7 @@ file stays valid for as long as that file exists.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import struct
 import threading
@@ -31,6 +32,13 @@ _FILE_SUFFIX = ".sqlite3"
 LEGACY_CHROMA_FILE = "chroma.sqlite3"
 #: Source paths bound in one statement, well under every SQLite build's variable limit.
 _PATH_BATCH = 500
+#: Chunks each ranking contributes to a hybrid search before fusion.
+_FUSION_CANDIDATES = 50
+#: Reciprocal rank fusion's rank offset; 60 is the value the method was published with.
+_RRF_K = 60
+#: Query words matched in the keyword index, so a pasted document cannot make one search scan everything.
+_MAX_KEYWORD_TERMS = 32
+_WORD = re.compile(r"\w+")
 #: Vector matrices kept loaded across searches, bounded by their total size.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
 _SCHEMA = """
@@ -160,28 +168,38 @@ class KnowledgeCollection:
         with closing(self._connect(write=False)) as connection:
             return connection.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
 
-    def search(self, embedding: Sequence[float], *, limit: int) -> list[SearchHit]:
-        """Return the ``limit`` chunks nearest ``embedding`` by cosine distance, each document's repeats dropped."""
+    def search(self, embedding: Sequence[float], *, limit: int, query: str | None = None) -> list[SearchHit]:
+        """Return the ``limit`` best chunks, each document's repeats dropped.
+
+        Chunks rank by cosine distance to ``embedding``; with ``query`` text, that ranking is fused with an FTS5 BM25
+        ranking of the query's words by reciprocal rank fusion, so exact names and identifiers the embedding blurs
+        still surface. Every hit reports its cosine distance either way.
+        """
         import numpy as np  # noqa: PLC0415 - only searching needs numpy, which installs on first use.
 
         with closing(self._connect(write=False)) as connection:
             index = _vector_index(connection, self.file)
             if not len(index.rowids):
                 return []
-            query = np.asarray(embedding, dtype=np.float32)
-            if query.shape != (index.matrix.shape[1],):
+            query_vector = np.asarray(embedding, dtype=np.float32)
+            if query_vector.shape != (index.matrix.shape[1],):
                 message = (
-                    f"Query embedding dimension {query.size} does not match the index dimension {index.matrix.shape[1]}"
+                    f"Query embedding dimension {query_vector.size} does not match the index dimension "
+                    f"{index.matrix.shape[1]}"
                 )
                 raise ValueError(message)
-            query_norm = float(np.linalg.norm(query))
+            query_norm = float(np.linalg.norm(query_vector))
             if query_norm:
-                query /= query_norm
-            scores = index.matrix @ query
-            order = _top_indices(scores, min(len(scores), limit * 2))
+                query_vector /= query_norm
+            scores = index.matrix @ query_vector
+            candidates = min(len(scores), max(limit * 2, _FUSION_CANDIDATES))
+            ranked = [int(index.rowids[position]) for position in _top_indices(scores, candidates)]
+            if query is not None:
+                ranked = _reciprocal_rank_fusion(ranked, _keyword_rowids(connection, query, candidates))
+            positions = np.searchsorted(index.rowids, ranked)
             return _hits(
                 connection,
-                [(int(index.rowids[position]), 1.0 - float(scores[position])) for position in order],
+                [(rowid, 1.0 - float(scores[position])) for rowid, position in zip(ranked, positions, strict=True)],
                 limit=limit,
             )
 
@@ -258,6 +276,35 @@ def _top_indices(scores: np.ndarray, count: int) -> list[int]:
         return []
     candidates = np.argpartition(-scores, count - 1)[:count] if count < len(scores) else np.arange(len(scores))
     return [int(position) for position in candidates[np.lexsort((candidates, -scores[candidates]))]]
+
+
+def _keyword_rowids(connection: sqlite3.Connection, query: str, limit: int) -> list[int]:
+    """Return the rowids of the ``limit`` chunks FTS5 ranks best by BM25 for any of the query's words.
+
+    Equal scores order by source path, then chunk order: rowids alone would follow which file a refresh happened to
+    write first.
+    """
+    words = list(dict.fromkeys(word.lower() for word in _WORD.findall(query)))[:_MAX_KEYWORD_TERMS]
+    if not words:
+        return []
+    expression = " OR ".join(f'"{word}"' for word in words)
+    return [
+        rowid
+        for (rowid,) in connection.execute(
+            "SELECT chunks.rowid FROM chunks_fts JOIN chunks ON chunks.rowid = chunks_fts.rowid "
+            "WHERE chunks_fts MATCH ? ORDER BY chunks_fts.rank, chunks.source_path, chunks.rowid LIMIT ?",
+            (expression, limit),
+        )
+    ]
+
+
+def _reciprocal_rank_fusion(*rankings: Sequence[int]) -> list[int]:
+    """Merge rankings by summed ``1 / (k + rank)``; ties keep the earlier ranking's order."""
+    fused: dict[int, float] = {}
+    for ranking in rankings:
+        for rank, rowid in enumerate(ranking, start=1):
+            fused[rowid] = fused.get(rowid, 0.0) + 1.0 / (_RRF_K + rank)
+    return sorted(fused, key=lambda rowid: -fused[rowid])
 
 
 def _hits(connection: sqlite3.Connection, ranked: Sequence[tuple[int, float]], *, limit: int) -> list[SearchHit]:

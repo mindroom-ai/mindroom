@@ -155,25 +155,25 @@ async def test_the_failing_search_still_fails_after_its_error_text_changes(
 
 
 def test_a_distance_differing_only_in_float32_last_bits_regenerates_as_recorded() -> None:
-    """An x86_64 machine's distance one float32 ulp from the recorded one keeps the recorded value; a real change does not.
+    """An aarch64 machine's distance one float32 ulp from the recorded one keeps the recorded value; a real change does not.
 
-    ``0.604523241519928`` is what an x86_64 run returns for the distance an aarch64 run recorded as
-    ``0.6045231819152832``.
+    ``0.6045231819152832`` is what an aarch64 run returns for the distance an x86_64 run recorded as
+    ``0.604523241519928``.
     """
     recorded = next(search["documents"] for search in SEARCH_GOLDENS["searches"] if "documents" in search)
     [index] = [
-        index for index, document in enumerate(recorded) if document["meta_data"]["distances"] == 0.6045231819152832
+        index for index, document in enumerate(recorded) if document["meta_data"]["distances"] == 0.604523241519928
     ]
-    on_x86 = deepcopy(recorded)
-    on_x86[index]["meta_data"] |= {"distances": 0.604523241519928, "similarity_score": 0.604523241519928}
+    on_aarch64 = deepcopy(recorded)
+    on_aarch64[index]["meta_data"] |= {"distances": 0.6045231819152832, "similarity_score": 0.6045231819152832}
     moved = deepcopy(recorded)
     moved[index]["meta_data"]["distances"] = 0.6046
-    replaced = deepcopy(on_x86)
+    replaced = deepcopy(on_aarch64)
     replaced[index]["content"] = "Another chunk."
 
-    assert distances_as_recorded(on_x86, recorded) == recorded
+    assert distances_as_recorded(on_aarch64, recorded) == recorded
     assert distances_as_recorded(moved, recorded)[index]["meta_data"]["distances"] == 0.6046
-    assert distances_as_recorded(replaced, recorded)[index]["meta_data"]["distances"] == 0.604523241519928
+    assert distances_as_recorded(replaced, recorded)[index]["meta_data"]["distances"] == 0.6045231819152832
 
 
 @pytest.mark.parametrize("memory_search_available", [False, True])

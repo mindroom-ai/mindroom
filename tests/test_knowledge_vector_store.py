@@ -188,3 +188,33 @@ def test_list_collection_names_skips_other_files(tmp_path: Path) -> None:
     (tmp_path / "a.sqlite3").write_bytes(b"")
     assert list_collection_names(tmp_path) == ("a", "b")
     assert list_collection_names(tmp_path / "absent") == ()
+
+
+def test_hybrid_search_surfaces_an_exact_keyword_match_the_embedding_misses(collection: KnowledgeCollection) -> None:
+    """A chunk naming the query's identifier rises to the top even when its vector is far from the query's."""
+    collection.write_source_rows(
+        "a.md",
+        [
+            _row("a1", "a.md", "general setup advice", [1.0, 0.0]),
+            _row("a2", "a.md", "more general advice", [0.99, 0.1]),
+            _row("a3", "a.md", "Set MINDROOM_STORAGE_PATH to move the data directory", [0.0, 1.0]),
+        ],
+    )
+
+    dense = collection.search([1.0, 0.0], limit=3)
+    hybrid = collection.search([1.0, 0.0], limit=3, query="where does MINDROOM_STORAGE_PATH point")
+
+    assert dense[-1].content.startswith("Set MINDROOM_STORAGE_PATH")
+    assert hybrid[0].content.startswith("Set MINDROOM_STORAGE_PATH")
+    assert hybrid[0].meta_data["distances"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_hybrid_search_stems_words_and_ignores_punctuation(collection: KnowledgeCollection) -> None:
+    """Keyword matching stems English words, and a query without words falls back to the vector ranking."""
+    collection.write_source_rows(
+        "a.md",
+        [_row("a1", "a.md", "unrelated", [1.0, 0.0]), _row("a2", "a.md", "Ada is the lead", [0.0, 1.0])],
+    )
+
+    assert collection.search([1.0, 0.0], limit=1, query="who leads?")[0].content == "Ada is the lead"
+    assert collection.search([1.0, 0.0], limit=1, query="?!")[0].content == "unrelated"
