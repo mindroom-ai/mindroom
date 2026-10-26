@@ -17,7 +17,7 @@ Paths below are relative to `src/mindroom/` unless they start with `scripts/` or
 ## Dependency-owned migrations
 
 - Nio owns its crypto store schema and preserves crypto and trust records; `matrix/legacy_crypto_upgrade.py` isolates only the pre-durable cutoff.
-- Chroma owns storage-engine migrations; `knowledge/indexing_config.py` owns corpus compatibility.
+- `knowledge/indexing_config.py` owns knowledge index compatibility, including the vector store's schema version, so an index of another version is rebuilt rather than migrated.
 - Mem0 owns its history-table rewrite and its default history path, which may lie outside MindRoom storage; `memory/config.py` leaves both to Mem0.
 
 ## Decisions and invariants

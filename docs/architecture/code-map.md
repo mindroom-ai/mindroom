@@ -205,7 +205,9 @@ Matrix sync callback
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
 | `knowledge/search.py` | What an agent searches: its published sources, the `search_knowledge_base` tool and its results, and the `<knowledge_base>` prompt block |
 | `knowledge/readers.py` | The Agno document readers and chunkers knowledge indexing reads files with; the only knowledge module that imports Agno |
-| `knowledge/collections.py` | Chroma collection lifecycle for one knowledge base: naming, opening, probing, writing a file's chunk rows, deleting, reclaiming |
+| `knowledge/collections.py` | Collection lifecycle for one knowledge base: naming, opening, writing a file's chunk rows, deleting, reclaiming superseded collections and legacy Chroma storage |
+| `knowledge/vector_store.py` | One collection as one SQLite file: chunk rows, float32 vectors, and an FTS5 keyword index; in-process search |
+| `knowledge/index_reader.py` | Published index handle: embeds a query and searches the current compatible publication on a worker thread |
 | `knowledge/git_source.py` | The Git checkout a knowledge base indexes: clone, fetch, force-align, LFS hydration, credential injection |
 | `knowledge/refresh_runner.py` | Dispatches one knowledge refresh: subprocess spawn, cancellation cleanup, publish and reconcile decisions |
 | `knowledge/refresh_locks.py` | Process-wide refresh serialization (in-loop and cross-process source-root locks) and active-refresh bookkeeping |
