@@ -1395,6 +1395,37 @@ async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_
 
 
 @pytest.mark.asyncio
+async def test_a_member_asked_again_after_an_approval_resume_starts_a_new_paragraph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer's draft from before another member's pause stays a paragraph apart from its revision after approval."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-draft", "writer", "Draft"), delegate("call-check", "checker", "Touch it")],
+        writer=[answer("Draft one.")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.models["default"] = ScriptedModel([delegate("call-revise", "writer", "Revise"), answer("Both done.")])
+    team.models["checker-model"] = ScriptedModel([answer("Checked.")])
+    team.models["writer-model"] = ScriptedModel([answer("Draft two.")])
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert result.response_text == (
+        f"{HEADER}**Writer**: Draft one.\n\nDraft two.\n\n**Checker**: Checked.\n\n\n**Team Consensus**:\n\nBoth done."
+    )
+
+
+@pytest.mark.asyncio
 async def test_an_approved_member_that_answers_without_text_shows_no_paused_notice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

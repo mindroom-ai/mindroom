@@ -133,6 +133,8 @@ def format_team_response(record: TeamRunRecord, presentation: TeamStreamPresenta
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
+# The run a restored slot's text is attributed to: none a resumed run can have, since every run id is non-empty.
+_RUN_BEFORE_THE_PAUSE = ""
 
 
 def _is_snapshot_member(member: object) -> bool:
@@ -247,6 +249,8 @@ class TeamStreamPresentation:
             tool_trace=list(deepcopy(tool_trace)),
         )
         restored.separate_next_scopes.update(scopes)
+        # A restored slot's text came from runs before the pause, so any run's next text starts a paragraph of its own.
+        restored._last_text_run = {member_id: _RUN_BEFORE_THE_PAUSE for member_id, text in per_member.items() if text}
         return restored
 
     def to_state(self) -> dict[str, object]:
