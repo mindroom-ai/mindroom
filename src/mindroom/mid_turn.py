@@ -65,7 +65,7 @@ def message_text_for_judgment(envelope: MessageEnvelope) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class QueuedMessage:
-    """Immutable pending input; missing text requires the existing wrap-up behavior."""
+    """One message queued during an active reply; without text it cannot be judged, so the reply wraps up for it."""
 
     event_id: str
     text: str | None
