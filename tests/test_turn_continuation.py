@@ -90,6 +90,36 @@ def test_failed_model_switch_resumes_with_current_model() -> None:
     assert "Continue the same task with the current model" in decision.next_prompt
 
 
+def test_a_switch_result_that_is_not_ok_is_rejected_even_when_it_names_a_model() -> None:
+    """Only an ``ok`` switch result moves the reply to another model, whatever else the result carries."""
+    execution = ToolExecution(
+        tool_call_id="call-switch-model",
+        tool_name="switch_thread_model",
+        tool_args={"model_name": "large", "when": "after-toolcall"},
+        result=json.dumps(
+            {
+                "action": "switch",
+                "model": "large",
+                "status": "error",
+                "tool": "thread_model",
+                "when": "after-toolcall",
+            },
+        ),
+        stop_after_call=True,
+    )
+
+    decision = continuation_decision_from_tools(
+        [execution.call],
+        original_prompt="Solve the problem",
+        continuation_count=0,
+    )
+
+    assert decision.should_continue is True
+    assert decision.model_switch_name is None
+    assert decision.next_prompt is not None
+    assert "Continue the same task with the current model" in decision.next_prompt
+
+
 def test_malformed_model_switch_result_resumes_with_current_model() -> None:
     """A malformed switch result must not strand the response at its stop-after-tool boundary."""
     execution = ToolExecution(

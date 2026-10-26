@@ -45,29 +45,22 @@ def _json_object(result: object) -> dict[str, object] | None:
     return cast("dict[str, object]", decoded)
 
 
-def _model_switch_from_tools(
-    tools: Sequence[ReportedCall] | None,
-) -> tuple[str | None, str | None] | None:
-    """Return the last successful thread-model switch in provider call order."""
-    switch_seen = False
-    for tool in reversed(tools or ()):
-        if tool.tool_name != _MODEL_SWITCH_FUNCTION_NAME:
-            continue
-        switch_seen = True
-        payload = _json_object(tool.result)
-        if payload is None:
-            continue
-        model_name = payload.get("model")
-        when = payload.get("when")
-        if (
-            payload.get("tool") == "thread_model"
-            and payload.get("action") == "switch"
-            and payload.get("status") == "ok"
-            and isinstance(model_name, str)
-            and when in {"after-toolcall", "next-turn"}
-        ):
-            return model_name, cast("str", when)
-    return (None, None) if switch_seen else None
+def _successful_switch(result: object) -> tuple[str, str] | None:
+    """Return the model and timing of one thread-model switch result, or None when the switch did not succeed."""
+    payload = _json_object(result)
+    if payload is None:
+        return None
+    model_name = payload.get("model")
+    when = payload.get("when")
+    if (
+        payload.get("tool") == "thread_model"
+        and payload.get("action") == "switch"
+        and payload.get("status") == "ok"
+        and isinstance(model_name, str)
+        and when in {"after-toolcall", "next-turn"}
+    ):
+        return model_name, cast("str", when)
+    return None
 
 
 def _model_switch_continuation_prompt(original_prompt: str, *, model_name: str, when: str) -> str:
@@ -108,51 +101,37 @@ def _failed_model_switch_continuation_prompt(original_prompt: str) -> str:
     )
 
 
-def _model_switch_decision(
-    model_switch: tuple[str | None, str | None],
-    *,
-    original_prompt: str,
-    continuation_count: int,
-) -> _TurnContinuationDecision:
-    """Return how to continue after one thread-model switch result."""
-    model_name, when = model_switch
-    if model_name is None or when is None:
-        if continuation_count >= TURN_CONTINUATION_LIMIT:
-            return _TurnContinuationDecision(
-                limit_message="Model switching did not produce a final answer after repeated rejected requests.",
-            )
-        return _TurnContinuationDecision(
-            next_prompt=_failed_model_switch_continuation_prompt(original_prompt),
-        )
-    if continuation_count >= TURN_CONTINUATION_LIMIT:
-        return _TurnContinuationDecision(
-            limit_message=_model_switch_limit_message(model_name=model_name, when=when),
-            model_switch_name=model_name,
-            model_switch_when=when,
-        )
-    return _TurnContinuationDecision(
-        next_prompt=_model_switch_continuation_prompt(
-            original_prompt,
-            model_name=model_name,
-            when=when,
-        ),
-        model_switch_name=model_name,
-        model_switch_when=when,
-    )
-
-
 def continuation_decision_from_tools(
     tools: Sequence[ReportedCall] | None,
     *,
     original_prompt: str,
     continuation_count: int,
 ) -> _TurnContinuationDecision:
-    """Return the continuation decision for a completed model response."""
-    model_switch = _model_switch_from_tools(tools)
-    if model_switch is None:
+    """Return the continuation decision for a completed model response.
+
+    The last successful thread-model switch in provider call order decides; a response whose every switch was
+    rejected resumes with the current model.
+    """
+    switch_results = [tool.result for tool in tools or () if tool.tool_name == _MODEL_SWITCH_FUNCTION_NAME]
+    if not switch_results:
         return _TurnContinuationDecision()
-    return _model_switch_decision(
-        model_switch,
-        original_prompt=original_prompt,
-        continuation_count=continuation_count,
+    successful = [switch for switch in map(_successful_switch, switch_results) if switch is not None]
+    at_limit = continuation_count >= TURN_CONTINUATION_LIMIT
+    if not successful:
+        if at_limit:
+            return _TurnContinuationDecision(
+                limit_message="Model switching did not produce a final answer after repeated rejected requests.",
+            )
+        return _TurnContinuationDecision(next_prompt=_failed_model_switch_continuation_prompt(original_prompt))
+    model_name, when = successful[-1]
+    if at_limit:
+        return _TurnContinuationDecision(
+            limit_message=_model_switch_limit_message(model_name=model_name, when=when),
+            model_switch_name=model_name,
+            model_switch_when=when,
+        )
+    return _TurnContinuationDecision(
+        next_prompt=_model_switch_continuation_prompt(original_prompt, model_name=model_name, when=when),
+        model_switch_name=model_name,
+        model_switch_when=when,
     )
