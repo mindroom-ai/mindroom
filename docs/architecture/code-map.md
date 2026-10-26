@@ -270,7 +270,7 @@ Matrix sync callback
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
 | `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, running the preflight archive check and the conversion to the current layout first |
 | `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
-| `session_storage/schema.py` | File and table names, table listing, and the layout of a conversation database: the sessions table, the five `*_log_*` tables, and the usage ledger |
+| `session_storage/schema.py` | File and table names, table listing, and the layout of a conversation database: the sessions table, the six `*_log_*` tables, and the usage ledger |
 | `session_storage/codec.py` | A run record to its run row and message rows and back, with the JSON keys stored runs carry |
 | `session_storage/types.py` | `ConversationSession` and the other values the store reads and writes |
 | `session_storage/lanes.py` | One FIFO lane per conversation database for storage operations started from async code |
@@ -463,6 +463,6 @@ Matrix sync callback
 
 [Data Persistence](../deployment/storage.md#data-persistence) lists the main directories under the storage root (`mindroom_data/` by default, overridable via `MINDROOM_STORAGE_PATH`).
 An agent's conversation database is `agents/<agent>/sessions/<agent>.db`, and private agents keep the same per-agent layout under their resolved private state roots.
-Its tables are named after its sessions table `<agent>_sessions`: `_log_runs` holds a row per run, `_log_messages` a row per stored message, `_log_summaries` the compaction summary rows, `_log_removed` the runs that edits and redactions removed, `_log_meta` the layout version and run counter, and `_usage` the usage ledger.
+Its tables are named after its sessions table `<agent>_sessions`: `_log_runs` holds a row per run, `_log_messages` a row per stored message, `_log_tools` a row per tool execution, `_log_summaries` the compaction summary rows, `_log_removed` the runs that edits and redactions removed, `_log_meta` the layout version and run counter, and `_usage` the usage ledger.
 A database converted from the Agno layout keeps its pre-conversion copy beside it as `<agent>.db.pre-storage-v2`.
 `tracking/personal_agents.json` is the roster of agents generated from `personal_agents` templates, read on every config load.

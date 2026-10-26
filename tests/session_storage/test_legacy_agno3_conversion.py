@@ -671,8 +671,8 @@ def test_converted_call_ids_are_text_or_none_so_folded_calls_read(
     assert (run_message.get("tool_calls"), run_message.get("tool_call_id")) == (kept, None)
     assert (folded.get("tool_calls"), folded.get("tool_call_id")) == (usable, None)
     assert stored["live.t0"] == json.dumps(result.to_dict())
-    [(member_tools,)] = _query(database, "SELECT tools FROM \"code_sessions_log_runs\" WHERE run_id = 'member'")
-    assert [tool["tool_call_id"] for tool in json.loads(member_tools)] == [None, "m.c0"]
+    member_tools = _query(database, "SELECT data FROM \"code_sessions_log_tools\" WHERE run_id = 'member' ORDER BY ord")
+    assert [json.loads(data)["tool_call_id"] for (data,) in member_tools] == [None, "m.c0"]
 
 
 @pytest.mark.parametrize("position", ["later", b"\x01"], ids=["text", "blob"])
@@ -909,12 +909,12 @@ def test_converted_runs_keep_only_the_keys_records_model(tmp_path: Path) -> None
 
     store = _converted(database)
 
-    [(record, tools, requirements)] = _query(
-        database,
-        'SELECT record, tools, requirements FROM "code_sessions_log_runs"',
-    )
+    [(record, requirements)] = _query(database, 'SELECT record, requirements FROM "code_sessions_log_runs"')
+    tools = [
+        json.loads(data) for (data,) in _query(database, 'SELECT data FROM "code_sessions_log_tools" ORDER BY ord')
+    ]
     assert DROPPED_RUN_KEYS.isdisjoint(json.loads(record))
-    executions = [*json.loads(tools), *(item["tool_execution"] for item in json.loads(requirements))]
+    executions = [*tools, *(item["tool_execution"] for item in json.loads(requirements))]
     assert all(DROPPED_TOOL_EXECUTION_KEYS.isdisjoint(execution) for execution in executions)
     converted = store.get_run(stored["run_id"])
     assert converted is not None
@@ -1446,6 +1446,7 @@ def test_a_converted_database_holds_only_the_v2_layout(tmp_path: Path, dump: Pat
             names.log_meta,
             names.log_runs,
             names.log_messages,
+            names.log_tools,
             names.log_summaries,
             names.log_removed,
             "sqlite_sequence",

@@ -1,4 +1,4 @@
-"""A run's stored dict splits over its storage v2 run row and its message rows, and joins again unchanged."""
+"""A run's stored dict splits over its storage v2 run row, message rows, and tool rows, and joins again unchanged."""
 
 from __future__ import annotations
 
@@ -42,10 +42,11 @@ _CASES = _stored_cases()
 
 
 def _round_trip(run: RunRecord | TeamRunRecord) -> RunRecord | TeamRunRecord:
-    """Split ``run`` into its row columns and message dicts, as the store writes it, and decode it again."""
+    """Split ``run`` into its row columns, message dicts, and tool dicts, as the store writes it, and decode it again."""
     data = run.to_dict()
     columns = run_columns(data, run_kind(run))
-    return run_record(data["run_id"], data["session_id"], data.get("parent_run_id"), columns, data["messages"])
+    parent_run_id, tools = data.get("parent_run_id"), data.get("tools") or []
+    return run_record(data["run_id"], data["session_id"], parent_run_id, columns, data["messages"], tools)
 
 
 @pytest.mark.parametrize("case", sorted(_CASES))
@@ -81,13 +82,13 @@ def test_the_goldens_hold_a_paused_team_run_with_members_and_runs_with_and_witho
 
 @pytest.mark.parametrize("value", [None, []], ids=["none", "empty"])
 def test_tools_and_requirements_keep_empty_apart_from_none(value: list[Any] | None) -> None:
-    """``[]`` is stored as JSON and None as SQL null, and each decodes as it was written."""
+    """``[]`` is stored as JSON and None as SQL null, an empty tool list as ``has_tools``, and each decodes as written."""
     run = RunRecord(run_id="r", session_id="s", agent_id="code", tools=value, requirements=value)
 
     columns = run_columns(run.to_dict(), "agent")
     decoded = _round_trip(run)
 
-    assert (columns.tools, columns.requirements) == ((None, None) if value is None else ("[]", "[]"))
+    assert (columns.has_tools, columns.requirements) == ((False, None) if value is None else (True, "[]"))
     assert (decoded.tools, decoded.requirements) == (value, value)
 
 
@@ -134,7 +135,7 @@ def test_the_rows_ids_and_status_win_over_the_record_json() -> None:
     stale = {"run_id": "old", "session_id": "old", "parent_run_id": "old", "status": "COMPLETED", "messages": []}
     planted = replace(columns, record=json.dumps({**json.loads(columns.record), **stale}))
 
-    decoded = run_record("r", "s", "root", planted, data["messages"])
+    decoded = run_record("r", "s", "root", planted, data["messages"], data["tools"])
 
     assert (decoded.run_id, decoded.session_id, decoded.parent_run_id) == ("r", "s", "root")
     assert decoded.status is RunStatus.paused

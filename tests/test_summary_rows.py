@@ -584,11 +584,12 @@ def test_a_fold_without_a_stored_run_stores_it_cancelled_with_its_folded_message
 
     row_id = _fold(store, live, "S", folded=[_call("c1"), _result("c1")])
 
-    [(status, tools, requirements, metadata)] = _query(
+    [(status, has_tools, requirements, metadata)] = _query(
         store,
-        "SELECT status, tools, requirements, metadata FROM code_sessions_log_runs WHERE run_id = 'live'",
+        "SELECT status, has_tools, requirements, metadata FROM code_sessions_log_runs WHERE run_id = 'live'",
     )
-    assert (status, tools, requirements) == (RunStatus.cancelled.value, None, None)
+    assert (status, has_tools, requirements) == (RunStatus.cancelled.value, 0, None)
+    assert _query(store, "SELECT COUNT(*) FROM code_sessions_log_tools") == [(0,)]
     assert json.loads(metadata) == live.metadata
     assert _query(store, "SELECT DISTINCT folded_by FROM code_sessions_log_messages") == [(row_id,)]
     [stored] = _loaded(store).runs

@@ -35,7 +35,7 @@ from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, sche
 from mindroom.history.session_context import _team_scope_state_root
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -295,6 +295,7 @@ def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]
                     status=RunStatus.completed,
                     metadata={"matrix_event_id": "$user"},
                     messages=[Message(role="user", content=f"question {run_id}")],
+                    tools=[ToolExecution(tool_call_id=f"{run_id}-{call}", tool_name="shell") for call in "ab"],
                 )
                 for run_id, created_at in runs
             ],
@@ -309,7 +310,7 @@ def _seed_general_runs(storage_root: Path) -> None:
 
 
 def test_read_runs_matches_session_and_decodes_its_rows(tmp_path: Path) -> None:
-    """Runs match by session id, and each run row comes with its message rows, JSON columns as nested objects."""
+    """Runs match by session id, and each run row comes with its message and tool rows, JSON columns as nested objects."""
     _seed_general_runs(tmp_path)
     ids = collect_ids(None, room_id=ROOM, thread_id="$root")
     result = _read_runs(tmp_path, ids)
@@ -322,6 +323,7 @@ def test_read_runs_matches_session_and_decodes_its_rows(tmp_path: Path) -> None:
     assert [(message["folded_by"], message["data"]["content"]) for message in item["messages"]] == [
         (None, "question run-1"),
     ]
+    assert [tool["tool_call_id"] for tool in item["tools"]] == ["run-1-a", "run-1-b"]
 
 
 def test_read_runs_names_the_fold_that_took_a_message(tmp_path: Path) -> None:
@@ -372,6 +374,7 @@ def test_read_runs_reads_converted_goldens_and_names_unconverted_databases(tmp_p
             for run in runs:
                 replayed = [message["data"] for message in reported[run.run_id]["messages"] if not message["folded_by"]]
                 assert replayed == [message.to_dict() for message in run.messages]
+                assert reported[run.run_id]["tools"] == run.to_dict().get("tools")
 
 
 def test_read_runs_matches_a_run_id_alone(tmp_path: Path) -> None:

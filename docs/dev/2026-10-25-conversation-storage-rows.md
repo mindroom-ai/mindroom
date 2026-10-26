@@ -59,8 +59,13 @@ The oracle exists because each review round of the earlier storage designs found
   The conversion instead drops the Agno tables and the five sessions columns no current code uses, so an older release started on a converted file archives its sessions directory loudly instead of writing rows a re-upgrade would ignore.
 - **SQLite's online backup API for the backup.**
   It opens the destination by path, and worker code can write session directories, so the backup copies the file through descriptors of the pinned directory under the conversion's write lock instead.
-- **Keying tool executions and requirements by id.**
-  Only full saves write them, and a full save is refused once its run is final, so per-id rows would add an upsert path without removing a race.
+- **A run's tool executions in one column of its run row.**
+  SQLite rewrites a row with all its overflow pages whenever the row's size changes, so every save of a running run, such as the CLI checkpoint after each tool call, rewrote every earlier result: a 200-call turn with 20 KB results wrote about 4 MB on each late save and about 400 MB over the turn.
+  Tool executions are rows of their own, keyed by their place in the run's list, which only grows while the run runs, so such a save writes its new call alone; requirements stay a column, since only a paused run holds them and they do not grow per call.
+- **Keeping a tool result only in its tool message.**
+  A tool message's content is not always its execution's result, since a job notice is appended to the message alone, and a fold hides the message from the replay view, so rebuilding the result would need a record of every difference, and the run row would still grow with every call's arguments.
+- **Keying tool rows by call id.**
+  A call stored without an id reads with one derived from what it stores, which two such calls share, and the conversion keeps only text ids, so ids need not be unique within a run, while places are.
 - **Converting the background readers' cursors.**
   Memory auto-flush and the knowledge graph keep `(created_at, run_id)` cursors outside the databases, which the backups do not cover, so their approval wait stays and a follow-up can convert those cursors on their own.
 
