@@ -634,6 +634,26 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     assert restored[0].scope_key == "member:GeneralAgent"
 
 
+def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
+    """Restart state keeps which call failed, Matrix clients never see it, and an entry stored without it did not fail."""
+    failed = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="fetch",
+        result_preview="HTTP 500",
+        tool_call_id="call-1",
+        is_error=True,
+    )
+
+    durable = serialize_tool_trace([failed], include_internal=True)
+    public = build_tool_trace_content([failed])
+
+    assert durable[0]["is_error"] is True
+    assert public is not None
+    assert "is_error" not in public[_TOOL_TRACE_KEY]["events"][0]
+    assert deserialize_tool_trace(durable)[0].is_error is True
+    assert deserialize_tool_trace([{"type": "tool_call_completed", "tool_name": "fetch"}])[0].is_error is False
+
+
 @pytest.mark.parametrize(
     "malformed",
     [
@@ -642,6 +662,7 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
         {"type": "tool_call_started", "tool_name": "inspect", "tool_call_id": 7},
         {"type": "tool_call_started", "tool_name": "inspect", "scope_key": []},
         {"type": "tool_call_completed", "tool_name": "inspect", "truncated": "yes"},
+        {"type": "tool_call_completed", "tool_name": "inspect", "is_error": "yes"},
     ],
 )
 def test_durable_tool_trace_rejects_malformed_events(malformed: dict[str, object]) -> None:
