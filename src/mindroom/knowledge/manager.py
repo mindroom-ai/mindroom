@@ -45,9 +45,6 @@ from mindroom.knowledge.candidate_checkpoint import (
 )
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.collections import (
-    SOURCE_DIGEST_KEY,
-    SOURCE_MTIME_NS_KEY,
-    SOURCE_SIZE_KEY,
     VECTOR_VERIFY_BATCH,
     CollectionSpace,
     KnowledgeChunk,
@@ -81,7 +78,7 @@ from mindroom.knowledge.indexing_config import (
     knowledge_git_dir,
     storage_key_for_base,
 )
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
+from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
 from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome

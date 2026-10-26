@@ -24,7 +24,7 @@ from chromadb.errors import InternalError, NotFoundError
 from mindroom.knowledge.chroma_client import KnowledgeCollection
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.indexing_config import storage_key_for_base
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
+from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -40,12 +40,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
-
-#: Source signature every indexed chunk carries beside its ``SOURCE_PATH_KEY``, so a collection doubles as an
-#: index from source path to the vectors and signature that path produced.
-SOURCE_MTIME_NS_KEY = "source_mtime_ns"
-SOURCE_SIZE_KEY = "source_size"
-SOURCE_DIGEST_KEY = "source_digest"
 
 #: Completed candidate entries whose vectors are confirmed in one Chroma query.
 #: Only a starting point: the query splits itself when the store refuses it,

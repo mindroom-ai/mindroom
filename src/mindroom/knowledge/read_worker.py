@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING
 from mindroom.knowledge.chroma_client import KnowledgeCollection
 from mindroom.knowledge.collection_lifetime import read_collection
 from mindroom.knowledge.read_protocol import (
+    DISTANCE_KEY,
     MAX_FRAME_BYTES,
+    SOURCE_DIGEST_KEY,
+    SOURCE_MTIME_NS_KEY,
+    SOURCE_SIZE_KEY,
     ReadRequest,
     ReadResult,
     SearchHit,
@@ -29,12 +33,18 @@ if TYPE_CHECKING:
 # The parent runs this module with `python -m`, so `__name__` is `__main__`.
 logger = get_logger("mindroom.knowledge.read_worker")
 
+# Stored row keys that serve indexing and say nothing about the chunk; ``content_id``, ``content_hash``, and the empty
+# ``linked_to`` are the keys the rows Agno wrote carry.
+_INDEXING_KEYS = frozenset(
+    {SOURCE_MTIME_NS_KEY, SOURCE_SIZE_KEY, SOURCE_DIGEST_KEY, "content_id", "content_hash", "linked_to"},
+)
+
 
 def _query_collection(collection: Collection, embedding: Sequence[float], *, limit: int) -> list[SearchHit]:
-    """Return the ``limit`` nearest chunks, the way knowledge search has always ranked and shown them.
+    """Return the ``limit`` nearest chunks, nearest first, each with its source, its reader keys, and its distance.
 
-    A chunk stored twice under one name appears once, and ``distances`` and
-    ``similarity_score`` both carry the cosine distance.
+    A chunk stored twice under one name appears once. The row keys that serve indexing, the source signature and
+    the content hash and id, and Agno's empty ``linked_to`` stay out of the hit.
     """
     result = collection.query(
         query_embeddings=[list(embedding)],
@@ -49,14 +59,10 @@ def _query_collection(collection: Collection, embedding: Sequence[float], *, lim
         (result["distances"] or [[]])[0],
         strict=True,
     ):
-        meta_data = dict(metadata or {})
-        name = meta_data.pop("name", None)
-        meta_data.pop("content_id", None)
-        # TODO(simplify): Hits show the model the stored source signature, Agno's empty `linked_to`, `content_hash`, and
-        # the cosine distance twice, once as a `similarity_score` that falls as matches improve. Show the source, the
-        # chunk, and one distance. Models would read shorter hits; the knowledge goldens pin these keys.
-        meta_data["distances"] = distance
-        meta_data["similarity_score"] = distance
+        stored = dict(metadata or {})
+        name = stored.pop("name", None)
+        meta_data = {key: value for key, value in stored.items() if key not in _INDEXING_KEYS}
+        meta_data[DISTANCE_KEY] = distance
         hit = SearchHit(
             content=document or "",
             name=None if name is None else str(name),
@@ -65,7 +71,7 @@ def _query_collection(collection: Collection, embedding: Sequence[float], *, lim
         if (hit.name, hit.content) not in seen:
             seen.add((hit.name, hit.content))
             hits.append(hit)
-    hits.sort(key=lambda hit: hit.meta_data["similarity_score"])
+    hits.sort(key=lambda hit: hit.meta_data[DISTANCE_KEY])
     return hits[:limit]
 
 

@@ -177,9 +177,9 @@ async def test_search_returns_the_fields_the_search_tool_shows(published_index: 
         ("Alpha", "alpha document"),
         ("Beta", "beta document"),
     ]
-    assert documents[0].meta_data == {"team": "a", "distances": 0.0, "similarity_score": 0.0}
+    assert documents[0].meta_data == {"team": "a", "distance": 0.0}
     # The fixture collection uses Chroma's default squared-L2 distance.
-    assert documents[1].meta_data == {"team": "b", "distances": 2.0, "similarity_score": 2.0}
+    assert documents[1].meta_data == {"team": "b", "distance": 2.0}
 
 
 @pytest.mark.asyncio
@@ -436,7 +436,7 @@ async def test_concurrent_search_burst_preserves_results(published_index: Path) 
     for documents in results:
         assert not isinstance(documents, BaseException)
         assert [(document.name, document.content) for document in documents] == [("Alpha", "alpha document")]
-        assert documents[0].meta_data == {"team": "a", "distances": 0.0, "similarity_score": 0.0}
+        assert documents[0].meta_data == {"team": "a", "distance": 0.0}
 
 
 @pytest.mark.asyncio
