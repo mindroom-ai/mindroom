@@ -1256,9 +1256,8 @@ async def test_a_resume_that_pauses_on_another_member_s_call_shows_no_paused_not
 
     repaused = await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
     assert isinstance(repaused, PausedAttempt)
-    assert repaused.response_text == (
-        f"{HEADER}**Checker**: Touched.\n\n\n*No team consensus - showing individual responses only*"
-    )
+    # The leader has not answered yet, so the pause shows no no-consensus note.
+    assert repaused.response_text == f"{HEADER}**Checker**: Touched."
     writer_call = replace(member_approval("call-touch-2", "risky"), invoking_agent="writer")
     result = await team.resume(repaused, approved=True, approvals=(writer_call,))
 
@@ -1453,9 +1452,8 @@ async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it
 
     paused = raised.value.paused
     slot = "Checking it\n\nChecker unavailable: api_key=***redacted***"
-    assert paused.response_text == (
-        f"{HEADER}**Checker**: {slot}\n\n\n*No team consensus - showing individual responses only*"
-    )
+    # The leader has not answered yet, so the pause shows no no-consensus note.
+    assert paused.response_text == f"{HEADER}**Checker**: {slot}"
     assert [member["content"] for member in paused.response_presentation_state["members"]] == ["", slot]
 
 
