@@ -17,6 +17,12 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.custom_tools.invite_router import InviteRouterTools
+from mindroom.matrix.personal_room_store import (
+    PersonalRoomAdoption,
+    PersonalRoomRecord,
+    personal_room_record_path,
+    write_personal_room,
+)
 from mindroom.message_target import MessageTarget
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -511,3 +517,46 @@ async def test_invite_router_reports_matrix_invite_failure(tmp_path: Path) -> No
         result = await InviteRouterTools().invite_router()
 
     assert result == "Error: Router invite failed; current agent may lack invite permission."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("router_attested", [False, True])
+async def test_invite_router_refuses_an_adopted_personal_room_that_does_not_admit_the_router(
+    tmp_path: Path,
+    router_attested: bool,
+) -> None:
+    """The room's guest check would remove the router again, so inviting it would only start a loop."""
+    context, client = _tool_context(tmp_path)
+    write_personal_room(
+        personal_room_record_path(context.runtime_paths, "code", "@alice:localhost"),
+        PersonalRoomRecord(
+            user_id="@alice:localhost",
+            alias="#personal:localhost",
+            source_room_id="!lobby:localhost",
+            room_id="!project:localhost",
+            adoption=PersonalRoomAdoption(
+                creator_user_id="@alice:localhost",
+                agent_user_id="@mindroom_code:localhost",
+                router_user_id="@mindroom_router:localhost" if router_attested else None,
+            ),
+        ),
+    )
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError("Not found", status_code="M_NOT_FOUND", room_id="!project:localhost"),
+        nio.RoomGetStateEventResponse(
+            content={"membership": "join"},
+            event_type="m.room.member",
+            state_key="@mindroom_router:localhost",
+            room_id="!project:localhost",
+        ),
+    ]
+    client.room_invite.return_value = nio.RoomInviteResponse()
+
+    with tool_runtime_context(context):
+        result = await InviteRouterTools().invite_router()
+
+    if router_attested:
+        assert result == "Router joined."
+    else:
+        assert result.startswith("Error: This adopted personal room does not admit the router")
+        client.room_invite.assert_not_awaited()

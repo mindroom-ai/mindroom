@@ -131,6 +131,14 @@ def retained_personal_rooms(runtime_paths: RuntimePaths, agent_name: str, *, use
     return {record.room_id for record in records if record.room_id is not None}
 
 
+def personal_room_excludes_router(runtime_paths: RuntimePaths, agent_name: str, room_id: str) -> bool:
+    """Return whether one of an agent's adopted personal rooms leaves the router out of its attested members."""
+    return any(
+        record.room_id == room_id and record.adoption is not None and record.adoption.router_user_id is None
+        for record in _personal_room_records(runtime_paths, agent_name)
+    )
+
+
 async def personal_room_cleanup_exclusions(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,

@@ -10,6 +10,7 @@ from agno.tools import Toolkit
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.invited_rooms_store import is_inviter_allowed
+from mindroom.matrix.personal_room_store import personal_room_excludes_router
 from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -73,5 +74,11 @@ class InviteRouterTools(Toolkit):
             return "Error: Router auto-accept does not allow this Matrix transport account."
         if membership == "invite":
             return "Router invite pending; retry after it joins."
+        if personal_room_excludes_router(context.runtime_paths, context.recipient, context.room_id):
+            # Its guest check would remove the router again.
+            return (
+                "Error: This adopted personal room does not admit the router; "
+                "an operator can add router_user_id to its personal-room record."
+            )
 
         return await _invite_and_wait(context.client, context.room_id, router_id)
