@@ -300,58 +300,30 @@ def test_format_tool_combined_with_empty_string_result() -> None:
 def test_complete_pending_tool_block_replaces_pending() -> None:
     """Should find a pending marker by id and mark it completed."""
     text = "hello\n\n🔧 `save_file` [1] ⏳\nworld"
-    updated, trace = complete_pending_tool_block(text, "save_file", "ok", tool_index=1)
+    updated = complete_pending_tool_block(text, "save_file", tool_index=1)
 
     assert "🔧 `save_file` [1]\n" in updated
     assert "⏳" not in updated
-    assert "\nok\n" not in updated  # results are no longer injected inline
     assert "world" in updated
-    assert trace.type == "tool_call_completed"
-    assert trace.result_preview == "ok"
 
 
 def test_complete_pending_tool_block_skips_already_completed() -> None:
     """Should leave an already-completed marker unchanged."""
     text = "🔧 `save_file` [1]"
-    updated, trace = complete_pending_tool_block(text, "save_file", "new_result", tool_index=1)
-
-    assert updated == text
-    assert trace.type == "tool_call_completed"
-    assert trace.result_preview == "new_result"
+    assert complete_pending_tool_block(text, "save_file", tool_index=1) == text
 
 
 def test_complete_pending_tool_block_noops_when_no_pending() -> None:
     """Should not synthesize a completed marker when no pending marker is found."""
     text = "some text"
-    updated, trace = complete_pending_tool_block(text, "save_file", "result", tool_index=3)
-
-    assert updated == text
-    assert trace.type == "tool_call_completed"
+    assert complete_pending_tool_block(text, "save_file", tool_index=3) == text
 
 
 def test_complete_pending_tool_block_requires_tool_index() -> None:
     """V2 completion markers must be matched by index."""
     text = "some text"
     with pytest.raises(ValueError, match="tool_index"):
-        complete_pending_tool_block(text, "save_file", None, tool_index=0)
-
-
-def test_complete_pending_tool_block_no_result_no_change() -> None:
-    """Should not modify anything when there's no result and no pending block."""
-    text = "some text"
-    updated, trace = complete_pending_tool_block(text, "save_file", None, tool_index=1)
-
-    assert updated == text
-    assert trace.result_preview is None
-
-
-def test_complete_pending_tool_block_no_result_marks_completed() -> None:
-    """Should mark pending block as completed even when result is None."""
-    text = "🔧 `save_file` [1] ⏳"
-    updated, trace = complete_pending_tool_block(text, "save_file", None, tool_index=1)
-
-    assert updated == "🔧 `save_file` [1]"
-    assert trace.result_preview is None
+        complete_pending_tool_block(text, "save_file", tool_index=0)
 
 
 def test_streaming_tool_tracker_records_hidden_pending_and_completion() -> None:
@@ -366,13 +338,12 @@ def test_streaming_tool_tracker_records_hidden_pending_and_completion() -> None:
     pending_tool = tracker.pending_tools[0]
     assert pending_tool.trace_entry == trace_entry
 
-    completed = tracker.complete(ToolExecution(tool_call_id="call-1", tool_name="save_file", result="ok").call)
+    matched_pending_tool, completed_trace = tracker.complete(
+        ToolExecution(tool_call_id="call-1", tool_name="save_file", result="ok").call,
+    )
 
-    assert completed is not None
-    tool_name, result, matched_pending_tool, _ = completed
     assert matched_pending_tool == pending_tool
-    assert tool_name == "save_file"
-    assert result == "ok"
+    assert (completed_trace.tool_name, completed_trace.result_preview) == ("save_file", "ok")
     assert tracker.pending_tools == []
     assert len(tracker.completed_tools) == 1
     assert tracker.completed_tools[0].result_preview == "ok"
@@ -385,13 +356,11 @@ def test_streaming_tool_tracker_uses_scope_for_name_fallback_matching() -> None:
     tracker = StreamingToolTracker()
     tracker.restore_pending([member_trace, team_trace])
 
-    completed = tracker.complete(
+    matched_pending_tool, _completed_trace = tracker.complete(
         ToolExecution(tool_call_id="call-search", tool_name="search", result="team result").call,
         scope_key="team",
     )
 
-    assert completed is not None
-    _tool_name, _result, matched_pending_tool, _completed_trace = completed
     assert matched_pending_tool is not None
     assert matched_pending_tool.trace_entry is team_trace
     assert [pending.trace_entry for pending in tracker.pending_tools] == [member_trace]
@@ -404,10 +373,10 @@ def test_streaming_tool_tracker_prefers_call_id_over_newest_same_named_tool() ->
     first_pending_tool = tracker.pending_tools[0]
     tracker.start(ToolExecution(tool_call_id="second", tool_name="save_file", tool_args={"file": "b.py"}).call)
 
-    completed = tracker.complete(ToolExecution(tool_call_id="first", tool_name="save_file", result="saved a").call)
+    matched_pending_tool, _completed_trace = tracker.complete(
+        ToolExecution(tool_call_id="first", tool_name="save_file", result="saved a").call,
+    )
 
-    assert completed is not None
-    _tool_name, _result, matched_pending_tool, _completed_trace = completed
     assert matched_pending_tool == first_pending_tool
     assert [pending.tool_call_id for pending in tracker.pending_tools] == ["second"]
 
@@ -426,14 +395,13 @@ def test_streaming_tool_tracker_scopes_reused_call_ids_to_team_members() -> None
         tool_index=2,
     )
 
-    completed = tracker.complete(
+    matched_pending_tool, _completed_trace = tracker.complete(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done").call,
         scope_key="agent:first",
     )
 
-    assert completed is not None
-    assert completed[2] is not None
-    assert completed[2].scope_key == "agent:first"
+    assert matched_pending_tool is not None
+    assert matched_pending_tool.scope_key == "agent:first"
     assert [(pending.scope_key, pending.tool_call_id) for pending in tracker.pending_tools] == [
         ("agent:second", "call-1"),
     ]
@@ -450,10 +418,11 @@ def test_streaming_tool_tracker_updates_visible_trace_slot() -> None:
     assert trace_entry is not None
     visible_trace.append(trace_entry)
 
-    completed = tracker.complete(ToolExecution(tool_call_id="call-save_file", tool_name="save_file", result="ok").call)
+    pending_tool, completed_trace = tracker.complete(
+        ToolExecution(tool_call_id="call-save_file", tool_name="save_file", result="ok").call,
+    )
 
-    assert completed is not None
-    _tool_name, _result, pending_tool, completed_trace = completed
+    assert pending_tool is not None
     assert tracker.update_visible_trace_entry(visible_trace, pending_tool, completed_trace) is True
     assert visible_trace == [
         ToolTraceEntry(
@@ -564,13 +533,12 @@ def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
         tool_index=5,
     )
 
-    updated, trace = complete_pending_tool_block(pending_text, "save_file", "ok", tool_index=5)
+    updated = complete_pending_tool_block(pending_text, "save_file", tool_index=5)
 
     assert "`save_file`" in updated
     assert "[5]" in updated
     assert "⏳" not in updated
     assert updated.count("🔧") == 1
-    assert trace.result_preview == "ok"
 
 
 def test_format_tool_started_collapses_newlines_in_args() -> None:
@@ -599,18 +567,16 @@ def test_complete_pending_tool_block_roundtrip_with_multiline_args() -> None:
     assert "\n" not in marker_line
 
     # Completing should work and produce exactly one block
-    updated, trace = complete_pending_tool_block(pending_text, "save_file", "saved", tool_index=1)
+    updated = complete_pending_tool_block(pending_text, "save_file", tool_index=1)
 
     assert "⏳" not in updated
     assert updated.count("🔧") == 1
-    assert trace.result_preview == "saved"
 
 
-def test_format_tool_completed_event_formats_combined_block() -> None:
-    """Completion event helper should render canonical plain marker."""
+def test_format_tool_completed_event_formats_its_trace() -> None:
+    """A completion's trace carries its tool, arguments, and result preview."""
     tool = ToolExecution(tool_call_id="call-run_shell", tool_name="run_shell", tool_args={"cmd": "pwd"}, result="/app")
-    text, trace = format_tool_completed_event(tool.call, tool_index=1)
-    assert text == "\n\n🔧 `run_shell` [1]\n\n"
+    trace = format_tool_completed_event(tool.call)
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "run_shell"
     assert trace.args_preview == "cmd=pwd"
@@ -707,8 +673,8 @@ def test_tool_lifecycle_produces_expected_html() -> None:
     body = text1 + text2
 
     # 2. Both complete
-    body, _ = complete_pending_tool_block(body, "save_file", "ok", tool_index=1)
-    body, _ = complete_pending_tool_block(body, "run_shell", "/app", tool_index=2)
+    body = complete_pending_tool_block(body, "save_file", tool_index=1)
+    body = complete_pending_tool_block(body, "run_shell", tool_index=2)
 
     # 3. Convert to HTML
     html = markdown_to_html(body)

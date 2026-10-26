@@ -78,7 +78,7 @@ async def test_openai_endpoint_precedence_reaches_sdk_clients(
     assert isinstance(bare_adapter(provider), ResponsesAdapter if responses else ChatAdapter)
 
     with pytest.raises(ProviderError):
-        await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
+        await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
 
     [request] = wire.requests
     assert str(request.url) == expected_url + ("responses" if responses else "chat/completions")

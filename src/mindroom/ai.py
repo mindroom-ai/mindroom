@@ -103,7 +103,6 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
-    complete_pending_tool_block,
     format_tool_combined,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
@@ -270,8 +269,6 @@ _render_system_enrichment_context = timed("system_prompt_assembly.system_enrichm
 @dataclass
 class _StreamingAttemptState:
     assistant_text: str = ""
-    full_response: str = ""
-    tool_count: int = 0
     observed_tool_calls: int = 0
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
     terminal: TerminalRecord[RunRecord] = field(default_factory=partial(TerminalRecord, RunRecord))
@@ -588,62 +585,26 @@ def _attempt_run_metadata(
     )
 
 
-def _track_stream_tool_started(state: _StreamingAttemptState, event: ToolStarted, *, show_tool_calls: bool) -> bool:
-    """Track started tool-call metadata for streaming output."""
-    display_tool_index = state.tool_count + 1 if show_tool_calls else None
-    tool_msg, trace_entry = state.tool_tracker.start(event.call, tool_index=display_tool_index, origin=event.origin)
+def _track_stream_tool_started(state: _StreamingAttemptState, event: ToolStarted) -> bool:
+    """Record a started tool call's trace; return False for a call the stream already announced."""
+    _, trace_entry = state.tool_tracker.start(event.call, origin=event.origin)
     if trace_entry is None:
         return False
     state.observed_tool_calls += 1
-    if not show_tool_calls or display_tool_index is None:
-        return True
-
-    state.tool_count = display_tool_index
-    if tool_msg:
-        state.full_response += tool_msg
     return True
 
 
 def _materialize_paused_agent_tool_events(
     state: _StreamingAttemptState,
     tools: Sequence[ToolExecution],
-    *,
-    show_tool_calls: bool,
 ) -> tuple[ToolStarted, ...]:
     """Return the tool-start events of paused calls the stream has not announced yet."""
     events = (ToolStarted(tool.call) for tool in tools)
-    return tuple(event for event in events if _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls))
-
-
-def _track_stream_tool_completed(
-    state: _StreamingAttemptState,
-    event: ToolCompleted,
-    *,
-    show_tool_calls: bool,
-    agent_name: str,
-) -> None:
-    """Track completed tool-call metadata for streaming output."""
-    tool_name, result, pending_tool, _ = state.tool_tracker.complete(event.call, origin=event.origin)
-    if not show_tool_calls:
-        return
-
-    if pending_tool is None or pending_tool.visible_tool_index is None:
-        logger.warning(
-            "Missing pending tool start in AI stream; skipping completion marker",
-            tool_name=tool_name,
-            agent=agent_name,
-        )
-        return
-    state.full_response, _ = complete_pending_tool_block(
-        state.full_response,
-        tool_name,
-        result,
-        tool_index=pending_tool.visible_tool_index,
-    )
+    return tuple(event for event in events if _track_stream_tool_started(state, event))
 
 
 def _stream_completed_without_visible_output(state: _StreamingAttemptState, record: AnyRunRecord) -> bool:
-    visible_text = state.full_response.strip() or (record.content or "").strip()
+    visible_text = state.assistant_text.strip() or (record.content or "").strip()
     return not visible_text and state.observed_tool_calls == 0
 
 
@@ -735,7 +696,6 @@ async def _start_agent_run(
     *,
     storage: RunStorage,
     terminal: TerminalRecord[RunRecord],
-    stream: bool,
 ) -> AsyncIterator[RunEvent]:
     """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
 
@@ -782,7 +742,8 @@ async def _start_agent_run(
         ctx=run,
         hooks=hooks,
         persist=persist_into(terminal, storage),
-        request_template=replace(run_context.request_template, stream=stream),
+        request_template=run_context.request_template,
+        metadata=run.metadata,
     )
     driven = drive_delegation_stream(
         events,
@@ -860,7 +821,7 @@ async def _run_blocking_agent_attempt(
         on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
-    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
+    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal)
     async with closing_async_stream(events):
         async for event in events:
             terminal.collect(event)
@@ -954,10 +915,11 @@ def _memory_conversation(
     ):
         return None
     entity = config.resolve_entity(ctx.entity_label)
+    settings = entity.history_settings
     if (
         entity.memory_backend != "file"
-        or not entity.history_settings.replays_whole_history
-        or not (entity.has_authored_compaction_config and entity.compaction_config.enabled)
+        or not settings.replays_whole_history
+        or not (settings.has_authored_compaction_config and settings.compaction_config.enabled)
     ):
         return None
     session = scope_context.session
@@ -1687,7 +1649,6 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     if pipeline_timing is not None:
                         pipeline_timing.mark("model_first_token")
                 state.assistant_text += event.text
-                state.full_response += event.text
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1702,7 +1663,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     tool_call_id=event.call.tool_call_id,
                     show_tool_calls=show_tool_calls,
                 )
-                _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls)
+                _track_stream_tool_started(state, event)
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1717,7 +1678,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     tool_call_id=event.call.tool_call_id,
                     show_tool_calls=show_tool_calls,
                 )
-                _track_stream_tool_completed(state, event, show_tool_calls=show_tool_calls, agent_name=agent_name)
+                state.tool_tracker.complete(event.call, origin=event.origin)
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1759,7 +1720,7 @@ async def _stream_agent_attempt_chunks(
         with bind_llm_request_log_context(**request_context):
             if pipeline_timing is not None:
                 pipeline_timing.mark_model_request()
-            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal, stream=True)
+            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal)
         events = stream_with_llm_request_log_context(run_events, request_context=request_context)
         chunks = _process_stream_events(
             events,
@@ -2003,11 +1964,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             if paused_attempt is None:
                 raise pause_without_approval_error(record, entity_label="agent")
-            for tool_event in _materialize_paused_agent_tool_events(
-                state,
-                paused_attempt.tools,
-                show_tool_calls=show_tool_calls,
-            ):
+            for tool_event in _materialize_paused_agent_tool_events(state, paused_attempt.tools):
                 _sync_live_turn_recorder()
                 yield tool_event
             yield AttemptResolved(

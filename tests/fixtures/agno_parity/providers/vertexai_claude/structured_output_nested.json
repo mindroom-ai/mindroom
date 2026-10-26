@@ -199,7 +199,6 @@
       "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -264,6 +263,7 @@
           }
         }
       ],
+      "stream": true,
       "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
@@ -271,32 +271,83 @@
       "content-type": "application/json"
     },
     "method": "POST",
-    "url": "https://us-east5-aiplatform.googleapis.com/v1/projects/parity-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5-5:rawPredict"
+    "url": "https://us-east5-aiplatform.googleapis.com/v1/projects/parity-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5-5:streamRawPredict"
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "content": [
-        {
-          "text": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
-          "type": "text"
-        }
-      ],
-      "id": "msg_parity",
-      "model": "claude-sonnet-5-5",
-      "role": "assistant",
-      "stop_reason": "end_turn",
-      "stop_sequence": null,
-      "type": "message",
-      "usage": {
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-        "input_tokens": 42,
-        "output_tokens": 12
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output_nested"

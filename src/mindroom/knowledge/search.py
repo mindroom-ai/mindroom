@@ -21,7 +21,7 @@ KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
 _DEFAULT_MAX_RESULTS = 10
 _MAX_MERGED_SOURCE_COVERAGE_RESULTS = 20
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-# The prompt text and the tool's docstring are Agno's, so prompts and tool schemas stay byte-identical.
+# The prompt text and the tool's docstring, which is its description, are model-visible.
 _SEARCH_INSTRUCTIONS = (
     "You have a knowledge base you can search using the search_knowledge_base tool. "
     "Search before answering questions—don't assume you know the answer. "

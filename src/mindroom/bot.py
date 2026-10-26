@@ -61,7 +61,7 @@ from mindroom.matrix.presence import build_agent_status_message, set_presence_st
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_continuity import SyncContinuityStore
-from mindroom.matrix.sync_loop import bot_ingestion_config, sliding_sync_room_subscriptions
+from mindroom.matrix.sync_loop import bot_ingestion_config, subscribe_sliding_rooms
 from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.message_target import MessageTarget  # noqa: TC001
@@ -185,7 +185,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
-    from mindroom.reply_lifecycle import Reply
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_jobs.conversation import ConversationKey
@@ -806,7 +805,10 @@ class AgentBot:
                     **ownership,
                 ),
                 settle_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
-                stop_reply=self._stop_reply_for_edit,
+                stop_reply=lambda reply, receipt_order: self._delivery_gateway.stop_reply_by_id(
+                    reply.reply_id,
+                    receipt_order,
+                ),
                 receipt_order=self._journal_dispatcher.receipt_order,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
@@ -1329,6 +1331,7 @@ class AgentBot:
                 target_membership=target_membership,
                 read_position=self.journal_principal().ingestion_membership_position,
                 admission_progress=self._ingestion_admission_progress,
+                subscribe_awaited_rooms=lambda: subscribe_sliding_rooms(session, self.config, self.rooms),
                 is_authorized=is_authorized,
             )
         if changed and target_membership == "join" and self.client is not None:
@@ -1734,10 +1737,8 @@ class AgentBot:
         """
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
-        if self.config.matrix_sync.mode == "sliding" and self._ingestion_session is not None:
-            await self._ingestion_session.update_sliding_subscriptions(
-                sliding_sync_room_subscriptions(self.rooms, self.config.matrix_sync.sliding_timeline_limit),
-            )
+        if self._ingestion_session is not None:
+            await subscribe_sliding_rooms(self._ingestion_session, self.config, self.rooms)
 
     async def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""
@@ -2934,11 +2935,6 @@ class AgentBot:
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""
         return await self._response_runner.generate_response(request)
-
-    async def _stop_reply_for_edit(self, reply: Reply, receipt_order: int) -> None:
-        """Stop a reply that still runs before an edit regenerates it, as a Stop reaction would."""
-        assert reply.event_id is not None, "an edit regenerates only a reply that showed something"
-        await self._user_stop_reconciler.finalize(reply.event_id, receipt_order, room_id=reply.room_id)
 
     async def _later_human_message(self, record: TurnRecord) -> bool:
         """Return whether a human wrote in the turn's conversation after it, so an edit of it regenerates nothing."""

@@ -115,7 +115,12 @@ visibility = [
 
 [[modules]]
 path = "mindroom.dynamic_workflows"
-depends_on = ["mindroom.durable_write", "mindroom.file_locks", "mindroom.failure_text"]
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.failure_text",
+]
 
 [[modules]]
 path = "mindroom.private_storage.private_instance_identity"
@@ -1592,6 +1597,7 @@ depends_on = [
     "mindroom.agent_loop.build",
     "mindroom.agents",
     "mindroom.authorization",
+    "mindroom.background_tasks",
     "mindroom.credentials.manager",
     "mindroom.custom_tools.dynamic_workflow_context",
     "mindroom.custom_tools.tool_payloads",
@@ -3414,6 +3420,7 @@ depends_on = [
     "mindroom.credentials.manager",
     "mindroom.matrix.identity",
     "mindroom.model_defaults",
+    "mindroom.providers.names",
     "mindroom.tool_system.worker_routing",
     "mindroom.config.schema_hints",
 ]
@@ -5305,10 +5312,10 @@ depends_on = []
 [[interfaces]]
 from = ["mindroom.tool_system.tool_access"]
 expose = [
-    "ToolDescriptor",
     "ToolKey",
     "UnknownToolError",
     "search_tool_metadata",
+    "tool_definition",
     "validate_tool_arguments",
 ]
 
@@ -6977,6 +6984,7 @@ expose = [
     "DetachedRequesterContext",
     "detached_requester_context",
     "current_budget_monitor",
+    "current_requester_id",
     "get_detached_requester_context",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
@@ -7360,6 +7368,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.worker_routing",
@@ -7895,6 +7904,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.conversation_text"
 depends_on = [
+    "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
@@ -8705,6 +8715,9 @@ depends_on = [
 from = ["mindroom.tool_system.agent_tool_calls"]
 expose = [
     "AgentToolCallEvent",
+    "AgentToolCallMedia",
+    "AgentToolCallStep",
+    "AgentToolCallWaiting",
     "DeferredAgentToolkit",
     "PreparedAgentToolBinding",
     "PreparedAgentToolCatalog",
@@ -8813,6 +8826,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -9519,6 +9533,7 @@ depends_on = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
+    "mindroom.tool_system.runtime_context",
     "mindroom.usage.storage",
 ]
 visibility = [

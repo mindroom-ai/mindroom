@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     worker_inert_agent_functions=("image_to_video", "generate_video"),
     display_name="Luma Labs",
     description="3D content creation and video generation using Luma AI Dream Machine",
-    category=ToolCategory.DEVELOPMENT,  # others/ category maps to DEVELOPMENT
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires LUMAAI_API_KEY
     setup_type=SetupType.API_KEY,  # API key authentication
     icon="FaVideo",  # Video-related icon
@@ -87,7 +87,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["lumaai"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/lumalabs",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#lumalabs",
     function_names=("generate_video", "image_to_video"),
 )
 def lumalabs_tools() -> type[LumaLabTools]:

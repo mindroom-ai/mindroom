@@ -19,7 +19,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -132,6 +131,8 @@
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -142,8 +143,6 @@
           "content": "Email the invoice for order A-1001."
         }
       ],
-      "model": "openai/gpt-oss-120b",
-      "stream": true,
       "tools": [
         {
           "type": "function",

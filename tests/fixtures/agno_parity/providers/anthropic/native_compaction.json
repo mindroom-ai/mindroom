@@ -57,7 +57,6 @@
     },
     "output_schema": null,
     "portable_replay": true,
-    "stream": true,
     "tool_choice": null,
     "tools": []
   },
@@ -100,6 +99,8 @@
           {
             "content": "<summary>Alice is packing for a rainy Paris trip and asked about the evening.</summary>",
             "encrypted_content": "parity-compaction",
+            "signature": null,
+            "tool_changes": null,
             "type": "compaction"
           }
         ],

@@ -327,9 +327,10 @@ def test_ai_run_metadata_prefers_provider_counters_over_estimate_for_cache_token
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="claude-sonnet-5",
         model_provider="google",
+        tool_count=0,
         context_run=_answered(
             "claude-sonnet-5",
             "google",
@@ -356,9 +357,10 @@ def test_ai_run_metadata_context_uses_raw_input_for_non_cache_token_providers() 
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="test-model",
         model_provider="openai",
+        tool_count=0,
         context_run=_answered("test-model", "openai", input_tokens=700, cache_read_tokens=512),
         prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
@@ -378,9 +380,10 @@ def test_ai_run_metadata_context_of_a_request_that_only_wrote_the_cache_shows_it
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="claude-sonnet-5",
         model_provider="Anthropic",
+        tool_count=0,
         context_run=_answered("claude-sonnet-5", "Anthropic", input_tokens=200, cache_write_tokens=1_000),
         prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
@@ -401,9 +404,10 @@ def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counter
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="claude-sonnet-5",
         model_provider="Anthropic",
+        tool_count=0,
         prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
 
@@ -435,9 +439,10 @@ def test_ai_run_metadata_context_of_a_run_that_failed_before_its_model_answered_
         model_name="default",
         run_id="run-2",
         session_id="session-1",
-        status="error",
+        status=RunStatus.error,
         model="claude-sonnet-5",
         model_provider="Anthropic",
+        tool_count=0,
         context_run=failed,
         prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
@@ -453,9 +458,10 @@ def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="claude-sonnet-5",
         model_provider="google",
+        tool_count=0,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=3_277, cache_read_tokens=99_772, cache_write_tokens=49_886)),
         context_run=_answered("claude-sonnet-5", "google", input_tokens=1_777, cache_read_tokens=49_886),
         prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
@@ -476,9 +482,10 @@ def test_ai_run_metadata_records_reply_cost_as_a_decimal_string() -> None:
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="test-model",
         model_provider="OpenAI",
+        tool_count=0,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         prices={("OpenAI", "test-model"): PricedModel(ModelPricing(input=2, output=8), input_includes_cache=True)},
     )
@@ -533,6 +540,35 @@ def test_an_agent_reply_on_a_priced_model_publishes_its_cost(tmp_path: Path) -> 
     assert content[AI_RUN_METADATA_KEY]["cost"] == {"usd": "0.00208"}
 
 
+def test_an_agent_reply_publishes_how_many_tool_calls_its_run_made(tmp_path: Path) -> None:
+    """The metadata an agent reply publishes counts the tool calls its run record holds."""
+    config = Config(models={"default": ModelConfig(provider="openai", id="gpt-6.1-sol", api_key="key")})
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    record = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        tools=[ToolExecution(tool_call_id=call_id, tool_name="search") for call_id in ("call-1", "call-2")],
+    )
+
+    content = agent_run_metadata_content(
+        config,
+        record,
+        runtime_paths=paths,
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        prepared_history=None,
+    )
+
+    assert content[AI_RUN_METADATA_KEY]["tools"] == {"count": 2}
+
+
 def test_ai_run_metadata_omits_cost_without_prices() -> None:
     """A reply on a model without prices carries no cost."""
     metadata = build_ai_run_metadata_content(
@@ -540,9 +576,10 @@ def test_ai_run_metadata_omits_cost_without_prices() -> None:
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="test-model",
         model_provider="OpenAI",
+        tool_count=0,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         prices={},
     )
@@ -575,9 +612,10 @@ def test_ai_run_metadata_splits_uncached_input_per_model() -> None:
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="gpt-6-luna",
         model_provider="OpenAI",
+        tool_count=0,
         metrics=metrics,
     )
 
@@ -592,9 +630,10 @@ def test_ai_run_metadata_splits_uncached_input_from_streamed_counters() -> None:
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="gpt-6-luna",
         model_provider="OpenAI",
+        tool_count=0,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_674, cache_read_tokens=1_408, output_tokens=31)),
     )
 
@@ -2700,8 +2739,8 @@ class TestUserIdPassthrough:
     ) -> None:
         """A request whose every attempt failed mid-stream after reporting its input describes no single context.
 
-        The reply's usage bills every attempt, while its context shows the estimate instead of the attempts' sum. The
-        route only streams, as Codex does, so a blocking reply's requests are retried as a streamed reply's are.
+        The reply's usage bills every attempt, while its context shows the estimate instead of the attempts' sum. Every
+        request streams, so a blocking reply's requests are retried as a streamed reply's are.
         """
         config, runtime_paths = _bound(
             tmp_path,
@@ -2722,7 +2761,6 @@ class TestUserIdPassthrough:
             runtime_paths,
             [calls(tool_call("run_shell_command", "call-1", cmd="pwd"), metrics=usage(500, 60)), *[dropped] * 5],
         )
-        model.capabilities = replace(model.capabilities, streams_only=True)
         install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
         run_metadata: dict[str, Any] = {}
 

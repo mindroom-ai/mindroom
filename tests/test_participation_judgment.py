@@ -76,7 +76,7 @@ def _gate(
         instructions=participation.instructions,
         decider=create_participation_decider(
             participation,
-            Config(models={"cheap": {"provider": "test", "id": "cheap"}}),
+            Config(models={"cheap": {"provider": "openai", "id": "cheap"}}),
             paths,
             agent_name="helper",
         ),

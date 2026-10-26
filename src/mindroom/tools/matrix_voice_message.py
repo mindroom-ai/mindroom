@@ -65,7 +65,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["openai"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_voice_message",
     function_names=("matrix_voice_message",),
 )
 def matrix_voice_message_tools() -> type[MatrixVoiceMessageTools]:

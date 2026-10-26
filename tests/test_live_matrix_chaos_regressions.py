@@ -565,6 +565,7 @@ def _blocking_supersession_final(case: _SupersessionCase) -> dict[str, Any]:
             status=RunStatus.completed,
             model=live_fuzz.MODEL_ID,
             model_provider="openai",
+            tool_count=0,
         ),
     }
     final = {

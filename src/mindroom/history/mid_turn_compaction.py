@@ -47,6 +47,7 @@ from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.token_budget import estimate_text_tokens
+from mindroom.tool_system.runtime_context import current_requester_id
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
 
 if TYPE_CHECKING:
@@ -660,7 +661,11 @@ def _summary_usage_recorder(
     compaction: _MidTurnCompaction,
     record: AnyRunRecord,
 ) -> Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None:
-    """Record each summary response under the reply's usage owner, else in the run's own session storage."""
+    """Record each summary response under the reply's usage owner, else in the run's own session storage.
+
+    The usage is recorded under the current request's requester, as a compaction before the reply records its own.
+    """
+    requester_id = current_requester_id()
     owner = get_helper_usage_owner()
     if owner is not None:
 
@@ -670,7 +675,7 @@ def _summary_usage_recorder(
                 partial(
                     save_compaction_usage,
                     session_id=owner.session_id,
-                    requester_id=record.user_id,
+                    requester_id=requester_id,
                     model=model,
                     usage=usage,
                     initial_session=owner.initial_session,
@@ -686,7 +691,7 @@ def _summary_usage_recorder(
         record_summary_usage,
         storage=storage,
         session_id=record.session_id,
-        requester_id=record.user_id,
+        requester_id=requester_id,
         # The run's own session row may not exist yet while its first turn is still running.
         initial_session=new_scope_session(
             session_id=record.session_id,

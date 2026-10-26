@@ -94,7 +94,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["yfinance"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/yfinance",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#yfinance",
     function_names=(
         "get_analyst_recommendations",
         "get_company_info",

@@ -1,7 +1,8 @@
-"""Team runs on the owned loop store the rows Agno stored and tell the leader what Agno told it.
+"""Team runs store the rows the storage goldens hold and tell the leader what each member returned.
 
-The C4 goldens are the reference: ``team-completed`` (a member used a tool), ``team-member-error`` (a member's run
+The storage goldens are the reference: ``team-completed`` (a member used a tool), ``team-member-error`` (a member's run
 failed), ``team-paused`` (a member's call waits for approval), and the streamed collaborate run ``panel-completed``.
+Member rows leave out the team run's metadata, which the storage goldens copy into them (``stored_as_owned``).
 """
 # ruff: noqa: D103
 
@@ -9,16 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
-import httpx
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
@@ -27,8 +27,9 @@ from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import add, echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
-from tests.providers.golden_support import hide_provider_environment
-from tests.team_runtime.squad import (
+from tests.providers.golden_support import Wire, hide_provider_environment, streamed_reply
+from tests.providers.openai_family_support import openai_family_adapter
+from tests.teams.squad import (
     PANEL,
     SQUAD,
     Store,
@@ -41,11 +42,14 @@ from tests.team_runtime.squad import (
     scripted,
     squad,
     start_team,
+    stored_as_owned,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    import httpx
 
     from mindroom.llm.usage import MessageMetrics
     from mindroom.teams.runtime import TeamRunEvent
@@ -57,10 +61,8 @@ def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetric
     return calls(tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task), metrics=metrics)
 
 
-# A blocking turn's leader requests do not stream, which is how Agno's team knew to run its non-stream delegation.
-_BLOCKING = ModelRequest(messages=(), stream=False)
-
 _OLLAMA_MEMBER = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
+_LLAMA_CPP_MEMBER = {"provider": "llama_cpp", "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"}
 
 
 async def _overloaded() -> None:
@@ -74,7 +76,7 @@ def _silent() -> list[Any]:
 
 
 def _blank() -> list[Any]:
-    """A turn whose provider sent an empty string whole, as a reply that does not stream can end."""
+    """A turn whose text is an empty string rather than no text."""
     return [TurnCompleted(message=Message(role="assistant", content=""), stop_reason="end")]
 
 
@@ -93,7 +95,7 @@ def _delegation_to_both(mode: TeamMode) -> list[Any]:
     )
 
 
-async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> None:
+async def test_a_coordinate_run_with_a_member_tool_call_stores_the_team_completed_rows() -> None:
     team_row = golden_run("team_squad", SQUAD, "team-completed")
     writer_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-00000000004b")
     leader = scripted(
@@ -121,12 +123,12 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
         noting_the_store(start_team(squad(leader, writer, checker), prompt(team_row), ctx=ctx, persist=store)),
     )
 
-    assert comparable(record.to_dict()) == comparable(team_row)
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(writer_row)
-    assert (
-        member.metadata is record.metadata is ctx.metadata
-    )  # One metadata dict, as Agno handed the member the team's.
+    assert comparable(member.to_dict()) == comparable(stored_as_owned(writer_row))
+    # The team's metadata stays on the team's record; the member's record stores none of it.
+    assert record.metadata is ctx.metadata
+    assert member.metadata is None
     assert store.records == [member.to_dict(), record.to_dict()]
     assert checker.requests == []
     # The member's input is the leader's task alone: no history, no conversation.
@@ -148,6 +150,41 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
     assert isinstance(events[-1], RunFinished)
 
 
+class _RunMetadata(Protocol):
+    """The part of the run context a tool receives that ``room_of_the_turn`` reads."""
+
+    metadata: dict[str, Any] | None
+
+
+def room_of_the_turn(run_context: _RunMetadata) -> str:
+    """Return the room the turn's run metadata names.
+
+    Args:
+        run_context: The run's context, which the loop injects.
+
+    """
+    return str((run_context.metadata or {}).get("room_id"))
+
+
+async def test_a_member_s_tools_read_the_team_s_metadata_which_only_the_team_s_record_stores() -> None:
+    leader = scripted(
+        "leader-model",
+        _delegate("call-team-writer", "writer", "Name the room", metrics=usage(10, 1)),
+        answer("The writer named it.", usage(10, 1)),
+    )
+    writer = scripted("writer-model", calls(tool_call("room_of_the_turn", "call-room")), answer("Named."))
+    team = squad(leader, writer, scripted("checker-model"), writer_toolkits=[toolkit(room_of_the_turn)])
+    ctx = run_context("team-run", SQUAD, {"room_id": "!room:example.org"})
+    store = Store()
+
+    _, record = await collect(start_team(team, [Message(role="user", content="Which room?")], ctx=ctx, persist=store))
+
+    [member] = store.members
+    assert [tool.result for tool in member.tools or ()] == ["!room:example.org"]
+    assert member.metadata is None
+    assert record.metadata == {"room_id": "!room:example.org"}
+
+
 async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_an_error_row() -> None:
     team_row = golden_run("team_squad", SQUAD, "team-member-error")
     checker_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-000000000054")
@@ -166,9 +203,9 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
             start_team(squad(leader, scripted("writer-model"), checker), prompt(team_row), ctx=ctx, persist=store),
         )
 
-    assert comparable(record.to_dict()) == comparable(team_row)
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(checker_row)
+    assert comparable(member.to_dict()) == comparable(stored_as_owned(checker_row))
     assert (member.status, member.content) == (RunStatus.error, "Checker overloaded")
     assert record.tools is not None
     assert (record.tools[0].result, record.tools[0].is_error) == ("Checker overloaded", False)
@@ -177,7 +214,7 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
     assert [(log["team_id"], log["member_id"]) for log in failures] == [("squad", "checker")]
 
 
-async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
+async def test_a_member_approval_pauses_the_team_with_the_team_paused_rows() -> None:
     team_row = golden_run("team_squad", SQUAD, "team-paused")
     checker_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-00000000005a")
     leader = scripted(
@@ -207,9 +244,9 @@ async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
     )
 
     assert record.status is RunStatus.paused
-    assert comparable(record.to_dict()) == comparable(team_row)
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(checker_row)
+    assert comparable(member.to_dict()) == comparable(stored_as_owned(checker_row))
     assert record.member_responses == [member]
     assert record.requirements is not None
     [requirement] = record.requirements
@@ -221,7 +258,7 @@ async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
     assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
 
 
-async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_text_in_member_order() -> None:
+async def test_a_streamed_collaborate_run_stores_the_panel_rows_and_joins_member_text_in_member_order() -> None:
     team_row = golden_run("team_panel", PANEL, "panel-completed")
     writer_row = golden_run("team_panel", PANEL, "00000000-0000-4000-8000-00000000006d")
     checker_row = golden_run("team_panel", PANEL, "00000000-0000-4000-8000-000000000070")
@@ -247,9 +284,12 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
         ),
     )
 
-    assert comparable(record.to_dict()) == comparable(team_row)
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     members = store.members
-    assert [comparable(member.to_dict()) for member in members] == [comparable(writer_row), comparable(checker_row)]
+    assert [comparable(member.to_dict()) for member in members] == [
+        comparable(stored_as_owned(writer_row)),
+        comparable(stored_as_owned(checker_row)),
+    ]
     assert record.tools is not None
     assert record.tools[0].result == "Five is prime.Five is odd."
     streamed = {
@@ -275,7 +315,7 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
     ]
 
 
-async def test_an_unknown_member_id_answers_the_leader_with_agno_s_roster_notice() -> None:
+async def test_an_unknown_member_id_answers_the_leader_with_the_not_found_notice_and_roster() -> None:
     leader = scripted(
         "leader-model",
         _delegate("call-nobody", "nobody", "Do it", metrics=usage(10, 2)),
@@ -307,7 +347,7 @@ async def test_an_unknown_member_id_answers_the_leader_with_agno_s_roster_notice
     assert record.status is RunStatus.completed
 
 
-async def test_a_collaborate_member_that_pauses_adds_agno_s_notice_in_its_place_and_pauses_the_team() -> None:
+async def test_a_collaborate_member_that_pauses_adds_its_paused_notice_in_its_place_and_pauses_the_team() -> None:
     leader = scripted(
         "leader-model",
         calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
@@ -331,7 +371,7 @@ async def test_a_collaborate_member_that_pauses_adds_agno_s_notice_in_its_place_
     assert record.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
     writer_record, checker_record = store.members
     assert (writer_record.status, checker_record.status) == (RunStatus.completed, RunStatus.paused)
-    assert record.member_responses == [checker_record]  # Only the paused member rides along, as Agno stored it.
+    assert record.member_responses == [checker_record]  # Only the paused member rides along.
     assert record.requirements is not None
     [requirement] = record.requirements
     assert (requirement.member_agent_id, requirement.member_run_id) == ("checker", checker_record.run_id)
@@ -427,7 +467,7 @@ async def test_a_member_s_external_call_pauses_the_team_with_the_member_s_raw_ca
     assert requirement.member_run_id == member.run_id
     assert record.tools is not None
     assert record.tools[0].result == MEMBER_PAUSED_RESULT.format(name="Checker")
-    # A silent external pause names nothing, so the team's paused text is empty, as Agno's was.
+    # A silent external pause names nothing, so the team's paused text is empty.
     assert team_paused_content(record) == ""
 
 
@@ -493,8 +533,8 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
         pytest.param(
             [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="")), _blank()],
             [calls(tool_call("echo", "call-c", text="c")), _silent()],
-            # The broadcast keeps an empty tool result, which a coordinate delegation drops.
-            "Agent Writer: a,Agent Checker: null",
+            # Blank text keeps an empty tool result in the broadcast; no text drops it, as a coordinate delegation does.
+            "Agent Writer: a,Agent Checker: c",
             id="tool-only",
         ),
         pytest.param(
@@ -506,7 +546,7 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
         ),
     ],
 )
-async def test_a_blocking_collaborate_run_gives_the_leader_agno_s_labeled_member_results(
+async def test_a_blocking_collaborate_run_gives_the_leader_each_member_result_labeled_with_its_name(
     writer_turns: list[list[Any]],
     checker_turns: list[list[Any]],
     expected: str,
@@ -530,7 +570,7 @@ async def test_a_blocking_collaborate_run_gives_the_leader_agno_s_labeled_member
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=_BLOCKING,
+            stream=False,
         ),
     )
 
@@ -596,7 +636,7 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
             persist=store,
-            request_template=ModelRequest(messages=(), stream=stream),
+            stream=stream,
         ),
     )
 
@@ -605,13 +645,13 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
     assert record.tools[0].result == expected
     delegated = leader.requests[1].messages[-1]
     assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-all", expected)
-    # The member's stored row keeps Agno's content: the text its model wrote before the failure, else the error.
+    # The member's stored row keeps its content: the text its model wrote before the failure, else the error.
     [failed] = [member for member in store.members if member.agent_id == "checker"]
     stored_content = "I will check." if wrote_text else "checker provider down: api_key=example-secret"
     assert (failed.status, failed.content) == (RunStatus.error, stored_content)
 
 
-async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_notice_and_pauses_the_team() -> None:
+async def test_a_blocking_collaborate_pause_adds_the_notice_after_the_labeled_results_and_pauses_the_team() -> None:
     leader = scripted(
         "leader-model",
         calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
@@ -626,7 +666,7 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=_BLOCKING,
+            stream=False,
             persist=store,
         ),
     )
@@ -649,10 +689,10 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
         pytest.param(True, [answer("")], NO_MEMBER_RESPONSE, id="streamed-empty"),
         pytest.param(False, [_blank()], "", id="blocking-empty"),
         pytest.param(True, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="streamed-tool-only"),
-        pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "null", id="blocking-tool-only"),
+        pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="blocking-tool-only"),
     ],
 )
-async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_delegation_gave_it_on_each_path(
+async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_member_result_rule_of_its_stream_mode(
     stream: bool,
     writer_turns: list[list[Any]],
     expected: str,
@@ -670,7 +710,7 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_del
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=ModelRequest(messages=(), stream=stream),
+            stream=stream,
         ),
     )
 
@@ -679,55 +719,89 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_del
     assert leader.requests[1].messages[-1].content == expected
 
 
-@pytest.mark.parametrize("mode", [TeamMode.COORDINATE, TeamMode.COLLABORATE])
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streaming"])
-async def test_every_member_request_streams_exactly_when_the_team_turn_does(mode: TeamMode, stream: bool) -> None:
-    # Agno ran each member with the team run's own ``stream``, so a blocking turn sends no member a streamed request.
-    leader = scripted("leader-model", _delegation_to_both(mode), answer("Both found 5."))
-    writer = scripted("writer-model", calls(tool_call("add", "call-add", a=2, b=3)), answer("5"))
-    checker = scripted("checker-model", answer("5"))
-    team = squad(leader, writer, checker, mode=mode, checker_toolkits=())
+def _chat_completion(message: dict[str, Any], finish_reason: str) -> dict[str, Any]:
+    """A finished llama.cpp Chat completion with ``message``, which ``streamed_reply`` streams as the server does."""
+    return {
+        "id": "chatcmpl-member",
+        "object": "chat.completion",
+        "created": 1,
+        "model": _LLAMA_CPP_MEMBER["id"],
+        "choices": [{"index": 0, "message": {"role": "assistant", **message}, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+    }
+
+
+@pytest.mark.parametrize(
+    ("stop_after_call", "replies"),
+    [
+        pytest.param(True, 1, id="stopped-by-its-tool"),
+        pytest.param(False, 2, id="silent-after-its-tool"),
+    ],
+)
+async def test_a_blocking_turn_hands_the_leader_a_chat_member_s_tool_results_when_it_writes_no_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stop_after_call: bool,
+    replies: int,
+) -> None:
+    # The server sends ``content: ""`` beside the tool call and in a reply after it, which the turn reads as no text.
+    hide_provider_environment(monkeypatch)
+    call = {"id": "call-x", "type": "function", "function": {"name": "echo", "arguments": '{"text": "x"}'}}
+    wire = Wire(
+        streamed_reply(_chat_completion({"content": "", "tool_calls": [call]}, "tool_calls")),
+        streamed_reply(_chat_completion({"content": ""}, "stop")),
+    )
+    leader = scripted("leader-model", _delegate("call-w", "writer", "Echo x.", metrics=usage(10, 2)), answer("x."))
+    writer = openai_family_adapter(_LLAMA_CPP_MEMBER, tmp_path, wire.respond)
+    team = squad(
+        leader,
+        writer,
+        scripted("checker-model"),
+        writer_toolkits=(toolkit(echo, stop_after_call=stop_after_call),),
+    )
 
     _, record = await collect(
         start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=ModelRequest(messages=(), stream=stream),
+            stream=False,
         ),
     )
 
-    assert record.status is RunStatus.completed
-    assert (len(writer.requests), len(checker.requests)) == (2, 1)
-    assert [request.stream for request in (*leader.requests, *writer.requests, *checker.requests)] == [stream] * 5
+    assert len(wire.requests) == replies
+    assert record.tools is not None
+    assert record.tools[0].result == "x"
+    assert leader.requests[1].messages[-1].content == "x"
 
 
 async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_without_its_thinking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A thinking model's ``<think>`` text stays the member's reasoning, as Agno's non-stream member run split it.
+    # A thinking model's ``<think>`` text stays the member's reasoning, so the leader reads only the answer.
     hide_provider_environment(monkeypatch)
     reply = "<think>Five has two divisors.</think>Five is prime."
     sent: list[dict[str, Any]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
-        # Ollama puts a thinking model's tags in the content, whether the reply streams or arrives whole.
-        body = json.loads(request.content)
-        sent.append(body)
+        # Ollama puts a thinking model's tags in the content.
+        sent.append(json.loads(request.content))
         done = {
             "model": _OLLAMA_MEMBER["id"],
             "created_at": "2026-10-20T00:00:00Z",
             "done": True,
             "done_reason": "stop",
-            "message": {"role": "assistant", "content": reply},
+            "message": {"role": "assistant", "content": ""},
             "prompt_eval_count": 7,
             "eval_count": 5,
         }
-        if not body["stream"]:
-            return httpx.Response(200, json=done)
-        text = {key: done[key] for key in ("model", "created_at", "message")} | {"done": False}
-        return ollama_ndjson(text, done | {"message": {"role": "assistant", "content": ""}})
+        text = {key: done[key] for key in ("model", "created_at")} | {
+            "done": False,
+            "message": {"role": "assistant", "content": reply},
+        }
+        return ollama_ndjson(text, done)
 
     leader = scripted(
         "leader-model",
@@ -743,7 +817,7 @@ async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_withou
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=_BLOCKING,
+            stream=False,
             persist=store,
         ),
     )
@@ -753,4 +827,4 @@ async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_withou
     assert record.tools[0].result == "Five is prime."
     [member] = store.members
     assert (member.content, member.messages[-1].reasoning_content) == ("Five is prime.", "Five has two divisors.")
-    assert [body["stream"] for body in sent] == [False]
+    assert [body["stream"] for body in sent] == [True]

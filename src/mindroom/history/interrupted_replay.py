@@ -72,7 +72,7 @@ def split_interrupted_tool_trace(
         if tool.result is None and tool.is_error is None:
             interrupted.append(format_tool_started_event(tool.call)[1])
         else:
-            completed.append(format_tool_completed_event(tool.call)[1])
+            completed.append(format_tool_completed_event(tool.call))
     return completed, interrupted
 
 

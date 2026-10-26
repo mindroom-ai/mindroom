@@ -49,7 +49,7 @@ def _config() -> Config:
             "leader": AgentConfig(display_name="Leader"),
             "child": AgentConfig(display_name="Child"),
         },
-        models={"default": ModelConfig(provider="test", id="test-model")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
 

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom.coalescing.batch import tagged_coalesced_prompt
@@ -504,7 +505,7 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
 
 def _reply(
     *,
-    event_id: str,
+    event_id: str | None,
     state: rl.ReplyState = rl.ReplyState.COMPLETED,
     stop_receipt_order: int | None = None,
 ) -> rl.Reply:
@@ -524,6 +525,10 @@ def _reply(
         event_id=event_id,
         stop_receipt_order=stop_receipt_order,
     )
+
+
+def _not_regenerated_reasons(logs: list[dict[str, Any]]) -> list[object]:
+    return [entry.get("reason") for entry in logs if entry["event"] == "edit_not_regenerated"]
 
 
 @pytest.mark.asyncio
@@ -549,10 +554,12 @@ async def test_an_edit_of_a_message_someone_answered_after_is_ignored(tmp_path: 
     harness.later_human_message.return_value = True
     event, event_info = _edit_event()
 
-    assert await _handle_edit(harness, event, event_info) is None
+    with capture_logs() as logs:
+        assert await _handle_edit(harness, event, event_info) is None
 
     _assert_no_regeneration(harness)
     harness.turn_store.register_edit_revision.assert_not_called()
+    assert _not_regenerated_reasons(logs) == ["later_human_message"]
 
 
 @pytest.mark.asyncio
@@ -587,6 +594,47 @@ async def test_an_edit_of_a_reply_that_still_streams_stops_it_and_regenerates_in
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "what is 4+4?"
     assert request.existing_event_id == RESPONSE_EVENT_ID
+
+
+@pytest.mark.asyncio
+async def test_an_edit_before_the_replys_create_is_acknowledged_stops_it_and_regenerates_it(tmp_path: Path) -> None:
+    """A reply whose first message Matrix has not acknowledged yet may already show; the edit stops and regenerates it."""
+    harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
+    creating = replace(
+        _reply(event_id=None, state=rl.ReplyState.ACTIVE),
+        current_span_id="span-running",
+        possibly_shown="Thinking...",
+    )
+    harness.regenerator.deps.reply_for_sources.return_value = creating  # type: ignore[attr-defined]
+    event, event_info = _edit_event(new_body="what is 4+4?")
+
+    assert await _handle_edit(harness, event, event_info) is True
+
+    harness.stop_reply.assert_awaited_once_with(creating, 9)
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == "what is 4+4?"
+    # Its claim reads the event the create bound from the reply's records.
+    assert request.existing_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_a_reply_that_recorded_nothing_to_show_is_ignored(tmp_path: Path) -> None:
+    """A turn that has not sent anything yet, as a participation turn may not have, answers the original text.
+
+    Stopping it would post a cancel note where nothing showed, and its
+    regeneration would answer without that participation decision.
+    """
+    harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
+    deciding = replace(_reply(event_id=None, state=rl.ReplyState.ACTIVE), current_span_id="span-running")
+    harness.regenerator.deps.reply_for_sources.return_value = deciding  # type: ignore[attr-defined]
+    event, event_info = _edit_event()
+
+    with capture_logs() as logs:
+        assert await _handle_edit(harness, event, event_info) is None
+
+    harness.stop_reply.assert_not_awaited()
+    _assert_no_regeneration(harness)
+    assert _not_regenerated_reasons(logs) == ["reply_not_shown"]
 
 
 @pytest.mark.asyncio
@@ -648,9 +696,11 @@ async def test_edit_of_a_turn_whose_reply_is_gone_is_ignored(tmp_path: Path) -> 
     )
     event, event_info = _edit_event()
 
-    await _handle_edit(harness, event, event_info)
+    with capture_logs() as logs:
+        await _handle_edit(harness, event, event_info)
 
     harness.generate_response.assert_not_awaited()
+    assert _not_regenerated_reasons(logs) == ["gone"]
 
 
 @pytest.mark.asyncio
@@ -956,10 +1006,13 @@ async def test_edit_without_turn_record_returns_early(tmp_path: Path) -> None:
     harness = _harness(tmp_path, turn_record=None)
     event, event_info = _edit_event()
 
-    await _handle_edit(harness, event, event_info)
+    with capture_logs() as logs:
+        await _handle_edit(harness, event, event_info)
 
     _assert_no_regeneration(harness)
     harness.resolver.build_message_envelope.assert_not_called()
+    # As for a message still waiting for media or voice before it reaches its turn.
+    assert _not_regenerated_reasons(logs) == ["no_turn_record"]
 
 
 @pytest.mark.asyncio
@@ -1042,9 +1095,11 @@ async def test_edit_without_previous_response_event_is_skipped(tmp_path: Path) -
     harness.regenerator.deps.reply_for_sources.return_value = None  # type: ignore[attr-defined]
     event, event_info = _edit_event()
 
-    await _handle_edit(harness, event, event_info)
+    with capture_logs() as logs:
+        await _handle_edit(harness, event, event_info)
 
     _assert_no_regeneration(harness)
+    assert _not_regenerated_reasons(logs) == ["no_reply"]
 
 
 @pytest.mark.asyncio

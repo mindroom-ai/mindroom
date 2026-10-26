@@ -20,6 +20,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Dynamic Tools",
         description="Search deferred tools and call them",
+        docs_url="https://docs.mindroom.chat/tools/dynamic-tools/#mindroom-tool-search",
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

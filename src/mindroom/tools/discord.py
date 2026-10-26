@@ -73,7 +73,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/discord",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#discord",
     function_names=(
         "delete_message",
         "get_channel_info",

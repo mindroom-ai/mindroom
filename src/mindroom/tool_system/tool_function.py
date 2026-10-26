@@ -28,7 +28,7 @@ class InjectedValue(StrEnum):
 
     ACTOR = "actor"  # The adapted toolkit's agent or team stand-in, ``ToolCallActor``.
     RUN_CONTEXT = "run_context"
-    MEDIA = "media"  # The run's media, which the owned loop never has, so None.
+    MEDIA = "media"  # The run's media, which the agent loop never gives a tool, so None.
     DEFAULT = "default"  # Nothing, so the parameter keeps its default.
 
 
@@ -49,10 +49,10 @@ class ToolFunction:
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
-    ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, tool
-    jobs, and the agent CLI's eager bindings name it by; for an implied or preset tool that is the tool that brings it
-    in. The agent CLI binds a deferred toolkit's functions under that toolkit's registered tool name instead, which
-    differs for an implied tool, and still approves their calls under this one. None for a
+    ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, and
+    tool jobs name it by; for an implied or preset tool that is the tool that brings it in.
+    ``registered_toolkit`` is the registered tool the function comes from, which the agent CLI reaches it under,
+    eager or deferred; it differs from ``toolkit`` for an implied or preset tool. Both are None for a
     function generated for the agent, such as the knowledge search, the skill readers, and a team's delegation, and
     for one adapted by a caller that names its toolkit beside it: the MCP gateway and the script broker adapt the
     function a call names alone (``adapt_function``), and the gateway's search adapts a selected toolkit whole.
@@ -60,6 +60,7 @@ class ToolFunction:
 
     name: str
     toolkit: str | None = None
+    registered_toolkit: str | None = None
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None = None
@@ -74,8 +75,8 @@ class ToolFunction:
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()
 
-    # TODO(simplify): The definition carries the pause flags only because Chat and Responses send them on the wire,
-    # as main does. Dropping them here and from ``ToolSpec`` leaves name, description, schema, and strict.
+    # TODO(simplify): The definition carries the pause flags only because Chat and Responses send them on the wire.
+    # Dropping them here and from ``ToolSpec`` leaves name, description, schema, and strict.
     # Models would notice: Chat and Responses requests stop sending them for the tools that set them (#3075).
     def definition(self) -> ToolSpec:
         """Return the model-facing definition a provider adapter formats, with the flags the tool never set as None."""
@@ -93,7 +94,7 @@ class ToolFunction:
         """Return the execution a call of this function starts as, before it runs.
 
         The call is paused when the function requires confirmation or external execution, and a paused call carries
-        the function's approval type and silence, as Agno's paused calls did.
+        the function's approval type, which decides how its pause is approved, and its silence flag.
         """
         # Deferred so that these tool values import no pydantic, which run records pull in through redaction.
         from mindroom.llm.runs import ToolExecution  # noqa: PLC0415
@@ -117,7 +118,7 @@ class AdaptedToolkit:
     it describes the toolkit's functions and minimal mode offers as a context document.
     ``function_instructions`` holds, by function name, the instructions a function asks the prompt to show, which
     only tool search shows, for a deferred toolkit; an agent refuses an eager toolkit that offers such a function.
-    ``refused`` holds, by function name, why MindRoom refuses a function that sets a field the owned loop cannot
+    ``refused`` holds, by function name, why MindRoom refuses a function that sets a field the agent loop cannot
     honor, such as an Agno hook; an agent refuses a toolkit that still offers such a function.
     ``connect`` is set for a toolkit that holds a connection for one run, which whoever offers its functions to a
     run connects before the run and closes after it; it returns how to close the connection, or None when the run

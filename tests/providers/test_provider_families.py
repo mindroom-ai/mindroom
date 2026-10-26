@@ -1,8 +1,8 @@
 """Behavior every provider family must share: tool definitions, the composed pipeline, stream activity, finality.
 
 Each family's bare adapter is built from a real model config over an httpx mock transport (the synthetic model
-needs none) and wrapped in the production pipeline (``wrap_provider``: the malformed-call guidance retry, portable
-tool search, media fallback, retry with the idle limit, the safeguard refusal, request logging), so what these tests
+needs none) and wrapped in the production pipeline (``wrap_provider``: portable tool search, media fallback, the
+malformed-call guidance retry, retry with the idle limit, the safeguard refusal, request logging), so what these tests
 prove is what the registry runs. The OpenAI family's idle-limit and server-tool cases live in
 ``test_openai_family_wire.py``; the Claude tool tri-state in its behavior tests.
 """
@@ -113,7 +113,7 @@ _TRI_STATE_TOOLS = [
     ),
 ]
 _GEMINI_SCHEMA = {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}, "required": []}
-_AGNO_FLAGS = {
+_OPENAI_WIRE_FLAGS = {
     "gated": {
         "strict": True,
         "requires_confirmation": True,
@@ -126,11 +126,12 @@ _AGNO_FLAGS = {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", ["openai_chat", "openai_responses", "cerebras", "gemini", "ollama"])
-async def test_unset_tool_fields_are_omitted_where_agno_omitted_them(family: str, tmp_path: Path) -> None:
-    """``Function.to_dict()`` dropped None values; each wire keeps exactly the fields its Agno adapter sent.
+async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family: str, tmp_path: Path) -> None:
+    """Each wire leaves a tool's unset fields out of its definition.
 
-    OpenAI's Chat and Responses wires carry ``strict`` and the approval flags when set; Cerebras and Ollama send
-    only name, description, and parameters; Gemini sends an empty description for a tool without one.
+    OpenAI's Chat and Responses wires still send ``strict`` and the approval flags when set; Cerebras and Ollama send
+    only name, description, and parameters; every wire but Gemini leaves out an unset description, which Gemini
+    sends empty.
     """
     spec = FAMILIES[family]
     wire = Wire(spec.reply())
@@ -147,7 +148,7 @@ async def test_unset_tool_fields_are_omitted_where_agno_omitted_them(family: str
     kind = {"type": "function"} if family == "openai_responses" else {}
     assert sent["unset"] == {"name": "unset", "parameters": _SCHEMA, **kind}
     expected_flags: dict[str, dict[str, Any]] = (
-        _AGNO_FLAGS if family in {"openai_chat", "openai_responses"} else {"gated": {}, "plain": {}}
+        _OPENAI_WIRE_FLAGS if family in {"openai_chat", "openai_responses"} else {"gated": {}, "plain": {}}
     )
     for name in ("gated", "plain"):
         assert sent[name] == {

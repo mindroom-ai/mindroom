@@ -32,7 +32,7 @@ from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.selection import GatewaySelections
-from mindroom.mcp_gateway.types import GatewayOwner
+from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
@@ -457,6 +457,18 @@ async def test_policy_approval_is_excluded_and_rejected(context: AgentToolContex
 
 def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> None:
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", lambda *_args, **_kwargs: toolkit)
+
+
+def _load_plugin_hooks(monkeypatch: pytest.MonkeyPatch, name: str, *hooks: object) -> None:
+    """Make the gateway load one plugin named ``name`` whose hooks are ``hooks``."""
+    plugin = SimpleNamespace(
+        name=name,
+        entry_config=PluginEntryConfig(path=f"{name}.py"),
+        plugin_order=0,
+        discovered_hooks=hooks,
+        discovered_automations=(),
+    )
+    monkeypatch.setattr(gateway, "load_plugins", lambda *_args, **_kwargs: [plugin])
 
 
 @pytest.mark.asyncio
@@ -959,24 +971,52 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
     toolkit = Toolkit(name="calculator", tools=[account])
     toolkit.functions["account"].cache_results = True
     _replace_calculator(monkeypatch, toolkit)
-    monkeypatch.setattr(
-        gateway,
-        "load_plugins",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(
-                name="audit",
-                entry_config=PluginEntryConfig(path="audit.py"),
-                plugin_order=0,
-                discovered_hooks=(before, after),
-                discovered_automations=(),
-            ),
-        ],
-    )
+    _load_plugin_hooks(monkeypatch, "audit", before, after)
     for _ in range(2):
         assert await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={}) == {
             "result": "fresh",
         }
     assert events == [("before", "@alice:example.org"), ("body", "called"), ("after", "@alice:example.org")] * 2
+
+
+def test_a_declined_call_without_a_reason_still_reads_why(context: AgentToolContext) -> None:
+    """A decline error that carries no message of its own falls back to the code's message, as every code does."""
+    assert gateway._error(context, GatewayErrorCode.TOOL_DECLINED) == {
+        "error": {"code": "tool_declined", "message": "A MindRoom plugin declined this call, so it did not run."},
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_call_a_plugin_hook_declines_answers_with_the_decline_as_an_error(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call a before-call hook declines never runs and answers as an error whose message is the decline's text."""
+    ran: list[str] = []
+
+    @hook("tool:before_call")
+    async def before(event: ToolBeforeCallContext) -> None:
+        event.decline("Accounts are paused")
+
+    def account() -> str:
+        ran.append("body")
+        return "fresh"
+
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[account]))
+    _load_plugin_hooks(monkeypatch, "policy", before)
+
+    result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
+
+    assert ran == []
+    assert result == {
+        "error": {
+            "code": "tool_declined",
+            "message": "[TOOL CALL DECLINED]\n"
+            "Tool: account\n"
+            "Reason: Accounts are paused\n\n"
+            "Adjust your approach — try a different tool or different arguments.",
+        },
+    }
 
 
 @pytest.mark.asyncio

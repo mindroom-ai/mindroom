@@ -40,7 +40,7 @@ if str(SRC_ROOT) not in sys.path:
 from mindroom.config.models import ModelConfig  # noqa: E402
 from mindroom.constants import resolve_runtime_paths  # noqa: E402
 from mindroom.llm.messages import Message  # noqa: E402
-from mindroom.llm.provider import ModelRequest, ModelTurn, ToolSpec, complete  # noqa: E402
+from mindroom.llm.provider import DeferredTools, ModelRequest, ModelTurn, ToolSpec, complete  # noqa: E402
 from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS  # noqa: E402
 from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider  # noqa: E402
 from mindroom.providers.model_http_client import closing_model_connections  # noqa: E402
@@ -76,6 +76,10 @@ PROBE_TOOLS = (
             "properties": {"text": {"type": "string", "description": "Text to echo."}},
             "required": ["text"],
         },
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
     ),
     ToolSpec(
         name="get_weather",
@@ -85,6 +89,10 @@ PROBE_TOOLS = (
             "properties": {"location": {"type": "string", "description": "City name."}},
             "required": ["location"],
         },
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
     ),
 )
 
@@ -123,8 +131,7 @@ def _request(messages: list[Message]) -> ModelRequest:
     return ModelRequest(
         messages=messages,
         tools=PROBE_TOOLS,
-        deferred_tool_names=frozenset({DEFERRED_TOOL_NAME}),
-        stream=False,
+        deferred_tools=DeferredTools(names=frozenset({DEFERRED_TOOL_NAME})),
     )
 
 
@@ -133,24 +140,35 @@ def _send(provider: ClaudeProvider, messages: list[Message]) -> ModelTurn:
 
 
 def run_dry_run(args: argparse.Namespace) -> int:
-    """Print the prepared wire request via a capturing HTTP transport; no network."""
+    """Print the prepared wire request via a capturing HTTP transport that streams a short reply; no network."""
     captured: list[dict[str, Any]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         captured.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={
-                "id": "msg_dry_run",
-                "type": "message",
-                "role": "assistant",
-                "model": args.model_id,
-                "content": [{"type": "text", "text": "ok"}],
-                "stop_reason": "end_turn",
-                "stop_sequence": None,
-                "usage": {"input_tokens": 1, "output_tokens": 1},
+        message = {
+            "id": "msg_dry_run",
+            "type": "message",
+            "role": "assistant",
+            "model": args.model_id,
+            "content": [],
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+        events = [
+            {"type": "message_start", "message": message},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": 1},
             },
-        )
+            {"type": "message_stop"},
+        ]
+        body = "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
 
     provider = build_probe_provider(args, httpx.AsyncClient(transport=httpx.MockTransport(respond)))
     _send(provider, [Message(role="system", content=_SYSTEM_PROMPT), Message(role="user", content="probe")])
@@ -239,10 +257,9 @@ def run_live(args: argparse.Namespace) -> int:
     ]
     discovered = "tool_search_tool_result" in block_types
     called_deferred = DEFERRED_TOOL_NAME in called
-    usage_first = first.message.metrics
+    usage_first = first.usage.tokens
     print(f"turn 1: server blocks={block_types} tool calls={called}")
-    if usage_first is not None:
-        print(f"turn 1 usage: cache_write={usage_first.cache_write_tokens} cache_read={usage_first.cache_read_tokens}")
+    print(f"turn 1 usage: cache_write={usage_first.cache_write_tokens} cache_read={usage_first.cache_read_tokens}")
 
     if not called_deferred:
         print(f"FAIL: model did not call the deferred tool '{DEFERRED_TOOL_NAME}'.")
@@ -250,11 +267,9 @@ def run_live(args: argparse.Namespace) -> int:
 
     messages.append(Message(role="user", content="Thanks — and what is the weather in London?"))
     second, _ = _answer(provider, messages)
-    usage_second = second.message.metrics
-    cache_read = usage_second.cache_read_tokens if usage_second is not None else 0
-    print(
-        f"turn 2 usage: cache_write={usage_second.cache_write_tokens if usage_second else '?'} cache_read={cache_read}",
-    )
+    usage_second = second.usage.tokens
+    cache_read = usage_second.cache_read_tokens
+    print(f"turn 2 usage: cache_write={usage_second.cache_write_tokens} cache_read={cache_read}")
 
     passed = discovered and called_deferred and cache_read > 0
     print(

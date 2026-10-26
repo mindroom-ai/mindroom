@@ -24,6 +24,7 @@ import pytest
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from mindroom import constants, frontend_assets
 from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
@@ -32,7 +33,7 @@ from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
-from mindroom.config.main import Config, dashboard_config_schema
+from mindroom.config.main import Config, dashboard_config_schema, iter_config_validation_messages
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
@@ -44,6 +45,7 @@ from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from mindroom.workers.backend import WorkerBackend
@@ -58,6 +60,7 @@ from tests.api.conftest import (
     use_trusted_upstream_runtime,
 )
 from tests.oauth_test_utils import publish_oauth_credentials
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 TEST_WORKER_AUTH = "token"
 
@@ -1466,6 +1469,83 @@ def test_get_agents(test_client: TestClient) -> None:
     assert "display_name" in agent
     assert "tools" in agent
     assert "rooms" in agent
+
+
+def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Every roster entry is listed with its account, status, and whether its template still exists.
+
+    Dave is onboarded after the config was loaded, so the loaded config has no agent for him yet.
+    Alice's account was registered under an earlier namespace on the real server name, which the listing keeps.
+    """
+    runtime_paths = main._app_runtime_paths(main.app)
+    for entry in (
+        personal_agent_entry(),
+        personal_agent_entry(
+            "@bob:localhost",
+            agent_name="mind_bob",
+            matrix_username="bob.mind",
+            user_display_name="Bob",
+            pending=True,
+        ),
+        personal_agent_entry("@carol:localhost", template="old", agent_name="old_carol"),
+    ):
+        _append_personal_agent_roster_entry(runtime_paths, entry)
+    config_data = yaml.safe_load(temp_config_file.read_text())
+    config_data["personal_agents"] = {"mind": {"agent": {"display_name": "{user_display_name}'s Mind"}}}
+    temp_config_file.write_text(yaml.dump(config_data))
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app)
+    _append_personal_agent_roster_entry(
+        runtime_paths,
+        personal_agent_entry("@dave:localhost", agent_name="mind_dave", user_display_name="Dave"),
+    )
+    matrix_state = MatrixState.load(runtime_paths=runtime_paths)
+    matrix_state.add_account("agent_mind_alice_smith", "mindroom_mind_alice_smith_old", None, domain="example.org")
+    matrix_state.save(runtime_paths=runtime_paths)
+
+    response = test_client.get("/api/config/personal-agents")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "template": "mind",
+            "user_id": "@Alice.Smith:example.org",
+            "agent_name": "mind_alice_smith",
+            "matrix_user_id": "@mindroom_mind_alice_smith_old:example.org",
+            "display_name": "Alice's Mind",
+            "pending": False,
+            "template_exists": True,
+        },
+        {
+            "template": "mind",
+            "user_id": "@bob:localhost",
+            "agent_name": "mind_bob",
+            "matrix_user_id": "@bob.mind:localhost",
+            "display_name": "Bob's Mind",
+            "pending": True,
+            "template_exists": True,
+        },
+        {
+            "template": "old",
+            "user_id": "@carol:localhost",
+            "agent_name": "old_carol",
+            "matrix_user_id": "@mindroom_old_carol:localhost",
+            "display_name": None,
+            "pending": False,
+            "template_exists": False,
+        },
+        {
+            "template": "mind",
+            "user_id": "@dave:localhost",
+            "agent_name": "mind_dave",
+            "matrix_user_id": "@mindroom_mind_dave:localhost",
+            "display_name": "Dave's Mind",
+            "pending": False,
+            "template_exists": True,
+        },
+    ]
 
 
 def test_create_agent(test_client: TestClient, sample_agent_data: dict[str, Any], temp_config_file: Path) -> None:
@@ -3418,7 +3498,7 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
                 "config": {"model": "nomic-embed-text", "host": "http://localhost:11434"},
             },
         },
-        "models": {"default": {"provider": "test", "id": "test-model-2"}},
+        "models": {"default": {"provider": "openai", "id": "test-model-2"}},
         "agents": {
             "new_agent": {
                 "display_name": "New Agent",
@@ -3451,7 +3531,7 @@ def test_save_config_writes_keys_in_alphabetical_order(test_client: TestClient, 
     agent = {"display_name": "Agent", "role": "Role", "tools": [], "instructions": [], "rooms": []}
     new_config = {
         "router": {"model": "default"},
-        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {"zeta": agent, "alpha": agent},
     }
 
@@ -3470,7 +3550,7 @@ def test_save_config_persists_unassigned_configured_rooms(
 ) -> None:
     """Dashboard-created rooms should survive save even before responders are assigned."""
     new_config = {
-        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {
             "assistant": {
                 "display_name": "Assistant",
@@ -3651,6 +3731,28 @@ def test_save_config_validation_error_omits_submitted_api_keys(test_client: Test
     assert response.status_code == 422
     assert "either api_key or extra_kwargs.api_key" in response.text
     assert "sk-secret" not in response.text
+
+
+def test_structured_and_raw_saves_report_config_errors_like_every_config_surface(test_client: TestClient) -> None:
+    """Both dashboard saves report the shared config error messages, at locations the editors can match."""
+    config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": [7], "learnng": False}},
+    }
+    with pytest.raises(ValidationError) as info:
+        Config.model_validate(config)
+    messages = [message for _, message in iter_config_validation_messages(info.value)]
+
+    structured = test_client.put("/api/config/save", json=config)
+    raw = test_client.put("/api/config/raw", json={"source": yaml.safe_dump(config)})
+
+    expected = [
+        {"loc": ["agents", "assistant", "rooms", 0], "msg": messages[0], "type": "value_error"},
+        {"loc": ["agents", "assistant", "learnng"], "msg": messages[1], "type": "value_error"},
+    ]
+    assert (structured.status_code, structured.json()["detail"]) == (422, expected)
+    assert (raw.status_code, raw.json()["detail"]) == (422, expected)
 
 
 def test_save_config_can_recover_from_invalid_reload(

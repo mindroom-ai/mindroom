@@ -483,7 +483,7 @@ def _config(*, private_child: bool = False) -> Config:
             "caller": AgentConfig(display_name="Caller"),
             "child": child,
         },
-        models={"default": ModelConfig(provider="test", id="test-model")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
 
@@ -1173,7 +1173,7 @@ async def test_self_delegation_creates_one_transcript_and_minimal_receipt(tmp_pa
     module = _records_module()
     config = Config(
         agents={"caller": AgentConfig(display_name="Caller")},
-        models={"default": ModelConfig(provider="test", id="test-model")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
     )
     runtime_paths = test_runtime_paths(tmp_path)
     owner = module.DelegationRecordOwner(config, runtime_paths)

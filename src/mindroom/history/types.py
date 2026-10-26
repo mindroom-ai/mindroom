@@ -9,16 +9,17 @@ from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from mindroom.config.models import CompactionConfig
     from mindroom.llm.provider import NativeCompactionReplay
 
 COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
-_CompactionMode = Literal["auto", "manual"]
+CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
-_CompactionLifecycleStatus = Literal["failed", "timeout"]
+CompactionLifecycleStatus = Literal["failed", "timeout"]
 CompactionAvailabilityReason = Literal[
     "no_context_window",
     "non_positive_summary_input_budget",
@@ -95,10 +96,16 @@ class HistoryPolicy:
 
 @dataclass(frozen=True)
 class ResolvedHistorySettings:
-    """Resolved history selection policy and tool-call limits for one run."""
+    """Resolved history selection policy, tool-call limits, and text compaction config for one run.
+
+    ``has_authored_compaction_config`` tells whether the operator configured text compaction for the entity or its
+    defaults, rather than only inheriting the built-in config.
+    """
 
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
+    compaction_config: CompactionConfig
+    has_authored_compaction_config: bool
 
     @property
     def replays_whole_history(self) -> bool:
@@ -114,6 +121,11 @@ class ScopeSummary:
     updated_at: datetime
 
 
+def replayed_summary_text(text: str | None) -> str | None:
+    """Return a stored summary as replay reads it: stripped, or None when it is missing or blank."""
+    return (text or "").strip() or None
+
+
 @dataclass(frozen=True)
 class HistoryScopeState:
     """Persisted compaction control state stored in session metadata.
@@ -123,6 +135,11 @@ class HistoryScopeState:
     """
 
     force_compact_before_next_run: bool = False
+
+    @property
+    def compaction_mode(self) -> CompactionMode:
+        """Return how a compaction of this scope is reported: manual when requested, else automatic."""
+        return "manual" if self.force_compact_before_next_run else "auto"
 
 
 @dataclass(frozen=True)
@@ -173,7 +190,7 @@ class CompactionDecision:
 class CompactionLifecycleStart:
     """Visible lifecycle notice payload emitted before foreground compaction."""
 
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
@@ -187,7 +204,7 @@ class CompactionLifecycleStart:
 class CompactionLifecycleProgress:
     """Visible lifecycle progress payload emitted after persisted compaction chunks."""
 
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
@@ -242,11 +259,11 @@ class CompactionLifecycleFailure:
     """Visible lifecycle notice payload emitted after failed foreground compaction."""
 
     notice_event_id: str | None
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
-    status: _CompactionLifecycleStatus
+    status: CompactionLifecycleStatus
     duration_ms: int
     failure_reason: str
     history_budget_tokens: int | None
@@ -272,7 +289,7 @@ class CompactionLifecycle(Protocol):
 class CompactionOutcome:
     """Completed compaction result used for lifecycle notices and tests."""
 
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary: str

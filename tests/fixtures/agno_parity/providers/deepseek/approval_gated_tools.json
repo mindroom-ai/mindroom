@@ -19,7 +19,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -128,6 +127,8 @@
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -138,8 +139,6 @@
           "content": "Email the invoice for order A-1001."
         }
       ],
-      "model": "deepseek-flash",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

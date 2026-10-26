@@ -42,7 +42,6 @@
       "model": "mindroom.routing:_RoutingSuggestion"
     },
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -72,6 +71,7 @@
   },
   "request": {
     "body": {
+      "model": "openai/gpt-oss-120b",
       "messages": [
         {
           "role": "system",
@@ -82,7 +82,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "openai/gpt-oss-120b",
       "response_format": {
         "type": "json_object"
       },

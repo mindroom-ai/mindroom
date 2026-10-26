@@ -52,7 +52,13 @@ from tests.history_helpers import (
     _runtime_paths,
     _session,
     folded_run_ids,
+    replay_settings,
 )
+
+
+def _agent_settings(config: Config) -> ResolvedHistorySettings:
+    """Return the test agent's resolved history settings, which hold its compaction config."""
+    return config.resolve_entity("test_agent").history_settings
 
 
 def _viewed_image_message(index: int) -> Message:
@@ -89,10 +95,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
     estimate_prompt_visible_history_tokens(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-        ),
+        history_settings=replay_settings(),
         replay_estimator=replay_estimator,
         native_route=native_route,
     )
@@ -106,7 +109,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
 @pytest.mark.parametrize("native_route", [None, "native-route"])
 def test_history_estimate_charges_conservative_visual_cost_without_provider_estimator(native_route: str | None) -> None:
     """Fallback planning charges visual tokens without treating image bytes as prompt text."""
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     without_image = _session(
         "without-image",
@@ -148,10 +151,7 @@ def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavail
     tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-        ),
+        history_settings=replay_settings(),
         replay_estimator=ReplayEstimate(None, uses_visual_tokens=True),
         native_route=native_route,
     )
@@ -164,7 +164,7 @@ def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_esti
     native_route: str | None,
 ) -> None:
     """A larger provider text estimate cannot hide the fallback image charge."""
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     without_image = _session(
         "without-image",
@@ -258,8 +258,8 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=1_000_000,
         static_prompt_tokens=10,
@@ -415,7 +415,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
         runtime_paths,
     )
 
-    resolved = config.resolve_entity("test_agent").compaction_config
+    resolved = _agent_settings(config).compaction_config
 
     assert resolved.enabled is True
     assert resolved.threshold_tokens is None
@@ -470,8 +470,8 @@ def test_authored_empty_defaults_compaction_enables_text_compaction(tmp_path: Pa
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -505,8 +505,8 @@ def test_omitted_defaults_compaction_enables_text_compaction(tmp_path: Path) -> 
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -544,8 +544,8 @@ def test_empty_agent_compaction_override_stays_disabled_with_disabled_defaults(t
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -710,7 +710,7 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_cl
         runtime_paths,
     )
 
-    compaction_config = config.resolve_entity("test_agent").compaction_config
+    compaction_config = _agent_settings(config).compaction_config
 
     assert compaction_config.enabled is False
     assert compaction_config.model is None
@@ -789,7 +789,7 @@ def _fallback_inheritance_config(tmp_path: Path, *, override: CompactionOverride
 def test_resolved_compaction_config_inherits_fallback_model_from_defaults(tmp_path: Path) -> None:
     config = _fallback_inheritance_config(tmp_path, override=CompactionOverrideConfig(enabled=True))
 
-    compaction_config = config.resolve_entity("test_agent").compaction_config
+    compaction_config = _agent_settings(config).compaction_config
 
     assert compaction_config.enabled is True
     assert compaction_config.model == "summary-model"
@@ -804,7 +804,7 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_fi
     ):
         config = _fallback_inheritance_config(tmp_path, override=override)
 
-        compaction_config = config.resolve_entity("test_agent").compaction_config
+        compaction_config = _agent_settings(config).compaction_config
 
         assert compaction_config.enabled is False
         assert compaction_config.fallback_model is None
@@ -815,7 +815,7 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
         has_authored_compaction_config=True,
         active_model_name="default",
         active_context_window=48_000,
@@ -853,7 +853,7 @@ def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
         has_authored_compaction_config=True,
         active_model_name="default",
         active_context_window=1_000_000,
@@ -983,8 +983,8 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=None,
         static_prompt_tokens=2_000,
@@ -1084,8 +1084,8 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=4_096,
         static_prompt_tokens=500,
@@ -1117,8 +1117,8 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=context_window_tokens,
         static_prompt_tokens=10,
@@ -1162,8 +1162,8 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=1_000,
         static_prompt_tokens=10,
@@ -1194,8 +1194,8 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        compaction_config=_agent_settings(config).compaction_config,
+        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
         active_model_name="default",
         active_context_window=active_context_window,
         static_prompt_tokens=10_000,
@@ -1318,10 +1318,7 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
     )
 
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="runs", limit=2),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = replay_settings(HistoryPolicy(mode="runs", limit=2))
     replay_plan = plan_replay_that_fits(
         session=session,
         scope=scope,
@@ -1412,10 +1409,7 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
         estimated_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="runs", limit=2),
-                max_tool_calls_from_history=None,
-            ),
+            history_settings=replay_settings(HistoryPolicy(mode="runs", limit=2)),
             replay_estimator=None,
         ),
         add_history_to_context=True,
@@ -1546,7 +1540,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
     session = _session("summary-only", runs=[])
     session.summary = summary
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
     size = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
@@ -1588,7 +1582,7 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
     )
     session.summary = ScopeSummary(text="Project facts", updated_at=datetime.now(UTC))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
     plan = plan_replay_that_fits(
         session=session,
         scope=scope,
@@ -1623,10 +1617,7 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
     )
 
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = replay_settings()
     replay_plan = plan_replay_that_fits(
         session=session,
         scope=scope,

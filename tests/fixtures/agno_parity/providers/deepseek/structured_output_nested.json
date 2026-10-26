@@ -196,7 +196,6 @@
       "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -204,7 +203,6 @@
     "message": {
       "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
       "provider_data": {
-        "finish_reason": "stop",
         "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "deepseek-flash",
@@ -223,6 +221,8 @@
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -233,9 +233,11 @@
           "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
-      "model": "deepseek-flash",
       "response_format": {
         "type": "json_object"
+      },
+      "stream_options": {
+        "include_usage": true
       },
       "thinking": {
         "type": "enabled"
@@ -250,36 +252,87 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "choices": [
-        {
-          "finish_reason": "stop",
-          "index": 0,
-          "message": {
-            "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
-            "role": "assistant"
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
           }
         }
-      ],
-      "created": 1792540800,
-      "id": "chatcmpl-parity",
-      "model": "deepseek-flash",
-      "object": "chat.completion",
-      "system_fingerprint": "fp_parity",
-      "usage": {
-        "completion_tokens": 12,
-        "completion_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "prompt_tokens": 42,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        },
-        "total_tokens": 54
+      },
+      {
+        "data": "[DONE]"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output_nested"

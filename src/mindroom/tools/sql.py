@@ -116,7 +116,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["sqlalchemy"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/sql",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#sql",
     function_names=("describe_table", "list_tables", "run_sql", "run_sql_query"),
 )
 def sql_tools() -> type[SQLTools]:

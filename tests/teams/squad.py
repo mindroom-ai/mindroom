@@ -1,4 +1,4 @@
-"""The C4 ``squad`` and ``panel`` teams rebuilt on the owned runtime, and the comparison with the rows Agno stored.
+"""The ``squad`` and ``panel`` teams of the storage goldens, and the comparison with the rows Agno stored.
 
 The capture ran ``Team-writer-checker`` with a scripted ``Synthetic`` provider: the writer has MindRoom's calculator,
 the checker the same calculator with ``multiply`` under the approval policy, and the leader only the delegation tool.
@@ -52,14 +52,14 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 
 
 def golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
-    """Return one run as the C4 capture loaded it from the store Agno wrote."""
+    """Return one run of the storage goldens as loaded from the store Agno wrote."""
     sessions = json.loads((STORAGE / "loaded_sessions.json").read_text(encoding="utf-8"))[store]
     [run] = [run for run in sessions[session_id]["runs"] if run["run_id"] == run_id]
     return run
 
 
 def pre_resume_runs(dump: str) -> dict[str, dict[str, Any]]:
-    """Return the run rows of one C6 pre-resume dump by run id, as the resume read them."""
+    """Return the run rows of one pre-resume dump by run id, as the resume read them."""
     with closing(sqlite3.connect(":memory:")) as connection:
         connection.executescript((STORAGE / f"{dump}.sql").read_text(encoding="utf-8"))
         [table] = [
@@ -178,6 +178,20 @@ def run_context(run_id: str, session_id: str, metadata: dict[str, Any] | None = 
     return RunContext(run_id=run_id, session=UnstoredSession(session_id), user_id=REQUESTER, metadata=metadata)
 
 
+def stored_as_owned(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a run row Agno stored as the owned runtime stores it: a member run holds none of the team's metadata.
+
+    Agno stored the team run's metadata on every member run; the owned runtime stores it on the team's row alone. A
+    team row's paused member runs ride along in ``member_responses`` and drop it too.
+    """
+    result = dict(row)
+    if row.get("parent_run_id") is not None:
+        result.pop("metadata", None)
+    if "member_responses" in row:
+        result["member_responses"] = [stored_as_owned(member) for member in row["member_responses"]]
+    return result
+
+
 def golden_metadata(team_row: dict[str, Any]) -> dict[str, Any]:
     """Return the run metadata the turn started with: the stored metadata minus what MindRoom added afterwards."""
     return {key: value for key, value in team_row["metadata"].items() if key != "io.mindroom.ai_run"}
@@ -236,9 +250,21 @@ def start_team(
     ctx: RunContext,
     persist: Persist[AnyRunRecord] = no_store,
     request_template: ModelRequest = EMPTY_REQUEST,
+    stream: bool = True,
 ) -> AsyncIterator[TeamRunEvent]:
-    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store."""
-    return run_team(team, run_input, ctx=ctx, hooks=NO_HOOKS, persist=persist, request_template=request_template)
+    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store.
+
+    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
+    """
+    return run_team(
+        team,
+        run_input,
+        ctx=ctx,
+        hooks=NO_HOOKS,
+        persist=persist,
+        request_template=request_template,
+        stream=stream,
+    )
 
 
 def resume_team(
@@ -280,8 +306,8 @@ def comparable(run: dict[str, Any]) -> dict[str, Any]:
 
     Prompt-role messages leave completed rows, as the store strips them; random ids become ``<id-n>`` in
     first-appearance order; every timestamp and duration becomes a sentinel, so its presence is compared but not its
-    value; a tool's timing keeps only which keys it recorded; the run metadata MindRoom adds after the turn
-    (``io.mindroom.ai_run``) goes, the rest of the metadata is compared.
+    value; the run metadata MindRoom adds after the turn (``io.mindroom.ai_run``) goes, the rest of the metadata is
+    compared.
     """
     text = json.dumps(_stored_shape(expected_run_dict(run)), sort_keys=True)
     ids: dict[str, str] = {}
@@ -320,22 +346,6 @@ def _with_clock_sentinels(run: dict[str, Any]) -> dict[str, Any]:
         # provider reported, so even its presence differs.
         metrics = _clocked(result["metrics"], frozenset({"duration"}))
         result["metrics"] = {key: value for key, value in metrics.items() if key != "time_to_first_token"}
-    if "tools" in result and result["tools"] is not None:
-        result["tools"] = [_tool_with_clock_sentinels(tool) for tool in result["tools"]]
-    if "requirements" in result and result["requirements"] is not None:
-        result["requirements"] = [
-            {
-                **_clocked(item, frozenset({"created_at"})),
-                "tool_execution": _tool_with_clock_sentinels(item["tool_execution"]),
-            }
-            for item in result["requirements"]
-        ]
     if "member_responses" in result:
         result["member_responses"] = [_with_clock_sentinels(item) for item in result["member_responses"]]
-    return result
-
-
-def _tool_with_clock_sentinels(tool: dict[str, Any]) -> dict[str, Any]:
-    result = _clocked(tool, frozenset({"created_at"}))
-    result["metrics"] = None if tool["metrics"] is None else sorted(tool["metrics"])
     return result

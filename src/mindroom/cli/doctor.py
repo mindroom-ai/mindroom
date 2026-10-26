@@ -38,7 +38,6 @@ from mindroom.matrix.provisioning_env import (
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.credentials import model_uses_own_credential
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
-from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
@@ -334,16 +333,16 @@ def _validate_vertexai_claude_connection(
     if missing:
         return None, f"missing {', '.join(missing)}"
 
-    # Google auth and the anthropic SDK load only when a Vertex Claude model is checked.
+    # Google auth, the anthropic SDK, and its HTTP client load only when a Vertex Claude model is checked.
     from google.auth.exceptions import DefaultCredentialsError  # noqa: PLC0415
 
     from mindroom.providers.anthropic.messages import build_provider  # noqa: PLC0415
+    from mindroom.providers.model_http_client import closing_model_connections  # noqa: PLC0415
 
     probe_config = model_config.model_copy(update={"extra_kwargs": {"timeout": 10, **extra_kwargs, "max_tokens": 1}})
     request = ModelRequest(
         messages=[Message(role="user", content="Reply with OK.")],
         overrides=RequestOverrides(prompt_cache=False, disable_thinking=True),
-        stream=False,
     )
     try:
         provider = build_provider(probe_config, runtime_paths)

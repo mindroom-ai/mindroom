@@ -19,7 +19,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -303,6 +302,8 @@
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -313,8 +314,6 @@
           "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
         }
       ],
-      "model": "deepseek-flash",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

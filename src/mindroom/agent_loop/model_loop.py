@@ -229,10 +229,9 @@ async def _before_request(
 ) -> Sequence[Message] | None:
     """Apply the request cap, then the pre-request hooks; return the messages to send, or None to end the loop."""
     if max_requests is not None and state.request_index >= max_requests:
-        record = state.record
         logger.warning(
             "tool_call_limit_reached",
-            entity=record.agent_id if isinstance(record, RunRecord) else record.team_id,
+            entity=_entity(state.record),
             budget=max_requests - _EXTRA_MODEL_REQUESTS,
             model_requests=state.request_index,
         )
@@ -256,9 +255,8 @@ def _accept_turn(
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
     The provider stamped the message with the model that answered it. A request that answers without content, as the
-    adapters report a streamed turn without text, leaves the content as it was, so a resumed run keeps its paused text
-    until the model says something new. Empty content, which a reply that does not stream can carry, is blank text;
-    its member results tell blank text from none.
+    adapters report a turn without text, leaves the content as it was, so a resumed run keeps its paused text until the
+    model says something new.
     """
     metrics = state.record.metrics
     assert metrics is not None
@@ -295,6 +293,7 @@ async def _run_tool_batch(
         state.messages,
         calls_so_far=progress.calls_so_far,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
+        entity=_entity(state.record),
     )
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
@@ -352,6 +351,11 @@ async def _answer_resumed(
             execution.external_execution_required = False
     progress.stopped = await _answer_batch(state.messages, results, hooks.on_resume_entry)
     progress.paused = _waits_for_decision(state.record)
+
+
+def _entity(record: AnyRunRecord) -> str | None:
+    """Return the agent or team the run belongs to, which its loop's warnings name."""
+    return record.agent_id if isinstance(record, RunRecord) else record.team_id
 
 
 def _waits_for_decision(record: AnyRunRecord) -> bool:

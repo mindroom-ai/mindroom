@@ -68,7 +68,7 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeReso
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
+from mindroom.llm.provider import ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
@@ -84,7 +84,7 @@ from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.invocation import current_tool_call
-from mindroom.tool_system.tool_calls import record_tool_success
+from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -94,8 +94,8 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
-from tests.team_runtime.squad import built_team, team_spec
-from tests.team_runtime.squad import member as team_member
+from tests.teams.squad import built_team, team_spec
+from tests.teams.squad import member as team_member
 
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
@@ -1110,9 +1110,10 @@ class TestChatCompletions:
                         model_name="default",
                         run_id="run-1",
                         session_id="session-1",
-                        status="completed",
+                        status=RunStatus.completed,
                         model="claude-sonnet-5-5",
                         model_provider="Anthropic",
+                        tool_count=0,
                         metrics=RunMetrics(
                             tokens=TokenCounts(
                                 input_tokens=40,
@@ -3224,12 +3225,13 @@ _PREPARED_TEAM_TURN = _prepared_team_execution_context(final_prompt="Build it")
 
 @dataclass(frozen=True)
 class _TeamRunCall:
-    """One ``run_team`` call the bridge made: the team, its request, and the run's context."""
+    """One ``run_team`` call the bridge made: the team, its request, the run's context, and its stream mode."""
 
     spec: TeamSpec
     messages: list[Message]
     ctx: RunContext
     request_template: ModelRequest
+    stream: bool
 
 
 @contextmanager
@@ -3244,10 +3246,11 @@ def _recorded_team_runs() -> Iterator[list[_TeamRunCall]]:
         *,
         ctx: RunContext,
         request_template: ModelRequest,
+        stream: bool,
         **kwargs: object,
     ) -> AsyncIterator[object]:
-        recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template))
-        return real_run_team(spec, messages, ctx=ctx, request_template=request_template, **kwargs)  # type: ignore[arg-type]
+        recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template, stream))
+        return real_run_team(spec, messages, ctx=ctx, request_template=request_template, stream=stream, **kwargs)  # type: ignore[arg-type]
 
     with patch("mindroom.teams.envelope.run_team", new=recording_run_team):
         yield recorded
@@ -3582,7 +3585,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
         [run] = runs
         assert [message.content for message in run.messages] == ["Build a feature"]
-        assert run.request_template.stream is False
+        assert run.stream is False
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
 
@@ -3826,15 +3829,15 @@ class TestTeamCompletion:
                 tool_name="demo_tool",
                 arguments={"query": "test"},
                 result={"status": "ok"},
-                duration_ms=1.0,
+                timing=ToolCallTiming(result_ready_ms=1.0),
                 agent_name="team/super_team",
+                channel=execution_identity.channel,
                 room_id=None,
                 thread_id=None,
                 reply_to_event_id=None,
                 requester_id=None,
                 session_id="session-123",
                 correlation_id=correlation_id,
-                execution_identity=execution_identity,
                 runtime_paths=runtime_paths,
             )
             yield TextDelta("Hello ")
@@ -3932,7 +3935,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["built"] is team
         [run] = runs
         assert [message.content for message in run.messages] == ["Build it"]
-        assert run.request_template.stream is True
+        assert run.stream is True
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 456
 
@@ -4465,7 +4468,7 @@ class TestTeamCompletion:
             "member-model": 44,
         }
 
-    def test_a_claude_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
+    def test_a_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
         self,
         team_app_client: TestClient,
     ) -> None:
@@ -4481,10 +4484,9 @@ class TestTeamCompletion:
             answer("I will split the work."),
             members=[("general", "GeneralAgent", member)],
         )
-        leader = replace(built.spec.leader.model, capabilities=Capabilities(claude_family=True))
-        team = replace(built, spec=replace(built.spec, leader=replace(built.spec.leader, model=leader)))
+        leader = built.spec.leader.model
 
-        with patch("mindroom.api.openai_compat._build_team", return_value=team):
+        with patch("mindroom.api.openai_compat._build_team", return_value=built):
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={"model": "team/super_team", "messages": [{"role": "user", "content": "Write it all"}]},
@@ -4553,8 +4555,8 @@ class TestTeamCompletion:
         ]
 
     @pytest.mark.asyncio
-    async def test_prepare_openai_team_execution_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
-        """OpenAI team prep should recover notice facts and preserve assistant-role rendering."""
+    async def test_prepare_openai_team_execution_scrubs_queued_notices_and_renders_the_messages_as_sent(self) -> None:
+        """OpenAI team prep should recover notice facts and render the leader's messages as they are sent."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
@@ -4669,7 +4671,7 @@ class TestTeamCompletion:
                 execution_identity=_team_identity("general", runtime_paths, session_id="session-openai-team-prep"),
             )
 
-        assert prepared.prompt_text == "assistant: Previous team reply\n\nAnalyze this."
+        assert prepared.prompt_text == "Previous team reply\n\nAnalyze this."
         assert prepared.run_metadata is not None
         assert "tools_schema" not in prepared.run_metadata
         assert prepared.run_metadata["model_params"] == {"temperature": 0.7}

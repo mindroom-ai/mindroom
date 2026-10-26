@@ -125,7 +125,7 @@ if TYPE_CHECKING:
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["openai"],
-    docs_url="https://docs.agno.com/tools/toolkits/models/openai",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#openai",
     function_names=("generate_image", "generate_speech", "transcribe_audio"),
 )
 def openai_tools() -> type[MindRoomOpenAITools]:

@@ -20,7 +20,7 @@ from ollama import AsyncClient
 
 from mindroom.credentials.sync import get_ollama_host
 from mindroom.llm.errors import InvalidRequest
-from mindroom.llm.messages import split_thinking, tool_result_view
+from mindroom.llm.messages import tool_result_view
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -34,7 +34,7 @@ from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import finished_assistant_message, output_started
+from mindroom.providers.assistant_turn import ThinkTagSplitter, finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.media import Image
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
+    from mindroom.llm.provider import ModelRequest, ReasoningDelta, StopReason, StreamEvent, ToolSpec
 
 logger = get_logger(__name__)
 
@@ -61,12 +61,24 @@ _IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 
 @dataclass(slots=True)
 class _OllamaReply:
+    """What one streamed reply produced so far; a model's inline ``<think>`` block becomes its reasoning."""
+
     content: str = ""
-    reasoning: str | None = None
+    reasoning: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     usage: MessageMetrics | None = None
     done_reason: str | None = None
     done: bool = False
+    think: ThinkTagSplitter = field(default_factory=ThinkTagSplitter)
+
+    def add_text(self, deltas: list[TextDelta | ReasoningDelta]) -> list[TextDelta | ReasoningDelta]:
+        """Record the reply text and inline reasoning the think-tag splitter released, and return them."""
+        for delta in deltas:
+            if isinstance(delta, TextDelta):
+                self.content += delta.text
+            else:
+                self.reasoning += delta.text
+        return deltas
 
 
 @dataclass(slots=True, kw_only=True)
@@ -87,7 +99,7 @@ class OllamaProvider:
         return settings_params(self.settings)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Send one chat request, streamed unless ``request.stream`` is False, and yield its events."""
+        """Send one streamed chat request and yield its events."""
         messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
         model = self.identity.id.strip()
         chat_kwargs = self._chat_kwargs(request)
@@ -96,32 +108,24 @@ class OllamaProvider:
         first_output_at: float | None = None
         try:
             client = self._sdk_client()
-            if request.stream:
-                chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
-                async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
-                    async for chunk in responses:
-                        for event in _read_chunk(reply, chunk) or [StreamProgress()]:
-                            first_output_at = output_started(first_output_at, event)
-                            yield event
-            else:
-                response = await client.chat(model=model, messages=messages, **chat_kwargs)
-                first_output_at = time.monotonic()
-                _read_chunk(reply, cast("ChatResponse", response))
-                # Only a whole reply with an opening ``<think>`` tag has its reasoning split out, kept as main behaves.
-                if "<think>" in reply.content:
-                    reply.reasoning, reply.content = split_thinking(reply.content)
+            chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
+            async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
+                async for chunk in responses:
+                    for event in _read_chunk(reply, chunk) or [StreamProgress()]:
+                        first_output_at = output_started(first_output_at, event)
+                        yield event
         except Exception as error:
             # Any exception that is not a provider failure propagates as it is.
             if (failure := provider_error(error, provider=self.identity.provider_name)) is None:
                 raise
             raise failure from error
-        if request.stream and not reply.done:
+        if not reply.done:
             # The stream ended before its done chunk, so the turn did not finish.
             return
         message = finished_assistant_message(
             self.identity,
             content=reply.content or None,
-            reasoning=reply.reasoning,
+            reasoning=reply.reasoning or None,
             tool_calls=reply.tool_calls,
             usage=reply.usage,
             started=started,
@@ -132,11 +136,15 @@ class OllamaProvider:
         yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        """Return the chat parameters of one request; authored ``request_params`` override the settings and tools."""
+        """Return the chat parameters of one request; authored ``request_params`` override the settings and tools.
+
+        A request's temperature override, such as a thread summary's, replaces an authored ``options.temperature``.
+        """
         settings = self.settings
-        # TODO(simplify): a request's temperature override, such as a thread summary's, is ignored. Send it as
-        # ``options.temperature``, as other routes apply theirs. Models would notice (#3075).
-        authored = {"format": settings.format, "options": settings.options or None, "keep_alive": settings.keep_alive}
+        options = dict(settings.options or {})
+        if request.overrides.temperature is not None:
+            options["temperature"] = request.overrides.temperature
+        authored = {"format": settings.format, "options": options or None, "keep_alive": settings.keep_alive}
         kwargs: dict[str, Any] = {key: value for key, value in authored.items() if value is not None}
         # TODO(simplify): ``tool_choice: "none"`` still sends the tools, so the model can call them; only a decision
         # request drops them. Drop the tools whenever ``tool_choice`` is "none". Models would notice (#3075).
@@ -230,7 +238,10 @@ def _read_image(path: Path, provider: str) -> bytes:
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
-    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then its text and tool calls."""
+    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then its text and tool calls.
+
+    The done chunk ends the reply, so it also releases the text the think-tag splitter held back.
+    """
     events: list[StreamEvent] = []
     if chunk.done:
         reply.done = True
@@ -239,8 +250,9 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
         events.append(UsageReported(reply.usage, final=False))
     message = chunk.message
     if message.content:
-        reply.content += message.content
-        events.append(TextDelta(message.content))
+        events.extend(reply.add_text(reply.think.add(message.content)))
+    if chunk.done:
+        events.extend(reply.add_text(reply.think.finish()))
     for tool_call in message.tool_calls or ():
         call = {
             "id": str(uuid4()),

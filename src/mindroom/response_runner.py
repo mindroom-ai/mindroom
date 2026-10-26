@@ -728,7 +728,12 @@ def _mid_turn_for_request(
     if gate is not None:
         # The ingress history may be stale until this response acquires the lock.
         gate.bind_conversation_context(None)
-    if gate is not None and request.existing_event_id and not _shows_placeholder(request):
+    # A regeneration replaces an answer that may show, even one whose event Matrix has not acknowledged yet.
+    if (
+        gate is not None
+        and (request.existing_event_id or request.edit_regeneration)
+        and not _shows_placeholder(request)
+    ):
         gate.visible_response_text = None
     return gate
 

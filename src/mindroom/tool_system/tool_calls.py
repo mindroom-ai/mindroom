@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -68,11 +67,11 @@ class _ToolCallRecordDict(TypedDict, total=False):
 
 @dataclass(frozen=True, slots=True)
 class ToolCallTiming:
-    """Optional phase timing breakdown for one tool call."""
+    """When one tool call's result was ready, which is its duration, and the phases measured before it."""
 
+    result_ready_ms: float
     before_hooks_ms: float | None = None
     tool_body_ms: float | None = None
-    result_ready_ms: float | None = None
 
     def as_dict(self) -> dict[str, float]:
         """Return JSON-safe timing fields, omitting phases that were not measured."""
@@ -98,10 +97,9 @@ class _ToolCallRecord:
     requester_id: str | None
     session_id: str | None
     correlation_id: str
-    duration_ms: float
     arguments: _JsonValue
     success: bool
-    timing: ToolCallTiming | None = None
+    timing: ToolCallTiming
     result: _JsonValue | None = None
     error_type: str | None = None
     error_message: str | None = None
@@ -111,6 +109,11 @@ class _ToolCallRecord:
     call_id: str | None = None
     toolkit_name: str | None = None
     function_name: str | None = None
+
+    @property
+    def duration_ms(self) -> float:
+        """The call's duration, the time its result was ready, JSON-safe."""
+        return _sanitize_duration_ms(self.timing.result_ready_ms)
 
     def as_dict(self) -> _ToolCallRecordDict:
         """Return the record in JSON-serializable dictionary form."""
@@ -132,10 +135,7 @@ class _ToolCallRecord:
             "session_id": self.session_id,
         }
         record.update({key: value for key, value in context_fields.items() if value is not None})
-        if self.timing is not None:
-            timing = self.timing.as_dict()
-            if timing:
-                record["timing"] = cast("_JsonValue", timing)
+        record["timing"] = cast("_JsonValue", self.timing.as_dict())
         if self.success or self.result is not None:
             record["result"] = self.result
         optional_fields: tuple[tuple[str, str | None], ...] = (
@@ -208,8 +208,7 @@ def _build_tool_failure_record(
     tool_name: str,
     arguments: dict[str, object],
     error: BaseException,
-    duration_ms: float,
-    timing: ToolCallTiming | None = None,
+    timing: ToolCallTiming,
     agent_name: str | None,
     channel: str | None,
     room_id: str | None,
@@ -232,7 +231,6 @@ def _build_tool_failure_record(
         requester_id=requester_id,
         session_id=session_id,
         correlation_id=correlation_id,
-        duration_ms=_sanitize_duration_ms(duration_ms),
         arguments=sanitize_failure_value(arguments),
         success=False,
         timing=timing,
@@ -248,8 +246,7 @@ def _build_tool_success_record(
     tool_name: str,
     arguments: dict[str, object],
     result: object,
-    duration_ms: float,
-    timing: ToolCallTiming | None = None,
+    timing: ToolCallTiming,
     agent_name: str | None,
     channel: str | None,
     room_id: str | None,
@@ -272,7 +269,6 @@ def _build_tool_success_record(
         requester_id=requester_id,
         session_id=session_id,
         correlation_id=correlation_id,
-        duration_ms=_sanitize_duration_ms(duration_ms),
         arguments=sanitize_failure_value(arguments),
         success=True,
         timing=timing,
@@ -356,16 +352,15 @@ def record_tool_failure(
     tool_name: str,
     arguments: dict[str, object],
     error: BaseException,
-    duration_ms: float,
-    timing: ToolCallTiming | None = None,
+    timing: ToolCallTiming,
     agent_name: str | None,
+    channel: str | None,
     room_id: str | None,
     thread_id: str | None,
     reply_to_event_id: str | None,
     requester_id: str | None,
     session_id: str | None,
     correlation_id: str,
-    execution_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths | None,
     origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
@@ -374,10 +369,9 @@ def record_tool_failure(
         tool_name=tool_name,
         arguments=arguments,
         error=error,
-        duration_ms=duration_ms,
         timing=timing,
         agent_name=agent_name,
-        channel=execution_identity.channel if execution_identity is not None else None,
+        channel=channel,
         room_id=room_id,
         thread_id=thread_id,
         reply_to_event_id=reply_to_event_id,
@@ -394,16 +388,15 @@ def record_tool_success(
     tool_name: str,
     arguments: dict[str, object],
     result: object,
-    duration_ms: float,
-    timing: ToolCallTiming | None = None,
+    timing: ToolCallTiming,
     agent_name: str | None,
+    channel: str | None,
     room_id: str | None,
     thread_id: str | None,
     reply_to_event_id: str | None,
     requester_id: str | None,
     session_id: str | None,
     correlation_id: str,
-    execution_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths | None,
     origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
@@ -412,10 +405,9 @@ def record_tool_success(
         tool_name=tool_name,
         arguments=arguments,
         result=result,
-        duration_ms=duration_ms,
         timing=timing,
         agent_name=agent_name,
-        channel=execution_identity.channel if execution_identity is not None else None,
+        channel=channel,
         room_id=room_id,
         thread_id=thread_id,
         reply_to_event_id=reply_to_event_id,

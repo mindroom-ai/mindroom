@@ -168,7 +168,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["composio-agno"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/composio",
+    docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#composio",
     supports_toolkit_filters=False,
 )
 def composio_tools() -> "type[Toolkit]":

@@ -274,11 +274,6 @@
       "new": 1
     }
   },
-  "tool_call_metrics": {
-    "start_time": 1.0,
-    "end_time": 2.5,
-    "duration": 1.5
-  },
   "run_metrics": {
     "input_tokens": 300,
     "output_tokens": 60,

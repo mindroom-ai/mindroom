@@ -139,7 +139,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/whatsapp",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#whatsapp",
     function_names=(
         "send_document",
         "send_image",

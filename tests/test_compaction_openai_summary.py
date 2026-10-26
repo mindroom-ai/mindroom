@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
+import httpx2
 import pytest
 
 from mindroom.config.models import ModelConfig
@@ -20,7 +21,7 @@ from mindroom.llm.errors import TRANSPORT_TIMEOUT, ProviderError, ProviderUnavai
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.openai.build import build_provider
-from tests.providers.golden_support import pipeline_provider
+from tests.providers.golden_support import httpx2_transport, pipeline_provider, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
@@ -50,7 +51,7 @@ def _model(
     )
     runtime = provider_runtime(
         resolve_runtime_paths(config_path=root / "config.yaml", storage_path=root / "data", process_env={}),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)),
     )
     return pipeline_provider(build_provider(config, runtime))
 
@@ -61,15 +62,16 @@ def _response(
     complete: bool = False,
     reason: str = "length",
     output_tokens: int = 1,
+    model: str = "gpt-6-astra",
 ) -> httpx.Response:
+    """Return the route's streamed summary reply "Project facts", cut off for ``reason`` unless ``complete``."""
     if route == "chat":
-        return httpx.Response(
-            200,
-            json={
+        return streamed_reply(
+            {
                 "id": "chatcmpl-summary",
                 "object": "chat.completion",
                 "created": 1,
-                "model": "gpt-6-astra",
+                "model": model,
                 "choices": [
                     {
                         "index": 0,
@@ -80,13 +82,12 @@ def _response(
                 "usage": {"prompt_tokens": 10, "completion_tokens": output_tokens, "total_tokens": 10 + output_tokens},
             },
         )
-    return httpx.Response(
-        200,
-        json={
+    return streamed_reply(
+        {
             "id": "resp_summary",
             "object": "response",
             "created_at": 1,
-            "model": "gpt-6-astra",
+            "model": model,
             "status": "completed" if complete else "incomplete",
             "incomplete_details": None
             if complete
@@ -134,7 +135,6 @@ async def test_summary_rejects_explicit_output_limit_below_usage_cap(route: _Rou
         )
     assert len(requests) == 1
     assert requests[0]["max_completion_tokens" if route == "chat" else "max_output_tokens"] == 4
-    assert requests[0].get("stream") is not True
 
 
 @pytest.mark.parametrize("route", ["chat", "responses"])
@@ -197,9 +197,9 @@ async def test_summary_makes_one_http_attempt_whatever_retries_the_model_authors
 async def test_a_summary_whose_transport_times_out_fails_as_a_timeout(route: _Route, tmp_path: Path) -> None:
     """The SDK's timeout error keeps the transport timeout's code, so compaction reports a timeout."""
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx.Response:
         msg = "The read operation timed out"
-        raise httpx.ReadTimeout(msg, request=request)
+        raise httpx2.ReadTimeout(msg, request=request)
 
     with pytest.raises(ProviderUnavailable) as raised:
         await generate_compaction_summary(
@@ -219,8 +219,7 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
 
     def respond(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
-        response = _response("chat", complete=True)
-        return httpx.Response(200, json={**json.loads(response.content), "model": "anthropic/claude-sonnet-5"})
+        return _response("chat", complete=True, model="anthropic/claude-sonnet-5")
 
     config = ModelConfig(
         provider="openrouter",
@@ -229,12 +228,12 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
     )
     runtime = provider_runtime(
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={}),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)),
     )
     model = pipeline_provider(build_provider(config, runtime))
     messages = (Message(role="system", content="Summarize"), Message(role="user", content="Conversation"))
 
-    await complete(model, ModelRequest(messages=messages, stream=False))
+    await complete(model, ModelRequest(messages=messages))
     summary = await generate_compaction_summary(
         model=model,
         summary_input="Conversation",

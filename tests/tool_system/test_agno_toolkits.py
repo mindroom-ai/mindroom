@@ -1,4 +1,4 @@
-"""The Agno toolkit adapter reproduces the C3 tool goldens' fields the owned loop reads, for every registered tool."""
+"""The Agno toolkit adapter reproduces the tool goldens' fields the owned loop reads, for every registered tool."""
 
 from __future__ import annotations
 

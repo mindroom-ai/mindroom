@@ -5362,7 +5362,7 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     config = coordinator.deps.runtime.config
-    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    config.models["large"] = ModelConfig(provider="openai", id="large-model")
     set_room_model_override(
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
@@ -5455,7 +5455,7 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     config = coordinator.deps.runtime.config
-    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    config.models["large"] = ModelConfig(provider="openai", id="large-model")
     set_room_model_override(
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
@@ -5944,8 +5944,8 @@ async def test_streaming_response_reuses_prepared_room_model_after_override_chan
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     config = coordinator.deps.runtime.config
-    config.models["large"] = ModelConfig(provider="test", id="large-model")
-    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+    config.models["large"] = ModelConfig(provider="openai", id="large-model")
+    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
     set_room_model_override(
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
@@ -7661,8 +7661,8 @@ async def _cold_cache_reply_model(
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     config = coordinator.deps.runtime.config
-    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
-    config.models["cheap2"] = ModelConfig(provider="test", id="cheap2-model")
+    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
+    config.models["cheap2"] = ModelConfig(provider="openai", id="cheap2-model")
     config.agents["general"] = config.agents["general"].model_copy(
         update={"cheap_model": None if inherit_cheap_model else "cheap", "cold_cache": ColdCacheConfig()},
     )
@@ -7791,7 +7791,7 @@ async def test_cold_cache_skipped_for_edit_regeneration(tmp_path: Path, edit_reg
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     config = coordinator.deps.runtime.config
-    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
     config.agents["general"] = config.agents["general"].model_copy(
         update={"cheap_model": "cheap", "cold_cache": ColdCacheConfig()},
     )
@@ -7815,8 +7815,8 @@ async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path:
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     config = coordinator.deps.runtime.config
-    config.models["large"] = ModelConfig(provider="test", id="large-model")
-    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+    config.models["large"] = ModelConfig(provider="openai", id="large-model")
+    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
     set_room_model_override(
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",

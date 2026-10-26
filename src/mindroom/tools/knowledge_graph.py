@@ -19,6 +19,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Knowledge Graph",
         description="Look up facts, entities, and their sources in the agent's knowledge graph",
+        docs_url="https://docs.mindroom.chat/knowledge-graph/#the-knowledge_graph-tool",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

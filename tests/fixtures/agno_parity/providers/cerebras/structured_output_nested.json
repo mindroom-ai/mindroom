@@ -196,7 +196,6 @@
       "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -220,6 +219,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -230,7 +231,6 @@
           "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
-      "model": "gpt-oss-120b",
       "response_format": {
         "type": "json_schema",
         "json_schema": {
@@ -425,42 +425,95 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "choices": [
-        {
-          "finish_reason": "stop",
-          "index": 0,
-          "message": {
-            "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
-            "role": "assistant"
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "time_info": {
+            "completion_time": 0.01,
+            "prompt_time": 0.002,
+            "queue_time": 0.001,
+            "total_time": 0.013
           }
         }
-      ],
-      "created": 1792540800,
-      "id": "chatcmpl-parity",
-      "model": "gpt-oss-120b",
-      "object": "chat.completion",
-      "system_fingerprint": "fp_parity",
-      "time_info": {
-        "completion_time": 0.01,
-        "prompt_time": 0.002,
-        "queue_time": 0.001,
-        "total_time": 0.013
       },
-      "usage": {
-        "completion_tokens": 12,
-        "completion_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "prompt_tokens": 42,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        },
-        "total_tokens": 54
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "time_info": {
+            "completion_time": 0.01,
+            "prompt_time": 0.002,
+            "queue_time": 0.001,
+            "total_time": 0.013
+          }
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "time_info": {
+            "completion_time": 0.01,
+            "prompt_time": 0.002,
+            "queue_time": 0.001,
+            "total_time": 0.013
+          },
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output_nested"

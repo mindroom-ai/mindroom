@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.AGENT,
     display_name="MoviePy Video Tools",
     description="Process videos, extract audio, generate SRT caption files, and embed rich word-highlighted captions",
-    category=ToolCategory.DEVELOPMENT,  # Derived from docs URL (/others/)
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,  # No authentication required
     setup_type=SetupType.NONE,  # No authentication needed
     icon="FaVideo",  # React icon name for video
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["moviepy"],  # From agno requirements
-    docs_url="https://docs.agno.com/tools/toolkits/others/moviepy",  # URL from llms.txt but WITHOUT .md extension
+    docs_url="https://docs.mindroom.chat/tools/media-and-content/#moviepy_video_tools",
     function_names=(
         "create_caption_clips",
         "create_srt",

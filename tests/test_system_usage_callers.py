@@ -46,7 +46,7 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
     config = bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", role="Help")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         paths,
     )

@@ -163,7 +163,7 @@ class TestAgentBot(AgentBotTestBase):
         """A room-default change during locked preparation must wait for the next team turn."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
-        config.models["large"] = ModelConfig(provider="test", id="large-model")
+        config.models["large"] = ModelConfig(provider="openai", id="large-model")
         runtime_paths = runtime_paths_for(config)
         set_room_model_override(
             runtime_paths,
@@ -227,8 +227,8 @@ class TestAgentBot(AgentBotTestBase):
         """A schedule model applies to both coordinator and members despite room defaults."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
-        config.models["large"] = ModelConfig(provider="test", id="large-model")
-        config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+        config.models["large"] = ModelConfig(provider="openai", id="large-model")
+        config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
         runtime_paths = runtime_paths_for(config)
         set_room_model_override(
             runtime_paths,
@@ -294,12 +294,12 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         config.models["large"] = ModelConfig(
-            provider="test",
+            provider="openai",
             id="large-model",
             pricing=ModelPricing(input=5, output=30),
         )
-        config.models["local"] = ModelConfig(provider="test", id="local-model")
-        config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+        config.models["local"] = ModelConfig(provider="openai", id="local-model")
+        config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
         config.agents["calculator"].model = "large"
         config.agents["general"].model = "local"
         config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
@@ -356,7 +356,7 @@ class TestAgentBot(AgentBotTestBase):
         """One room-default change must not split a turn across model aliases."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
-        config.models["large"] = ModelConfig(provider="test", id="large-model")
+        config.models["large"] = ModelConfig(provider="openai", id="large-model")
         runtime_paths = runtime_paths_for(config)
         set_room_model_override(
             runtime_paths,

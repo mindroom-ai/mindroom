@@ -44,8 +44,8 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls
 from tests.llm.agno_dict_helpers import stored_run_record
-from tests.team_runtime.squad import SQUAD_APPROVED, STORAGE, approval, scripted
 from tests.team_turn_helpers import authored_team_config, build_team_turn
+from tests.teams.squad import SQUAD_APPROVED, STORAGE, approval, scripted
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

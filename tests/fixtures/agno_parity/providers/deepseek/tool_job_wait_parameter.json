@@ -19,7 +19,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tool_jobs": {
       "managed": [
@@ -112,6 +111,8 @@
   },
   "request": {
     "body": {
+      "model": "deepseek-flash",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -122,8 +123,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "deepseek-flash",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

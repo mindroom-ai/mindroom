@@ -27,7 +27,7 @@ from mindroom.llm.runs import (
     TeamRunRecord,
     ToolExecution,
 )
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts, ToolCallMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from tests.llm.agno_dict_helpers import (
     DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
@@ -90,6 +90,27 @@ def test_media_from_dict_decodes_content_bytes_as_agno_did() -> None:
     assert binary_file.content == PDF_BYTES
 
 
+def test_a_text_file_that_is_not_utf8_reads_back_as_its_bytes() -> None:
+    """A ``text/*`` file whose bytes are not UTF-8 is stored as base64 that says so, and reads back as those bytes."""
+    latin1 = File(id="f", content="café".encode("latin-1"), mime_type="text/plain")
+
+    stored = latin1.to_dict()
+
+    assert File.from_dict(stored).content == "café".encode("latin-1")
+    assert stored == {"id": "f", "mime_type": "text/plain", "content": "Y2Fm6Q==", "content_encoding": "base64"}
+    # UTF-8 text keeps its text form, which reads back as the same bytes.
+    utf8 = File(id="f", content="café".encode(), mime_type="text/plain")
+    assert utf8.to_dict() == {"id": "f", "mime_type": "text/plain", "content": "café"}
+    assert File.from_dict(utf8.to_dict()).content == "café".encode()
+
+
+def test_a_text_file_stored_before_its_encoding_was_recorded_reads_as_before() -> None:
+    """An unmarked ``text/*`` row reads as UTF-8 text, so an earlier non-UTF-8 file still reads as its base64 text."""
+    earlier = File.from_dict({"id": "f", "mime_type": "text/plain", "content": "Y2Fm6Q=="})
+
+    assert earlier.content == b"Y2Fm6Q=="
+
+
 def test_media_from_dict_ignores_agno_only_keys() -> None:
     image = Image.from_dict(
         {"id": "i", "url": "https://example.invalid/i.png", "media_reference": {"storage_key": "k"}},
@@ -129,13 +150,6 @@ def test_message_metrics_addition_matches_agno() -> None:
 
     assert owned.to_dict() == agno("message_metrics_sum")
     assert (MessageMetrics(tokens=TokenCounts(input_tokens=1)) + MessageMetrics()).to_dict() == {"input_tokens": 1}
-
-
-def test_tool_call_metrics_round_trip_agno_dict() -> None:
-    expected = agno("tool_call_metrics")
-
-    assert ToolCallMetrics.from_dict(expected).to_dict() == expected
-    assert ToolCallMetrics.from_dict({**expected, "timer": None}).to_dict() == expected
 
 
 def test_run_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
@@ -315,10 +329,16 @@ def test_a_run_whose_tool_executions_have_no_call_ids_still_loads() -> None:
 
 
 def test_tool_execution_default_dict_matches_agno_minus_dropped_keys() -> None:
-    owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={}, created_at=7)
+    owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={})
 
     assert owned.to_dict() == without(agno("tool_execution_default"), DROPPED_TOOL_EXECUTION_KEYS)
-    assert ToolExecution.from_dict({"tool_name": "t"}).created_at > 0
+
+
+def test_new_tool_executions_and_requirements_store_no_timing() -> None:
+    stored = RunRequirement(ToolExecution(tool_call_id="c", tool_name="t", tool_args={})).to_dict()
+
+    assert "created_at" not in stored
+    assert {"metrics", "created_at"}.isdisjoint(stored["tool_execution"])
 
 
 def test_run_requirement_round_trips_agno_dict() -> None:
@@ -480,7 +500,6 @@ def test_run_requirement_reads_rows_agno_read_leniently() -> None:
     owned = RunRequirement.from_dict(stored)
 
     assert (owned.tool_execution.tool_name, owned.tool_execution.tool_args) == ("unknown", {})
-    assert owned.created_at.tzinfo is not None
     agno_dict, owned_dict = expected_requirement_dict(agno("run_requirement_read_leniently")), owned.to_dict()
     # Agno's placeholder had no call id; the owned one reads with an id, the same on every read.
     assert agno_dict["tool_execution"]["tool_call_id"] is None
@@ -488,7 +507,7 @@ def test_run_requirement_reads_rows_agno_read_leniently() -> None:
     assert owned.tool_execution.tool_call_id
     assert RunRequirement.from_dict(stored).tool_execution.tool_call_id == owned.tool_execution.tool_call_id
     for result in (agno_dict, owned_dict):
-        del result["created_at"], result["tool_execution"]["created_at"], result["tool_execution"]["tool_call_id"]
+        del result["tool_execution"]["tool_call_id"]
     assert owned_dict == agno_dict
 
 
@@ -559,7 +578,6 @@ FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[
     "message_metrics": (MessageMetrics.from_dict, dict),
     "run_metrics": (RunMetrics.from_dict, dict),
     "model_metrics": (ModelMetrics.from_dict, dict),
-    "tool_call_metrics": (ToolCallMetrics.from_dict, dict),
     "session_metrics": (SessionMetrics.from_dict, dict),
 }
 

@@ -23,7 +23,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.failure_text import failure_text
 from mindroom.tool_system.agno_toolkits import (
@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from mindroom.history.types import HistoryScope
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import ToolFunction, ToolValue
 
-# What the loop sends the model for a call that names no function it offered, kept as main behaves.
+# What the loop sends the model for a call that names no function it offered.
 MISSING_TOOL_ERROR_TEXT = "Error: The requested tool does not exist or is not available."
 _DECODE_ERROR_TEXT = (
     "Error while decoding function arguments: {error}\n\nPlease make sure we can json.loads() the arguments and retry."
@@ -55,15 +55,19 @@ _LITERAL_WORDS: dict[str, bool | None] = {"none": None, "null": None, "true": Tr
 _MAX_SCHEMA_NODES = 256
 _MAX_ALTERNATIVES = 64
 # The session id of a call that belongs to no conversation, such as an MCP gateway or script-run call. Tools that key
-# state by session, such as ``claude_agent``, share one session across those calls, kept as main behaves.
+# state by session, such as ``claude_agent``, share one session across those calls.
 DETACHED_SESSION_ID = "default"
 
 
 @dataclass(frozen=True, slots=True)
 class ToolArgumentError:
-    """A tool call the model sent with arguments that cannot be decoded; ``error_text`` is what the model reads."""
+    """A tool call the model sent with arguments that cannot be decoded; ``error_text`` is what the model reads.
+
+    ``reason`` says whether the arguments did not parse or parsed to something other than an object.
+    """
 
     error_text: str
+    reason: Literal["decode", "not_object"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -229,13 +233,13 @@ def parse_tool_arguments(
         except Exception:
             decoded = ast.literal_eval(raw_arguments)
     except Exception as error:
-        return ToolArgumentError(_DECODE_ERROR_TEXT.format(error=error))
+        return ToolArgumentError(_DECODE_ERROR_TEXT.format(error=error), "decode")
     # TODO(simplify): ``[]`` decodes to None while an empty string decodes to ``{}``, two forms of "no arguments".
     # Both could decode to ``{}``. Stored data would notice: such a call's ``tool_args`` is stored as ``{}``, not null.
     if isinstance(decoded, list) and not decoded:
         return None
     if not isinstance(decoded, dict):
-        return ToolArgumentError(_NOT_AN_OBJECT_ERROR_TEXT)
+        return ToolArgumentError(_NOT_AN_OBJECT_ERROR_TEXT, "not_object")
     cleaned = {name: _argument_value(name, value, function.parameters) for name, value in decoded.items()}
     return model_arguments(cleaned, function)
 
@@ -297,14 +301,23 @@ async def execute_tool_call(
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except Exception as error:
         return ToolOutcome(content=failure_text(error), stop_after_call=function.stop_after_call, is_error=True)
+    return tool_outcome(
+        value,
+        stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
+        is_error=isinstance(value, ToolOutcome) and value.is_error,
+    )
+
+
+def tool_outcome(value: ToolValue, *, stop_after_call: bool, is_error: bool) -> ToolOutcome:
+    """Return ``value``'s text and media as one call's outcome, which stops the run after it or fails as given."""
     return ToolOutcome(
         content=value.content,
         images=value.images,
         audios=value.audios,
         videos=value.videos,
         files=value.files,
-        stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
-        is_error=isinstance(value, ToolOutcome) and value.is_error,
+        stop_after_call=stop_after_call,
+        is_error=is_error,
     )
 
 
@@ -326,7 +339,7 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
 
 
 async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
-    """Call the entrypoint with the framework's and the model's arguments; drain a generator it returns."""
+    """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns."""
     entrypoint = function.entrypoint
     # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
     # rewrites them, so values for injected names are dropped here as well.
@@ -340,21 +353,27 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
         result = await result
     if isinstance(result, AsyncIterator):
         return await _drain_async(result)
+    if isinstance(result, Iterator):
+        # An async tool returned a synchronous iterator, which may block between items.
+        return await run_sync_tool_entrypoint(partial(_drain_sync, result))
     return result
 
 
 def _invoke_and_drain_sync(entrypoint: Callable[..., Any], kwargs: dict[str, Any]) -> object:
     """Run a synchronous entrypoint and, when it returns an iterator, consume it on the same worker thread."""
     result = entrypoint(**kwargs)
-    if not isinstance(result, Iterator):
-        return result
+    return _drain_sync(result) if isinstance(result, Iterator) else result
+
+
+def _drain_sync(stream: Iterator[object]) -> object:
     collector = StreamCollector()
     try:
-        for item in result:
+        for item in stream:
             collector.add(item)
     finally:
-        if inspect.isgenerator(result):
-            result.close()
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
     return collector.value()
 
 
@@ -379,4 +398,5 @@ __all__ = [
     "execute_tool_call",
     "parse_tool_arguments",
     "run_tool_call",
+    "tool_outcome",
 ]

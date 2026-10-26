@@ -59,7 +59,7 @@ def test_config_format_validation(test_client: TestClient, temp_config_file: Pat
 
     # Fix the config
     valid_config = {
-        "models": {"default": {"provider": "test", "id": "test"}},
+        "models": {"default": {"provider": "openai", "id": "test"}},
         "agents": {},
         "defaults": {},
     }

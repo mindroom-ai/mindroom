@@ -29,7 +29,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": []
   },
@@ -55,6 +54,8 @@
   },
   "request": {
     "body": {
+      "model": "k3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -76,8 +77,6 @@
           ]
         }
       ],
-      "model": "k3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       }

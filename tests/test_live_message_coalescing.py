@@ -146,7 +146,7 @@ def _make_config(
                     **{name: AgentConfig(display_name=name.title()) for name in other_agent_names},
                 },
                 teams={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
                 defaults=DefaultsConfig(
                     coalescing={
                         "debounce_ms": debounce_ms,
@@ -308,7 +308,7 @@ def test_coalescing_config_rejects_removed_enabled_flag(tmp_path: Path) -> None:
         Config.validate_with_runtime(
             {
                 "agents": {"test_agent": {"display_name": "TestAgent"}},
-                "models": {"default": {"provider": "test", "id": "test-model"}},
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "defaults": {"coalescing": {"enabled": True}},
             },
             test_runtime_paths(tmp_path),

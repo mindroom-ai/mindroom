@@ -2197,7 +2197,7 @@ async def test_threaded_schedule_edit_preserves_persisted_placement(
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -2271,7 +2271,7 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -2428,7 +2428,7 @@ async def test_edit_scheduled_task_persists_via_admin_and_preserves_omitted_sile
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -2947,7 +2947,7 @@ async def test_schedule_task_persists_via_admin_when_active_agent_lacks_state_po
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -3017,7 +3017,7 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -3086,7 +3086,7 @@ async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) 
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -3161,7 +3161,7 @@ async def test_schedule_task_returns_error_when_state_write_fails_without_admin_
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -3235,7 +3235,7 @@ async def test_schedule_task_returns_error_when_active_write_returns_unexpected_
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -3291,7 +3291,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
                     rooms=["!test:server"],
                 ),
             },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -3353,7 +3353,7 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
                 "assistant": AgentConfig(display_name="Assistant", role="Test assistant"),
                 "writer": AgentConfig(display_name="Writer", role="Test writer"),
             },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -3429,7 +3429,7 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
     config = bind_runtime_paths(
         Config(
             agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
-            models={name: ModelConfig(provider="test", id=f"{name}-model") for name in ("default", "cheap")},
+            models={name: ModelConfig(provider="openai", id=f"{name}-model") for name in ("default", "cheap")},
         ),
         runtime_paths,
     )

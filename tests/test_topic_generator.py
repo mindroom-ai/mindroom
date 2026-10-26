@@ -103,7 +103,7 @@ async def test_generate_room_topic_includes_team_only_room_entities(
                     rooms=["ops"],
                 ),
             },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -124,7 +124,7 @@ async def test_a_failed_model_run_never_becomes_the_topic(tmp_path: Path, monkey
     """A provider failure, such as a bad API key, raises instead of answering, so the room gets no topic."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
-        Config(models={"default": ModelConfig(provider="test", id="test-model")}),
+        Config(models={"default": ModelConfig(provider="openai", id="test-model")}),
         runtime_paths,
     )
 
@@ -157,7 +157,7 @@ async def test_generate_room_topic_resolves_configured_entities_for_persisted_ro
                     rooms=["ops"],
                 ),
             },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )

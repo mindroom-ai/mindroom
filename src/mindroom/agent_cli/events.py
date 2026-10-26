@@ -12,7 +12,7 @@ from mindroom.tool_system.context_bound_streams import callback_event_stream, cl
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
-    from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent
+    from mindroom.tool_system.agent_tool_calls import AgentToolCallStep
 
 __all__ = [
     "emit_cli_run_event",
@@ -36,15 +36,9 @@ def emit_cli_suspension(error: BaseException) -> None:
         sink(_CliSuspension(error))
 
 
-def emit_cli_tool_event(event: AgentToolCallEvent, parent: str | None) -> None:
+def emit_cli_tool_event(event: AgentToolCallStep, parent: str | None) -> None:
     """Publish trusted inner audit events, excluding the canonical outer shell alias."""
-    sink = _SINK.get()
-    if (
-        sink is None
-        or event.call_id == parent
-        or event.call is None
-        or event.kind not in {"started", "completed", "failed", "continuation_required"}
-    ):
+    if event.call.tool_call_id == parent:
         return
     cls = ToolStarted if event.kind == "started" else ToolCompleted
     emit_cli_run_event(cls(event.call), parent=parent, toolkit_name=event.key.toolkit)

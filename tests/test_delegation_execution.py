@@ -31,7 +31,7 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, chi
 from mindroom.history.storage import new_scope_session
 from mindroom.llm.errors import ModelOutputLimitError, ProviderError
 from mindroom.llm.events import ToolCompleted
-from mindroom.llm.provider import Capabilities, TurnCompleted
+from mindroom.llm.provider import TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -885,11 +885,11 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_turn_continues_after_its_delegation_with_streamed_requests(
+async def test_a_blocking_turn_continues_after_its_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The parent's continuation streams even when its turn does not, as Agno's delegation continuation did."""
+    """A blocking turn's parent continues with its delegation's result."""
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
     leader = ScriptedModel(
@@ -907,7 +907,7 @@ async def test_a_blocking_turn_continues_after_its_delegation_with_streamed_requ
     )
 
     assert "Parent done" in text
-    assert [request.stream for request in leader.requests] == [False, True]
+    assert len(leader.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -1153,7 +1153,6 @@ async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
             _cut_off_turn("cut-3"),
             answer("The hooks were rebuilt."),
         ],
-        capabilities=Capabilities(claude_family=True),
     )
     code = ScriptedModel([answer("first result"), answer("second result")])
     ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)

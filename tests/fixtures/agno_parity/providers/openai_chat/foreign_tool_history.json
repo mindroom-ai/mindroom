@@ -83,7 +83,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
@@ -162,6 +161,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "messages": [
         {
           "role": "developer",
@@ -199,8 +200,6 @@
           "content": "And for the evening?"
         }
       ],
-      "model": "gpt-6-astra",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },
