@@ -7,6 +7,7 @@ Always back up configuration and persistent storage before replacing the running
 ## Upgrading to conversation storage v2
 
 The first start after this upgrade converts the conversation database of every agent and team, private instances included, to a new layout before any agent comes online.
+Meanwhile the process answers liveness and startup probes and becomes ready once the conversion finishes, so Kubernetes keeps the pod running however long the conversion takes.
 The conversion is one-way, and downgrading afterwards is not supported.
 
 ### Before upgrading

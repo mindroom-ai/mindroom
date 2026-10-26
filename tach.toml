@@ -2347,6 +2347,11 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.startup_probes"
+depends_on = []
+visibility = ["mindroom.cli.main", "mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.api.skills"
 depends_on = [
     "mindroom.constants",
@@ -3182,6 +3187,7 @@ path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agent_cli.session",
     "mindroom.api.agent_cli",
+    "mindroom.api.startup_probes",
     "mindroom.approval.manager",
     "mindroom.approval.recovery",
     "mindroom.matrix.room_reconciliation",
@@ -5010,11 +5016,6 @@ depends_on = [
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
-path = "mindroom.cli.pairing_probes"
-depends_on = []
-visibility = ["mindroom.cli.main"]
-
-[[modules]]
 path = "mindroom.cli.plugins"
 depends_on = [
     "mindroom.cli.config",
@@ -5054,6 +5055,7 @@ path = "mindroom.cli.main"
 depends_on = [
     "mindroom.origins",
     "mindroom.api.auth",
+    "mindroom.api.startup_probes",
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
@@ -5071,7 +5073,6 @@ depends_on = [
     "mindroom.cli.interactive",
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",
-    "mindroom.cli.pairing_probes",
     "mindroom.cli.plugins",
     "mindroom.cli.service",
     "mindroom.cli.trigger",

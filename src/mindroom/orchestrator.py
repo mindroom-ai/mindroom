@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from contextvars import Context
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -20,6 +20,7 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
+from mindroom.api.startup_probes import serve_startup_probes
 from mindroom.approval.manager import initialize_approval_store
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import shutdown_approval_runtime
@@ -3231,7 +3232,11 @@ async def _run_runtime(  # noqa: PLR0915
         await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
         await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
         # After the retirement, so no old worker mounting whole state roots can swap a sessions directory as it converts.
-        await migrate_conversation_storage(runtime_paths)
+        # The first start after an upgrade converts every conversation database before the API binds, which can take
+        # minutes, so probes meanwhile see a live process that is not ready yet instead of a closed port.
+        probes = serve_startup_probes(api_host, api_port, detail="Converting conversation storage") if api else None
+        with probes or nullcontext():
+            await migrate_conversation_storage(runtime_paths)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)

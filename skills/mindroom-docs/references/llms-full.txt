@@ -6676,7 +6676,7 @@ Changing `matrix_sync` through config reload restarts running agents.
 If a large initial sync exceeds the response limit, raise `max_response_bytes` enough to fit it.
 If processing received events exceeds the pending limit, raise `max_pending_bytes`; stored events can take more space than the HTTP response, so raising the response limit may also require raising the pending limit.
 Each bot has its own sync session, so allow enough memory and disk space when raising these limits.
-Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` sets the first-sync allowance, and the runtime Helm chart's `probes.startup` values set the Kubernetes startup probe allowance.
+Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` sets the first-sync allowance.
 
 # Rooms & Spaces
 
@@ -20689,7 +20689,7 @@ The `/api/ready` phases are:
 | `ready` | Startup finished and requests are being served |
 | `failed` | Startup or runtime failure; `detail` gives the cause |
 
-While `mindroom run` waits for hosted pairing approval, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval`.
+While `mindroom run` waits for hosted pairing approval, or converts conversation storage on the first start after an upgrade, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval` or `Converting conversation storage`.
 
 When an agent, team, or router receives no Matrix sync for 120 seconds, MindRoom restarts that entity's sync loop on its own.
 After 180 seconds without a sync, `/api/health` returns `503` and lists the entity in `stale_sync_entities`.
@@ -20840,6 +20840,7 @@ Always back up configuration and persistent storage before replacing the running
 ## Upgrading to conversation storage v2
 
 The first start after this upgrade converts the conversation database of every agent and team, private instances included, to a new layout before any agent comes online.
+Meanwhile the process answers liveness and startup probes and becomes ready once the conversion finishes, so Kubernetes keeps the pod running however long the conversion takes.
 The conversion is one-way, and downgrading afterwards is not supported.
 
 ### Before upgrading
