@@ -29,7 +29,7 @@ from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import TurnMessages, build_request, replayed_history
 from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import is_compaction_summary
-from mindroom.history.summary_rows import segment_tool_call_ids
+from mindroom.history.summary_rows import folded_tool_call_ids
 from mindroom.history.types import CompactionOutcome
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
@@ -53,9 +53,9 @@ from tests.history_helpers import (
     ToolLoopModel,
     _completed_team_run,
     _team_session,
+    folds_of,
     log_of,
     seeded_storage,
-    segments_of,
     summary_rows_of,
 )
 from tests.scripted_agent_helpers import registered_toolkit
@@ -536,7 +536,7 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
         *(f"row:{row.summary}" for row in rows),
         f"run:{record.run_id}",
     ]
-    assert {run_id for run_id, _segment in segments_of(team.storage, TEAM_SCOPE.key, SESSION_ID)} == {record.run_id}
+    assert {fold.run_id for fold in folds_of(team.storage, TEAM_SCOPE.key, SESSION_ID)} == {record.run_id}
     stored = team.storage.load_session(SESSION_ID, "team")
     assert stored is not None
     assert stored.summary is not None
@@ -625,7 +625,7 @@ async def test_each_team_fold_carries_the_members_that_ended_since_and_a_stop_dr
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: SummaryCalls,
 ) -> None:
-    """Each fold's segment holds the member runs that ended since the run's last fold; a stop leaves their calls out."""
+    """Each fold takes the member runs that ended since the run's last fold; a stop leaves their calls out."""
     stopped = asyncio.Event()
 
     async def wait_to_be_stopped() -> None:
@@ -660,18 +660,14 @@ async def test_each_team_fold_carries_the_members_that_ended_since_and_a_stop_dr
     assert summary_calls.inputs
     record, members = team.stored_runs()
     assert [member.content for member in members] == [f"Part {n} done" for n in range(1, 7)]
-    [(first_run, first), (second_run, second)] = segments_of(team.storage, TEAM_SCOPE.key, SESSION_ID)
-    assert first_run == second_run == record.run_id
-    assert [member["content"] for member in first["member_responses"]] == ["Part 1 done", "Part 2 done", "Part 3 done"]
-    assert [member["content"] for member in second["member_responses"]] == ["Part 4 done", "Part 5 done", "Part 6 done"]
-    # A segment holds each member run as it ended; its stored row leaves out the prompt, which requests rebuild.
-    without_prompts = [
-        {**member, "messages": [message for message in member["messages"] if message["role"] != "system"]}
-        for member in [*first["member_responses"], *second["member_responses"]]
-    ]
-    assert without_prompts == [member.to_dict() for member in members]
+    [first, second] = folds_of(team.storage, TEAM_SCOPE.key, SESSION_ID)
+    assert first.run_id == second.run_id == record.run_id
+    # Each fold flags the stored member runs that ended since the run's last fold.
+    contents = {member.run_id: member.content for member in members}
+    assert [contents[member_id] for member_id in first.member_run_ids] == ["Part 1 done", "Part 2 done", "Part 3 done"]
+    assert [contents[member_id] for member_id in second.member_run_ids] == ["Part 4 done", "Part 5 done", "Part 6 done"]
     member_calls = {f"touch-{n}" for n in range(1, 7)}
-    assert member_calls <= segment_tool_call_ids(team.storage, session_id=SESSION_ID, run_id=record.run_id)
+    assert member_calls <= folded_tool_call_ids(team.storage, session_id=SESSION_ID, run_id=record.run_id)
     assert member_calls <= team.recorder.folded_tool_call_ids
     snapshot = team.recorder.interrupted_snapshot()
     assert [tool.tool_name for tool in [*snapshot.completed_tools, *snapshot.interrupted_tools]] == []

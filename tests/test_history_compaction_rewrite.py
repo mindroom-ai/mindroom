@@ -32,6 +32,7 @@ from mindroom.history.storage import (
     append_compaction_chunk,
     read_scope_seen_event_ids,
     read_scope_state,
+    strip_kept_replay_fields,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
 from mindroom.history.summary_input import build_summary_input, messages_for_runs
@@ -559,11 +560,11 @@ async def test_checkpoint_before_an_approval_pause_does_not_cover_the_turns_it_w
         "intervening",
         messages=[Message(role="user", content="INTERVENING FACT"), Message(role="assistant", content="Noted")],
     )
-    storage.save_runs(session, [intervening])
+    storage.save_run(session, intervening, record_usage=False)
     completed = deepcopy(paused)
     completed.status = RunStatus.completed
     completed.messages.append(Message(role="assistant", content="Approval completed"))
-    storage.save_runs(session, [completed])
+    storage.save_run(session, completed, record_usage=False)
     loaded = storage.load_session("session-1", "agent")
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["earlier", "intervening", "approval"]
@@ -707,8 +708,8 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     )
     assert folded_run_ids(storage) == ["run-1", "run-2"]
     assert summary_rows_of(storage, "agent:test_agent") == [
-        StoredSummaryRow(summary="first chunk summary", summary_model="fallback-model-id", legacy=False),
-        StoredSummaryRow(summary="merged summary", summary_model="fallback-model-id", legacy=False),
+        StoredSummaryRow(summary="first chunk summary", legacy=False),
+        StoredSummaryRow(summary="merged summary", legacy=False),
     ]
     assert rewrite_result.compacted_run_count == 2
     assert rewrite_result.served_by.model is fallback
@@ -1816,9 +1817,8 @@ def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_s
 
 
 @pytest.mark.asyncio
-async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields_from_remaining_runs(
-    tmp_path: Path,
-) -> None:
+async def test_compaction_strips_stale_replay_fields_from_the_runs_it_kept(tmp_path: Path) -> None:
+    """After the chunks commit, the kept runs lose the replay fields of turns before the latest prompt, stored too."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -1896,13 +1896,20 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
     assert rewrite_result is not None
     assert rewrite_result.compacted_run_count == 1
     assert [run.run_id for run in working_session.runs] == ["run-2"]
-    remaining_messages = working_session.runs[0].messages or []
-    assert remaining_messages[1].provider_data == {"keep": "yes"}
-    assert remaining_messages[1].reasoning_content is None
-    assert remaining_messages[1].redacted_reasoning_content is None
-    assert remaining_messages[3].provider_data == {"signature": "sig-current"}
-    assert remaining_messages[3].reasoning_content == "current thinking"
-    assert remaining_messages[3].redacted_reasoning_content == "current redacted"
+
+    strip_kept_replay_fields(storage, session=working_session, scope=scope)
+
+    stored = storage.load_session("session-1", "agent")
+    assert stored is not None
+    for session in (working_session, stored):
+        assert [run.run_id for run in session.runs] == ["run-2"]
+        remaining_messages = session.runs[0].messages or []
+        assert remaining_messages[1].provider_data == {"keep": "yes"}
+        assert remaining_messages[1].reasoning_content is None
+        assert remaining_messages[1].redacted_reasoning_content is None
+        assert remaining_messages[3].provider_data == {"signature": "sig-current"}
+        assert remaining_messages[3].reasoning_content == "current thinking"
+        assert remaining_messages[3].redacted_reasoning_content == "current redacted"
 
 
 @pytest.mark.asyncio

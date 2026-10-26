@@ -25,6 +25,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.native_compaction import replay_basis
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
@@ -57,29 +58,46 @@ def storage(tmp_path: Path) -> ConversationStore:
     return _open(tmp_path)
 
 
-def _write_session_row_summary(storage: ConversationStore, session_id: str, summary: str) -> None:
-    """Write ``summary`` into the session row's ``summary`` column, where releases before summary rows kept it."""
-    with storage.transaction(write=True) as connection:
-        connection.execute(
-            f"UPDATE {storage.names.sessions} SET summary = ? WHERE session_id = ?",  # noqa: S608
-            (json.dumps({"summary": summary}), session_id),
-        )
-
-
 @pytest.fixture
 def open_legacy(tmp_path: Path) -> Callable[[ConversationSession], ConversationStore]:
-    """Seed a session as a pre-archive release left it, then reopen so the migration adopts it."""
+    """Write a session as a pre-archive release left it, then open it, which converts it and adopts its state."""
 
     def open_migrated(session: ConversationSession) -> ConversationStore:
-        seeding = _open(tmp_path)
-        seed_session(seeding, session)
-        if session.summary is not None:
-            _write_session_row_summary(seeding, session.session_id, session.summary.text)
-        # A pre-archive release never had summary-row tables, so the next open adopts its state.
-        with closing(sqlite3.connect(tmp_path / "sessions" / "code.db")) as connection, connection:
-            connection.execute("DROP TABLE code_sessions_summaries")
-            connection.execute("DROP TABLE code_sessions_removed_runs")
-        return _open(tmp_path)
+        names = AgnoTableNames("code")
+        database = names.database_path(tmp_path)
+        database.parent.mkdir(parents=True)
+        # A pre-archive release kept Agno's sessions and runs tables, its replayed summary in the session row's
+        # ``summary``, and no summary-row tables.
+        with closing(sqlite3.connect(database)) as connection, connection:
+            for statement in agno_runs_sql(names):
+                connection.execute(statement)
+            connection.execute(
+                f'INSERT INTO "{names.sessions}" (session_id, session_type, agent_id, session_data, metadata, '  # noqa: S608
+                "summary, created_at, updated_at) VALUES (?, 'agent', ?, ?, ?, ?, 1, 1)",
+                (
+                    session.session_id,
+                    session.owner_id,
+                    json.dumps({"session_state": session.session_state}),
+                    json.dumps(session.metadata),
+                    json.dumps({"summary": session.summary.text}) if session.summary is not None else None,
+                ),
+            )
+            for run_index, run in enumerate(session.runs):
+                connection.execute(
+                    f'INSERT INTO "{names.runs}" (run_id, session_id, run_type, agent_id, status, run_index, '  # noqa: S608
+                    "run_data, created_at) VALUES (?, ?, 'agent', ?, ?, ?, ?, 1)",
+                    (
+                        run.run_id,
+                        session.session_id,
+                        run.agent_id,
+                        run.status.value,
+                        run_index,
+                        json.dumps(run.to_dict()),
+                    ),
+                )
+        storage = _open(tmp_path)
+        assert _summary(_stored(storage)) == _summary(session)
+        return storage
 
     return open_migrated
 
@@ -182,7 +200,7 @@ def test_redaction_restores_the_runs_compacted_before_the_redacted_one(storage: 
 
 
 def test_redacting_the_first_compacted_run_clears_the_summary_for_good(storage: ConversationStore) -> None:
-    """A cut past every summary row leaves no summary, and a stale session-row summary never replays."""
+    """A cut past every summary row leaves no summary."""
     session = _seed(storage, ["r1", "r2"])
     _compact(storage, session, ["r1"], "summary with the redacted content")
 
@@ -190,10 +208,6 @@ def test_redacting_the_first_compacted_run_clears_the_summary_for_good(storage: 
     stored = _stored(storage)
     assert stored.runs == []
     assert stored.summary is None
-
-    _write_session_row_summary(storage, "session", "summary with the redacted content")
-
-    assert _stored(storage).summary is None
 
 
 def test_redacting_a_loaded_only_event_keeps_the_summary(storage: ConversationStore) -> None:
@@ -328,8 +342,6 @@ def test_removing_a_loaded_run_keeps_runs_folded_after_a_legacy_summary(
     assert stored.summary is None
     assert "r1" in stored_run_ids(storage, "session")
     assert _seen(storage, stored) == {"$r2"}
-    _write_session_row_summary(storage, "session", "legacy summary and r1")
-    assert _stored(storage).summary is None
 
 
 def test_retirement_survives_a_later_cut(open_legacy: Callable[[ConversationSession], ConversationStore]) -> None:
@@ -377,7 +389,7 @@ def test_a_late_save_of_a_redacted_run_cannot_replay_it(storage: ConversationSto
     _compact(storage, session, ["r1"], "summary of r1")
     assert _redact(storage, session, "$r1")
 
-    storage.save_runs(session, [late_copy])
+    assert storage.save_run(session, late_copy, record_usage=False) == "removed"
 
     assert _stored(storage).runs == []
     assert stored_run_ids(storage, "session") == []
@@ -393,7 +405,7 @@ def test_a_late_save_after_a_legacy_clear_cannot_replay_the_cleared_run(
     _compact(storage, session, ["r1"], "legacy summary and r1")
     assert _redact(storage, session, "$legacy")
 
-    storage.save_runs(session, [late_copy])
+    assert storage.save_run(session, late_copy, record_usage=False) == "removed"
 
     assert _stored(storage).runs == []
 
@@ -445,7 +457,7 @@ def test_a_stale_copy_of_a_folded_run_stays_folded(storage: ConversationStore) -
     session = _seed(storage, ["r1", "r2"])
     stale = next(run for run in session.runs if run.run_id == "r1")
     _compact(storage, session, ["r1"], "summary mentioning r1")
-    storage.save_runs(session, [stale])
+    assert storage.save_run(session, stale, record_usage=False) == "final"
     assert folded_run_ids(storage, "session") == ["r1"]
     _compact(storage, _stored(storage), ["r2"], "summary mentioning r1 and r2")
 
