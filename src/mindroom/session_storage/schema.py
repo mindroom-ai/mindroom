@@ -132,6 +132,8 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         f"CREATE TABLE IF NOT EXISTS {quote_identifier(names.log_messages)} ("
         f"run_id TEXT NOT NULL REFERENCES {runs}(run_id) ON DELETE CASCADE, message_id TEXT NOT NULL, "
         "ord INTEGER NOT NULL, folded_by INTEGER, data TEXT NOT NULL, PRIMARY KEY (run_id, message_id))",
+        # Serves reading a run's messages in order without a sort, which spills a large run to a temp file.
+        _index_sql(names.log_messages, "run_id", "ord"),
         # AUTOINCREMENT never hands out the id of a deleted newest row again, which an append's compare relies on.
         f"CREATE TABLE IF NOT EXISTS {summaries} (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE, scope_key TEXT NOT NULL, "

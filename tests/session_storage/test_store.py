@@ -753,6 +753,25 @@ def test_a_message_rewrite_holds_the_write_lock_while_it_edits(store: Conversati
     assert errors == ["database is locked"]
 
 
+def test_a_message_rewrite_that_stores_no_run_leaves_the_session_the_load_its_edit_was_handed(
+    store: ConversationStore,
+) -> None:
+    """Nothing changed, so the load the edit saw is what a load returns, without a second read."""
+    _save(store, _run("r1"), _run("r2"))
+    session = _loaded(store)
+    handed: list[AnyRunRecord] = []
+
+    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
+        handed.extend(runs)
+        return [_run("unknown")]
+
+    store.rewrite_run_messages("s1", "agent", edit, session=session)
+
+    assert [id(run) for run in session.runs] == [id(run) for run in handed]
+    assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
+    assert _row(store, "unknown") is None
+
+
 # --- deletes ----------------------------------------------------------------------------------------------------
 
 
@@ -965,6 +984,27 @@ def test_load_reads_one_snapshot(store: ConversationStore, traced: list[Callable
     assert errors == ["database is locked"]
     assert [run.run_id for run in session.runs] == ["r0", "r1"]
     assert session.summary is None
+
+
+def test_saves_and_loads_read_messages_in_order_without_a_sort(
+    store: ConversationStore,
+    traced: list[Callable[[str], None]],
+) -> None:
+    """Message reads walk an index in ``ord`` order; a sort would spill a large run's messages to a temp file."""
+    reads: list[str] = []
+
+    def record(statement: str) -> None:
+        if statement.lstrip().upper().startswith("SELECT") and "code_sessions_log_messages" in statement:
+            reads.append(statement)
+
+    traced.append(record)
+    _save(store, _run("r1"))
+    _loaded(store)
+
+    assert len(reads) == 2
+    for read in reads:
+        plan = [step for *_, step in _query(store, f"EXPLAIN QUERY PLAN {read}")]
+        assert [step for step in plan if "TEMP B-TREE" in step] == [], plan
 
 
 # --- the session mirror -----------------------------------------------------------------------------------------
