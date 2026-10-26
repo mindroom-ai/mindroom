@@ -79,7 +79,7 @@ def resolve_embedder_settings(config: Config, runtime_paths: RuntimePaths) -> _R
     return _ResolvedEmbedderSettings(
         provider=provider,
         model=embedder_config.model,
-        host=embedder_config.host,
+        host=None,
         dimensions=embedder_config.dimensions,
     )
 

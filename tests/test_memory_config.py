@@ -291,7 +291,6 @@ class TestMemoryConfig:
             provider="sentence_transformers",
             config=EmbedderConfig(
                 model="sentence-transformers/all-MiniLM-L6-v2",
-                dimensions=384,
             ),
         )
         memory = MemoryConfig(embedder=embedder_config, llm=None)
@@ -301,7 +300,6 @@ class TestMemoryConfig:
 
         assert result["embedder"]["provider"] == "huggingface"
         assert result["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
-        assert result["embedder"]["config"]["embedding_dims"] == 384
 
     def test_get_memory_config_keeps_existing_huggingface_provider_support(
         self,
@@ -547,6 +545,16 @@ class TestMemoryConfig:
                 {"api_key": "sk-test"},
                 "memory.embedder.config.api_key does not apply to the ollama provider; remove it",
             ),
+            (
+                "ollama",
+                {"dimensions": 768},
+                "memory.embedder.config.dimensions does not apply to the ollama provider; remove it",
+            ),
+            (
+                "sentence-transformers",
+                {"dimensions": 256},
+                "memory.embedder.config.dimensions does not apply to the sentence_transformers provider; remove it",
+            ),
         ],
     )
     def test_embedder_rejects_the_fields_its_provider_ignores(
@@ -584,17 +592,17 @@ class TestMemoryConfig:
                 },
             ),
             (" OpenAI ", {"api_key": "sk-test", "query_prefix": "q: "}),
-            ("ollama", {"host": "http://ollama.local:11434", "dimensions": 768}),
+            ("ollama", {"host": "http://ollama.local:11434"}),
             # A Mem0-only provider's collection name includes dimensions, so it stays accepted though unread.
             ("huggingface", {"dimensions": 384}),
-            ("sentence_transformers", {"dimensions": 384}),
+            ("Sentence-Transformers", {}),
         ],
     )
     def test_embedder_accepts_the_fields_its_provider_may_set(self, provider: str, fields: dict[str, object]) -> None:
-        """The provider name is compared case-insensitively, and each accepted field loads as configured."""
+        """The provider name is spelled as model providers are, and each accepted field loads as configured."""
         embedder = _MemoryEmbedderConfig.model_validate({"provider": provider, "config": {"model": "embed", **fields}})
 
-        assert embedder.provider == provider.strip().lower()
+        assert embedder.provider == provider.strip().lower().replace("-", "_")
         assert embedder.config.model_dump(exclude_none=True) == {"model": "embed", **fields}
 
     def test_keyless_local_endpoint_constructs_both_real_clients(

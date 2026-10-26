@@ -9,15 +9,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.path_globs import validate_safe_relative_pattern
+from mindroom.providers.names import normalized_provider_name
 
 MemoryBackend = Literal["mem0", "file", "none"]
 _MemorySearchMode = Literal["keyword", "semantic"]
 
-# openai reads every memory.embedder.config field; other providers may set only model and dimensions, and ollama host.
-# Only openai reads dimensions, but the Mem0 collection name of a huggingface or other Mem0-only embedder includes it,
+# The memory.embedder.config fields each provider other than openai, which reads them all, may set.
+_EMBEDDER_FIELDS_BY_PROVIDER = {"ollama": frozenset({"model", "host"}), "sentence_transformers": frozenset({"model"})}
+# Nothing reads dimensions for a huggingface or other Mem0-only embedder, but its Mem0 collection name includes it,
 # so rejecting it would cut such a deployment off from its stored memories.
-_NON_OPENAI_EMBEDDER_FIELDS = frozenset({"model", "dimensions"})
-_OLLAMA_EMBEDDER_FIELDS = _NON_OPENAI_EMBEDDER_FIELDS | {"host"}
+_MEM0_ONLY_EMBEDDER_FIELDS = frozenset({"model", "dimensions"})
 
 
 def _sets_a_value(value: object) -> bool:
@@ -84,14 +85,14 @@ class _MemoryEmbedderConfig(BaseModel):
     @classmethod
     def _canonical_provider(cls, value: str) -> str:
         """Spell the provider as every embedder consumer compares it, so `OpenAI` selects openai."""
-        return value.strip().lower()
+        return normalized_provider_name(value)
 
     @model_validator(mode="after")
     def _reject_fields_the_provider_never_reads(self) -> Self:
-        """Reject a set field that the provider never reads, except dimensions (see _NON_OPENAI_EMBEDDER_FIELDS)."""
+        """Reject a set field that the provider never reads, except a Mem0-only provider's dimensions."""
         if self.provider == "openai":
             return self
-        accepted = _OLLAMA_EMBEDDER_FIELDS if self.provider == "ollama" else _NON_OPENAI_EMBEDDER_FIELDS
+        accepted = _EMBEDDER_FIELDS_BY_PROVIDER.get(self.provider, _MEM0_ONLY_EMBEDDER_FIELDS)
         ignored = [
             f"memory.embedder.config.{name}"
             for name, value in self.config
