@@ -202,8 +202,8 @@ def _models_using_shared_key(config: Config, env_key: str, runtime_paths: Runtim
 
 def _get_custom_base_url(models: list[ModelConfig], runtime_paths: RuntimePaths) -> str | None:
     """Return the endpoint the runtime sends the shared key to when a model's config or its route's endpoint variable sets one."""
-    # Deferred: the OpenAI routes load the model HTTP client and token counter.
-    from mindroom.providers.openai.build import configured_endpoint  # noqa: PLC0415
+    # Deferred: the provider routes load the model HTTP client and token counter.
+    from mindroom.providers.registry import configured_endpoint  # noqa: PLC0415
 
     return next((endpoint for model in models if (endpoint := configured_endpoint(model, runtime_paths))), None)
 

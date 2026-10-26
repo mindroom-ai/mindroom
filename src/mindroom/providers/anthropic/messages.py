@@ -68,6 +68,7 @@ from mindroom.providers.anthropic.settings import (
     ENDPOINT_VARIABLES,
     ClaudeRouteKind,
     ClaudeSettings,
+    configured_anthropic_endpoint,
     parse_claude_settings,
 )
 from mindroom.providers.anthropic.wire import (
@@ -134,8 +135,7 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | N
     """
     client_params = settings.client_params or {}
     if route == "anthropic":
-        base_url = client_params.get("base_url") or os.environ.get("ANTHROPIC_BASE_URL") or ANTHROPIC_BASE_URL_DEFAULT
-        return str(base_url).rstrip("/")
+        return str(configured_anthropic_endpoint(client_params) or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
     if route == "vertexai_claude":
         params = {**_route_client_kwargs(route, settings), **client_params}
         region = params["region"] or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])

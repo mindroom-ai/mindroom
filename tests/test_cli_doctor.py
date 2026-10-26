@@ -292,6 +292,13 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
         ("openai", {}, "OPENAI_BASE_URL=https://env-proxy.example/v1\n", "https://env-proxy.example/v1/models"),
         ("groq", {"base_url": "https://groq-proxy.example"}, "", "https://groq-proxy.example/openai/v1/models"),
         ("google", {}, "", "https://generativelanguage.googleapis.com/v1beta/models?key=k"),
+        ("OpenAI", {"base_url": "https://proxy.example/v1"}, "", "https://proxy.example/v1/models"),
+        (
+            "Anthropic",
+            {"client_params": {"base_url": "https://gateway.example/anthropic"}},
+            "",
+            "https://gateway.example/anthropic/v1/models",
+        ),
         # OpenRouter's model list is public, so its key is read back from the key endpoint at any endpoint.
         (
             "openrouter",
@@ -310,6 +317,7 @@ def test_doctor_checks_a_provider_key_at_the_endpoint_the_runtime_calls(
     url: str,
 ) -> None:
     """The key check goes to the model's runtime endpoint: ``client_params.base_url``, then ``base_url``, then the endpoint variable."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     env_key = f"{provider.upper()}_API_KEY"
     (tmp_path / ".env").write_text(f"{env_key}=k\n{env}", encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
@@ -325,8 +333,37 @@ def test_doctor_checks_a_provider_key_at_the_endpoint_the_runtime_calls(
         router=RouterConfig(model="default"),
     )
 
-    assert _check_single_provider(provider, config, runtime_paths) == (1, 0, 0)
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
     assert probed == [url]
+
+
+def test_doctor_checks_an_anthropic_key_at_the_endpoint_the_sdk_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ANTHROPIC_BASE_URL``, which the Anthropic SDK reads from the process environment, moves the key check too."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic/")
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent: list[tuple[str, dict[str, str]]] = []
+
+    def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
+        sent.append((url, headers))
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    config = Config(
+        models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert sent == [
+        (
+            "https://gateway.example/anthropic/v1/models",
+            {"x-api-key": "k", "anthropic-version": "2023-06-01"},
+        ),
+    ]
 
 
 def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_client_key(

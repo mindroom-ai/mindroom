@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
-from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings
+from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings, configured_anthropic_endpoint
 from mindroom.providers.credentials import dashboard_api_key
 from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
 from mindroom.providers.gemini.settings import GeminiSettings
@@ -22,6 +22,7 @@ from mindroom.providers.openai.build import ENDPOINT_VARIABLES as OPENAI_ENDPOIN
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
 from mindroom.providers.openai.build import accepted_extra_kwargs as openai_accepted_extra_kwargs
 from mindroom.providers.openai.build import build_provider as build_openai_provider
+from mindroom.providers.openai.build import configured_endpoint as openai_configured_endpoint
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.synthetic_adapter import SyntheticSettings
@@ -34,7 +35,13 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import Capabilities, ModelProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["build_model_provider", "check_extra_kwargs", "model_capabilities", "stream_idle_timeout_seconds"]
+__all__ = [
+    "build_model_provider",
+    "check_extra_kwargs",
+    "configured_endpoint",
+    "model_capabilities",
+    "stream_idle_timeout_seconds",
+]
 
 logger = get_logger(__name__)
 
@@ -147,6 +154,17 @@ def _sets_base_url(value: object) -> bool:
         return False
     settings = cast("dict[str, Any]", value)
     return any((key == "base_url" and bool(item)) or _sets_base_url(item) for key, item in settings.items())
+
+
+def configured_endpoint(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
+    """Return the endpoint one model calls when its config or its route's endpoint variable sets one, else None.
+
+    The OpenAI Chat Completions routes and the direct Anthropic route resolve it as their builders do; any other
+    route gets None.
+    """
+    if provider_route(model_config.provider) == "anthropic":
+        return configured_anthropic_endpoint((model_config.extra_kwargs or {}).get("client_params"))
+    return openai_configured_endpoint(model_config, runtime_paths)
 
 
 def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: RuntimePaths) -> float | None:

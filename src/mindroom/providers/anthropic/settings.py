@@ -6,6 +6,7 @@ list at config load and again when the model is built.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -113,6 +114,14 @@ class ClaudeSettings:
         return (request_params.get("extra_body") or {}).get(name, request_params.get(name, authored))
 
 
+def configured_anthropic_endpoint(client_params: Mapping[str, Any] | None) -> str | None:
+    """Return the endpoint the direct ``anthropic`` route calls when its config or the SDK's variable sets one.
+
+    ``client_params.base_url`` wins, else the ``ANTHROPIC_BASE_URL`` the SDK reads from the process environment.
+    """
+    return (client_params or {}).get("base_url") or os.environ.get("ANTHROPIC_BASE_URL") or None
+
+
 def parse_claude_settings(route: ClaudeRouteKind, extra_kwargs: Mapping[str, Any] | None) -> ClaudeSettings:
     """Parse authored ``extra_kwargs`` for one route, rejecting keys the route does not accept."""
     return settings_from_extra_kwargs(ClaudeSettings, extra_kwargs, provider=route, accepted=ACCEPTED_KEYS[route])
@@ -123,5 +132,6 @@ __all__ = [
     "ENDPOINT_VARIABLES",
     "ClaudeRouteKind",
     "ClaudeSettings",
+    "configured_anthropic_endpoint",
     "parse_claude_settings",
 ]

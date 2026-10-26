@@ -25,8 +25,8 @@ __all__ = ["PROVIDER_KEY_CHECKS", "ProviderKeyCheck"]
 class ProviderKeyCheck:
     """One provider's key check: where it is sent and how the key travels.
 
-    ``path`` is what the check reads below an OpenAI-compatible endpoint a model's config sets in place of the
-    provider's own. ``header_name`` carries the key after ``header_prefix``; without one, the key travels as the
+    ``path`` is what the check reads below an endpoint a model's config sets in place of the provider's own.
+    ``header_name`` carries the key after ``header_prefix``; without one, the key travels as the
     ``key`` query parameter, as Google's Gemini API takes it.
     """
 
@@ -56,6 +56,7 @@ PROVIDER_KEY_CHECKS: dict[str, ProviderKeyCheck] = {
         url=f"{ANTHROPIC_BASE_URL_DEFAULT}/v1/models",
         header_name="x-api-key",
         extra_headers=(("anthropic-version", "2023-06-01"),),
+        path="/v1/models",
     ),
     "openai": _bearer(f"{OPENAI_BASE_URL_DEFAULT}/models"),
     # TODO(simplify): The Gemini check sends the key as a URL query parameter, which proxy and HTTP logs record.
