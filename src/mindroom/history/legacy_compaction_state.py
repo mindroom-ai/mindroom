@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import time
-from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
@@ -27,7 +26,7 @@ from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Collection, Iterator
+    from collections.abc import Collection
 
     from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 
@@ -71,8 +70,7 @@ def _create_summary_rows(connection: sqlite3.Connection, names: AgnoTableNames) 
     for statement in agno_summary_rows_sql(names):
         connection.execute(statement)
     if f"{names.sessions}_compactions" in table_names(connection):
-        with _text_with_replacement_characters(connection):
-            _convert_archive(connection, names)
+        _convert_archive(connection, names)
     else:
         _adopt_legacy_sessions(connection, names)
 
@@ -133,7 +131,7 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
 # write) stay; tombstones are not carried over. Worker code can write the archive, so an archived run that is not a JSON
 # object does not return, a row naming no stored session or a run by an id that is not text stays out, as does a
 # stale copy's member row whose run id is not text, event ids count only as text entries of valid JSON, and text that is
-# not UTF-8 reads with replacement characters; none fails the conversion.
+# not UTF-8 reads with replacement characters, as everywhere in the conversion; none fails the conversion.
 # Coverage: tests/test_archive_migration.py::test_ordinary_generations_become_summary_rows_after_their_runs,
 # ::test_a_legacy_generation_stays_in_force_before_every_run, ::test_retired_generations_keep_their_runs_behind_the_barrier,
 # ::test_stale_copies_of_archived_and_tombstoned_runs_are_dropped, ::test_archived_member_runs_return_with_their_team_run,
@@ -142,7 +140,6 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
 # ::test_an_archived_run_with_unusable_values_returns_without_them,
 # ::test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text,
 # ::test_archive_text_that_is_not_utf8_reads_with_replacement_characters,
-# ::test_the_archive_step_leaves_text_reads_to_the_steps_after_it,
 # ::test_archive_rows_naming_no_stored_session_or_a_run_by_an_id_that_is_not_text_stay_out, and
 # ::test_a_member_row_whose_id_is_not_text_below_an_archived_run_does_not_stop_the_conversion.
 def _convert_archive(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
@@ -171,20 +168,6 @@ def _convert_archive(connection: sqlite3.Connection, names: AgnoTableNames) -> N
     _insert_generation_rows(connection, names)
     connection.execute(f"DROP TABLE {compacted_runs}")
     connection.execute(f"DROP TABLE {compactions}")
-
-
-@contextmanager
-def _text_with_replacement_characters(connection: sqlite3.Connection) -> Iterator[None]:
-    """Read text whose bytes are not UTF-8 with replacement characters instead of failing the read.
-
-    SQLite keeps whatever bytes worker code stores as text, and decodes a JSON escape of a lone surrogate to such bytes.
-    """
-    text_factory = connection.text_factory
-    connection.text_factory = lambda value: value.decode("utf-8", "replace")
-    try:
-        yield
-    finally:
-        connection.text_factory = text_factory
 
 
 def _insert_generation_rows(connection: sqlite3.Connection, names: AgnoTableNames) -> None:

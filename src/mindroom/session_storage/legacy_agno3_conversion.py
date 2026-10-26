@@ -6,7 +6,8 @@ in one write transaction, after the byte-for-byte backup beside it (``legacy_agn
 leaves the file as it was and the next open converts it again.
 
 Worker code can write session directories, so every database is untrusted input: the conversion follows no link to the
-file, decodes each run row on its own, and leaves out a row it cannot read, which the backup keeps.
+file, reads text that is not UTF-8 with replacement characters, decodes each run row on its own, and leaves out a row it
+cannot read, which the backup keeps.
 """
 
 from __future__ import annotations
@@ -86,6 +87,8 @@ def migrate_conversation_database(path: Path, names: TableNames, *, timeout: flo
             # Asked again under the lock: another opener may have converted the file while this one waited, and backing
             # up the converted file would replace the original's backup.
             if not _is_converted(connection, names):
+                # SQLite keeps whatever bytes worker code stores as text; the conversion's own connection reads them.
+                connection.text_factory = _TEXT_WITH_REPLACEMENT_CHARACTERS
                 _convert(connection, AgnoTableNames(names.storage_name), path, descriptors)
         except BaseException:
             connection.rollback()
@@ -151,6 +154,10 @@ def _connect_by_name(path: Path, timeout: float) -> sqlite3.Connection:
     return connection
 
 
+# Decodes text that is not UTF-8, which worker code can store, with replacement characters instead of failing the read.
+_TEXT_WITH_REPLACEMENT_CHARACTERS = partial(str, encoding="utf-8", errors="replace")
+
+
 def _is_converted(connection: sqlite3.Connection, names: TableNames) -> bool:
     query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
     return connection.execute(query, (names.log_meta,)).fetchone() is not None
@@ -177,6 +184,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     if tables:
         write_conversion_backup(connection, path, descriptors)
     if names.sessions in tables:
+        _session_text_as_utf8(connection, names)
         seed_usage_ledger(connection, names)
         adopt_summary_rows(connection, names)
         _fold_force_requests(connection, names)
@@ -199,6 +207,27 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     _drop_agno_tables(connection, names)
     _drop_dead_session_columns(connection, names)
     _write_meta(connection, names, next(seqs))
+
+
+def _session_text_as_utf8(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
+    """Store each session column's text that is not UTF-8 as the conversion reads it, so every later read decodes it.
+
+    A session whose id is not UTF-8, which no read could name, is left out; the backup keeps it.
+    """
+    sessions = quote_identifier(names.sessions)
+    rows = connection.execute(
+        f"SELECT CAST(session_id AS BLOB), {', '.join(SESSION_COLUMNS)} FROM {sessions}",  # noqa: S608
+    ).fetchall()
+    for key, *values in rows:
+        for column, value in zip(SESSION_COLUMNS, values, strict=True):
+            # Only a value read with a replacement character can differ from what is stored.
+            if not (isinstance(value, str) and "\ufffd" in value):
+                continue
+            where = f"WHERE CAST(session_id AS BLOB) IS ? AND {column} IS NOT ?"
+            if column == "session_id":
+                connection.execute(f"DELETE FROM {sessions} {where}", (key, value))  # noqa: S608
+            else:
+                connection.execute(f"UPDATE {sessions} SET {column} = ? {where}", (value, key, value))  # noqa: S608
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,13 +749,18 @@ def _requested_scopes(scope_keys: object) -> list[HistoryScope]:
 # LEGACY_COMPAT: The Agno-layout removed-run table.
 # Legacy format: `<s>_removed_runs`, the ids of runs a cut removed, which a late save must not write again.
 # Last legacy release: v2026.10.559; replacement: the next release, `<s>_log_removed`.
-# Handling: Every row of a stored session is copied, so a late save of a removed run still writes nothing.
-# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_removed_runs_stay_removed.
+# Handling: Every row of a stored session is copied, so a late save of a removed run still writes nothing; an id that is
+# not UTF-8 is copied as the conversion reads it, with replacement characters, and two such ids can read alike.
+# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_removed_runs_stay_removed and
+# ::test_a_removed_run_whose_id_is_not_utf8_is_stored_as_the_conversion_reads_it.
 def _copy_removed(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
-    connection.execute(
-        f"INSERT INTO {quote_identifier(names.log_removed)} (run_id, session_id) SELECT run_id, session_id "  # noqa: S608
-        f"FROM {quote_identifier(names.removed_runs)} "
+    rows = connection.execute(
+        f"SELECT run_id, session_id FROM {quote_identifier(names.removed_runs)} "  # noqa: S608
         f"WHERE session_id IN (SELECT session_id FROM {quote_identifier(names.sessions)})",
+    ).fetchall()
+    connection.executemany(
+        f"INSERT OR IGNORE INTO {quote_identifier(names.log_removed)} (run_id, session_id) VALUES (?, ?)",  # noqa: S608
+        rows,
     )
 
 

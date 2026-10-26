@@ -13,13 +13,11 @@ import pytest
 
 from mindroom import constants
 from mindroom.history import summary_rows
-from mindroom.history.legacy_compaction_state import adopt_summary_rows
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.history_helpers import folded_run_ids, stored_run_ids
@@ -571,18 +569,6 @@ def test_an_archived_run_with_a_lone_surrogate_returns_with_a_replacement_charac
     assert restored is not None
     assert restored.to_dict()[field] == "x\ufffd"
     assert _replay(tmp_path).stored == ["r0", "r1"]
-
-
-def test_the_archive_step_leaves_text_reads_to_the_steps_after_it(tmp_path: Path) -> None:
-    """Replacement characters stay the archive's rule: the connection reads text as it did once the step ends."""
-    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
-    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
-        adopt_summary_rows(connection, AgnoTableNames("code"))
-
-        assert connection.text_factory is str
-        assert "code_sessions_compactions" not in {
-            name for (name,) in connection.execute("SELECT name FROM sqlite_master")
-        }
 
 
 @pytest.mark.parametrize(
