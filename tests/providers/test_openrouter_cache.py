@@ -46,14 +46,6 @@ _USAGE = {
     "total_tokens": 5001,
     "prompt_tokens_details": {"cached_tokens": 4000, "cache_write_tokens": 900},
 }
-_COMPLETION = {
-    "id": "gen-test",
-    "object": "chat.completion",
-    "created": 1,
-    "model": "anthropic/claude-haiku-4.5",
-    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
-    "usage": _USAGE,
-}
 _CHUNK = {"id": "gen-test", "object": "chat.completion.chunk", "created": 1, "model": "anthropic/claude-haiku-4.5"}
 _STREAM = [
     {"data": {**_CHUNK, "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]}},
@@ -68,23 +60,17 @@ async def _send(
     *,
     tools: list[ToolSpec] | None = None,
     model_id: str = "anthropic/claude-haiku-4.5",
-    stream: bool = False,
     overrides: RequestOverrides | None = None,
     **extra_kwargs: Any,  # noqa: ANN401
 ) -> tuple[dict[str, Any], TurnCompleted]:
     """Send one request through the OpenRouter route and return its wire body and finished turn."""
-    reply: dict[str, Any] = (
-        {"status": 200, "headers": {"content-type": "text/event-stream"}, "sse": _STREAM}
-        if stream
-        else {"status": 200, "headers": {"content-type": "application/json"}, "json": _COMPLETION}
-    )
+    reply = {"status": 200, "headers": {"content-type": "text/event-stream"}, "sse": _STREAM}
     model_config = {"provider": "openrouter", "id": model_id, "extra_kwargs": {"api_key": "test-key", **extra_kwargs}}
     tmp_path.mkdir(parents=True, exist_ok=True)
     built = golden_provider({"input": {"model_config": model_config}, "response_raw": reply}, tmp_path)
     request = ModelRequest(
         messages=messages,
         tools=tools or (),
-        stream=stream,
         overrides=overrides or RequestOverrides(),
     )
     events = [event async for event in built.provider.stream(request)]
@@ -192,19 +178,16 @@ async def test_an_authored_tool_marker_turns_the_automatic_markers_off(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-async def test_every_request_mode_sends_markers_and_a_request_can_opt_out(tmp_path: Path, *, stream: bool) -> None:
-    """Streamed and non-streamed requests get the ladder, and a request without prompt caching sends none."""
-    marked, _ = await _send(tmp_path, _conversation(), tools=_TOOLS, stream=stream)
+async def test_requests_send_markers_and_a_request_can_opt_out(tmp_path: Path) -> None:
+    """Requests get the ladder, and a request without prompt caching sends none."""
+    marked, _ = await _send(tmp_path, _conversation(), tools=_TOOLS)
     unmarked, _ = await _send(
         tmp_path / "opted-out",
         _conversation(),
         tools=_TOOLS,
-        stream=stream,
         overrides=RequestOverrides(prompt_cache=False),
     )
 
-    assert marked.get("stream", False) is stream
     assert _markers(marked) == [_ONE_HOUR] * 4
     assert _markers(unmarked) == []
 

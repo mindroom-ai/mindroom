@@ -393,7 +393,7 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
     assert len(reply.model.requests) == 2
     assert reply.model.requests[1].messages[-1].role == "tool"
     assert reply.model.requests[1].messages[-1].content == "touched a"
-    assert all(request.tool_choice is None and request.stream for request in reply.model.requests)
+    assert all(request.tool_choice is None for request in reply.model.requests)
     record = _stored(reply)
     assert record.status is RunStatus.completed
     assert record.content == "The probe answered."
@@ -407,12 +407,12 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_reply_sends_non_streaming_requests_and_returns_the_text(
+async def test_a_blocking_reply_runs_the_same_loop_and_returns_the_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The blocking path runs the same loop with ``stream=False`` requests and the tool trace in the text."""
+    """The blocking path runs the same loop and returns the text with the tool trace in it."""
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Done.")])
 
     text = await _respond(reply)
@@ -420,7 +420,6 @@ async def test_a_blocking_reply_sends_non_streaming_requests_and_returns_the_tex
     assert text.startswith("Done.")
     assert "touch" in text
     assert probe.calls == ["a"]
-    assert all(request.stream is False for request in reply.model.requests)
     assert _stored(reply).status is RunStatus.completed
 
 
@@ -819,7 +818,6 @@ async def test_a_silent_participation_decision_ends_the_reply_before_any_model_r
     assert gate.is_declined
     [decision] = reply.model.requests
     assert decision.tool_choice == "none"
-    assert decision.stream is False
     assert reply.storage.list_runs(SESSION_ID) == []
     assert reply.recorder.outcome == "skipped"
 
@@ -853,7 +851,7 @@ async def test_an_approving_participation_decision_reuses_the_reply_prefix(
     assert decision.messages[-1].role == "user"
     assert "Offer concise technical help." in str(decision.messages[-1].content)
     assert decision.tools == answer_request.tools
-    assert (decision.tool_choice, decision.stream) == ("none", False)
+    assert decision.tool_choice == "none"
     assert answer_request.tool_choice is None
     record = _stored(reply)
     assert record.content == "Useful answer"
@@ -989,7 +987,6 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     assert len(hooks.on_resume_entry) == 1
     assert hooks.on_loop_end is not None
     assert captured["request_template"].native_compaction is None
-    assert captured["request_template"].stream is True
 
 
 @dataclass(frozen=True)

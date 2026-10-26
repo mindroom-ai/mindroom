@@ -30,7 +30,6 @@ from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import create_mid_turn_gate
@@ -78,7 +77,6 @@ class _ResumedRequests:
 async def _run_turn(
     model: ScriptedModel,
     *toolkits: AdaptedToolkit,
-    stream: bool,
     persist: Callable[[RunRecord], Awaitable[None]] | None = None,
 ) -> RunRecord:
     """Run one turn of "Do the task" on the owned loop with the queued-notice hooks a reply installs."""
@@ -89,7 +87,7 @@ async def _run_turn(
             ctx=context(),
             hooks=_NOTICE_HOOKS,
             persist=persist,
-            request_template=ModelRequest(messages=(), stream=stream),
+            request_template=EMPTY_REQUEST,
         ),
     )
     return record
@@ -534,12 +532,10 @@ async def test_judgment_cancellation_propagates_without_caching_approval() -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("finish", [False, True])
 @pytest.mark.parametrize("terminal", [False, True])
 async def test_real_tool_loop_judges_before_next_provider_request(
     *,
-    stream: bool,
     finish: bool,
     terminal: bool,
 ) -> None:
@@ -566,7 +562,7 @@ async def test_real_tool_loop_judges_before_next_provider_request(
     model = ScriptedModel([calls(tool_call("queue_followup", "call_1")), answer("Done")])
     tools = toolkit(queue_followup, stop_after_call=True) if terminal else toolkit(queue_followup)
     with queued_message_signal_context(state, mid_turn_gate=gate) as context:
-        await _run_turn(model, tools, stream=stream)
+        await _run_turn(model, tools)
         assert context.notice_fired is (not finish and not terminal)
     assert len(evidence) == (0 if terminal else 1)
     assert "Private tool result" not in json.dumps(evidence)
@@ -577,9 +573,8 @@ async def test_real_tool_loop_judges_before_next_provider_request(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("mixed", [False, True])
-async def test_pending_approval_is_not_judged_as_completed_work(*, stream: bool, mixed: bool) -> None:
+async def test_pending_approval_is_not_judged_as_completed_work(*, mixed: bool) -> None:
     """Unresolved tool calls must not become evidence of completed actions."""
     executed: list[str] = []
     judgments: list[JudgmentRequest] = []
@@ -603,7 +598,7 @@ async def test_pending_approval_is_not_judged_as_completed_work(*, stream: bool,
     names = ["ordinary_action", "approved_action"] if mixed else ["approved_action"]
     model = ScriptedModel([calls(*(tool_call(name, name) for name in names))])
     with queued_message_signal_context(state, mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate)):
-        record = await _run_turn(model, gated(approved_action), toolkit(ordinary_action), stream=stream)
+        record = await _run_turn(model, gated(approved_action), toolkit(ordinary_action))
     assert record.status == RunStatus.paused
     assert executed == (["ordinary_action"] if mixed else [])
     assert judgments == []
@@ -738,9 +733,8 @@ async def test_configured_backends_control_resumed_turns(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("cancel", [False, True])
-async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, stream: bool, cancel: bool) -> None:
+async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, cancel: bool) -> None:
     """Adding a judgment must not discard the stored results of executed tools."""
     state = _QueuedMessageState()
     entered = asyncio.Event()
@@ -767,7 +761,7 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
             state,
             mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate),
         ):
-            await _run_turn(model, toolkit(work), stream=stream, persist=persist)
+            await _run_turn(model, toolkit(work), persist=persist)
 
     task = asyncio.create_task(run())
     await entered.wait()
@@ -785,10 +779,9 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("interrupt", [False, True])
 @pytest.mark.parametrize("media", [False, True])
-async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool, interrupt: bool, media: bool) -> None:
+async def test_batch_with_paused_delegation_follows_the_judgment(*, interrupt: bool, media: bool) -> None:
     """A delegation paused beside other calls must not request a wrap-up the judge did not ask for."""
     state = _QueuedMessageState()
     judgments: list[JudgmentRequest] = []
@@ -814,7 +807,7 @@ async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool
         mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate),
     ):
         # The loop runs the ordinary call and pauses the delegation for its external driver.
-        paused = await _run_turn(model, *tools, stream=stream)
+        paused = await _run_turn(model, *tools)
         assert paused.status == RunStatus.paused
         assert len(model.requests) == 1
         assert judgments == []
@@ -866,7 +859,7 @@ async def test_a_failing_judge_or_defer_reaction_costs_no_reply(*, failure: str,
     model = ScriptedModel([calls(*batch), answer("Done")])
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=react)
     with queued_message_signal_context(state, mid_turn_gate=gate):
-        record = await _run_turn(model, *tools, stream=False)
+        record = await _run_turn(model, *tools)
         if resumed:
             assert record.status == RunStatus.paused
             record = await _resume_turn(model, record, *tools, external_results={"child": "Child result"})

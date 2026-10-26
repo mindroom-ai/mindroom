@@ -1,4 +1,4 @@
-"""The C4 ``squad`` and ``panel`` teams rebuilt on the owned runtime, and the comparison with the rows Agno stored.
+"""The ``squad`` and ``panel`` teams of the storage goldens, and the comparison with the rows Agno stored.
 
 The capture ran ``Team-writer-checker`` with a scripted ``Synthetic`` provider: the writer has MindRoom's calculator,
 the checker the same calculator with ``multiply`` under the approval policy, and the leader only the delegation tool.
@@ -52,14 +52,14 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 
 
 def golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
-    """Return one run as the C4 capture loaded it from the store Agno wrote."""
+    """Return one run of the storage goldens as loaded from the store Agno wrote."""
     sessions = json.loads((STORAGE / "loaded_sessions.json").read_text(encoding="utf-8"))[store]
     [run] = [run for run in sessions[session_id]["runs"] if run["run_id"] == run_id]
     return run
 
 
 def pre_resume_runs(dump: str) -> dict[str, dict[str, Any]]:
-    """Return the run rows of one C6 pre-resume dump by run id, as the resume read them."""
+    """Return the run rows of one pre-resume dump by run id, as the resume read them."""
     with closing(sqlite3.connect(":memory:")) as connection:
         connection.executescript((STORAGE / f"{dump}.sql").read_text(encoding="utf-8"))
         [table] = [
@@ -249,9 +249,21 @@ def start_team(
     ctx: RunContext,
     persist: Persist[AnyRunRecord] = no_store,
     request_template: ModelRequest = EMPTY_REQUEST,
+    stream: bool = True,
 ) -> AsyncIterator[TeamRunEvent]:
-    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store."""
-    return run_team(team, run_input, ctx=ctx, hooks=NO_HOOKS, persist=persist, request_template=request_template)
+    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store.
+
+    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
+    """
+    return run_team(
+        team,
+        run_input,
+        ctx=ctx,
+        hooks=NO_HOOKS,
+        persist=persist,
+        request_template=request_template,
+        stream=stream,
+    )
 
 
 def resume_team(

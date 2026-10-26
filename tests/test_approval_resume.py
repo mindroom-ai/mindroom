@@ -1,4 +1,4 @@
-"""Production approval resumes continue the C6 pre-resume dumps into the rows Agno stored, and refuse what they must.
+"""Production approval resumes continue the pre-resume dumps into the rows Agno stored, and refuse what they must.
 
 Each test loads a paused run from its pre-resume dump (``tests.approval_resume_helpers``) and continues it through
 ``AgentApprovalExecution`` with the decisions the capture took. The stored rows are compared with the ones Agno wrote
@@ -21,7 +21,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.approval_continuation_helpers import receipt_call_ids
 from tests.approval_resume_helpers import AGENT_RESUMES, ROOM, CodeResume, resume_case, setup_case, setup_resume
-from tests.team_runtime.squad import comparable, golden_run, scripted
+from tests.teams.squad import comparable, golden_run, scripted
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,12 +30,12 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.mark.parametrize("run_id", ["run-approved", "run-rejected"])
-async def test_a_paused_approval_resumes_into_the_rows_agno_stored(
+async def test_a_paused_approval_resumes_into_its_golden_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     run_id: str,
 ) -> None:
-    """Approving or denying the paused ``multiply`` continues the run exactly as Agno's continuation did."""
+    """Approving or denying the paused ``multiply`` continues the run into the rows its golden holds."""
     case = AGENT_RESUMES[run_id]
     run = await setup_case(case, tmp_path, monkeypatch)
     before = run.paused.to_dict()
@@ -54,7 +54,7 @@ async def test_a_paused_approval_resumes_into_the_rows_agno_stored(
     assert request.messages[-1].tool_call_id == f"call-{run_id}"
 
 
-async def test_a_paused_delegation_resumes_its_child_and_then_the_parent_as_agno_did(
+async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

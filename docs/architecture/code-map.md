@@ -52,7 +52,7 @@ Matrix sync callback
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
-| `participation_hook.py` | The reply's participation check as a pre-request loop hook: a non-streaming decision request on the reply's exact messages, or the configured judgment backend, ending the run when it stays silent |
+| `participation_hook.py` | The reply's participation check as a pre-request loop hook: a decision request on the reply's exact messages, or the configured judgment backend, ending the run when it stays silent |
 | `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, the bounded HTTP client, and LLM, System One, and OpenAI Decisions adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM, TypeSafe, or OpenAI Decisions judge and map its result to a participation decision |
 | `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |
@@ -259,7 +259,7 @@ Matrix sync callback
 | `providers/prompt_cache_key.py` | Stable prompt-cache routing keys derived from execution identity |
 | `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys, and reports the non-secret settings that run metadata and request logs record as model params |
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
-| `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp and timings |
+| `providers/assistant_turn.py` | What adapters share to build a turn: the `mindroom_model` provenance stamp and timings, and the split of a leading inline `<think>` block into reasoning |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
 | `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |

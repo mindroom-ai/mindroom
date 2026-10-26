@@ -72,7 +72,7 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.providers.golden_support import SentRequest, httpx2_transport
+from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -674,6 +674,28 @@ def test_long_tool_output_keeps_its_start_and_end() -> None:
     assert "characters omitted ..." in transcript
     assert transcript.count("characters omitted") == 1
     assert len(transcript) <= 40_000 // 8 + 64
+
+
+def test_a_failed_tool_result_reads_as_an_error() -> None:
+    """A reviewer can tell a call that failed from one that returned, so it does not learn a failed command as working."""
+    transcript = _transcript(
+        _run(
+            "r1",
+            Message(
+                role="tool",
+                content="make: *** No rule to make target 'deploy'.",
+                tool_name="shell",
+                tool_call_error=True,
+            ),
+            Message(role="tool", content="Deployed.", tool_name="shell", tool_call_error=False),
+        ),
+        budget_chars=40_000,
+    )
+
+    assert (
+        transcript
+        == "TOOL ERROR (shell):\nmake: *** No rule to make target 'deploy'.\n\nTOOL RESULT (shell):\nDeployed."
+    )
 
 
 def test_model_replies_count_only_model_visible_runs() -> None:
@@ -1593,7 +1615,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     assert forked.tools == sent.tools
     assert "deploy" in {tool.name for tool in forked.tools}
     assert forked.deferred_tools == sent.deferred_tools == settings.deferred_tools
-    assert (sent.stream, forked.stream) == (True, False)
+    assert replace(forked, messages=(), tools=()) == replace(sent, messages=(), tools=())
     assert shell_calls == deploy_calls == []
     assert denied[-1] == (
         "This tool is not available during a skill review; only skill_manage, get_skill_instructions, "
@@ -1693,7 +1715,6 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(
     assert len(replay.requests) == 1
     assert "<conversation>" in replay.requests[0][-1]
     assert "tests passed" in replay.requests[0][-1]
-    assert replay.received[0].stream is False
 
 
 @pytest.mark.asyncio
@@ -1804,7 +1825,7 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(
 
     def respond(request: SentRequest) -> httpx.Response:
         requests.append(json.loads(request.content))
-        return httpx.Response(200, json=replies.pop(0))
+        return streamed_reply(replies.pop(0))
 
     async with (
         httpx2.AsyncClient(transport=httpx2_transport(respond)) as model_client,
@@ -1820,9 +1841,7 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(
         )
         model = build_model_provider(config, paths, "default")
         capture = SkillReviewCapture()
-        # The replies are whole responses, so the response asks for whole replies too.
-        settings = ModelRequest(messages=(), stream=False)
-        await _answer(model, capture, _agent_tools(config, paths, []), settings=settings)
+        await _answer(model, capture, _agent_tools(config, paths, []))
         await _review(config, paths, captured=capture.latest)
     _first, primary, fork = (cast("dict[str, Any]", _without_cache_markers(request)) for request in requests)
     history, unchanged = _WIRE_REQUEST_PARTS[wire_name]

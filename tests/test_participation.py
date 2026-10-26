@@ -115,8 +115,7 @@ async def test_approval_reuses_exact_normal_prefix_and_only_checks_once() -> Non
     assert decision.messages[-1].role == "user"
     assert "Offer concise technical help." in str(decision.messages[-1].content)
     assert decision.tools == reply.tools == continuation.tools
-    assert (decision.tool_choice, decision.stream) == ("none", False)
-    assert (reply.tool_choice, reply.stream) == (None, True)
+    assert (decision.tool_choice, reply.tool_choice) == ("none", None)
     assert first.content == "Useful answer"
     assert second.content == "Continued"
     assert gate.approved
@@ -127,7 +126,7 @@ async def test_approval_reuses_exact_normal_prefix_and_only_checks_once() -> Non
 
 @pytest.mark.asyncio
 async def test_the_decision_request_keeps_every_setting_of_the_reply_request() -> None:
-    """The decision is the reply's request with the prompt appended, tool selection off, and one non-streaming call.
+    """The decision is the reply's request with the prompt appended and tool selection off.
 
     Deferred tool search, native compaction, portable replay, and request overrides reach the decision as they reach
     the reply, so the decision shares the reply's prompt cache and replays the history the provider compacted.
@@ -146,8 +145,8 @@ async def test_the_decision_request_keeps_every_setting_of_the_reply_request() -
     decision, reply = model.requests
     assert replace(reply, messages=template.messages, tools=template.tools) == template
     assert tuple(decision.messages[:-1]) == tuple(reply.messages)
-    assert (decision.tool_choice, decision.stream) == ("none", False)
-    assert replace(decision, messages=reply.messages, tool_choice=reply.tool_choice, stream=reply.stream) == reply
+    assert decision.tool_choice == "none"
+    assert replace(decision, messages=reply.messages, tool_choice=reply.tool_choice) == reply
 
 
 @pytest.mark.asyncio

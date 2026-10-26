@@ -18,7 +18,6 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {

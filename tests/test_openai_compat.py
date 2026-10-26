@@ -94,8 +94,8 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
-from tests.team_runtime.squad import built_team, team_spec
-from tests.team_runtime.squad import member as team_member
+from tests.teams.squad import built_team, team_spec
+from tests.teams.squad import member as team_member
 
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
@@ -3224,12 +3224,13 @@ _PREPARED_TEAM_TURN = _prepared_team_execution_context(final_prompt="Build it")
 
 @dataclass(frozen=True)
 class _TeamRunCall:
-    """One ``run_team`` call the bridge made: the team, its request, and the run's context."""
+    """One ``run_team`` call the bridge made: the team, its request, the run's context, and its stream mode."""
 
     spec: TeamSpec
     messages: list[Message]
     ctx: RunContext
     request_template: ModelRequest
+    stream: bool
 
 
 @contextmanager
@@ -3244,10 +3245,11 @@ def _recorded_team_runs() -> Iterator[list[_TeamRunCall]]:
         *,
         ctx: RunContext,
         request_template: ModelRequest,
+        stream: bool,
         **kwargs: object,
     ) -> AsyncIterator[object]:
-        recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template))
-        return real_run_team(spec, messages, ctx=ctx, request_template=request_template, **kwargs)  # type: ignore[arg-type]
+        recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template, stream))
+        return real_run_team(spec, messages, ctx=ctx, request_template=request_template, stream=stream, **kwargs)  # type: ignore[arg-type]
 
     with patch("mindroom.teams.envelope.run_team", new=recording_run_team):
         yield recorded
@@ -3582,7 +3584,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
         [run] = runs
         assert [message.content for message in run.messages] == ["Build a feature"]
-        assert run.request_template.stream is False
+        assert run.stream is False
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
 
@@ -3932,7 +3934,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["built"] is team
         [run] = runs
         assert [message.content for message in run.messages] == ["Build it"]
-        assert run.request_template.stream is True
+        assert run.stream is True
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 456
 

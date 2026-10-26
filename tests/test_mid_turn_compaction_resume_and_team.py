@@ -232,7 +232,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
             ),
         ),
         persist=persist_to(agent.store, agent.session),
-        request_template=replace(build.request_template, stream=False),
+        request_template=build.request_template,
     )
     finished = [event async for event in events][-1]
     assert isinstance(finished, RunFinished)

@@ -78,7 +78,7 @@ class GeminiProvider:
         return settings_params(self.settings)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
+        """Send one streamed ``generateContent`` request and yield its events.
 
         Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
         """
@@ -95,28 +95,19 @@ class GeminiProvider:
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
             call = {"model": self.identity.id, "contents": cast("Any", contents), "config": cast("Any", config or None)}
-            if request.stream:
-                chunks = await client.aio.models.generate_content_stream(**call)
-                async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
-                    async for chunk in responses:
-                        # A chunk without output, such as grounding or code-execution progress, is still activity.
-                        for event in read_chunk(reply, chunk) or [StreamProgress()]:
-                            first_output_at = output_started(first_output_at, event)
-                            yield event
-            else:
-                whole = read_chunk(reply, await client.aio.models.generate_content(**call), whole_response=True)
-                first_output_at = time.monotonic()
-                # A reply that arrives whole yields no deltas; its usage still comes first, so a malformed call
-                # settles it.
-                for event in whole:
-                    if isinstance(event, UsageReported):
+            chunks = await client.aio.models.generate_content_stream(**call)
+            async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
+                async for chunk in responses:
+                    # A chunk without output, such as grounding or code-execution progress, is still activity.
+                    for event in read_chunk(reply, chunk) or [StreamProgress()]:
+                        first_output_at = output_started(first_output_at, event)
                         yield event
         except ProviderError:
             # Media and chunk failures arrive normalized.
             raise
         except Exception as error:
             raise _provider_error(error, provider=provider) from error
-        if request.stream and not reply.finished:
+        if not reply.finished:
             # The stream ended before Gemini ended the reply, so the turn did not finish.
             return
         for event in self._finished_turn(reply, started=started, first_output_at=first_output_at):

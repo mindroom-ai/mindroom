@@ -196,7 +196,6 @@
       "model": "mindroom.scheduling.tasks:ScheduledWorkflow"
     },
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },

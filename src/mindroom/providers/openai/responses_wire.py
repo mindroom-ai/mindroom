@@ -5,8 +5,8 @@ Stored responses continue with ``previous_response_id`` while the request's syst
 ``store: false`` responses and portable replay send the history explicitly, with ordered output items and encrypted
 reasoning so a later request can replay a tool loop exactly. A changed system text on a stored route without
 portable replay resends the history rebuilt from its text and calls, without reasoning, because those responses
-record neither ordered output nor reasoning. A streamed turn ends with ``response.completed`` or
-``response.incomplete``, as a blocking one does; a stream that stops before either did not finish the turn.
+record neither ordered output nor reasoning. A turn ends only when ``response.completed`` or ``response.incomplete``
+arrives.
 """
 
 from __future__ import annotations
@@ -47,7 +47,13 @@ from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from openai.types.responses import Response, ResponseFunctionToolCall, ResponseStreamEvent, ResponseUsage
+    from openai.types.responses import (
+        Response,
+        ResponseFunctionToolCall,
+        ResponseOutputItem,
+        ResponseStreamEvent,
+        ResponseUsage,
+    )
 
     from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
@@ -59,7 +65,6 @@ __all__ = [
     "ResponsesStream",
     "ResponsesTurnParts",
     "ResponsesWire",
-    "parse_response",
     "request_store",
     "responses_input",
     "responses_replay",
@@ -449,10 +454,9 @@ class ResponsesTurnParts:
     incomplete_reason: str | None = None
 
 
-def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[Any]) -> None:
-    items = [item.model_dump(exclude_none=True) for item in output_items if item.type in _TOOL_SEARCH_ITEM_TYPES]
-    if items:
-        parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).extend(items)
+def _record_tool_search_item(parts: ResponsesTurnParts, item: ResponseOutputItem) -> None:
+    if item.type in _TOOL_SEARCH_ITEM_TYPES:
+        parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).append(item.model_dump(exclude_none=True))
 
 
 def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
@@ -463,43 +467,6 @@ def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
         "type": "function",
         "function": {"name": item.name, "arguments": item.arguments},
     }
-
-
-def _incomplete_reason(response: Response) -> str | None:
-    return None if response.incomplete_details is None else response.incomplete_details.reason
-
-
-def _read_ended_response(
-    parts: ResponsesTurnParts,
-    response: Response,
-    items: list[dict[str, Any]],
-    *,
-    store: bool | None,
-    portable_replay: bool,
-    native_compaction: NativeCompactionReplay | None,
-    system_digest: str,
-) -> None:
-    """Record what a response that ended says about its turn, the same whether it streamed or arrived whole.
-
-    A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
-    status and the incomplete reason. Both record the response id, its storage provenance, and the ``system_digest``
-    of its request when stored; only a completed response's output is recorded for replay.
-    """
-    parts.status = response.status
-    parts.incomplete_reason = _incomplete_reason(response)
-    if response.usage is not None:
-        parts.usage = _usage(response.usage)
-    if response.id:
-        parts.provider_data["response_id"] = response.id
-    parts.provider_data[_STORED_KEY] = store is not False
-    if store is not False:
-        parts.provider_data[_SYSTEM_DIGEST_KEY] = system_digest
-    if response.status != "completed":
-        return
-    parts.provider_data[_PORTABLE_KEY] = portable_replay
-    parts.provider_data[NATIVE_CHECKPOINT_KEY] = native_checkpoint_state(items, native_compaction)
-    if (store is False or portable_replay) and any(item.get("type") == "reasoning" for item in items):
-        parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
 
 
 def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, tool_calls: bool) -> StopReason | None:
@@ -518,9 +485,8 @@ class ResponsesStream:
     """Fold streamed Responses events into deltas and one finished turn.
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
-    its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
-    event order with any summary text (see the TODO in ``responses.py``). ``provider`` is the metrics provider name a
-    failed response's error carries.
+    its start is reported as such. The turn's reasoning is the reasoning summary text the response returns.
+    ``provider`` is the metrics provider name a failed response's error carries.
     """
 
     provider: str
@@ -528,7 +494,6 @@ class ResponsesStream:
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
     system_digest: str
-    text_as_reasoning: bool
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     # Whether the response ended, completed or incomplete; a stream that stops before then did not finish the turn.
     ended: bool = False
@@ -547,7 +512,7 @@ class ResponsesStream:
             provider=self.provider,
         )
 
-    def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:  # noqa: C901 - one branch per event type
+    def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:
         """Fold one event and return the deltas it carried; failure events raise."""
         current = cast("Any", event)
         if event.type in {"error", "response.failed"}:
@@ -557,8 +522,6 @@ class ResponsesStream:
             events.append(hosted_tool_started(current.item.type))
         if event.type == "response.output_text.delta":
             self._content.append(current.delta)
-            if self.text_as_reasoning:
-                self._reasoning.append(current.delta)
             events.append(TextDelta(current.delta))
         elif event.type == "response.reasoning_summary_text.delta":
             self._reasoning.append(current.delta)
@@ -569,11 +532,11 @@ class ResponsesStream:
             self._tool_use["function"]["arguments"] += current.delta
         elif event.type == "response.output_item.done":
             events.extend(self._ready_call())
-            _record_tool_search_items(self.parts, [current.item])
+            _record_tool_search_item(self.parts, current.item)
             if self.store is False or self.portable_replay:
                 self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
         elif event.type in _ENDED_EVENT_TYPES:
-            # A call the response ended in the middle of is kept, as a blocking response keeps every call it lists.
+            # A call the response ended in the middle of is kept, as the ended response lists it too.
             events.extend(self._ready_call())
             self._end(current.response)
         return events
@@ -587,19 +550,32 @@ class ResponsesStream:
         return [ToolCallReady(call)]
 
     def _end(self, response: Response) -> None:
+        """Record what the ended response says about its turn.
+
+        A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
+        status and the incomplete reason. Both record the response id, its storage provenance, and the
+        ``system_digest`` of its request when stored; only a completed response's output is recorded for replay.
+        """
         self.ended = True
+        parts = self.parts
+        parts.status = response.status
+        parts.incomplete_reason = None if response.incomplete_details is None else response.incomplete_details.reason
+        if response.usage is not None:
+            parts.usage = _usage(response.usage)
+        if response.id:
+            parts.provider_data["response_id"] = response.id
+        parts.provider_data[_STORED_KEY] = self.store is not False
+        if self.store is not False:
+            parts.provider_data[_SYSTEM_DIGEST_KEY] = self.system_digest
+        if response.status != "completed":
+            return
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]
-        _read_ended_response(
-            self.parts,
-            response,
-            items,
-            store=self.store,
-            portable_replay=self.portable_replay,
-            native_compaction=self.native_compaction,
-            system_digest=self.system_digest,
-        )
+        parts.provider_data[_PORTABLE_KEY] = self.portable_replay
+        parts.provider_data[NATIVE_CHECKPOINT_KEY] = native_checkpoint_state(items, self.native_compaction)
+        if (self.store is False or self.portable_replay) and any(item.get("type") == "reasoning" for item in items):
+            parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
 
     def finish(self) -> ResponsesTurnParts:
         """Return the finished turn after the response ended."""
@@ -622,56 +598,3 @@ def usage_report(event: ResponseStreamEvent) -> UsageReported | None:
     if event.type not in _TERMINAL_EVENT_TYPES or not (usage := cast("Any", event).response.usage):
         return None
     return UsageReported(_usage(usage), final=False)
-
-
-def _reasoning_summary(response: Response) -> str:
-    """Return the reasoning summary text a response carries, which a stream delivers as reasoning deltas."""
-    return "".join(
-        item.text
-        for output in cast("list[Any]", response.output)
-        if output.type == "reasoning"
-        for item in output.summary
-        if item.text
-    )
-
-
-def parse_response(
-    response: Response,
-    *,
-    provider: str,
-    store: bool | None,
-    portable_replay: bool,
-    native_compaction: NativeCompactionReplay | None,
-    system_digest: str,
-    text_as_reasoning: bool,
-) -> ResponsesTurnParts:
-    """Read one non-streamed response into a finished turn; ``provider`` is the metrics provider name of its error.
-
-    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary (see the
-    TODO in ``responses.py``).
-    """
-    if response.error:
-        raise _response_error(response.error.code, response.error.message, provider=provider)
-    parts = ResponsesTurnParts()
-    # The SDK's output union does not narrow on ``type``.
-    for output in cast("list[Any]", response.output):
-        if output.type == "message":
-            parts.content = response.output_text
-        elif output.type == "function_call":
-            parts.tool_calls.append(_function_call(output))
-    parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
-    # TODO(simplify): Only a blocking response stores response_status and incomplete_reason in provider_data, and
-    # nothing reads them. Store them on neither path. Stored data.
-    parts.provider_data["response_status"] = response.status
-    parts.provider_data["incomplete_reason"] = _incomplete_reason(response)
-    _record_tool_search_items(parts, response.output)
-    _read_ended_response(
-        parts,
-        response,
-        [item.model_dump(mode="json", exclude_none=True) for item in response.output],
-        store=store,
-        portable_replay=portable_replay,
-        native_compaction=native_compaction,
-        system_digest=system_digest,
-    )
-    return parts

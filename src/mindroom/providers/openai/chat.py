@@ -9,24 +9,15 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from mindroom.llm.provider import (
-    StreamProgress,
-    ToolCallReady,
-    TurnCompleted,
-    UsageReported,
-)
+import httpx2
+
+from mindroom.llm.provider import StreamProgress, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings
-from mindroom.providers.openai.chat_wire import (
-    ChatStream,
-    ChatWire,
-    chat_request_kwargs,
-    chat_stop_reason,
-    parse_chat_completion,
-)
+from mindroom.providers.openai.chat_wire import ChatStream, ChatWire, chat_request_kwargs, chat_stop_reason
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
 
@@ -37,6 +28,32 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.settings import ChatSettings
 
 __all__ = ["ChatAdapter"]
+
+
+@dataclass
+class _WatchedBody(httpx2.AsyncByteStream):
+    """A response body that records whether the SDK decoded it to its end.
+
+    The SDK decodes the events through its first read of the body. After ``[DONE]`` it drains the rest of an HTTP/1.1
+    body through a second read, so the connection returns to the pool, and that read's end says nothing.
+    """
+
+    body: httpx2.AsyncByteStream
+    reads: int = 0
+    decoded_to_end: bool = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Pass the body through, then record whether the decoding read ended it."""
+        self.reads += 1
+        decoding = self.reads == 1
+        async for chunk in self.body:
+            yield chunk
+        if decoding:
+            self.decoded_to_end = True
+
+    async def aclose(self) -> None:
+        """Close the body."""
+        await self.body.aclose()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -65,7 +82,6 @@ class ChatAdapter:
             tool_choice=request.tool_choice,
             output_schema=request.output_schema,
             structured_output=self.capabilities.structured_output,
-            stream=request.stream,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
         )
@@ -85,11 +101,20 @@ class ChatAdapter:
         first_token: float | None = None
         # Reading and encoding attachments can be slow, so the body is built off the event loop.
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
+        accumulator = ChatStream(self.wire)
         try:
             client = await self.clients.client(request.overrides)
-            if request.stream:
-                accumulator = ChatStream(self.wire)
+            if not kwargs.get("stream"):
+                # A request the dialect does not stream (``chat_request_kwargs``) gets the whole reply.
+                for event in accumulator.add_reply(await client.chat.completions.create(**kwargs)):
+                    first_token = output_started(first_token, event)
+                    yield event
+            else:
                 sdk_stream = await client.chat.completions.create(**kwargs)
+                # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
+                # stops decoding at the sentinel, so a body decoded to its end never sent one.
+                body = _WatchedBody(cast("httpx2.AsyncByteStream", sdk_stream.response.stream))
+                sdk_stream.response.stream = body
                 try:
                     async for chunk in sdk_stream:
                         # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
@@ -98,16 +123,18 @@ class ChatAdapter:
                             yield event
                 finally:
                     await sdk_stream.close()
-                parts = accumulator.finish()
-                # A stream assembles its tool calls from their pieces, so each is complete only now.
-                for call in parts.tool_calls:
-                    yield ToolCallReady(call)
-            else:
-                completion = await client.chat.completions.create(**kwargs)
-                parts = parse_chat_completion(completion, self.wire, provider=self.identity.provider_name)
-                first_token = time.monotonic()
+                if body.decoded_to_end and accumulator.parts.finish_reason is None:
+                    # Servers may omit a finish reason or ``[DONE]``, but a stream with neither was cut off.
+                    return
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
+        for event in accumulator.finish():
+            first_token = output_started(first_token, event)
+            yield event
+        parts = accumulator.parts
+        # A stream assembles its tool calls from their pieces, so each is complete only now.
+        for call in parts.tool_calls:
+            yield ToolCallReady(call)
         message = finished_assistant_message(
             self.identity,
             content=parts.content,

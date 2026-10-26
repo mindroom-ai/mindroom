@@ -67,7 +67,7 @@ async def judge_with_llm(
             Message(role="user", content=prepared.body.decode()),
         )
         with without_provider_tools():
-            turn = await complete(provider, ModelRequest(messages=messages, tool_choice="none", stream=False))
+            turn = await complete(provider, ModelRequest(messages=messages, tool_choice="none"))
         if turn.tool_calls or not isinstance(turn.message.content, str):
             raise JudgmentError(failure="invalid_response")
         usage = turn.usage

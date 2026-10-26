@@ -28,6 +28,8 @@ ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {"vertexai_claude": "ANTHROPIC_
 _DEFAULT_MAX_TOKENS = 8192
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past ten minutes unless the
 # client has an explicit timeout; 3600 s is the SDK's own ceiling for non-streaming operations.
+# TODO(simplify): every request streams, so the SDK guard this timeout satisfies no longer applies. Drop it for the
+# SDK's default timeout. Operators would notice the shorter default (#3119).
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 
 _COMMON_KEYS = frozenset(

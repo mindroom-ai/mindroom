@@ -1,6 +1,6 @@
-"""Team resumes route each decision to the member that waits for it, then continue the leader as Agno did.
+"""Team resumes route each decision to the member that waits for it, then continue the leader.
 
-The C6 pre-resume dump of ``team-approved`` (a team paused on its checker's ``multiply``) is resumed with the
+The pre-resume dump of ``team-approved`` (a team paused on its checker's ``multiply``) is resumed with the
 member's approval and compared with the ``team-approved`` rows Agno stored after the same resume.
 """
 # ruff: noqa: D103
@@ -16,14 +16,15 @@ import pytest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ToolCompleted, ToolStarted
-from mindroom.llm.provider import ModelRequest, TextDelta
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import TextDelta, TurnCompleted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
-from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
+from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
-from tests.team_runtime.squad import (
+from tests.teams.squad import (
     PROVIDER,
     SQUAD,
     SQUAD_APPROVED,
@@ -47,7 +48,6 @@ if TYPE_CHECKING:
     from agno.run import RunContext as AgnoRunContext
 
     from mindroom.agent_loop.spec import RunContext
-    from mindroom.llm.messages import Message
 
 pytestmark = pytest.mark.asyncio
 
@@ -64,7 +64,7 @@ def _resume_request(paused: TeamRunRecord) -> list[Message]:
     return build_resume_request(paused=paused.messages, summary=None, history=[])
 
 
-async def test_an_approved_member_call_resumes_into_agno_s_team_approved_rows() -> None:
+async def test_an_approved_member_call_resumes_into_the_team_approved_rows() -> None:
     paused = _paused_team_approved()
     before = paused.to_dict()
     team_row = golden_run("team_squad", SQUAD_APPROVED, "team-approved")
@@ -176,36 +176,44 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     assert checker_request.messages[-1].content == "Alice declined."
 
 
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking-template", "streaming-template"])
-async def test_a_team_resume_streams_the_leader_s_and_the_resumed_member_s_requests(stream: bool) -> None:
-    # Every continuation of the Agno-backed runtime streamed, and Agno continued each paused member with its team's.
+async def test_a_resumed_leader_reads_a_new_delegation_by_the_streamed_result_rules() -> None:
+    # The result rules still depend on the stream mode (``member_result_text``), and a resume uses the streamed ones,
+    # so a member whose text is blank and that ran no tools hands over the no-response notice rather than nothing.
     paused = _paused_team_approved()
-    leader = scripted("leader-model", answer("The checker found 42.", usage(1, 1)))
+    leader = scripted(
+        "leader-model",
+        calls(tool_call("delegate_task_to_member", "call-w2", member_id="writer", task="Echo x."), metrics=usage(1, 1)),
+        answer("Done.", usage(1, 1)),
+    )
+    writer = scripted(
+        "writer-model",
+        [TurnCompleted(message=Message(role="assistant", content=" "), stop_reason="end")],
+    )
     checker = scripted("checker-model", answer("42", usage(1, 1)))
 
     _, record = await collect(
         resume_team(
-            squad(leader, scripted("writer-model"), checker),
+            squad(leader, writer, checker, writer_toolkits=(toolkit(echo),)),
             paused,
             _resume_request(paused),
             approved={
                 ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
             },
             context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
-            request_template=ModelRequest(messages=(), stream=stream),
         ),
     )
 
     assert record.status is RunStatus.completed
-    assert [request.stream for request in (*checker.requests, *leader.requests)] == [True, True]
+    delegated = leader.requests[1].messages[-1]
+    assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-w2", NO_MEMBER_RESPONSE)
 
 
-async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_results_as_agno_did() -> None:
-    """Pin Agno's continuation: the members' results replace the whole delegation result, siblings' text included.
+async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_results() -> None:
+    """The resumed members' results replace the whole delegation result, siblings' text included.
 
-    A collaborate delegation returns every member's text joined; when one member pauses, Agno's resume rewrote that
+    A collaborate delegation returns every member's text joined; when one member pauses, the resume rewrites that
     result as the heading plus the members resumed in this call, so the text of a member that had completed earlier
-    (the writer's here) no longer reaches the leader. The owned runtime keeps that request body for parity.
+    (the writer's here) no longer reaches the leader.
     """
     leader = scripted(
         "leader-model",
@@ -251,7 +259,7 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
 async def test_a_resume_keeps_the_members_that_ended_before_the_pause_with_the_resumed_one_in_its_place() -> None:
     """A team run's ended members carry into its resume, and the resumed member's record replaces its paused one.
 
-    Agno's live team run held every finished member and continued a paused member's output in place, so a fold of
+    The live team run holds every finished member and continues a paused member's output in place, so a fold of
     the resume stores each member run once. A loaded record holds none of them; the stored row keeps only the paused.
     """
     leader = scripted(
@@ -647,7 +655,7 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
 async def test_a_coordinate_resume_answers_each_waiting_delegation_with_the_resumed_members_results(
     both_pause: bool,
 ) -> None:
-    """Two delegations of one leader response: each paused member resumes on its own call, as Agno's continuation did.
+    """Two delegations of one leader response: each paused member resumes on its own call.
 
     Every delegation that waited on a member reads the resumed members' results; one whose member completed before
     the pause keeps that member's own answer.
@@ -788,7 +796,7 @@ async def test_a_finished_member_whose_answer_mentions_human_input_keeps_its_ans
 
     The writer finishes with text that mentions human input, the checker pauses on its gated call; once approved,
     a coordinate leader still reads the writer's answer, while a collaborate call, which waited on the checker, is
-    answered with the members' results as Agno answered it.
+    answered with the members' results.
     """
     writer_text = "Step 3 requires human input from the operator; steps 1-2 are fine."
     if mode is TeamMode.COORDINATE:
@@ -831,8 +839,8 @@ async def test_a_finished_member_whose_answer_mentions_human_input_keeps_its_ans
 async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the_leader_the_member_s_result() -> None:
     """A mixed resume answers the delegation with the member's result and runs the leader's own approved call.
 
-    Agno's continuation took its team-level branch here and left the delegation result as the pause notice; the owned
-    runtime gives the leader the member's result in the same entry, a deviation that favors the leader.
+    The delegation's entry holds the member's result instead of the pause notice, so the leader reads what its member
+    did.
     """
     leader = scripted(
         "leader-model",
@@ -917,8 +925,8 @@ async def test_a_member_whose_resumed_run_fails_reaches_the_leader_as_its_redact
     assert "example-secret" not in member_result
 
 
-async def test_a_failed_resume_stores_its_error_over_the_paused_team_row_as_agno_did() -> None:
-    """A leader request that fails after the member resumed ends the team run ``ERROR`` over its ``PAUSED`` row (D15).
+async def test_a_failed_resume_stores_its_error_over_the_paused_team_row() -> None:
+    """A leader request that fails after the member resumed ends the team run ``ERROR`` over its ``PAUSED`` row.
 
     The member's resumed row is stored completed first, so the approved call is not offered again.
     """
@@ -956,11 +964,10 @@ async def test_a_failed_resume_stores_its_error_over_the_paused_team_row_as_agno
     assert team_row["requirements"] == []
 
 
-async def test_cancelling_a_resume_stores_cancelled_rows_over_the_paused_ones_as_agno_did() -> None:
+async def test_cancelling_a_resume_stores_cancelled_rows_over_the_paused_ones() -> None:
     """A Stop during a member's resume ends the member and the team ``CANCELLED``; the approval is not resumable again.
 
-    Agno's continuation stored the same rows, so the owned runtime keeps that; the envelope writes its interrupted
-    record over the team row afterwards.
+    The envelope writes its interrupted record over the team row afterwards.
     """
     paused = _paused_team_approved()
     resuming = asyncio.Event()

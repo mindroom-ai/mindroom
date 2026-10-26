@@ -42,7 +42,6 @@
       "model": "mindroom.routing:_RoutingSuggestion"
     },
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -50,7 +49,6 @@
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
       "provider_data": {
-        "finish_reason": "stop",
         "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "glm-5.3",
@@ -70,6 +68,7 @@
   "request": {
     "body": {
       "model": "glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -108,6 +107,9 @@
           },
           "strict": true
         }
+      },
+      "stream_options": {
+        "include_usage": true
       }
     },
     "headers": {
@@ -119,36 +121,87 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "choices": [
-        {
-          "finish_reason": "stop",
-          "index": 0,
-          "message": {
-            "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-            "role": "assistant"
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
           }
         }
-      ],
-      "created": 1792540800,
-      "id": "chatcmpl-parity",
-      "model": "glm-5.3",
-      "object": "chat.completion",
-      "system_fingerprint": "fp_parity",
-      "usage": {
-        "completion_tokens": 12,
-        "completion_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "prompt_tokens": 42,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        },
-        "total_tokens": 54
+      },
+      {
+        "data": "[DONE]"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output"

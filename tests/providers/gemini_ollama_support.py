@@ -1,4 +1,4 @@
-"""Replay the C1 provider goldens of the Gemini and Ollama routes through the owned adapters.
+"""Replay the provider goldens of the Gemini and Ollama routes through the owned adapters.
 
 The harness builds the owned adapter from the golden's model config, answers its single HTTP request with
 the golden's canned reply through an httpx mock transport, and hands the request to the shared golden harness
@@ -41,7 +41,7 @@ FAMILIES = ("gemini", "gemini_vertexai", "ollama")
 
 @dataclass(frozen=True)
 class Golden:
-    """One C1 provider golden."""
+    """One provider golden."""
 
     family: str
     scenario: str

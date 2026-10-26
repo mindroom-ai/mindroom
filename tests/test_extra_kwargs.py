@@ -7,7 +7,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -33,8 +32,8 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
-from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
-from tests.providers.golden_support import Wire
+from tests.providers.anthropic_family_support import claude_turn, route_provider, sse_reply
+from tests.providers.golden_support import Wire, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
@@ -189,7 +188,7 @@ async def test_model_params_mask_credentials_nested_in_request_params_and_extra_
     )
     provider = build_model_provider(config, _runtime_paths(tmp_path, OPENROUTER_API_KEY="openrouter-key"))
 
-    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
+    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
 
     [request] = chat_wire.requests
     assert request.headers["authorization"] == "Bearer nested-header-secret"
@@ -278,13 +277,13 @@ async def test_transient_context_takes_no_marker_so_the_next_turn_reuses_the_pro
     transient = render_transient_context(
         ("<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>",),
     )
-    wire = Wire(json_reply([{"type": "text", "text": "A1"}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "A1"}]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"extended_cache_time": False})
     system = Message(role="system", content="Stable system")
     for history in ([], [Message(role="user", content="Q1"), Message(role="assistant", content="A1")]):
         prompt = Message(role="user", content="Q2" if history else "Q1")
         context = Message(role="user", content=transient)
-        await claude_turn(provider, ModelRequest(messages=[system, *history, prompt, context], stream=False))
+        await claude_turn(provider, ModelRequest(messages=[system, *history, prompt, context]))
 
     current = wire.body(0)["messages"][0]["content"]
     assert current[0]["cache_control"] == _FIVE_MINUTES
@@ -737,8 +736,8 @@ _COMPLETION = {
 
 @pytest.fixture
 def chat_wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
-    """Answer every request sent through the shared model HTTP client with a finished chat completion."""
-    wire = Wire(httpx.Response(200, json=_COMPLETION))
+    """Answer every request sent through the shared model HTTP client with a finished chat completion stream."""
+    wire = Wire(lambda _request: streamed_reply(_COMPLETION))
     monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
     return wire
 
@@ -747,7 +746,7 @@ async def _send(model_config: ModelConfig, runtime_paths: RuntimePaths) -> None:
     config = Config(models={"default": model_config})
     await complete(
         build_model_provider(config, runtime_paths),
-        ModelRequest(messages=[Message(role="user", content="Hi")], stream=False),
+        ModelRequest(messages=[Message(role="user", content="Hi")]),
     )
 
 

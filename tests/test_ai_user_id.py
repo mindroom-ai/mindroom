@@ -2790,8 +2790,8 @@ class TestUserIdPassthrough:
     ) -> None:
         """A request whose every attempt failed mid-stream after reporting its input describes no single context.
 
-        The reply's usage bills every attempt, while its context shows the estimate instead of the attempts' sum. The
-        route only streams, as Codex does, so a blocking reply's requests are retried as a streamed reply's are.
+        The reply's usage bills every attempt, while its context shows the estimate instead of the attempts' sum. Every
+        request streams, so a blocking reply's requests are retried as a streamed reply's are.
         """
         config, runtime_paths = _bound(
             tmp_path,
@@ -2812,7 +2812,6 @@ class TestUserIdPassthrough:
             runtime_paths,
             [calls(tool_call("run_shell_command", "call-1", cmd="pwd"), metrics=usage(500, 60)), *[dropped] * 5],
         )
-        model.capabilities = replace(model.capabilities, streams_only=True)
         install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
         run_metadata: dict[str, Any] = {}
 
