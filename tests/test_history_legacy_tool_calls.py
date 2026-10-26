@@ -17,7 +17,7 @@ from mindroom.history.summary_input import build_summary_input, messages_for_run
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.session_storage.codec import run_from_row
+from mindroom.session_storage.legacy_agno3_schema import run_from_row
 from tests.agent_loop.helpers import collect, context, gated, spec
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 

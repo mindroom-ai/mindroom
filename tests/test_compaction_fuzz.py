@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,16 +30,15 @@ from mindroom.history.storage import (
     _remove_redacted_event_from_history,
     append_compaction_chunk,
     append_fold,
-    ensure_scope_session_row,
     read_chunk_basis,
     read_fold_basis,
     read_scope_seen_event_ids,
 )
-from mindroom.history.summary_rows import Segment
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from tests.conftest import seed_session
 from tests.history_helpers import folded_run_ids, stored_run_ids
@@ -94,7 +94,7 @@ class _Runner:
         self._removed: set[str] = set()
         self._paused: list[str] = []
         self._snapshots: list[ConversationSession] = []
-        # The lowest index a redaction in the current step may delete from; ``None`` when it may delete nothing.
+        # The lowest `seq` a redaction in the current step may delete from; ``None`` when it may delete nothing.
         self._cut_floor: int | None = None
         self._moved: set[str] = set()
         # The turn that is running now, which folds mid-turn and has no stored row unless it paused before.
@@ -105,21 +105,13 @@ class _Runner:
         self._redacted_while_running: set[str] = set()
         # Runs whose stored part a retirement may remove in the current step, because they folded mid-turn.
         self._retirable: set[str] = set()
-        seeding = self._open()
-        seed_session(seeding, self._legacy_session() if legacy else _session_row())
         if legacy:
-            # Releases before the archive had no summary-row tables and replayed the session row's summary, so the
-            # next open adopts the state.
-            with sqlite3.connect(root / "sessions" / "code.db") as connection:
-                connection.execute(
-                    "UPDATE code_sessions SET summary = ? WHERE session_id = ?",
-                    (json.dumps({"summary": _summary_of(set(_LEGACY_RUNS))}), _SESSION),
-                )
-                connection.execute("DROP TABLE IF EXISTS code_sessions_summaries")
-                connection.execute("DROP TABLE IF EXISTS code_sessions_removed_runs")
+            self._seed_legacy()
+        else:
+            seed_session(self._open(), _session_row())
         self._storage = self._open()
         self._stored = set(stored_run_ids(self._storage, _SESSION))
-        self._indexes = self._run_indexes()
+        self._seqs = self._run_seqs()
 
     def run(self, actions: list[Action]) -> None:
         operations = {
@@ -150,24 +142,32 @@ class _Runner:
     def _open(self) -> ConversationStore:
         return create_state_storage("code", self._root)
 
-    @staticmethod
-    def _legacy_session() -> ConversationSession:
-        """Return a session as the destructive compactor left it after folding the legacy runs."""
-        return ConversationSession(
-            kind="agent",
-            session_id=_SESSION,
-            owner_id="code",
-            metadata={
-                constants.MINDROOM_COMPACTION_METADATA_KEY: {
-                    "version": 2,
-                    "states": {_SCOPE.key: {"compacted_run_ids": list(_LEGACY_RUNS)}},
-                },
-                constants.MINDROOM_MATRIX_HISTORY_METADATA_KEY: {
-                    "version": 1,
-                    "states": {_SCOPE.key: {"seen_event_ids": [_event(run_id) for run_id in _LEGACY_RUNS]}},
-                },
+    def _seed_legacy(self) -> None:
+        """Write the session as the destructive compactor left it after folding the legacy runs, which the open converts.
+
+        Releases before the archive had no summary-row tables and replayed the session row's summary.
+        """
+        metadata = {
+            constants.MINDROOM_COMPACTION_METADATA_KEY: {
+                "version": 2,
+                "states": {_SCOPE.key: {"compacted_run_ids": list(_LEGACY_RUNS)}},
             },
-        )
+            constants.MINDROOM_MATRIX_HISTORY_METADATA_KEY: {
+                "version": 1,
+                "states": {_SCOPE.key: {"seen_event_ids": [_event(run_id) for run_id in _LEGACY_RUNS]}},
+            },
+        }
+        names = AgnoTableNames("code")
+        database = names.database_path(self._root)
+        database.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database)) as connection, connection:
+            for statement in agno_runs_sql(names):
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO code_sessions (session_id, session_type, agent_id, metadata, summary, created_at) "
+                "VALUES (?, 'agent', 'code', ?, ?, 0)",
+                (_SESSION, json.dumps(metadata), json.dumps({"summary": _summary_of(set(_LEGACY_RUNS))})),
+            )
 
     def _load(self) -> ConversationSession:
         session = self._storage.load_session(_SESSION, "agent")
@@ -190,12 +190,12 @@ class _Runner:
 
     def _add(self, _action: Action) -> None:
         run_id = f"r{len(self._created)}"
-        self._storage.save_runs(_session_row(), [self._new_run(run_id, RunStatus.completed)])
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.completed), record_usage=False)
         self._created.append(run_id)
 
     def _pause(self, _action: Action) -> None:
         run_id = f"r{len(self._created)}"
-        self._storage.save_runs(_session_row(), [self._new_run(run_id, RunStatus.paused)])
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.paused), record_usage=False)
         self._created.append(run_id)
         self._paused.append(run_id)
 
@@ -206,7 +206,7 @@ class _Runner:
             return
         run_id = waiting[action.index % len(waiting)]
         self._paused.remove(run_id)
-        self._storage.save_runs(_session_row(), [self._new_run(run_id, RunStatus.completed)])
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.completed), record_usage=False)
         self._moved.add(run_id)
 
     def _chunk(self, count: int) -> tuple[ConversationSession, list[str], str] | None:
@@ -229,7 +229,6 @@ class _Runner:
             basis=basis,  # type: ignore[arg-type]
             included_run_ids=chunk,
             summary=summary,
-            summary_model="fuzz-model",
         )
 
     def _basis(self, session: ConversationSession, run_ids: list[str]) -> object:
@@ -299,20 +298,16 @@ class _Runner:
         racing = action.count == 3 and self._chunk(1) is not None
         if racing:
             self._compact(Action("compact", count=1))
-        ensure_scope_session_row(self._storage, session, _SCOPE)
         appended = append_fold(
             self._storage,
             session=session,
             scope=_SCOPE,
             basis=basis,
             summary=summary,
-            summary_model="fuzz-model",
-            segment=Segment(
-                run_id=run_id,
-                metadata=self._new_run(run_id, RunStatus.running).metadata or {},
-                messages=[],
-                tools=[],
-                member_responses=[],
+            fold=summary_rows.Fold(
+                run=self._new_run(run_id, RunStatus.running),
+                messages=(),
+                member_run_ids=frozenset(),
             ),
         )
         assert appended == (not racing and run_id not in self._removed)
@@ -332,7 +327,7 @@ class _Runner:
             return
         status = (RunStatus.completed, RunStatus.cancelled, RunStatus.paused)[outcome]
         stored_paused = run_id in self._stored and run_id not in self._stored_visible()
-        self._storage.save_runs(_session_row(), [self._new_run(run_id, status)])
+        self._storage.save_run(_session_row(), self._new_run(run_id, status), record_usage=False)
         if status == RunStatus.paused:
             self._paused.append(run_id)
         elif status == RunStatus.completed and stored_paused:
@@ -344,24 +339,23 @@ class _Runner:
             return {
                 run_id
                 for (run_id,) in connection.execute(
-                    "SELECT run_id FROM code_sessions_runs WHERE status NOT IN ('PAUSED', 'CANCELLED', 'ERROR')",
+                    "SELECT run_id FROM code_sessions_log_runs WHERE status NOT IN ('PAUSED', 'CANCELLED', 'ERROR')",
                 )
             }
 
-    def _segment_rows(self) -> dict[int, tuple[int, str]]:
+    def _fold_rows(self) -> dict[int, tuple[int, str]]:
         with sqlite3.connect(self._root / "sessions" / "code.db") as connection:
             return {
-                row_id: (after_run_index, run_id)
-                for row_id, after_run_index, run_id in connection.execute(
-                    "SELECT id, after_run_index, segment_run_id FROM code_sessions_summaries "
-                    "WHERE segment_run_id IS NOT NULL",
+                row_id: (through, run_id)
+                for row_id, through, run_id in connection.execute(
+                    "SELECT id, through, fold_run_id FROM code_sessions_log_summaries WHERE fold_run_id IS NOT NULL",
                 )
             }
 
     def _latest_barrier(self) -> int | None:
         with sqlite3.connect(self._root / "sessions" / "code.db") as connection:
             (barrier,) = connection.execute(
-                "SELECT MAX(id) FROM code_sessions_summaries WHERE summary IS NULL",
+                "SELECT MAX(id) FROM code_sessions_log_summaries WHERE summary IS NULL",
             ).fetchone()
         return barrier
 
@@ -380,12 +374,12 @@ class _Runner:
         copies = [run for snapshot in self._snapshots for run in snapshot.runs or [] if run.run_id not in loaded]
         if copies:
             run = copies[action.index % len(copies)]
-            self._storage.save_runs(_session_row(), [run])
+            self._storage.save_run(_session_row(), run, record_usage=False)
 
     def _redact(self, action: Action) -> None:
         events = [_event(run_id) for run_id in (*_LEGACY_RUNS, *self._created)]
         event_id = events[action.index % len(events)]
-        owners = {owner for _index, owner in self._segment_rows().values()}
+        owners = {owner for _through, owner in self._fold_rows().values()}
         if event_id[1:] == self._running and event_id[1:] not in self._stored | owners:
             self._redacted_while_running.add(event_id)
         self._apply_redaction(event_id)
@@ -399,21 +393,21 @@ class _Runner:
             legacy = summary_rows.legacy_event_ids(self._storage, session_id=_SESSION, scope_key=_SCOPE.key)
             floor = -1 if legacy is not None else None
         elif run_id in before - self._behind_latest_barrier():
-            floor = self._run_indexes()[run_id]
+            floor = self._run_seqs()[run_id]
         else:
             floor = None
-        segment_rows = self._segment_rows()
+        fold_rows = self._fold_rows()
         barrier = self._latest_barrier()
         _remove_redacted_event_from_history(self._storage, session=self._load(), scope=_SCOPE, event_id=event_id)
         # A run goes whole, so a cut that removed one of its fold rows starts right after that row.
-        remaining = self._segment_rows()
-        for row_id, (after_run_index, owner) in segment_rows.items():
+        remaining = self._fold_rows()
+        for row_id, (through, owner) in fold_rows.items():
             if row_id not in remaining:
-                floor = after_run_index + 1 if floor is None else min(floor, after_run_index + 1)
+                floor = through + 1 if floor is None else min(floor, through + 1)
                 self._removed.add(owner)
         if self._latest_barrier() != barrier:
             # Retirement removes every run that folded mid-turn, wherever it sorts.
-            owners = {owner for _index, owner in segment_rows.values()}
+            owners = {owner for _through, owner in fold_rows.values()}
             self._retirable |= owners
             self._removed |= owners
         if floor is not None:
@@ -424,16 +418,16 @@ class _Runner:
     def _reopen(self, _action: Action) -> None:
         self._storage = self._open()
 
-    def _run_indexes(self) -> dict[str, int]:
+    def _run_seqs(self) -> dict[str, int]:
         with sqlite3.connect(self._root / "sessions" / "code.db") as connection:
-            return dict(connection.execute("SELECT run_id, run_index FROM code_sessions_runs").fetchall())
+            return dict(connection.execute("SELECT run_id, seq FROM code_sessions_log_runs").fetchall())
 
     def _behind_latest_barrier(self) -> set[str]:
         with sqlite3.connect(self._root / "sessions" / "code.db") as connection:
             (barrier,) = connection.execute(
-                "SELECT after_run_index FROM code_sessions_summaries WHERE summary IS NULL ORDER BY id DESC LIMIT 1",
+                "SELECT through FROM code_sessions_log_summaries WHERE summary IS NULL ORDER BY id DESC LIMIT 1",
             ).fetchone() or (None,)
-        return {run_id for run_id, index in self._run_indexes().items() if barrier is not None and index <= barrier}
+        return {run_id for run_id, seq in self._run_seqs().items() if barrier is not None and seq <= barrier}
 
     def _check(self) -> None:
         session = self._load()
@@ -442,7 +436,7 @@ class _Runner:
         folded = set(folded_run_ids(self._storage, _SESSION))
         covered = _covered(session)
         stored = set(stored_run_ids(self._storage, _SESSION))
-        indexes = self._run_indexes()
+        seqs = self._run_seqs()
 
         # Replay is the latest summary plus the visible runs after it; no folded run loads.
         assert not loaded & folded
@@ -459,11 +453,11 @@ class _Runner:
         if covered & set(_LEGACY_RUNS):
             assert summary_rows.legacy_event_ids(self._storage, session_id=_SESSION, scope_key=_SCOPE.key)
         # Compaction moves no run row; only a completed approval moves, to the end.
-        for run_id, index in self._indexes.items():
-            if run_id in indexes and run_id not in self._moved:
-                assert indexes[run_id] == index
-        for run_id in self._moved & set(indexes):
-            assert indexes[run_id] == max(indexes.values())
+        for run_id, seq in self._seqs.items():
+            if run_id in seqs and run_id not in self._moved:
+                assert seqs[run_id] == seq
+        for run_id in self._moved & set(seqs):
+            assert seqs[run_id] == max(seqs.values())
         # Redacted content never replays: it is gone from loaded runs, the summary, and every stored run
         # except a retired one behind the latest barrier, which neither replays nor counts as seen.
         for event_id in self._redacted:
@@ -478,9 +472,9 @@ class _Runner:
         if self._cut_floor is None:
             assert not lost
         else:
-            assert all(self._indexes[run_id] >= self._cut_floor for run_id in lost)
+            assert all(self._seqs[run_id] >= self._cut_floor for run_id in lost)
         self._stored = stored
-        self._indexes = indexes
+        self._seqs = seqs
         # Seen ids are exactly the events replay represents, so nothing is repeated or dropped.
         expected_seen = {_event(run_id) for run_id in visible | (covered - {f"{owner}~" for owner in owners}) | owners}
         assert read_scope_seen_event_ids(self._storage, session, _SCOPE) == expected_seen

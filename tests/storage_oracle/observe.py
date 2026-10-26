@@ -2,8 +2,7 @@
 
 Each observable is computed on its own, and one that raises records the error instead, so an unreadable row shows
 where it fails without hiding the rest. Dicts are key-sorted when a recording is written, and every set is a sorted
-list. The history-level readers are passed in, so a backend whose store has its own versions of them observes the
-same things.
+list.
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request, replayed_history
@@ -38,28 +36,6 @@ if TYPE_CHECKING:
 _SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
 _PLAN = ResolvedReplayPlan(mode="configured", estimated_tokens=0, add_history_to_context=True)
 _PROBE_ID = "probe"
-
-
-@dataclass(frozen=True)
-class Readers:
-    """The history-level reads the observables use, each bound to one store's layout."""
-
-    seen_event_ids: Callable[[ConversationStore, ConversationSession, HistoryScope], set[str]]
-    redaction_candidates: Callable[[ConversationStore, ConversationSession, HistoryScope], set[str]]
-    folded_tool_call_ids: Callable[[ConversationStore, str, str], set[str]]
-    force_queued: Callable[[ConversationStore, str, HistoryScope], bool]
-
-
-AGNO_LAYOUT_READERS = Readers(
-    seen_event_ids=read_scope_seen_event_ids,
-    redaction_candidates=_read_scope_history_event_ids,
-    folded_tool_call_ids=lambda store, session_id, run_id: run_folded_tool_call_ids(
-        store,
-        session_id=session_id,
-        run_id=run_id,
-    ),
-    force_queued=has_queued_force_compaction,
-)
 
 
 def _error(error: Exception) -> dict[str, str]:
@@ -162,7 +138,6 @@ def observe(
     session_id: str,
     scope: HistoryScope,
     *,
-    readers: Readers,
     run_ids: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Return the observables of one session of ``store`` in ``scope``.
@@ -179,16 +154,16 @@ def observe(
         "request": _safely(lambda: _probe_request(session, scope)),
         "resume_requests": _safely(lambda: _resume_requests(session, scope)),
         "seen_event_ids": _safely(
-            lambda: sorted(readers.seen_event_ids(store, session, scope)) if session is not None else [],
+            lambda: sorted(read_scope_seen_event_ids(store, session, scope)) if session is not None else [],
         ),
         "redaction_candidates": _safely(
-            lambda: sorted(readers.redaction_candidates(store, session, scope)) if session is not None else [],
+            lambda: sorted(_read_scope_history_event_ids(store, session, scope)) if session is not None else [],
         ),
-        "folded_tool_call_ids": _safely(lambda: _folded_tool_call_ids(store, session_id, folded_of, readers)),
+        "folded_tool_call_ids": _safely(lambda: _folded_tool_call_ids(store, session_id, folded_of)),
         "list_runs": list_error
         or [run.to_dict() for run in sorted(listed or [], key=lambda run: (run.created_at, run.run_id))],
         "session_runs": _safely(lambda: [run.run_id for run in session_runs(store, session_id)]),
-        "force_queued": _safely(lambda: readers.force_queued(store, session_id, scope)),
+        "force_queued": _safely(lambda: has_queued_force_compaction(store, session_id, scope)),
         "ledger": _safely(lambda: _ledger(store, session_id)),
     }
 
@@ -200,12 +175,9 @@ def _attempt[Result](read: Callable[[], Result]) -> tuple[Result | None, dict[st
         return None, _error(error)
 
 
-def _folded_tool_call_ids(
-    store: ConversationStore,
-    session_id: str,
-    run_ids: Sequence[str],
-    readers: Readers,
-) -> dict[str, list[str]]:
+def _folded_tool_call_ids(store: ConversationStore, session_id: str, run_ids: Sequence[str]) -> dict[str, list[str]]:
     """Return the tool calls each run's mid-turn folds summarized, for the runs that have any."""
-    folded = {run_id: sorted(readers.folded_tool_call_ids(store, session_id, run_id)) for run_id in run_ids}
+    folded = {
+        run_id: sorted(run_folded_tool_call_ids(store, session_id=session_id, run_id=run_id)) for run_id in run_ids
+    }
     return {run_id: call_ids for run_id, call_ids in folded.items() if call_ids}

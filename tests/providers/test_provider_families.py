@@ -30,7 +30,7 @@ from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_G
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from mindroom.providers.synthetic_adapter import SHELL_TOOL
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
-from mindroom.session_storage.codec import run_from_row
+from mindroom.session_storage.legacy_agno3_schema import run_from_row
 from tests.providers.family_support import (
     CLAUDE_DEPRECATION_FILTER,
     FAMILIES,

@@ -275,16 +275,17 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # Handling: Per session, each agent or team row becomes a `<s>_log_runs` row with the next `seq` in the order a load
 # read them, decoded through `run_from_row`, the row's ids winning; a row without a position goes last rather than
 # first, so no summary row covers it, as none did; a member of a member is re-parented to its team run. A paused team
-# run's embedded members replace or create their member rows, since a resume read them; a fold whose run has no row gets a
-# cancelled one right after its latest summary row, with the fold's metadata and members. Workflow rows and rows that
-# do not decode are left out, the latter logged by id; the backup keeps both.
+# run's embedded members replace or create their member rows, since a resume read them; a fold whose run has no row and
+# was not removed gets a cancelled one right after its latest summary row, with the fold's metadata and members. Workflow
+# rows and rows that do not decode are left out, the latter logged by id; the backup keeps both.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
 # ::test_members_of_members_join_their_team_run, ::test_a_paused_team_runs_embedded_members_become_its_member_rows,
 # ::test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary,
 # ::test_fold_runs_without_a_row_sort_by_their_latest_fold,
 # ::test_workflow_rows_and_rows_that_do_not_decode_are_left_out,
-# ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, and
-# tests/storage_oracle/test_migrated.py::test_a_converted_input_shows_its_recording_but_for_named_masks.
+# ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone,
+# tests/storage_oracle/test_migrated.py::test_a_converted_input_shows_its_recording_but_for_named_masks, and
+# tests/storage_oracle/test_migrated.py::test_a_fold_run_a_retirement_removed_converts_without_a_row.
 def _convert_runs(
     connection: sqlite3.Connection,
     names: AgnoTableNames,
@@ -378,11 +379,14 @@ def _embedded_members(connection: sqlite3.Connection, names: AgnoTableNames, ses
 def _fold_owners_without_rows(connection: sqlite3.Connection, names: AgnoTableNames, session_id: str) -> list[_Run]:
     """Return a cancelled run for each fold whose running run has no row, each followed by its segments' new members.
 
-    Each takes the place right after the latest summary row of its folds, as a fold stores a run without a row now.
+    Each takes the place right after the latest summary row of its folds, as a fold stores a run without a row now. A
+    run a retirement removed gets none, as in a store that never converted: it never writes a row again, and the
+    barrier keeps its folds out of replay and out of what a redaction matches.
     """
     folds: dict[str, list[_SummaryRow]] = {}
     without_row = (
-        f"AND segment_run_id IS NOT NULL AND segment_run_id NOT IN (SELECT run_id FROM {quote_identifier(names.runs)})"  # noqa: S608
+        f"AND segment_run_id IS NOT NULL AND segment_run_id NOT IN (SELECT run_id FROM {quote_identifier(names.runs)}) "  # noqa: S608
+        f"AND segment_run_id NOT IN (SELECT run_id FROM {quote_identifier(names.removed_runs)})"
     )
     for row in _summary_rows(connection, names, session_id, without_row):
         folds.setdefault(cast("str", row.segment_run_id), []).append(row)

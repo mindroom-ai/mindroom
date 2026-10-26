@@ -18,10 +18,10 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from mindroom.history import legacy_compaction_state, summary_rows, summary_rows_next
+from mindroom.history import legacy_compaction_state, summary_rows
 from mindroom.history import storage as history_storage
 from mindroom.llm import messages, runs
-from mindroom.session_storage import agent_storage, legacy_agno2_runs, preflight, store, store_next, types
+from mindroom.session_storage import agent_storage, legacy_agno2_runs, preflight, store, types
 
 if TYPE_CHECKING:
     import sqlite3
@@ -85,9 +85,9 @@ def _time_module(determinism: Determinism) -> SimpleNamespace:
 # Modules that call ``uuid4`` by that name, each with its own counter.
 _UUID_MODULES: tuple[ModuleType, ...] = (messages, runs, agent_storage, preflight)
 # Modules that call ``time()`` imported from ``time``.
-_TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, store_next, summary_rows_next, types)
+_TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, summary_rows, types)
 # Modules that call ``time.time()`` on the imported module.
-_TIME_MODULE_MODULES: tuple[ModuleType, ...] = (summary_rows, agent_storage, legacy_compaction_state, legacy_agno2_runs)
+_TIME_MODULE_MODULES: tuple[ModuleType, ...] = (agent_storage, legacy_compaction_state, legacy_agno2_runs)
 # Modules that call ``datetime.now``.
 _DATETIME_MODULES: tuple[ModuleType, ...] = (runs, history_storage)
 
@@ -120,7 +120,6 @@ def deterministic(*, time_modules: Sequence[ModuleType] = ()) -> Iterator[Determ
             stack.enter_context(patch.object(module, "time", time_module))
         for module in _DATETIME_MODULES:
             stack.enter_context(patch.object(module, "datetime", fixed_datetime))
-        for module in (store, store_next):
-            connect = module.connect_conversation_database
-            stack.enter_context(patch.object(module, "connect_conversation_database", _without_fsync(connect)))
+        connect = store.connect_conversation_database
+        stack.enter_context(patch.object(store, "connect_conversation_database", _without_fsync(connect)))
         yield determinism

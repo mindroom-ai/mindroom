@@ -42,8 +42,6 @@ KIND_WEIGHTS: dict[ScenarioKind, dict[str, int]] = {
 }
 # Kinds that only start a conversation: they need a database without a session row.
 OPENING_KINDS = frozenset({"legacy", "fold_first_turn"})
-# Kinds after which a recording keeps the full observables, not only their digests.
-CUT_KINDS = frozenset({"edit", "redact"})
 
 
 @dataclass(frozen=True)
@@ -82,21 +80,11 @@ class Scenario:
         return cls(value["kind"], tuple(Action.from_json(action) for action in value["actions"]))
 
 
-def generate(seed: int, length: int) -> Scenario:
-    """Return ``length`` actions drawn with ``random.Random(seed)``; every third seed is a team conversation."""
+def draw(kind: ScenarioKind, seed: int | str, length: int) -> tuple[Action, ...]:
+    """Return ``length`` actions of a ``kind`` conversation under way, drawn with ``random.Random(seed)``."""
     rng = random.Random(seed)  # noqa: S311 - a reproducible sequence, not a secret
-    kind: ScenarioKind = "team" if seed % 3 == 2 else "agent"
-    weights = KIND_WEIGHTS[kind]
-    kinds = [name for name, weight in weights.items() for _ in range(weight)]
-    actions: list[Action] = []
-    opening = rng.random()
-    if opening < 0.25:
-        actions.append(Action("legacy", index=rng.randrange(3)))
-    elif opening < 0.4:
-        actions.append(Action("fold_first_turn", index=rng.randrange(3)))
-    while len(actions) < length:
-        actions.append(Action(rng.choice(kinds), index=rng.randrange(31), count=rng.randint(1, 3)))
-    return Scenario(kind, tuple(actions))
+    kinds = [name for name, weight in KIND_WEIGHTS[kind].items() for _ in range(weight)]
+    return tuple(Action(rng.choice(kinds), index=rng.randrange(31), count=rng.randint(1, 3)) for _ in range(length))
 
 
 def _scenario(kind: ScenarioKind, *actions: Action) -> Scenario:

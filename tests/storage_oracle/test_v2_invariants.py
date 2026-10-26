@@ -23,9 +23,9 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from mindroom.history.run_visibility import replays_in_scope
-from mindroom.history.summary_rows_next import seen_event_ids, source_event_ids
-from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES
 from mindroom.llm.runs import TeamRunRecord
+from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES
+from mindroom.session_storage.store import seen_event_ids, source_event_ids
 from mindroom.usage.storage import quote_identifier
 from tests.storage_oracle.actions import KIND_WEIGHTS, NAMED, OPENING_KINDS, Action, Scenario
 from tests.storage_oracle.backend import SESSION_ID, summary_tokens
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationState
     from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.store_next import SaveOutcome
+    from mindroom.session_storage.store import SaveOutcome
     from mindroom.session_storage.types import ConversationSession
     from tests.storage_oracle.actions import ScenarioKind
     from tests.storage_oracle.backend import FoldBasisView, FoldInput
@@ -225,7 +225,7 @@ class _InvariantBackend(NextBackend):
         run_id: str,
         snapshot: InterruptedReplaySnapshot,
         state: dict[str, object] | None,
-    ) -> tuple[AnyRunRecord, str]:
+    ) -> tuple[AnyRunRecord, SaveOutcome | bool]:
         before = self._stored_status(run_id)
         record, outcome = super()._save_interrupted(session, run_id, snapshot, state)
         if outcome == "written":
