@@ -243,9 +243,12 @@ class KnowledgeCollection:
             )
 
     def load_vectors(self) -> None:
-        """Load the collection's vectors into the matrix cache as a search would, so the next search finds them."""
+        """Load the collection's vectors into the matrix cache as a search would, so the next search finds them.
+
+        No search used them yet, so they go in as the least recently used and never evict a searched base's.
+        """
         with closing(self._connect(read_only=True)) as connection:
-            _vector_index(connection, self.file)
+            _vector_index(connection, self.file, searched=False)
 
     def _connect(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Open the existing collection file after checking its schema version.
@@ -462,7 +465,7 @@ def _file_version(file: Path) -> tuple[str, int, int, int, int] | None:
     return (str(file), status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
 
 
-def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
+def _vector_index(connection: sqlite3.Connection, file: Path, *, searched: bool = True) -> _VectorIndex:
     """Return the file's vectors, loading them once per file version and keeping recent ones within the cache budget."""
     version = _file_version(file)
     if version is None:
@@ -493,6 +496,7 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
         index = _load_vector_index(connection)
         with _index_cache_lock:
             _index_cache[key] = index
+            _index_cache.move_to_end(key, last=searched)
             # The largest index does not count against the budget, so one base too big for it is not reloaded on every
             # search, even when searches alternate between it and smaller ones.
             largest = max(_index_cache, key=lambda cached: _index_cache[cached].nbytes)

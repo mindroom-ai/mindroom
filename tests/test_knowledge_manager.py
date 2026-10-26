@@ -6243,6 +6243,29 @@ async def test_a_publication_does_not_load_a_base_nobody_searched(
 
 
 @pytest.mark.asyncio
+async def test_a_files_mode_publication_preloads_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A base switched to files mode publishes no vectors, so its refreshes neither load vectors nor log a warning."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
+    _publish_collection(key, "old").search([1.0], limit=1)
+    files_config = config.model_copy(deep=True)
+    files_config.knowledge_bases["docs"].mode = "files"
+    _publish_on_refresh(monkeypatch, "new")
+
+    with capture_logs() as logs:
+        result = await KnowledgeRefreshScheduler().refresh_now("docs", config=files_config, runtime_paths=runtime_paths)
+
+    assert result.index_published
+    assert not [log for log in logs if log["event"] == "Could not preload published knowledge vectors"]
+    assert _cached_matrix_files() == ["old.sqlite3"]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_preload_is_logged_and_the_refresh_still_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

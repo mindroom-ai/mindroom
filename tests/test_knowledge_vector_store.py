@@ -278,6 +278,27 @@ def test_concurrent_cold_searches_load_the_matrix_once(
     assert all(result[0].content == "alpha" for result in results)
 
 
+def test_preloaded_vectors_never_evict_a_searched_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preloaded vectors enter the cache as least recently used, so over budget they go before a searched base's."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    collections = {}
+    for name, rows in (("largest", 40), ("searched", 2), ("preloaded", 2)):
+        collections[name] = KnowledgeCollection(path=tmp_path / name, name=name)
+        collections[name].reset()
+        collections[name].write_source_rows(
+            "a.md",
+            [_row(f"{name}{index}", "a.md", name, [1.0, float(index)]) for index in range(rows)],
+        )
+    collections["largest"].search([1.0, 0.0], limit=1)
+    collections["searched"].search([1.0, 0.0], limit=1)
+    # Room for one small matrix besides the largest one.
+    monkeypatch.setattr(vector_store_module, "_MATRIX_CACHE_BYTES", 40)
+
+    collections["preloaded"].load_vectors()
+
+    assert [Path(key[0]).name for key in vector_store_module._index_cache] == ["largest.sqlite3", "searched.sqlite3"]
+
+
 def test_a_preload_racing_a_search_loads_the_matrix_once(
     collection: KnowledgeCollection,
     monkeypatch: pytest.MonkeyPatch,

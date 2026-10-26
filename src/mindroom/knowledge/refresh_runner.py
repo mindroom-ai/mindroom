@@ -249,7 +249,8 @@ async def refresh_knowledge_binding_in_subprocess(
         raise
     _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=False)
     try:
-        if result.index_published:
+        # A files-mode base publishes no vectors, even if it was searched while semantic.
+        if result.index_published and key.indexing_settings.mode == "semantic":
             await preload_published_vectors(published_index_storage_path(key), key.indexing_settings)
     except Exception:
         logger.warning("Could not preload published knowledge vectors", base_id=key.base_id, exc_info=True)
