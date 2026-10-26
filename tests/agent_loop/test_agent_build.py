@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
+from agno.tools.reasoning import ReasoningTools
 from structlog.testing import capture_logs
 
 import mindroom.agents as agents_module
@@ -524,18 +525,43 @@ def test_a_refused_function_the_agent_never_offers_costs_its_toolkit_nothing(
     assert [function.name for function in build.spec.toolkits[0].functions] == ["ping"]
 
 
-def test_the_prompt_shows_a_toolkits_instructions_once_even_when_another_offers_its_names(tmp_path: Path) -> None:
-    """The same toolkit built for two tools shows its instructions once, though a run offers only the first's functions."""
+def test_a_toolkit_s_instructions_show_whenever_it_offers_a_function(tmp_path: Path) -> None:
+    """Agno's own toolkits show their instructions too, though their ``add_instructions`` switch is off."""
+    config, runtime_paths = _config(tmp_path, tools=["reasoning"])
+
+    build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    assert ReasoningTools().add_instructions is False
+    assert build.prompt.tool_instructions == (ReasoningTools().instructions,)
+
+
+def test_a_toolkit_whose_functions_are_all_left_out_shows_no_instructions(tmp_path: Path) -> None:
+    """A toolkit shows its instructions only while it offers a function, not after a filter leaves them all out."""
+    config, runtime_paths = _config(tmp_path, tools=["reasoning", "calculator"])
+
+    build = _build(
+        config,
+        runtime_paths,
+        persist_runtime_state=False,
+        tool_function_filter=lambda function: function.name not in {"think", "analyze"},
+    )
+
+    assert "reasoning_tools" not in [toolkit.name for toolkit in build.spec.toolkits]
+    assert build.prompt.tool_instructions == ()
+
+
+def test_a_toolkit_whose_every_function_an_earlier_one_took_shows_no_instructions(tmp_path: Path) -> None:
+    """A run offers the first function of each name, so the later toolkit offers none and shows no instructions."""
     config, runtime_paths = _config(tmp_path, tools=["calculator", "wikipedia"])
 
-    def build_toolkit(_tool_name: str, **_kwargs: object) -> Toolkit:
-        return Toolkit(name="pinger", tools=[ping], instructions="Ping politely.", add_instructions=True)
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name="pinger", tools=[ping], instructions=f"Ping for {tool_name}.")
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit):
         build = _build(config, runtime_paths, persist_runtime_state=False)
 
     assert [toolkit.functions != () for toolkit in build.spec.toolkits[:2]] == [True, False]
-    assert build.prompt.tool_instructions == ("Ping politely.",)
+    assert build.prompt.tool_instructions == ("Ping for calculator.",)
 
 
 @pytest.mark.parametrize(

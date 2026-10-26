@@ -103,9 +103,9 @@ class ToolFunction:
 class AdaptedToolkit:
     """One Agno toolkit as the agent loop sees it; ``instructions`` is what the prompt shows of its instructions.
 
-    The prompt shows them whenever the toolkit offers a function, except a vendor toolkit whose ``add_instructions``
-    is off. ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
-    it describes the toolkit's functions and minimal mode offers as a context document.
+    The prompt shows them whenever the toolkit offers a function, unless the toolkit is deferred, whose instructions
+    tool search shows instead. ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which
+    the agent CLI shows when it describes the toolkit's functions and minimal mode offers as a context document.
     ``function_instructions`` holds, by function name, the instructions a function asks the prompt to show, which
     only tool search shows, for a deferred toolkit; an agent refuses an eager toolkit that offers such a function.
     ``refused`` holds, by function name, why MindRoom refuses a function that sets a field the agent loop cannot

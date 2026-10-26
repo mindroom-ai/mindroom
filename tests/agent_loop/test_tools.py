@@ -94,17 +94,16 @@ def test_a_spec_refuses_two_functions_of_one_name() -> None:
         spec(ScriptedModel([]), toolkit(add, echo, name="first"), _loud_echo())
 
 
-def test_toolkit_instructions_keep_only_prompt_instructions_once_per_toolkit() -> None:
+def test_toolkit_instructions_show_for_each_toolkit_that_offers_a_function() -> None:
     math = replace(toolkit(add, name="math"), instructions="Use math.")
-    text = toolkit(echo, name="text")  # Agno adds no instructions unless the toolkit asks.
+    text = toolkit(echo, name="text")  # A toolkit without instructions adds none.
+    errors = replace(toolkit(add, boom, name="errors"), instructions="Fail loudly.")
 
-    math_with_echo = replace(math, functions=(*math.functions, *text.functions))
+    offered = offered_toolkits((math, text, replace(math, name="algebra"), errors), agent="code")
 
-    assert toolkit_instructions((math, text, math, replace(math, name="algebra"), math_with_echo)) == (
-        "Use math.",
-        "Use math.",
-        "Use math.",
-    )
+    # The algebra copy offers no function, since math took ``add``; errors still offers ``boom``.
+    assert [len(toolkit.functions) for toolkit in offered] == [1, 1, 0, 1]
+    assert toolkit_instructions(offered) == ("Use math.", "Fail loudly.")
 
 
 # --- plan_tool_batch -------------------------------------------------------------------------------------------------

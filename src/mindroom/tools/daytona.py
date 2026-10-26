@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -165,14 +165,6 @@ if TYPE_CHECKING:
             placeholder="Custom guidelines for the toolkit",
             description="Custom instructions for the toolkit",
         ),
-        ConfigField(
-            name="add_instructions",
-            label="Add Instructions",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Whether to add instructions to the agent",
-        ),
     ],
     dependencies=["daytona"],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#daytona",
@@ -213,8 +205,7 @@ def daytona_tools() -> type[DaytonaTools]:
             verify_ssl: bool | None = True,
             persistent: bool = True,
             instructions: str | None = None,
-            add_instructions: bool = False,
-            **kwargs: object,
+            **kwargs: Any,  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
         ) -> None:
             normalized_language = sandbox_language.strip() if isinstance(sandbox_language, str) else sandbox_language
             if isinstance(normalized_language, str):
@@ -247,7 +238,6 @@ def daytona_tools() -> type[DaytonaTools]:
                 verify_ssl=verify_ssl is not False,
                 persistent=persistent,
                 instructions=instructions,
-                add_instructions=add_instructions,
                 **kwargs,
             )
 

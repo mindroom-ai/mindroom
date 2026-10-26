@@ -265,7 +265,6 @@ class UpdateAwarenessTools(Toolkit):
             name="update_awareness",
             tools=[self.get_mindroom_update_status],
             instructions=_release_awareness_instructions(self.status),
-            add_instructions=True,
         )
 
     def get_mindroom_update_status(self) -> str:

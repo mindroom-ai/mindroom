@@ -155,12 +155,12 @@ def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None, registered: str |
         adapted.append(
             replace(_adapt(offered), toolkit=key, registered_toolkit=registered or key, actor_state=actor_state),
         )
-    instructions, guidance = _prompt_and_guidance(toolkit, toolkit.instructions)
+    instructions = toolkit.instructions or None
     return AdaptedToolkit(
         name=toolkit.name,
         functions=tuple(adapted),
         instructions=instructions,
-        guidance=guidance,
+        guidance=instructions,
         function_instructions={
             function.name: function.instructions
             for function in functions
@@ -177,29 +177,8 @@ def with_offered_instructions(toolkit: Toolkit, adapted: AdaptedToolkit) -> Adap
     """
     if not isinstance(toolkit, FunctionScopedInstructions):
         return adapted
-    rendered = toolkit.instructions_for([function.name for function in adapted.functions])
-    instructions, guidance = _prompt_and_guidance(toolkit, rendered)
-    return replace(adapted, instructions=instructions, guidance=guidance)
-
-
-def _prompt_and_guidance(toolkit: Toolkit, instructions: str | None) -> tuple[str | None, str | None]:
-    """Return what the prompt shows of ``instructions``, and the guidance, which is all of them.
-
-    The prompt shows a toolkit's instructions whenever it offers a function, except that a vendor toolkit keeps its
-    own ``add_instructions`` opt-in (``_is_vendor_toolkit``).
-    """
-    shown = instructions if toolkit.add_instructions or not _is_vendor_toolkit(toolkit) else None
-    return shown or None, instructions or None
-
-
-def _is_vendor_toolkit(toolkit: Toolkit) -> bool:
-    """Return whether ``toolkit`` is one of Agno's own toolkits, or a subclass of one, rather than a bare ``Toolkit``.
-
-    Agno's toolkits ship instructions that their ``add_instructions`` setting opts into, such as ``reasoning``'s
-    "You must ALWAYS think before making tool calls", which MindRoom exposes as each toolkit's ``add_instructions``
-    setting; toolkits MindRoom and plugins author subclass ``Toolkit`` directly and mean their instructions to show.
-    """
-    return any(cls is not Toolkit and cls.__module__.startswith("agno.tools.") for cls in type(toolkit).__mro__)
+    instructions = toolkit.instructions_for([function.name for function in adapted.functions]) or None
+    return replace(adapted, instructions=instructions, guidance=instructions)
 
 
 def offered_refusal(toolkit: AdaptedToolkit) -> str | None:

@@ -56,6 +56,7 @@ It requires a Zep API key from `api_key` or `ZEP_API_KEY`; without one, the agen
 Set `user_id` and `session_id` to keep using the same Zep user and thread across conversations.
 Without them, the tool generates a new Zep user and thread, so it does not find earlier memory.
 A `user_id` that does not exist yet in Zep is created automatically.
+The agent's prompt always includes the Zep usage instructions.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -67,7 +68,6 @@ A `user_id` that does not exist yet in Zep is created automatically.
 | `enable_get_zep_memory` | `boolean` | `true` | Enable `get_zep_memory()`. |
 | `enable_search_zep_memory` | `boolean` | `true` | Enable `search_zep_memory()`. |
 | `instructions` | `text` | `null` | Replace the default Zep usage instructions. |
-| `add_instructions` | `boolean` | `false` | Add the Zep usage instructions to the agent's prompt. |
 | `all` | `boolean` | `false` | Enable every function regardless of the individual flags. |
 
 ```yaml

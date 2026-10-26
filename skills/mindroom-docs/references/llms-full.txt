@@ -9372,6 +9372,7 @@ is_prime(97)
 `think()` records an intermediate thought and an optional next action.
 `analyze()` records the result of a step and a `next_action` of `continue`, `validate`, or `final_answer`.
 Steps are kept for the current run, so later steps see earlier ones.
+The agent's prompt always includes the toolkit's reasoning instructions, which tell the model to call `think()` before every tool call or reply.
 
 ### Configuration
 
@@ -9379,8 +9380,7 @@ Steps are kept for the current run, so later steps see earlier ones.
 | --- | --- | --- | --- | --- |
 | `enable_think` | `boolean` | `no` | `true` | Enable `think()`. |
 | `enable_analyze` | `boolean` | `no` | `true` | Enable `analyze()`. |
-| `add_instructions` | `boolean` | `no` | `false` | Add the toolkit's reasoning instructions to the prompt. |
-| `add_few_shot` | `boolean` | `no` | `false` | Also add few-shot examples when instructions are added. |
+| `add_few_shot` | `boolean` | `no` | `false` | Add few-shot examples to the default reasoning instructions. |
 | `instructions` | `text` | `no` | `null` | Replace the default reasoning instructions entirely. |
 | `few_shot_examples` | `text` | `no` | `null` | Replace the built-in few-shot examples; used only when few-shot examples are added. |
 | `all` | `boolean` | `no` | `false` | Enable all reasoning functions. |
@@ -9392,7 +9392,6 @@ agents:
   researcher:
     tools:
       - reasoning:
-          add_instructions: true
           add_few_shot: true
 ```
 
@@ -13416,6 +13415,7 @@ It requires a Zep API key from `api_key` or `ZEP_API_KEY`; without one, the agen
 Set `user_id` and `session_id` to keep using the same Zep user and thread across conversations.
 Without them, the tool generates a new Zep user and thread, so it does not find earlier memory.
 A `user_id` that does not exist yet in Zep is created automatically.
+The agent's prompt always includes the Zep usage instructions.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -13427,7 +13427,6 @@ A `user_id` that does not exist yet in Zep is created automatically.
 | `enable_get_zep_memory` | `boolean` | `true` | Enable `get_zep_memory()`. |
 | `enable_search_zep_memory` | `boolean` | `true` | Enable `search_zep_memory()`. |
 | `instructions` | `text` | `null` | Replace the default Zep usage instructions. |
-| `add_instructions` | `boolean` | `false` | Add the Zep usage instructions to the agent's prompt. |
 | `all` | `boolean` | `false` | Enable every function regardless of the individual flags. |
 
 ```yaml
@@ -14263,6 +14262,7 @@ With `persistent: true`, the same sandbox is reused across calls within one repl
 The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
 Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
+The agent's prompt always includes the toolkit's instructions, which tell the model to run any code it writes and show the output.
 
 `verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
 Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.
@@ -14286,7 +14286,6 @@ Set it only for a self-hosted Daytona API whose certificate you cannot otherwise
 | `persistent` | `boolean` | `true` | Reuse one sandbox across calls within one reply. |
 | `sandbox_public` | `boolean` | `null` | Make created sandboxes public. |
 | `instructions` | `text` | `null` | Custom toolkit instructions replacing the bundled write, run, and show-results guidance. |
-| `add_instructions` | `boolean` | `false` | Add the toolkit instructions to the agent prompt. |
 
 ```yaml
 agents:
@@ -14295,7 +14294,6 @@ agents:
       - daytona:
           api_url: https://api.daytona.io
           auto_stop_interval: 30
-          add_instructions: true
 ```
 
 ## [`composio`]
@@ -16100,7 +16098,6 @@ def greeter_tools() -> type[Toolkit]:
 ```
 
 Pass `instructions="..."` to `Toolkit.__init__` for guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions, while each function's docstring is that function's description.
-A toolkit that subclasses one of Agno's own toolkits shows its instructions only with `add_instructions=True`.
 
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.

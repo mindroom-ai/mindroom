@@ -1077,7 +1077,6 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         name="active",
         tools=[Function(name="shared_tool", entrypoint=active_tool)],
         instructions=active_toolkit_marker,
-        add_instructions=True,
     )
     deferred_function = Function(
         name="shared_tool",
@@ -1089,7 +1088,6 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         name="deferred",
         tools=[deferred_function],
         instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
-        add_instructions=True,
     )
     _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit))
 
@@ -1569,7 +1567,6 @@ class _CrmTools(Toolkit):
             name="crm",
             tools=[self.crm_lookup, self.crm_notes],
             instructions="Prefer exact customer IDs.",
-            add_instructions=True,
         )
 
     def crm_lookup(self, customer_id: int) -> str:
@@ -1989,7 +1986,6 @@ def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
         tools=[Function.from_callable(lambda: "b", name="beta_tool")],
         instructions="Use beta.",
     )
-    first.add_instructions = second.add_instructions = True
     toolkit = _search_toolkit(_deferred(first, "Shared", "shared"), _deferred(second, "Shared", "shared"))
 
     payload = _tool_payload(toolkit.tool_search("shared"))

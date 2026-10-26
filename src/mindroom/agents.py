@@ -1527,9 +1527,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             partial(_generated_function_visible, config, tool_function_filter),
         ),
     ]
+    offered = _offered_entries(built, agent_name=agent_name)
     assembly = _AgentToolAssembly(
-        entries=_offered_entries(built, agent_name=agent_name),
-        instructions=toolkit_instructions(entry.adapted for entry in built),
+        entries=offered,
+        instructions=toolkit_instructions(entry.adapted for entry in offered),
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),

@@ -280,16 +280,14 @@ def test_async_variants_replace_sync_functions_in_place() -> None:
     assert adapted.functions[1].entrypoint.__wrapped__ is async_second
 
 
-def test_a_toolkit_s_instructions_reach_the_prompt_unless_a_vendor_toolkit_opts_out() -> None:
-    """A toolkit authored on ``Toolkit`` shows its instructions without ``add_instructions``; Agno's own keep the opt-in."""
+def test_every_toolkit_s_instructions_reach_the_prompt_whatever_its_add_instructions() -> None:
+    """A toolkit authored on ``Toolkit`` and one of Agno's own both show their instructions; ``add_instructions`` is unread."""
     authored = Toolkit(name="authored", tools=[probes.probe_no_arguments], instructions="Shown.")
     vendor = ReasoningTools(enable_think=True, enable_analyze=False)
-    opted_in = ReasoningTools(enable_think=True, enable_analyze=False, add_instructions=True)
 
-    assert adapt_toolkit(authored).instructions == "Shown."
-    assert adapt_toolkit(vendor).instructions is None
-    assert adapt_toolkit(vendor).guidance == vendor.instructions
-    assert adapt_toolkit(opted_in).instructions == opted_in.instructions
+    assert (authored.add_instructions, vendor.add_instructions) == (False, False)
+    assert (adapt_toolkit(authored).instructions, adapt_toolkit(authored).guidance) == ("Shown.", "Shown.")
+    assert adapt_toolkit(vendor).instructions == adapt_toolkit(vendor).guidance == vendor.instructions
 
 
 def test_definition_is_the_provider_facing_tool_spec() -> None:

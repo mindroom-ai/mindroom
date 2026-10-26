@@ -71,17 +71,12 @@ def offered_toolkits(toolkits: Sequence[AdaptedToolkit], *, agent: str) -> tuple
 
 
 def toolkit_instructions(toolkits: Iterable[AdaptedToolkit]) -> tuple[str, ...]:
-    """Return the instructions of ``toolkits`` the prompt shows, in offer order.
+    """Return the instructions the prompt shows of ``toolkits``, as ``offered_toolkits`` resolves them, in offer order.
 
-    Each toolkit's instructions are kept once per toolkit identity: its name, its instructions, and the functions it
-    was built with, whichever of them a run offers.
+    A toolkit's instructions show whenever it offers a function, so a toolkit whose every function an earlier one
+    took shows none.
     """
-    instructions: dict[tuple[str, str, frozenset[str]], str] = {}
-    for toolkit in toolkits:
-        if toolkit.instructions is not None:
-            key = (toolkit.name, toolkit.instructions, frozenset(function.name for function in toolkit.functions))
-            instructions.setdefault(key, toolkit.instructions)
-    return tuple(instructions.values())
+    return tuple(toolkit.instructions for toolkit in toolkits if toolkit.functions and toolkit.instructions is not None)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
