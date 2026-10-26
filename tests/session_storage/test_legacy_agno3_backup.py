@@ -59,7 +59,7 @@ def _write_backup(database: Path) -> Path:
     with ExitStack() as descriptors, closing(connect_conversation_database(database)) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
-        backup = write_conversion_backup(database, descriptors)
+        backup = write_conversion_backup(database, descriptors, copied_bytes=0)
         connection.rollback()
     return backup
 
@@ -309,7 +309,7 @@ def test_the_write_lock_outlives_the_backup(tmp_path: Path) -> None:
     with ExitStack() as descriptors:
         with closing(connect_conversation_database(database)) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            write_conversion_backup(database, descriptors)
+            write_conversion_backup(database, descriptors, copied_bytes=0)
 
             assert _other_process_takes_write_lock(database) == "database is locked"
 

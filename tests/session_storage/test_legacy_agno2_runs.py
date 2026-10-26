@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -16,6 +18,7 @@ import pytest
 from mindroom.history import legacy_compaction_state
 from mindroom.history.legacy_compaction_state import adopt_summary_rows
 from mindroom.session_storage.legacy_agno2_runs import decode_json, move_blob_runs_to_rows, number_unindexed_runs
+from mindroom.session_storage.legacy_agno3_backup import ConversionSpaceError
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.store import ConversationStore
@@ -115,6 +118,38 @@ def test_blob_runs_become_rows_when_the_summary_rows_migrate(tmp_path: Path) -> 
         ("run-2", "RUNNING"),
         ("run-3", "RUNNING"),
     ]
+
+
+@pytest.mark.parametrize("spare", [-1, 0])
+def test_converting_blob_runs_needs_room_for_the_copy_it_makes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spare: int,
+) -> None:
+    """The blob runs' copy into rows is journaled, so the free space needed grows by their size beyond 2.5 times."""
+    db_file = _agno_2_database(tmp_path)
+    with closing(sqlite3.connect(db_file)) as connection:
+        [(blobs,)] = connection.execute("SELECT sum(octet_length(runs)) FROM code_sessions").fetchall()
+    needed = 5 * db_file.stat().st_size // 2 + blobs
+    statvfs = os.statvfs
+    monkeypatch.setattr(
+        os,
+        "statvfs",
+        lambda target: (
+            SimpleNamespace(f_bavail=needed + spare, f_frsize=1) if isinstance(target, int) else statvfs(target)
+        ),
+    )
+
+    if spare == 0:
+        _converted(db_file)
+        assert _log(db_file)
+        return
+    with pytest.raises(
+        ConversionSpaceError,
+        match=rf"needs {needed} bytes .* plus the {blobs} bytes of older run data",
+    ):
+        _converted(db_file)
+    assert _has_blob_column(db_file)
 
 
 def test_blob_runs_keep_the_order_agno_read_them_in(tmp_path: Path) -> None:

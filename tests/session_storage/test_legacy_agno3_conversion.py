@@ -1863,11 +1863,11 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     locked, full = _store_at(root / "agents/locked"), _store_at(root / "agents/full")
     write_backup = legacy_agno3_conversion.write_conversion_backup
 
-    def backup_without_space(database: Path, descriptors: ExitStack) -> Path:
+    def backup_without_space(database: Path, descriptors: ExitStack, *, copied_bytes: int) -> Path:
         if database == full:
             msg = f"Converting {database} to storage v2 needs more bytes"
             raise ConversionSpaceError(msg)
-        return write_backup(database, descriptors)
+        return write_backup(database, descriptors, copied_bytes=copied_bytes)
 
     monkeypatch.setattr(legacy_agno3_conversion, "write_conversion_backup", backup_without_space)
     before = outside.read_bytes()

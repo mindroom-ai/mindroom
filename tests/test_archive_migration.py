@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,6 +20,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_backup import ConversionSpaceError
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.history_helpers import folded_run_ids, stored_run_ids
@@ -190,6 +193,39 @@ def test_ordinary_generations_become_summary_rows_after_their_runs(tmp_path: Pat
     )
     assert "code_sessions_compactions" not in _tables(tmp_path)
     assert "code_sessions_compacted_runs" not in _tables(tmp_path)
+
+
+@pytest.mark.parametrize("spare", [-1, 0])
+def test_converting_the_archive_needs_room_for_the_runs_it_restores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spare: int,
+) -> None:
+    """Restoring archived runs is journaled, so the free space needed grows by their size beyond 2.5 times."""
+    _main_database(tmp_path, live=[_run("r3")], generations=[_Generation(summary="S1", runs=[_run("r1"), _run("r2")])])
+    with closing(sqlite3.connect(_db(tmp_path))) as connection:
+        [(archived,)] = connection.execute(
+            "SELECT sum(octet_length(run_data)) FROM code_sessions_compacted_runs",
+        ).fetchall()
+    needed = 5 * _db(tmp_path).stat().st_size // 2 + archived
+    statvfs = os.statvfs
+    monkeypatch.setattr(
+        os,
+        "statvfs",
+        lambda target: (
+            SimpleNamespace(f_bavail=needed + spare, f_frsize=1) if isinstance(target, int) else statvfs(target)
+        ),
+    )
+
+    if spare == 0:
+        assert stored_run_ids(_open(tmp_path), "s1") == ["r1", "r2", "r3"]
+        return
+    with pytest.raises(
+        ConversionSpaceError,
+        match=rf"needs {needed} bytes .* plus the {archived} bytes of older run data",
+    ):
+        _open(tmp_path)
+    assert "code_sessions_compacted_runs" in _tables(tmp_path)
 
 
 def test_reopening_a_migrated_database_changes_nothing(tmp_path: Path) -> None:

@@ -61,6 +61,29 @@ def adopt_summary_rows(connection: sqlite3.Connection, names: AgnoTableNames) ->
         _create_summary_rows(connection, names)
 
 
+def adoption_copy_bytes(connection: sqlite3.Connection, names: AgnoTableNames) -> int:
+    """Return the bytes of run data ``adopt_summary_rows`` copies into run rows: Agno 2 blobs and archived runs.
+
+    The copies leave the pages of the data they move free, and the conversion's later inserts reuse those pages in the
+    same transaction, so SQLite journals them: such a conversion needs about this much more free space.
+    """
+    if not _needs_summary_rows(connection, names):
+        return 0
+    copied = 0
+    if has_blob_column(connection, names):
+        copied += _octets(connection, names.sessions, "runs")
+    if f"{names.sessions}_compactions" in table_names(connection):
+        copied += _octets(connection, f"{names.sessions}_compacted_runs", "run_data")
+    return copied
+
+
+def _octets(connection: sqlite3.Connection, table: str, column: str) -> int:
+    (octets,) = connection.execute(
+        f"SELECT coalesce(sum(octet_length({column})), 0) FROM {quote_identifier(table)}",  # noqa: S608
+    ).fetchone()
+    return octets
+
+
 def _create_summary_rows(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     for statement in agno_runs_sql(names):
         connection.execute(statement)

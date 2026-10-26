@@ -15,7 +15,8 @@ The conversion is one-way, and downgrading afterwards is not supported.
 
 Point every startup probe at `/api/health`, not `/api/ready`, as the bundled Helm charts do: a startup probe on `/api/ready` restarts the process during a long conversion, each restart rolls back the database being converted, and a large one never finishes (see [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness)).
 Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about two and a half times the total size of their `.db` files.
-A database whose directory has less than two and a half times its own size free is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
+A database that no release since v2026.10.341 has opened can still hold Agno 2 run blobs or the compaction archive, which the conversion copies first, so it needs up to about three and a half times its size.
+A database whose directory lacks the space it needs is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
 
 ### What carries over
 

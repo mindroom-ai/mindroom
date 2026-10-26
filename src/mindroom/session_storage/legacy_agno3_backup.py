@@ -33,11 +33,12 @@ class ConversionSpaceError(RuntimeError):
 # it, so a downgrade can restore it; a retry replaces an earlier attempt's backup, and MindRoom never deletes the backup
 # of a converted database.
 # Coverage: tests/session_storage/test_legacy_agno3_backup.py.
-def write_conversion_backup(database: Path, descriptors: ExitStack) -> Path:
+def write_conversion_backup(database: Path, descriptors: ExitStack, *, copied_bytes: int) -> Path:
     """Copy ``database`` to ``<name>.db.pre-storage-v2`` beside it, called while the conversion holds its write lock.
 
-    Free space must be at least two and a half times the file's size. The copy reads and writes only through
-    descriptors of the pinned directory, never following a link, and replaces an earlier attempt's files.
+    Free space must be at least two and a half times the file's size plus ``copied_bytes``, the older run data the
+    conversion copies inside its transaction before it converts. The copy reads and writes only through descriptors of
+    the pinned directory, never following a link, and replaces an earlier attempt's files.
 
     ``descriptors`` takes the database file's own descriptor. SQLite's locks are POSIX record locks, which a
     process loses on every descriptor of the file as soon as it closes any one of them, so the caller must close
@@ -56,8 +57,9 @@ def write_conversion_backup(database: Path, descriptors: ExitStack) -> Path:
         descriptors.callback(os.close, source)
         # The backup takes the file's size and the converted file grows by about as much again before compaction:
         # measured at up to 2.2 times the size in all (a 391 MB database's backup and an 860 MB converted file), so
-        # two and a half times leaves a margin.
-        _require_free_space(directory, database, 5 * os.fstat(source).st_size // 2)
+        # two and a half times leaves a margin. Copying Agno 2 blobs or archived runs first journals about their size
+        # again: measured at 2.94 times with 80% of the runs archived and 3.16 times with every run in blobs.
+        _require_free_space(directory, database, 5 * os.fstat(source).st_size // 2, copied_bytes)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         with (
             os.fdopen(source, "rb", closefd=False) as reader,
@@ -71,12 +73,14 @@ def write_conversion_backup(database: Path, descriptors: ExitStack) -> Path:
     return database.with_name(backup_name)
 
 
-def _require_free_space(directory: int, database: Path, needed: int) -> None:
+def _require_free_space(directory: int, database: Path, base: int, copied: int) -> None:
+    needed = base + copied
     status = os.statvfs(directory)
     available = status.f_bavail * status.f_frsize
     if available < needed:
+        copies = f" plus the {copied} bytes of older run data it copies first" if copied else ""
         msg = (
             f"Converting {database} to storage v2 needs {needed} bytes free in its directory, "
-            f"two and a half times the database's size, but only {available} are free"
+            f"two and a half times the database's size{copies}, but only {available} are free"
         )
         raise ConversionSpaceError(msg)

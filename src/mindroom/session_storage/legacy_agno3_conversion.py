@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
-from mindroom.history.legacy_compaction_state import adopt_summary_rows
+from mindroom.history.legacy_compaction_state import adopt_summary_rows, adoption_copy_bytes
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -234,7 +234,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     """
     tables = table_names(connection)
     if tables:
-        write_conversion_backup(path, descriptors)
+        write_conversion_backup(path, descriptors, copied_bytes=adoption_copy_bytes(connection, names))
     if names.sessions in tables:
         _session_text_as_utf8(connection, names)
         seed_usage_ledger(connection, names)
