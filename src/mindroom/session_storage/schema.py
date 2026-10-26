@@ -118,7 +118,7 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
     summaries = quote_identifier(names.log_summaries)
     return (
         f"CREATE TABLE IF NOT EXISTS {sessions} ({_SESSION_COLUMN_SQL}, PRIMARY KEY (session_id))",
-        _index_sql(names.sessions, "session_type"),
+        index_sql(names.sessions, "session_type"),
         # The constant key keeps the table at one row.
         f"CREATE TABLE IF NOT EXISTS {meta} (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL, "
         "next_seq INTEGER NOT NULL)",
@@ -131,15 +131,15 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         "kind TEXT NOT NULL, scope_key TEXT NOT NULL, status TEXT NOT NULL, seq INTEGER NOT NULL, "
         "folded_by INTEGER, has_tools INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
         "metadata TEXT, record TEXT NOT NULL, requirements TEXT)",
-        _index_sql(names.log_runs, "session_id", "seq"),
-        _index_sql(names.log_runs, "parent_run_id"),
+        index_sql(names.log_runs, "session_id", "seq"),
+        index_sql(names.log_runs, "parent_run_id"),
         # Not WITHOUT ROWID: SQLite recommends that only for rows under about a twentieth of a page, and messages are
         # often larger.
         f"CREATE TABLE IF NOT EXISTS {quote_identifier(names.log_messages)} ("
         f"run_id TEXT NOT NULL REFERENCES {runs}(run_id) ON DELETE CASCADE, message_id TEXT NOT NULL, "
         "ord INTEGER NOT NULL, folded_by INTEGER, data TEXT NOT NULL, PRIMARY KEY (run_id, message_id))",
         # Serves reading a run's messages in order without a sort, which spills a large run to a temp file.
-        _index_sql(names.log_messages, "run_id", "ord"),
+        index_sql(names.log_messages, "run_id", "ord"),
         # Rows of their own, so a save that adds a tool call writes that call alone rather than the run's whole list.
         f"CREATE TABLE IF NOT EXISTS {quote_identifier(names.log_tools)} ("
         f"run_id TEXT NOT NULL REFERENCES {runs}(run_id) ON DELETE CASCADE, ord INTEGER NOT NULL, "
@@ -150,7 +150,7 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         "through INTEGER NOT NULL, legacy INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, fold_run_id TEXT, "
         "summary TEXT, event_ids TEXT NOT NULL DEFAULT '[]', seen_event_ids TEXT NOT NULL DEFAULT '[]', "
         "fold_event_ids TEXT, fold_seen_event_ids TEXT)",
-        _index_sql(names.log_summaries, "session_id", "scope_key", "id"),
+        index_sql(names.log_summaries, "session_id", "scope_key", "id"),
         f"CREATE TABLE IF NOT EXISTS {quote_identifier(names.log_removed)} (run_id TEXT NOT NULL PRIMARY KEY, "
         f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE)",
         usage_table_sql(names.sessions),
@@ -171,8 +171,14 @@ def table_names(connection: sqlite3.Connection) -> set[str]:
     return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
-def _index_sql(table: str, *columns: str) -> str:
-    name = quote_identifier(f"idx_{table}_{'_'.join(columns)}")
+def index_name(table: str, *columns: str) -> str:
+    """Return the name of ``table``'s index over ``columns``, the one rule both layouts' indexes follow."""
+    return f"idx_{table}_{'_'.join(columns)}"
+
+
+def index_sql(table: str, *columns: str) -> str:
+    """Return the idempotent DDL of ``table``'s index over ``columns``."""
+    name = quote_identifier(index_name(table, *columns))
     return f"CREATE INDEX IF NOT EXISTS {name} ON {quote_identifier(table)} ({', '.join(columns)})"
 
 
@@ -182,6 +188,8 @@ __all__ = [
     "NON_VISIBLE_RUN_STATUS_VALUES",
     "SESSION_COLUMNS",
     "TableNames",
+    "index_name",
+    "index_sql",
     "log_schema_sql",
     "owner_scope_key",
     "table_names",

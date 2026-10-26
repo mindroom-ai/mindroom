@@ -42,7 +42,7 @@ from mindroom.session_storage.legacy_agno3_schema import (
     agno_schema_sql,
     run_from_row,
 )
-from mindroom.session_storage.schema import SESSION_COLUMNS, TableNames, log_schema_sql, table_names
+from mindroom.session_storage.schema import SESSION_COLUMNS, TableNames, index_name, log_schema_sql, table_names
 from mindroom.session_storage.store import (
     BUSY_TIMEOUT_SECONDS,
     connect_conversation_database,
@@ -816,7 +816,7 @@ def _drop_agno_tables(connection: sqlite3.Connection, names: AgnoTableNames) -> 
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.
 def _drop_dead_session_columns(connection: sqlite3.Connection, names: TableNames) -> None:
     sessions = quote_identifier(names.sessions)
-    connection.execute(f"DROP INDEX IF EXISTS {quote_identifier(f'idx_{names.sessions}_created_at')}")
+    connection.execute(f"DROP INDEX IF EXISTS {quote_identifier(index_name(names.sessions, 'created_at'))}")
     for (column,) in connection.execute("SELECT name FROM pragma_table_info(?)", (names.sessions,)).fetchall():
         if column not in SESSION_COLUMNS:
             connection.execute(f"ALTER TABLE {sessions} DROP COLUMN {quote_identifier(column)}")

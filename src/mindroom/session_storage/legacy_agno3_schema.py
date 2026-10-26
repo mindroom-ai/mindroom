@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.session_storage.legacy_agno2_runs import decode_json
 from mindroom.session_storage.legacy_tool_results import split_combined_tool_results
-from mindroom.session_storage.schema import TableNames
+from mindroom.session_storage.schema import TableNames, index_sql
 from mindroom.usage.storage import quote_identifier, usage_table_sql
 
 if TYPE_CHECKING:
@@ -93,15 +93,15 @@ def agno_runs_sql(names: AgnoTableNames) -> tuple[str, ...]:
     session_columns = ", ".join(f"{column} {column_type}" for column, column_type in _SESSION_COLUMN_TYPES.items())
     return (
         f"CREATE TABLE IF NOT EXISTS {sessions} ({session_columns}, PRIMARY KEY (session_id))",
-        _index_sql(names.sessions, "session_type"),
-        _index_sql(names.sessions, "created_at"),
+        index_sql(names.sessions, "session_type"),
+        index_sql(names.sessions, "created_at"),
         f"CREATE TABLE IF NOT EXISTS {runs} (run_id VARCHAR NOT NULL, session_id VARCHAR NOT NULL, "
         "run_type VARCHAR NOT NULL, agent_id VARCHAR, team_id VARCHAR, workflow_id VARCHAR, user_id VARCHAR, "
         "parent_run_id VARCHAR, status VARCHAR, run_index BIGINT, run_data JSON NOT NULL, "
         "created_at BIGINT NOT NULL, updated_at BIGINT, PRIMARY KEY (run_id), "
         f"FOREIGN KEY(session_id) REFERENCES {sessions} (session_id) ON DELETE CASCADE)",
-        *(_index_sql(names.runs, column) for column in _RUNS_INDEXED_COLUMNS),
-        _index_sql(names.runs, "session_id", "run_index"),
+        *(index_sql(names.runs, column) for column in _RUNS_INDEXED_COLUMNS),
+        index_sql(names.runs, "session_id", "run_index"),
     )
 
 
@@ -179,11 +179,6 @@ def delete_run_subtrees_in_transaction(
         (session_id, json.dumps(sorted(found))),
     )
     return found
-
-
-def _index_sql(table: str, *columns: str) -> str:
-    name = quote_identifier(f"idx_{table}_{'_'.join(columns)}")
-    return f"CREATE INDEX IF NOT EXISTS {name} ON {quote_identifier(table)} ({', '.join(columns)})"
 
 
 __all__ = [
