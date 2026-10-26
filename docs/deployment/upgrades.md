@@ -8,6 +8,34 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to conversation storage v2
+
+The first start after this upgrade converts the conversation database of every agent and team, private instances included, to a new layout before any agent comes online.
+The conversion is one-way, and downgrading afterwards is not supported.
+
+### Before upgrading
+
+Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about twice the total size of their `.db` files.
+A database whose directory has less than twice its own size free is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
+
+### What carries over
+
+Conversation history, compaction summaries, pending tool approvals, and usage records carry over.
+Before converting a database, MindRoom copies it byte for byte to `<name>.db.pre-storage-v2` beside it and never deletes that copy.
+A stored run whose data cannot be read is left out of the converted database, logged as `conversation_run_left_out` with its run ID, and kept in the backup.
+A crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
+A converted database keeps the disk space its old tables used until later writes reuse it; with MindRoom stopped, `sqlite3 <name>.db VACUUM` returns that space.
+
+### Downgrading
+
+The only way back is to stop MindRoom, replace each `<name>.db` with its `<name>.db.pre-storage-v2` backup, delete any `<name>.db-journal` beside it, and start the older release.
+Everything written since the upgrade is lost: replies, summaries, session state, approvals requested since then, and usage records for that period.
+The older release drops messages redacted since the upgrade from the restored history before it next replies in that conversation, but edits made since the upgrade are not applied again, so the earlier reply to an edited message can return to the agent's history.
+An older release started on converted databases without restoring the backups moves each agent's or team's `sessions/` directory aside to `sessions.incompatible-<id>/`, backups included, and starts it with empty history; move the backups back out of that archive and restore them as above.
+Upgrading again converts each restored database again and writes a new backup.
+
+Once you are sure you will not downgrade, delete the `.pre-storage-v2` backups.
+
 ## Upgrading to durable reply records
 
 Upgrade while no agent is replying.
