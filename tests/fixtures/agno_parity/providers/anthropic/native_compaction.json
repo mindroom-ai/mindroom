@@ -186,11 +186,17 @@
           }
         }
       ],
+      "thinking": {
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
+      },
       "stream": true
     },
     "headers": {
       "accept": "application/json",
-      "anthropic-beta": "compact-2026-01-12",
+      "anthropic-beta": "compact-2026-01-12,thinking-binding-controls-2026-08-01",
       "anthropic-version": "2023-06-01",
       "content-type": "application/json"
     },

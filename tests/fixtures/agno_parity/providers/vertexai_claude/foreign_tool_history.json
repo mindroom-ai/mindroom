@@ -231,6 +231,12 @@
           }
         }
       ],
+      "thinking": {
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
+      },
       "tools": [
         {
           "name": "get_weather",
@@ -288,6 +294,7 @@
     },
     "headers": {
       "accept": "application/json",
+      "anthropic-beta": "thinking-binding-controls-2026-08-01",
       "content-type": "application/json"
     },
     "method": "POST",

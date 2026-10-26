@@ -26,6 +26,7 @@ from anthropic.types import RawContentBlockDeltaEvent, ToolUseBlock
 from anthropic.types import TextDelta as AnthropicTextDelta
 from anthropic.types import ThinkingDelta as AnthropicThinkingDelta
 from anthropic.types.beta import (
+    BetaMessage,
     BetaRawContentBlockDeltaEvent,
     BetaTextDelta,
     BetaThinkingDelta,
@@ -70,6 +71,7 @@ from mindroom.providers.anthropic.settings import (
 )
 from mindroom.providers.anthropic.wire import (
     assistant_message_from_response,
+    checks_thinking_prefix,
     format_claude_messages,
     format_claude_tools,
     inline_url_media,
@@ -96,7 +98,6 @@ if TYPE_CHECKING:
     import httpx2
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
-    from anthropic.types.beta import BetaMessage
     from google.auth.credentials import Credentials as GoogleCredentials
     from pydantic import BaseModel
 
@@ -114,6 +115,13 @@ _PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
     "bedrock_claude": "AwsBedrock",
 }
 _STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
+# Replayed thinking whose earlier context changed is dropped instead of failing the request. The system prompt carries
+# the date and the turn's memory and enrichment, a turn's transient context leaves the history after it, and
+# compaction and replay limits rewrite earlier turns, so a request regularly replays thinking produced after a different
+# prefix; the API rejects such a request by default on accounts created from 2026-08-31. Bedrock stays without it
+# until it is shown to accept the beta, because a platform rejects a beta it does not take.
+_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+_THINKING_BINDING_ROUTES: frozenset[ClaudeRouteKind] = frozenset({"anthropic", "vertexai_claude"})
 _VERTEX_ENDPOINTS = {
     "global": "https://aiplatform.googleapis.com/v1",
     "us": "https://aiplatform.us.rep.googleapis.com/v1",
@@ -304,6 +312,16 @@ class ClaudeProvider:
             )
         elif stop_reason == "refusal":
             logger.warning("claude_safeguard_refusal", model_id=self.identity.id, stop_reason=raw_stop_reason)
+        transformations = response.input_transformations if isinstance(response, BetaMessage) else None
+        dropped = [entry for entry in transformations or () if entry.type == "thinking_dropped"]
+        if dropped:
+            # The model answered without that earlier reasoning: something before it changed since it was produced.
+            logger.info(
+                "claude_replayed_thinking_dropped",
+                model_id=self.identity.id,
+                blocks=len(dropped),
+                reasons=sorted({entry.reason for entry in dropped}),
+            )
         return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
 
     def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
@@ -354,6 +372,29 @@ class ClaudeProvider:
             params.pop("extra_body", None)
         return params
 
+    def _with_thinking_binding(self, params: dict[str, Any], request: ModelRequest) -> bool:
+        """Ask the API to drop stale replayed thinking (``_THINKING_BINDING_BETA``); return whether the request does.
+
+        The binding rides on adaptive thinking, which these models run when the request sends no thinking setting;
+        the API rejects it beside any other thinking type. An authored ``block_binding`` is kept, and a request that
+        disables thinking sends none.
+        """
+        if (
+            self.route not in _THINKING_BINDING_ROUTES
+            or request.overrides.disable_thinking
+            or not checks_thinking_prefix(self.identity.id)
+        ):
+            return False
+        extra_body = params.get("extra_body") or {}
+        # The SDK sends ``extra_body`` over the body's own fields, so the thinking it holds is the one sent.
+        owner = extra_body if "thinking" in extra_body else params
+        thinking = dict(owner.get("thinking") or {"type": "adaptive"})
+        if thinking.get("type") != "adaptive":
+            return False
+        thinking.setdefault("block_binding", {"prefix_mismatch_behavior": "drop_block"})
+        owner["thinking"] = thinking
+        return True
+
     def _request_params(
         self,
         request: ModelRequest,
@@ -373,6 +414,8 @@ class ClaudeProvider:
             betas.append(_STRUCTURED_OUTPUTS_BETA)
         if request.native_compaction is not None or compaction_edit:
             betas.append(COMPACTION_BETA)
+        if self._with_thinking_binding(params, request):
+            betas.append(_THINKING_BINDING_BETA)
         if betas:
             params["betas"] = list(dict.fromkeys(betas))
         if output_format is not None:

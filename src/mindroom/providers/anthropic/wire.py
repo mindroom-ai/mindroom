@@ -76,6 +76,9 @@ _NON_STRUCTURED_OUTPUT_ALIASES = frozenset(
         "claude-opus-4-0",
     },
 )
+# Models whose API checks each replayed thinking block against the system prompt, tools, and messages sent before it
+# (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking); newer generations join this set.
+_PREFIX_CHECKED_THINKING_PREFIXES = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 
 _TRAILING_USER_MESSAGE = "continue"
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
@@ -138,6 +141,11 @@ def supports_structured_outputs(model_id: str) -> bool:
     # TODO(simplify): Unlike supports_prefill, this reads the raw id, so a gateway id such as anthropic/claude-3-...
     # counts as supporting structured output. Read it through _core_model_id too. Users of gateway ids would notice.
     return model_id not in _NON_STRUCTURED_OUTPUT_ALIASES and not model_id.startswith(_NON_STRUCTURED_OUTPUT_PREFIXES)
+
+
+def checks_thinking_prefix(model_id: str) -> bool:
+    """Return whether the API rejects or drops this model's replayed thinking once the context before it changed."""
+    return _core_model_id(model_id).startswith(_PREFIX_CHECKED_THINKING_PREFIXES)
 
 
 def stop_reason_of(raw: str | None) -> StopReason | None:
@@ -612,6 +620,7 @@ def assistant_message_from_response(
 __all__ = [
     "FormattedConversation",
     "assistant_message_from_response",
+    "checks_thinking_prefix",
     "format_claude_messages",
     "format_claude_tools",
     "inline_url_media",
