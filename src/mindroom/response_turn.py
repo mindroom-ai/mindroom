@@ -1165,8 +1165,9 @@ def _settle_completed_attempt(
             continuation=continuation,
             response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
         )
+    # Only a call the run stopped after can leave the turn unanswered; a refused call never ran, so the model answered.
     decision = continuation_decision_from_tools(
-        (*(tool.call for tool in resolution.tool_executions), *resolution.control_calls),
+        (*(tool.call for tool in resolution.tool_executions if tool.stop_after_call), *resolution.control_calls),
         original_prompt=continuation.original_prompt,
         continuation_count=continuation_count,
     )
