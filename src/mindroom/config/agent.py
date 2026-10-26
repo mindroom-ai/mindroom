@@ -497,6 +497,8 @@ class AgentConfig(BaseModel):
 class TeamConfig(BaseModel):
     """Configuration for a team of agents."""
 
+    model_config = ConfigDict(extra="forbid")
+
     display_name: str = Field(description="Human-readable name for the team")
     role: str = Field(
         description="Description of the team's purpose",
@@ -528,7 +530,10 @@ class TeamConfig(BaseModel):
         description="Configured model alias used for this team's replies",
         json_schema_extra=dashboard_hint(reference="model"),
     )
-    mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
+    mode: Literal["coordinate", "collaborate"] = Field(
+        default="coordinate",
+        description="Team collaboration mode: coordinate or collaborate",
+    )
     compaction: CompactionOverrideConfig | None = Field(
         default=None,
         description="Per-team required-compaction overrides",

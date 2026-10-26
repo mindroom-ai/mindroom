@@ -258,7 +258,7 @@ TEAM_MODE_SELECTION_PROMPT_TEMPLATE = """Determine the best team collaboration m
 Task: {message}
 Agents: {agent_names}
 
-Team Modes (from Agno documentation):
+Team Modes:
 - "coordinate": Team leader delegates tasks to members and synthesizes their outputs.
                The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.
 - "collaborate": All team members are given the SAME task and work on it simultaneously.

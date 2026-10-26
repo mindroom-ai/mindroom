@@ -847,7 +847,7 @@ class ConfigManagerTools(Toolkit):
         display_name: str,
         role: str,
         agents: list[str],
-        mode: str = "coordinate",
+        mode: Literal["coordinate", "collaborate"] = "coordinate",
     ) -> str:
         """Create or manage team configurations.
 
@@ -1377,14 +1377,11 @@ class ConfigManagerTools(Toolkit):
         display_name: str,
         role: str,
         agents: list[str],
-        mode: str = "coordinate",
+        mode: Literal["coordinate", "collaborate"] = "coordinate",
         *,
         config: Config,
     ) -> str:
         """Create a new team configuration."""
-        if mode not in ["coordinate", "collaborate"]:
-            return "Error: Team mode must be 'coordinate' or 'collaborate'"
-
         try:
             if team_name in config.teams:
                 return f"Error: Team '{team_name}' already exists."

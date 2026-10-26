@@ -5284,7 +5284,11 @@
               }
             },
             "mode": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "coordinate",
+                "collaborate"
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [

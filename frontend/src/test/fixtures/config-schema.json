@@ -4542,6 +4542,7 @@
       "type": "object"
     },
     "TeamConfig": {
+      "additionalProperties": false,
       "description": "Configuration for a team of agents.",
       "properties": {
         "display_name": {
@@ -4628,6 +4629,10 @@
         "mode": {
           "default": "coordinate",
           "description": "Team collaboration mode: coordinate or collaborate",
+          "enum": [
+            "coordinate",
+            "collaborate"
+          ],
           "title": "Mode",
           "type": "string"
         },
