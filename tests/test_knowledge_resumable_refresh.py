@@ -4715,6 +4715,7 @@ async def test_a_chunking_change_or_forced_rebuild_re_embeds_everything_and_keep
 @pytest.mark.asyncio
 async def test_a_kept_collection_mostly_made_of_dead_entries_is_copied_afresh(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     embedder: _RecordingEmbedder,
 ) -> None:
     """Deleted rows stay in a local vector index, so a kept collection's dead entries must stay bounded."""
@@ -4726,6 +4727,14 @@ async def test_a_kept_collection_mostly_made_of_dead_entries_is_copied_afresh(
     assert (await _manager(config).reindex_all()).published
     large_rows = sum(path == "large.md" for path, _text in _served(_published_collection(config)))
     assert large_rows > 3, "the large file must be several chunks for this to prove anything"
+    collections_while_copying: list[int] = []
+    original_copy = KnowledgeManager._copy_published_vectors
+
+    def _recording_copy(self: KnowledgeManager, **kwargs: Any) -> dict[str, FileSignature]:  # noqa: ANN401
+        collections_while_copying.append(len(_FakeVectorDb.store))
+        return original_copy(self, **kwargs)
+
+    monkeypatch.setattr(KnowledgeManager, "_copy_published_vectors", _recording_copy)
 
     copies = 0
     for version in range(1, 16):
@@ -4750,6 +4759,8 @@ async def test_a_kept_collection_mostly_made_of_dead_entries_is_copied_afresh(
             dead = _FakeVectorDb.written.get(name, 0) - len(records)
             assert dead <= len(records) + 2 * large_rows, f"{name} holds {dead} dead entries over {len(records)} rows"
     assert 2 <= copies <= 8, f"the index was copied afresh {copies} times in 15 refreshes"
+    # The worn collection is dropped before the copy, so only the published index and the copy share the disk.
+    assert max(collections_while_copying) == 2
 
 
 @pytest.mark.asyncio
@@ -4830,3 +4841,82 @@ async def test_an_unreadable_seal_costs_one_copy_and_nothing_else(tmp_path: Path
 
     assert _copied_rows() > 0
     assert len(_FakeVectorDb.store) <= 2
+
+
+@pytest.mark.parametrize("seal_step", ["take_sealed_candidate", "rotate_seals"])
+@pytest.mark.asyncio
+async def test_a_cancelled_refresh_finishes_its_seal_change_before_it_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seal_step: str,
+) -> None:
+    """A seal change still running after cancellation could undo the next refresh's, such as a forced rebuild's."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    await _build_steady_state(config, docs_path, names)
+    (docs_path / names[1]).write_text("change before the cancellation", encoding="utf-8")
+    original = getattr(knowledge_manager_module, seal_step)
+    started = Event()
+    release = Event()
+    finished = Event()
+
+    def _blocking(*args: object, **kwargs: object) -> object:
+        started.set()
+        assert release.wait(timeout=10)
+        result = original(*args, **kwargs)
+        finished.set()
+        return result
+
+    monkeypatch.setattr(knowledge_manager_module, seal_step, _blocking)
+    refresh = asyncio.create_task(_manager(config).reindex_all())
+    assert await asyncio.to_thread(started.wait, 10)
+    refresh.cancel()
+    await asyncio.sleep(0.1)
+    try:
+        assert not refresh.done(), "the cancellation escaped while the seal change was still running"
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh
+    assert finished.is_set()
+    monkeypatch.setattr(knowledge_manager_module, seal_step, original)
+    await _refresh_and_check(config, docs_path)
+
+
+@pytest.mark.parametrize("damage", ["unreadable", "lost_row"])
+@pytest.mark.asyncio
+async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing_or_serving_lost_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+) -> None:
+    """A kept collection the store cannot read, or that lost rows at rest, is dropped and the index copied."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 6)
+    config = _config(tmp_path, docs_path)
+    await _build_steady_state(config, docs_path, names)
+    (retired,) = set(_FakeVectorDb.store) - {_published_collection(config)}
+    if damage == "unreadable":
+        original_count = _FakeCollection.count
+
+        def _unreadable_count(self: _FakeCollection) -> int:
+            if self.name == retired:
+                message = "Error constructing hnsw segment reader"
+                raise InternalError(message)
+            return original_count(self)
+
+        monkeypatch.setattr(_FakeCollection, "count", _unreadable_count)
+    else:
+        lost = next(record for record in _FakeVectorDb.store[retired] if record.metadata["source_path"] == names[5])
+        _FakeVectorDb.store[retired].remove(lost)
+    (docs_path / names[3]).write_text("change after the damage", encoding="utf-8")
+    _FakeVectorDb.writes = []
+
+    await _refresh_and_check(config, docs_path)
+
+    assert _copied_rows() > 0
+    assert retired not in _FakeVectorDb.store, "the damaged collection was kept"
+    for step in range(2):
+        (docs_path / names[step]).write_text(f"later change {step}", encoding="utf-8")
+        await _refresh_and_check(config, docs_path)

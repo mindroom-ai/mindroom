@@ -62,6 +62,7 @@ from mindroom.knowledge.collections import (
     paths_with_vectors,
     readers_drained,
     reset_collection,
+    row_count,
     write_source_rows,
 )
 from mindroom.knowledge.file_listing import (
@@ -1525,12 +1526,19 @@ class KnowledgeManager:
         Returns it with the revision its claims describe.
         """
         published_collection = None if persisted_state is None else persisted_state.collection
-        sealed = await asyncio.to_thread(
-            self._take_sealed_collection,
-            # A forced rebuild trusts no stored vectors, so it keeps no seal either.
-            None if force_reindex else published_collection,
-            take=cleanup_is_safe and not force_reindex,
+        # Seal changes are drained before a cancellation escapes, so none outlives the refresh that owns the base.
+        sealed, dropped = await _shielded_write(
+            asyncio.to_thread(
+                self._take_sealed_collection,
+                # A forced rebuild trusts no stored vectors, so it keeps no seal either.
+                None if force_reindex else published_collection,
+                take=cleanup_is_safe and not force_reindex,
+            ),
         )
+        if cleanup_is_safe:
+            # Before any copy, so a worn collection never shares the disk with both the published one and its copy.
+            for collection_name in dropped - {published_collection}:
+                await delete_collection(self._collections, collection_name)
         if sealed is not None:
             # A seal is exact by construction, so, like a fresh copy, its claims need no vector probe.
             opened = _OpenedCandidate(
@@ -1548,16 +1556,23 @@ class KnowledgeManager:
             return opened, None
         return opened, persisted_state.published_revision
 
-    def _take_sealed_collection(self, published_collection: str | None, *, take: bool) -> CandidateCheckpoint | None:
+    def _take_sealed_collection(
+        self,
+        published_collection: str | None,
+        *,
+        take: bool,
+    ) -> tuple[CandidateCheckpoint | None, set[str]]:
         """Take one sealed, retired collection over as the candidate when ``take``; drop every other seal.
 
         Only the published collection's own seal is kept, for the publication
         that later retires it. Taking a seal first waits out readers that
         selected its collection before it was retired, then renames the seal
         onto the candidate snapshot, so the collection is never sealed and
-        writable at once.
+        writable at once. Returns the taken seal and the collections whose
+        seals were dropped.
         """
         taken: CandidateCheckpoint | None = None
+        dropped: set[str] = set()
         for seal_path, seal in load_seals(self._base_storage_path).items():
             if seal is not None and seal.settings == self._indexing_settings:
                 if seal.collection == published_collection:
@@ -1567,6 +1582,8 @@ class KnowledgeManager:
                         take_sealed_candidate(self._base_storage_path, seal_path)
                     taken = seal
                     continue
+            if seal is not None:
+                dropped.add(seal.collection)
             seal_path.unlink(missing_ok=True)
         if taken is not None:
             logger.info(
@@ -1575,18 +1592,29 @@ class KnowledgeManager:
                 collection=taken.collection,
                 claimed_files=len(taken.completed),
             )
-        return taken
+        return taken, dropped
 
     def _sealed_collection_is_usable(self, seal: CandidateCheckpoint) -> bool:
-        """Return whether a sealed collection still exists and is not mostly dead vector-index entries.
+        """Return whether a sealed collection still holds its sealed rows, and not mostly dead vector-index entries.
 
-        Chroma's local vector index never reuses a deleted row's entry, so a
-        collection written over and over is copied afresh once its dead entries
-        outnumber its live rows.
+        A store that cannot answer makes the seal unusable rather than failing
+        the refresh: reusing it is only an optimization. Chroma's local vector
+        index never reuses a deleted row's entry, so a collection written over
+        and over is copied afresh once its dead entries outnumber its live rows.
         """
         collection = open_collection(self._collections, seal.collection)
-        with closing(collection):
-            return collection.exists() and seal.rows_written <= 2 * collection.collection().count()
+        try:
+            with closing(collection):
+                rows = row_count(collection) if collection.exists() else None
+        except Exception:
+            logger.warning(
+                "Dropping the seal of an unreadable knowledge collection",
+                base_id=self.base_id,
+                collection=seal.collection,
+                exc_info=True,
+            )
+            return False
+        return rows is not None and rows == seal.row_count and seal.rows_written <= 2 * rows
 
     def _published_state_and_cleanup_safety(self) -> tuple[PublishedIndexState | None, bool]:
         """Return the persisted state, and whether candidate cleanup may run at all.
@@ -2034,22 +2062,22 @@ class KnowledgeManager:
             # never be rewritten as if the build were still in progress.
             run.published = publish_state.index_published
         await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
-        seal = replace(
-            run.checkpoint,
-            completed=dict(run.completed),
-            failed={},
-            target_revision=run.baseline_revision,
-            total_files=run.total_files,
-            rows_written=run.checkpoint.rows_written + self._rows_written,
-        )
-        kept = await asyncio.to_thread(
-            rotate_seals,
-            self._base_storage_path,
-            retired=run.retired_collection,
-            # A candidate resumed from an earlier refresh may hold rows a crash
-            # wrote before their claim, so only one this refresh started from a
-            # trusted state is sealed for reuse.
-            published=None if run.resumed else seal,
+        # A candidate resumed from an earlier refresh may hold rows a crash wrote
+        # before their claim, so only one this refresh started from a trusted
+        # state is sealed for reuse.
+        seal = None
+        if not run.resumed:
+            seal = replace(
+                run.checkpoint,
+                completed=dict(run.completed),
+                failed={},
+                target_revision=run.baseline_revision,
+                total_files=run.total_files,
+                rows_written=run.checkpoint.rows_written + self._rows_written,
+                row_count=await asyncio.to_thread(row_count, run.collection),
+            )
+        kept = await _shielded_write(
+            asyncio.to_thread(rotate_seals, self._base_storage_path, retired=run.retired_collection, published=seal),
         )
         await asyncio.to_thread(
             cleanup_superseded_collections,

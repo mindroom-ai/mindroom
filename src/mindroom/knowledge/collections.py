@@ -109,6 +109,11 @@ def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCo
     return KnowledgeCollection(path=str(space.storage_path), name=collection_name)
 
 
+def row_count(collection: KnowledgeCollection) -> int:
+    """Return how many rows one existing collection holds."""
+    return collection.collection().count()
+
+
 def readers_drained(space: CollectionSpace) -> AbstractContextManager[None]:
     """Wait out every native reader of this base's collections, and admit none until released."""
     return collection_lifetime_lock(space.storage_path, exclusive=True)
