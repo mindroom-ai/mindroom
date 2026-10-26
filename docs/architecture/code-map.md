@@ -279,7 +279,7 @@ Matrix sync callback
 | `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
-| `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, repaired into the current shape when a database converts |
+| `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
 | `history/session_runs.py` | Finished Matrix turns of an agent's conversations, live and compacted, with the approval hold-back and redaction filter background workers share |
 | `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |
