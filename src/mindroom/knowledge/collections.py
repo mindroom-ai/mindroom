@@ -12,16 +12,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import shutil
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.indexing_config import storage_key_for_base
+from mindroom.knowledge.legacy_chroma_storage import remove_legacy_chroma_storage
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.vector_store import (
-    LEGACY_CHROMA_FILE,
     KnowledgeCollection,
     StoredRow,
     list_collection_names,
@@ -35,6 +34,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.candidate_checkpoint import FileSignature
 
 logger = get_logger(__name__)
+
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
 
@@ -70,6 +70,12 @@ class CollectionSpace:
         """Return the published collection name this base's identity owns."""
         return _collection_name_for_base(self.base_id, self.knowledge_path)
 
+    def owns(self, collection_name: str) -> bool:
+        """Return whether a collection name carries this base's identity: its default name or candidate prefix."""
+        return collection_name == self.default_collection or collection_name.startswith(
+            f"{self.default_collection}_candidate_",
+        )
+
 
 @dataclass(frozen=True)
 class KnowledgeChunk:
@@ -93,7 +99,14 @@ def candidate_collection_name(space: CollectionSpace) -> str:
 
 
 def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCollection:
-    """Return a handle on one collection in this base's storage directory; nothing is opened yet."""
+    """Return a handle on one collection this base owns in its storage directory; nothing is opened yet.
+
+    Names come from metadata a worker sharing the storage root can write, and even a directory swapped for a link
+    then only exposes files named for this base, never another file a forged name would choose.
+    """
+    if not space.owns(collection_name):
+        message = f"Knowledge collection {collection_name!r} does not belong to base {space.base_id!r}"
+        raise ValueError(message)
     return KnowledgeCollection(path=space.storage_path, name=collection_name)
 
 
@@ -185,36 +198,6 @@ def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> Non
         open_collection(space, collection_name).delete()
 
 
-def _remove_legacy_chroma_storage(space: CollectionSpace) -> None:
-    """Remove the Chroma database and segment directories this base kept before MindRoom owned its store.
-
-    Nothing reads them anymore: an index Chroma held is rebuilt in the owned store.
-    """
-    removed = 0
-    try:
-        entries = tuple(space.storage_path.iterdir())
-    except OSError:
-        return
-    for path in entries:
-        try:
-            if path.name in {
-                LEGACY_CHROMA_FILE,
-                f"{LEGACY_CHROMA_FILE}-journal",
-                f"{LEGACY_CHROMA_FILE}-wal",
-                f"{LEGACY_CHROMA_FILE}-shm",
-            }:
-                path.unlink()
-            elif not path.is_symlink() and path.is_dir() and str(uuid.UUID(path.name)) == path.name:
-                shutil.rmtree(path)
-            else:
-                continue
-        except (OSError, ValueError):
-            continue
-        removed += 1
-    if removed:
-        logger.info("Removed legacy Chroma knowledge storage", base_id=space.base_id, entries=removed)
-
-
 def cleanup_superseded_collections(
     space: CollectionSpace,
     *,
@@ -263,12 +246,12 @@ def cleanup_superseded_collections(
                     collection=collection_name,
                     exc_info=True,
                 )
-        for leftover in space.storage_path.glob("*.sqlite3.building"):
+        for leftover in space.storage_path.glob(f"{default_collection}*.sqlite3.building"):
             # A reset killed before its rename; no collection is ever read from these.
             leftover.unlink(missing_ok=True)
         if not candidates_only:
             # Only the sweep after a publication: until then the Chroma files are what a downgrade would read.
-            _remove_legacy_chroma_storage(space)
+            remove_legacy_chroma_storage(space.storage_path, base_id=space.base_id)
         if unowned:
             logger.info(
                 "Preserved knowledge collections with unprovable ownership",

@@ -285,6 +285,7 @@ knowledge_bases:
 
 The context is stored in front of its chunk, so it is embedded, keyword-indexed, and shown to agents with the chunk.
 It costs one model call per chunk of every added or changed multi-chunk file; single-chunk files are indexed as they are, and unchanged files keep their stored chunks.
+Turning `chunk_context_model` on, or changing it, rebuilds the base, so every multi-chunk file gets new contexts once.
 A file whose context call fails is not indexed in that refresh and is retried on the next one.
 Usage is recorded under `knowledge_chunk_context`.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -57,6 +58,7 @@ class _CohereReranker:
 #: Loaded ``sentence_transformers.CrossEncoder`` models by name.
 _cross_encoders: dict[str, Any] = {}
 _cross_encoder_lock = threading.Lock()
+_cross_encoder_thread = ThreadPoolExecutor(1, thread_name_prefix="knowledge-rerank")
 
 
 @dataclass(frozen=True)
@@ -66,7 +68,8 @@ class _CrossEncoderReranker:
     model: str
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        return await asyncio.to_thread(self._score, query, documents)
+        # Scoring is serialized, so queued calls wait on their own thread, not in the shared default executor.
+        return await asyncio.get_running_loop().run_in_executor(_cross_encoder_thread, self._score, query, documents)
 
     def _score(self, query: str, documents: Sequence[str]) -> list[float]:
         with _cross_encoder_lock:

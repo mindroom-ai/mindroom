@@ -28,8 +28,8 @@ if TYPE_CHECKING:
 #: Bump together with ``indexing_config._VECTOR_STORE_FORMAT``, which makes every semantic index rebuild.
 _SCHEMA_VERSION = 1
 _FILE_SUFFIX = ".sqlite3"
-#: The file Chroma kept in a base's storage directory before MindRoom owned this store.
-LEGACY_CHROMA_FILE = "chroma.sqlite3"
+#: The file Chroma kept in a base's storage directory before MindRoom owned this store; never a collection.
+_CHROMA_FILE = "chroma.sqlite3"
 #: Source paths bound in one statement, well under every SQLite build's variable limit.
 _PATH_BATCH = 500
 #: Chunks each ranking contributes to a hybrid search before fusion.
@@ -41,9 +41,11 @@ _MAX_KEYWORD_TERMS = 32
 _WORD = re.compile(r"\w+")
 #: What a collection name may be: one plain file-name component, the same characters Chroma allowed.
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-#: Vector matrices kept loaded across searches, bounded by their total size; the most recent one always stays.
+#: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
-_SCHEMA = """
+#: The keyword index's tokenizer, also used to normalize query words the same way.
+_TOKENIZER = "porter unicode61 remove_diacritics 2"
+_SCHEMA = f"""
 CREATE TABLE chunks (
     rowid INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
@@ -57,7 +59,7 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
     document,
     content='chunks',
     content_rowid='rowid',
-    tokenize='porter unicode61 remove_diacritics 2'
+    tokenize='{_TOKENIZER}'
 );
 CREATE VIRTUAL TABLE chunks_vocab USING fts5vocab(chunks_fts, row);
 CREATE TRIGGER chunks_fts_insert AFTER INSERT ON chunks BEGIN
@@ -66,7 +68,7 @@ END;
 CREATE TRIGGER chunks_fts_delete AFTER DELETE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, document) VALUES ('delete', old.rowid, old.document);
 END;
-"""
+"""  # noqa: S608 - fixed DDL; the only substitution is the constant tokenizer
 
 
 class _CollectionNotFoundError(LookupError):
@@ -267,7 +269,7 @@ def list_collection_names(storage_path: Path) -> tuple[str, ...]:
         sorted(
             entry.name.removesuffix(_FILE_SUFFIX)
             for entry in entries
-            if entry.name.endswith(_FILE_SUFFIX) and entry.name != LEGACY_CHROMA_FILE and entry.is_file()
+            if entry.name.endswith(_FILE_SUFFIX) and entry.name != _CHROMA_FILE and entry.is_file()
         ),
     )
 
@@ -321,15 +323,17 @@ def _keyword_rowids(connection: sqlite3.Connection, query: str, limit: int, *, c
     """
     words = list(dict.fromkeys(word.lower() for word in _WORD.findall(query)))[:_MAX_KEYWORD_TERMS]
     if words:
+        terms = _index_terms(connection, words)
+        all_terms = sorted(set().union(*terms))
         common = {
             term
             for term, documents in connection.execute(
-                f"SELECT term, doc FROM chunks_vocab WHERE term IN ({_placeholders(words)})",  # noqa: S608
-                words,
+                f"SELECT term, doc FROM chunks_vocab WHERE term IN ({_placeholders(all_terms)})",  # noqa: S608
+                all_terms,
             )
             if documents * 2 > chunk_count
         }
-        words = [word for word in words if word not in common]
+        words = [word for word, word_terms in zip(words, terms, strict=True) if not word_terms <= common]
     if not words:
         return []
     expression = " OR ".join(f'"{word}"' for word in words)
@@ -341,6 +345,20 @@ def _keyword_rowids(connection: sqlite3.Connection, query: str, limit: int, *, c
             (expression, limit),
         )
     ]
+
+
+def _index_terms(connection: sqlite3.Connection, words: Sequence[str]) -> list[set[str]]:
+    """Return the terms the keyword index's tokenizer makes of each word, such as ``configur`` for ``configurations``."""
+    connection.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS temp.query_words USING fts5(word, tokenize='{_TOKENIZER}')")
+    connection.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS temp.query_terms USING fts5vocab(temp, query_words, instance)",
+    )
+    connection.execute("DELETE FROM temp.query_words")
+    connection.executemany("INSERT INTO temp.query_words(rowid, word) VALUES (?, ?)", enumerate(words))
+    terms: list[set[str]] = [set() for _word in words]
+    for position, term in connection.execute("SELECT doc, term FROM temp.query_terms"):
+        terms[position].add(term)
+    return terms
 
 
 def _reciprocal_rank_fusion(*rankings: Sequence[int]) -> list[int]:
@@ -418,11 +436,15 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
         index = _load_vector_index(connection)
         with _index_cache_lock:
             _index_cache[key] = index
-            cached_bytes = sum(cached.nbytes for cached in _index_cache.values())
-            # The newest index always stays, even alone over the budget, so a large base is not reloaded per search.
-            while cached_bytes > _MATRIX_CACHE_BYTES and len(_index_cache) > 1:
-                _, evicted = _index_cache.popitem(last=False)
-                cached_bytes -= evicted.nbytes
+            # The largest index does not count against the budget, so one base too big for it is not reloaded on every
+            # search, even when searches alternate between it and smaller ones.
+            largest = max(_index_cache, key=lambda cached: _index_cache[cached].nbytes)
+            cached_bytes = sum(cached.nbytes for cached in _index_cache.values()) - _index_cache[largest].nbytes
+            for cached in list(_index_cache):
+                if cached_bytes <= _MATRIX_CACHE_BYTES:
+                    break
+                if cached != largest:
+                    cached_bytes -= _index_cache.pop(cached).nbytes
     return index
 
 

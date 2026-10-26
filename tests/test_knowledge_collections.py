@@ -63,13 +63,14 @@ async def test_delete_collection_reports_present_and_absent_collections_deleted(
     already_missing: bool,
 ) -> None:
     """Both successful and already-absent deletion report success and leave other collections alone."""
-    seed_collection(open_collection(space, "retained"), [{"content": "retained"}])
+    retained = f"{space.default_collection}_candidate_retained"
+    seed_collection(open_collection(space, retained), [{"content": "retained"}])
     if not already_missing:
         seed_collection(open_collection(space, space.default_collection), [{"content": "published"}])
 
     assert await delete_collection(space, space.default_collection) is True
 
-    assert list_collection_names(space.storage_path) == ("retained",)
+    assert list_collection_names(space.storage_path) == (retained,)
 
 
 @pytest.mark.asyncio
@@ -97,8 +98,9 @@ def test_superseded_cleanup_preserves_retained_reader(
     retained_name = f"{space.default_collection}_candidate_current"
     retained = open_collection(space, retained_name)
     seed_collection(retained, [{"id": "document", "content": "document"}])
-    for name in (space.default_collection, f"{space.default_collection}_candidate_stale", "unowned"):
+    for name in (space.default_collection, f"{space.default_collection}_candidate_stale"):
         seed_collection(open_collection(space, name), [])
+    seed_collection(KnowledgeCollection(path=space.storage_path, name="unowned"), [])
     if deletion_fails:
         original_delete = KnowledgeCollection.delete
 
@@ -137,7 +139,7 @@ def _rows(*texts_and_vectors: tuple[str, list[float]]) -> list[tuple[KnowledgeCh
 
 def test_write_source_rows_replaces_one_files_rows(space: CollectionSpace) -> None:
     """A write replaces its own file's rows, keeps other files', and stores what search results show."""
-    collection = open_collection(space, "rows")
+    collection = open_collection(space, space.default_collection)
     collection.reset()
     write_source_rows(
         collection,
@@ -183,7 +185,7 @@ def test_reset_raises_and_keeps_the_old_rows_when_the_swap_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reset that cannot swap in the empty file raises and leaves the old rows, never a half-built collection."""
-    collection = open_collection(space, "rows")
+    collection = open_collection(space, space.default_collection)
     collection.reset()
     write_source_rows(
         collection,

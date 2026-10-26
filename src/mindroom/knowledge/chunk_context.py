@@ -32,10 +32,16 @@ search retrieval of the chunk. Answer only with the succinct context and nothing
 
 
 def _document_window(document: str, start: int, length: int) -> str:
-    """Return the whole document, or the window of at most ``_MAX_DOCUMENT_CHARS`` centered on one chunk."""
+    """Return the whole document, or a window of ``_MAX_DOCUMENT_CHARS`` holding the chunk.
+
+    Window starts snap to a quarter of the window, so neighbouring chunks send the same window and a provider's prompt
+    cache can serve it to all of them.
+    """
     if len(document) <= _MAX_DOCUMENT_CHARS:
         return document
-    begin = min(max(start + length // 2 - _MAX_DOCUMENT_CHARS // 2, 0), len(document) - _MAX_DOCUMENT_CHARS)
+    stride = _MAX_DOCUMENT_CHARS // 4
+    centered = start + length // 2 - _MAX_DOCUMENT_CHARS // 2
+    begin = min(max(centered // stride * stride, 0), len(document) - _MAX_DOCUMENT_CHARS)
     return document[begin : begin + _MAX_DOCUMENT_CHARS]
 
 

@@ -133,3 +133,12 @@ async def test_a_failed_context_call_fails_only_that_file(monkeypatch: pytest.Mo
     assert not outcome.published
     assert "guide.md" in manager._file_index_errors
     assert "note.md" not in manager._file_index_errors
+
+
+def test_neighbouring_chunks_of_a_long_document_share_a_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows snap to a quarter-window stride, so nearby chunks send the same text and a prompt cache can reuse it."""
+    monkeypatch.setattr(chunk_context_module, "_MAX_DOCUMENT_CHARS", 40)
+    document = "".join(chr(65 + index % 26) for index in range(200))
+
+    assert _document_window(document, 100, 4) == _document_window(document, 104, 4)
+    assert document.index(_document_window(document, 100, 4)) <= 100

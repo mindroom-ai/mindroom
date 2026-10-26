@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import httpx
@@ -161,3 +164,33 @@ async def test_cross_encoder_reranker_scores_query_document_pairs(
     )
 
     assert await reranker.ascore("q", ["ab", "abc"]) == [2.0, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_local_reranking_does_not_need_the_shared_default_executor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local scoring runs on its own thread, so a busy default executor does not hold up a rerank."""
+
+    class _Encoder:
+        def predict(self, sentences: list[tuple[str, str]]) -> list[float]:
+            return [1.0 for _sentence in sentences]
+
+    monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setitem(rerank_module._cross_encoders, "local-model", _Encoder())
+    reranker = create_reranker(
+        KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model"),
+        test_runtime_paths(tmp_path),
+    )
+    loop = asyncio.get_running_loop()
+    busy = ThreadPoolExecutor(1)
+    loop.set_default_executor(busy)
+    release = threading.Event()
+    blocked = loop.run_in_executor(None, release.wait)
+    try:
+        assert await asyncio.wait_for(reranker.ascore("q", ["a", "b"]), timeout=5) == [1.0, 1.0]
+    finally:
+        release.set()
+        await blocked
+        busy.shutdown()

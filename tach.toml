@@ -6126,11 +6126,17 @@ path = "mindroom.knowledge.collections"
 depends_on = [
     "mindroom.knowledge.collection_lifetime",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.legacy_chroma_storage",
     "mindroom.knowledge.read_protocol",
     "mindroom.knowledge.vector_store",
     "mindroom.logging_config",
 ]
 visibility = ["mindroom.knowledge.manager"]
+
+[[modules]]
+path = "mindroom.knowledge.legacy_chroma_storage"
+depends_on = ["mindroom.logging_config", "mindroom.path_confinement"]
+visibility = ["mindroom.knowledge.collections"]
 
 [[modules]]
 path = "mindroom.embeddings.batching"
@@ -6189,6 +6195,7 @@ path = "mindroom.knowledge.indexing_config"
 depends_on = [
     "mindroom.embeddings.signatures",
     "mindroom.knowledge.legacy_metadata",
+    "mindroom.path_confinement",
     "mindroom.knowledge.redaction",
 ]
 

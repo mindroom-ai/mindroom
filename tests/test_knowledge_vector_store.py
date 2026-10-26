@@ -325,3 +325,48 @@ def test_keyword_ranking_skips_words_most_chunks_contain(collection: KnowledgeCo
         "the zebra",
     ]
     assert collection.search([1.0, 0.0], limit=1, query="the zebra")[0].content == "the zebra"
+
+
+def test_keyword_ranking_skips_inflections_of_words_most_chunks_contain(collection: KnowledgeCollection) -> None:
+    """Common-word skipping sees the words as the keyword index stores them, stemmed and without accents."""
+    collection.write_source_rows(
+        "a.md",
+        [
+            _row("a1", "a.md", "configurations for the café", [1.0, 0.0]),
+            _row("a2", "a.md", "configurations for the café, running", [0.9, 0.1]),
+            _row("a3", "a.md", "configurations in a cafe", [0.0, 1.0]),
+        ],
+    )
+    connection = sqlite3.connect(collection.file)
+
+    assert vector_store_module._keyword_rowids(connection, "configuration cafes", 10, chunk_count=3) == []
+    assert vector_store_module._keyword_rowids(connection, "configuration runs", 10, chunk_count=3) == [2]
+
+
+def test_the_largest_index_stays_cached_when_searches_alternate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A base larger than the cache budget is not reloaded when searches alternate between it and a smaller one."""
+    large = KnowledgeCollection(path=tmp_path, name="large")
+    small = KnowledgeCollection(path=tmp_path, name="small")
+    for collection, count in ((large, 40), (small, 2)):
+        collection.reset()
+        collection.write_source_rows(
+            "a.md",
+            [_row(f"{collection.name}{index}", "a.md", f"doc {index}", [1.0, float(index)]) for index in range(count)],
+        )
+    monkeypatch.setattr(vector_store_module, "_MATRIX_CACHE_BYTES", 100)
+    loads: list[str] = []
+    real_load = vector_store_module._load_vector_index
+    monkeypatch.setattr(
+        vector_store_module,
+        "_load_vector_index",
+        lambda connection: loads.append("load") or real_load(connection),
+    )
+
+    for _round in range(3):
+        large.search([1.0, 0.0], limit=1)
+        small.search([1.0, 0.0], limit=1)
+
+    assert len(loads) == 2

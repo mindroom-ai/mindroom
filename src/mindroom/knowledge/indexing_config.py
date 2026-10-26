@@ -10,15 +10,16 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from mindroom.embeddings.signatures import effective_knowledge_embedder_signature
 from mindroom.knowledge.legacy_metadata import normalize_legacy_indexing_settings
 from mindroom.knowledge.redaction import credential_free_url_identity
+from mindroom.path_confinement import resolve_path_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
-    from pathlib import Path
 
     from mindroom.config.knowledge import KnowledgeBaseMode
     from mindroom.config.main import Config
@@ -245,6 +246,19 @@ def published_index_settings_compatible(
     return (
         published_settings._query_compatibility_key() == current_settings._query_compatibility_key()
         and published_settings._corpus_compatibility_key() == current_settings._corpus_compatibility_key()
+    )
+
+
+def knowledge_storage_directory(storage_root: Path, base_id: str, knowledge_path: Path) -> Path:
+    """Return one base's index directory under ``storage_root``, refusing a path that goes through a link.
+
+    A private base's index directory sits in storage its worker can write, and following a link planted there would
+    point index writes and legacy cleanup at whatever directory the link names.
+    """
+    return resolve_path_within_root(
+        storage_root,
+        Path("knowledge_db", storage_key_for_base(base_id, knowledge_path)),
+        symlinks="reject",
     )
 
 

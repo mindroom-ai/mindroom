@@ -23,8 +23,8 @@ from mindroom.knowledge.index_metadata import (
 from mindroom.knowledge.indexing_config import (
     IndexingSettings,
     indexing_settings_key,
+    knowledge_storage_directory,
     published_index_settings_compatible,
-    storage_key_for_base,
 )
 from mindroom.knowledge.vector_store import KnowledgeCollection
 from mindroom.logging_config import get_logger
@@ -222,8 +222,7 @@ def resolve_refresh_target(
 
 def published_index_storage_path(key: PublishedIndexKey) -> Path:
     """Return the private storage directory backing one resolved knowledge base."""
-    knowledge_path = Path(key.knowledge_path)
-    return (Path(key.storage_root) / "knowledge_db" / storage_key_for_base(key.base_id, knowledge_path)).resolve()
+    return knowledge_storage_directory(Path(key.storage_root), key.base_id, Path(key.knowledge_path))
 
 
 def published_index_metadata_path(key: PublishedIndexKey) -> Path:
