@@ -364,7 +364,7 @@ class TeamStreamPresentation:
         self.complete_tool(f"agent:{member_id}", call)
 
     def render_body(self, *, paused: bool = False) -> str:
-        """Render the current structured document; a ``paused`` one, which waits for an approval, has no no-consensus note."""
+        """Render the current structured document; a ``paused`` one, which waits for an approval, has no consensus note."""
         parts = render_team_member_slots(
             self.member_ids,
             display_names_by_id=self.display_names_by_id,
