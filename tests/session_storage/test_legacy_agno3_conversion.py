@@ -585,30 +585,45 @@ def test_segment_messages_name_only_text_call_ids(tmp_path: Path, calls: object)
     assert {("live.odd", 1), ("live.t0", 1)} <= set(rows)
 
 
+_FUNCTION = {"name": "probe", "arguments": "{}"}
+# Each odd ``tool_calls`` value, the calls its folded copy keeps, and the calls the run's own message keeps once the
+# legacy repair drops each call without a function, which cannot replay.
 _ODD_CALLS = {
-    "nan": (math.nan, None),
-    "number": (5, None),
-    "text": ("call", None),
-    "object": ({"id": "call"}, None),
-    "list-of-non-objects": ([1, "call"], None),
-    "object-id": ([{"id": {"nested": 1}}], [{"id": None}]),
-    "list-id": ([{"id": ["call"], "type": "function"}], [{"id": None, "type": "function"}]),
+    "nan": (math.nan, None, None),
+    "number": (5, None, None),
+    "text": ("call", None, None),
+    "object": ({"id": "call"}, None, None),
+    "list-of-non-objects": ([1, "call"], None, None),
+    "object-id": ([{"id": {"nested": 1}}], [{"id": None}], None),
+    "list-id": ([{"id": ["call"], "type": "function"}], [{"id": None, "type": "function"}], None),
+    "function-object-id": (
+        [{"id": {"nested": 1}, "type": "function", "function": _FUNCTION}],
+        [{"id": None, "type": "function", "function": _FUNCTION}],
+        [{"id": None, "type": "function", "function": _FUNCTION}],
+    ),
+    "function-list-id": (
+        [{"id": ["call"], "type": "function", "function": _FUNCTION}],
+        [{"id": None, "type": "function", "function": _FUNCTION}],
+        [{"id": None, "type": "function", "function": _FUNCTION}],
+    ),
 }
 
 
 @pytest.mark.parametrize("odd_id", [math.nan, 5, {"id": "c9"}, ["c9"]], ids=["nan", "number", "object", "list"])
-@pytest.mark.parametrize(("odd", "usable"), list(_ODD_CALLS.values()), ids=list(_ODD_CALLS))
+@pytest.mark.parametrize(("odd", "usable", "kept"), list(_ODD_CALLS.values()), ids=list(_ODD_CALLS))
 def test_converted_call_ids_are_text_or_none_so_folded_calls_read(
     tmp_path: Path,
     odd: object,
     usable: object,
+    kept: object,
     odd_id: object,
 ) -> None:
     """Call ids worker code wrote in other shapes convert as text or none in run, folded, and member rows alike.
 
     So the run's folded calls read; tool calls keep only their objects, and well-formed messages are stored as written.
-    The run's own messages are then repaired like any legacy call, so a call without a function, which cannot replay,
-    leaves its message; a fold's folded messages are stored as the fold took them.
+    The run's own messages are then repaired like any legacy call: a call without a function leaves its message, and
+    one with a function stays, its id None, so a resume's tool-call window can hash it. The folded copy, a message the
+    run's row does not hold, is stored as the fold took it.
     """
     database = _agno_database(tmp_path)
     odd_message = {"id": "live.odd", "role": "assistant", "content": "x", "tool_calls": odd, "tool_call_id": odd_id}
@@ -631,7 +646,7 @@ def test_converted_call_ids_are_text_or_none_so_folded_calls_read(
     assert folded_tool_call_ids(store, session_id=_SESSION, run_id="live") == {"c0", "m.c0"}
     stored = dict(_query(database, "SELECT message_id, data FROM \"code_sessions_log_messages\" WHERE run_id = 'live'"))
     run_message, folded = (json.loads(stored[message_id]) for message_id in ("live.odd", "live.f0"))
-    assert (run_message.get("tool_calls"), run_message.get("tool_call_id")) == (None, None)
+    assert (run_message.get("tool_calls"), run_message.get("tool_call_id")) == (kept, None)
     assert (folded.get("tool_calls"), folded.get("tool_call_id")) == (usable, None)
     assert stored["live.t0"] == json.dumps(result.to_dict())
     [(member_tools,)] = _query(database, "SELECT tools FROM \"code_sessions_log_runs\" WHERE run_id = 'member'")
@@ -1069,6 +1084,32 @@ def test_a_segment_flags_what_its_fold_took(tmp_path: Path) -> None:
     assert _query(database, "SELECT folded_by FROM \"code_sessions_log_runs\" WHERE run_id = 'member'") == [(1,)]
     assert [message.id for message in store.get_run("live").messages] == ["live.u"]  # type: ignore[union-attr]
     assert folded_tool_call_ids(store, session_id=_SESSION, run_id="live") == {"c0"}
+
+
+def test_a_folded_message_the_run_row_holds_is_stored_repaired(tmp_path: Path) -> None:
+    """A segment message the run's row holds keeps the row's repaired copy; one the repair removed keeps the fold's."""
+    database = _agno_database(tmp_path)
+    bare = {"id": "call-0", "type": "function", "function": {"name": "list_rooms"}}
+    call = Message(role="assistant", id="live.a0", tool_calls=[bare, {"id": "call_0"}], created_at=100)
+    orphan = Message(role="tool", content="orphan", id="live.t0", tool_call_id="call_0", created_at=100)
+    live = _run("live", status=RunStatus.paused)
+    live.messages = [*live.messages, call, orphan]
+    _insert_run(database, live, run_index=0)
+    _insert_summary(database, 1, -1, segment_run_id="live", segment=_segment(call, orphan))
+
+    _converted(database)
+
+    stored = dict(
+        _query(database, 'SELECT message_id, data FROM "code_sessions_log_messages" WHERE run_id = ?', ("live",)),
+    )
+    assert json.loads(stored["live.a0"])["tool_calls"] == [
+        {**bare, "function": {"name": "list_rooms", "arguments": "{}"}},
+    ]
+    assert stored["live.t0"] == json.dumps(orphan.to_dict())
+    assert {message_id for message_id, folded_by in _message_rows(database, "live") if folded_by} == {
+        "live.a0",
+        "live.t0",
+    }
 
 
 def test_a_segment_whose_run_is_not_converted_flags_nothing(tmp_path: Path) -> None:
