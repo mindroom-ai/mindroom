@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.knowledge.collection_lifetime import read_collection
-from mindroom.knowledge.vector_store import KnowledgeCollection
+from mindroom.knowledge.vector_store import KnowledgeCollection, has_cached_vectors
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -22,6 +22,18 @@ if TYPE_CHECKING:
 _SEARCH_TIMEOUT_SECONDS = 30.0
 #: Searches wait on collection locks and load matrices here, never in the event loop's shared default executor.
 _search_threads = ThreadPoolExecutor(4, thread_name_prefix="knowledge-search")
+
+
+async def preload_published_vectors(storage_path: Path, settings: IndexingSettings) -> None:
+    """Load the current publication's vectors on a search thread if a search here loaded the base's earlier ones."""
+    await asyncio.get_running_loop().run_in_executor(_search_threads, _preload, storage_path, settings)
+
+
+def _preload(storage_path: Path, settings: IndexingSettings) -> None:
+    if has_cached_vectors(storage_path):
+        # The settings select the publication, so the collection name goes unused.
+        with read_collection(str(storage_path), "", settings.to_metadata()) as collection_name:
+            KnowledgeCollection(path=storage_path, name=collection_name).load_vectors()
 
 
 @dataclass

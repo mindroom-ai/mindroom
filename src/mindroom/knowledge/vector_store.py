@@ -242,6 +242,11 @@ class KnowledgeCollection:
                 limit=limit,
             )
 
+    def load_vectors(self) -> None:
+        """Load the collection's vectors into the matrix cache as a search would, so the next search finds them."""
+        with closing(self._connect(read_only=True)) as connection:
+            _vector_index(connection, self.file)
+
     def _connect(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Open the existing collection file after checking its schema version.
 
@@ -440,6 +445,12 @@ _index_cache: OrderedDict[tuple[str, int, int, int, int, int], _VectorIndex] = O
 _index_cache_lock = threading.Lock()
 #: Held while a matrix loads, so concurrent cold searches load it once instead of each allocating a copy.
 _index_load_lock = threading.Lock()
+
+
+def has_cached_vectors(storage_path: Path) -> bool:
+    """Return whether the matrix cache holds the vectors of any collection stored in ``storage_path``."""
+    with _index_cache_lock:
+        return any(Path(cached[0]).parent == storage_path for cached in _index_cache)
 
 
 def _file_version(file: Path) -> tuple[str, int, int, int, int] | None:

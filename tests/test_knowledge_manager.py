@@ -14,6 +14,7 @@ import sys
 import tempfile
 import traceback
 import weakref
+from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -40,6 +41,7 @@ import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
+import mindroom.knowledge.vector_store as vector_store_module
 from mindroom import file_locks
 from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
@@ -69,6 +71,7 @@ from mindroom.knowledge.file_listing import (
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
+from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.index_reader import PublishedIndexReader
 from mindroom.knowledge.indexing_config import IndexingSettings, indexing_settings_key, knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature, _PreparedFile
@@ -6156,6 +6159,115 @@ async def test_refresh_scheduler_refresh_now_uses_subprocess_with_force_reindex(
 
     assert result.indexed_count == 1
     assert seen_force_reindex == [True]
+
+
+def _publish_collection(key: knowledge_registry.PublishedIndexKey, name: str) -> KnowledgeCollection:
+    """Write a one-row collection into the base's storage and record it as the base's publication."""
+    collection = KnowledgeCollection(path=published_index_storage_path(key), name=name)
+    seed_collection(collection, [{"content": name}])
+    save_published_index_state(
+        published_index_metadata_path(key),
+        state_for_publication(
+            settings=key.indexing_settings,
+            collection=name,
+            indexed_count=1,
+            source_signature="seeded",
+            published_revision=None,
+        ),
+    )
+    return collection
+
+
+def _publish_on_refresh(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Make each refresh child publish a new collection called ``name`` for its base."""
+
+    async def _fake_refresh(
+        key: knowledge_registry.PublishedIndexKey,
+        **_kwargs: object,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        _publish_collection(key, name)
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=key,
+            indexed_count=1,
+            index_published=True,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+
+
+def _cached_matrix_files() -> list[str]:
+    """Return the file names whose vectors the process's matrix cache holds."""
+    return [Path(cached[0]).name for cached in vector_store_module._index_cache]
+
+
+@pytest.mark.asyncio
+async def test_a_publication_preloads_the_new_vectors_of_a_searched_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh that publishes a base this process searched loads the new matrix, so the next search finds it."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
+    _publish_collection(key, "old").search([1.0], limit=1)
+    _publish_on_refresh(monkeypatch, "new")
+    scheduler = KnowledgeRefreshScheduler()
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await _wait_until(lambda: not scheduler._tasks, "the refresh task did not finish")
+
+    assert _cached_matrix_files() == ["new.sqlite3"]
+
+
+@pytest.mark.asyncio
+async def test_a_publication_does_not_load_a_base_nobody_searched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publishing a base whose vectors were never loaded leaves it unloaded, even while another base's are cached."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    other = KnowledgeCollection(path=tmp_path / "other", name="other")
+    seed_collection(other, [{"content": "other"}])
+    other.search([1.0], limit=1)
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    _publish_on_refresh(monkeypatch, "new")
+    scheduler = KnowledgeRefreshScheduler()
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await _wait_until(lambda: not scheduler._tasks, "the refresh task did not finish")
+
+    assert _cached_matrix_files() == ["other.sqlite3"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_preload_is_logged_and_the_refresh_still_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A preload that cannot read the new vectors costs only a cold next search; the refresh result stands."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
+    _publish_collection(key, "old").search([1.0], limit=1)
+    _publish_on_refresh(monkeypatch, "new")
+
+    def _failing_load(_connection: object) -> NoReturn:
+        msg = "disk I/O error"
+        raise OSError(msg)
+
+    monkeypatch.setattr(vector_store_module, "_load_vector_index", _failing_load)
+
+    with capture_logs() as logs:
+        result = await KnowledgeRefreshScheduler().refresh_now("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published
+    warning = next(entry for entry in logs if entry.get("event") == "Could not preload published knowledge vectors")
+    assert warning["log_level"] == "warning"
+    assert warning["base_id"] == "docs"
 
 
 def _write_subprocess_result(kwargs: dict[str, object]) -> None:

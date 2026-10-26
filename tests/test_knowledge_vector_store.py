@@ -278,6 +278,30 @@ def test_concurrent_cold_searches_load_the_matrix_once(
     assert all(result[0].content == "alpha" for result in results)
 
 
+def test_a_preload_racing_a_search_loads_the_matrix_once(
+    collection: KnowledgeCollection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A search that misses the cache while a preload loads the same matrix waits for that load and reuses it."""
+    collection.write_source_rows("a.md", [_row("a1", "a.md", "alpha", [1.0, 0.0])])
+    loads: list[int] = []
+    real_load = vector_store_module._load_vector_index
+
+    def slow_load(connection: sqlite3.Connection) -> object:
+        loads.append(1)
+        time.sleep(0.2)
+        return real_load(connection)
+
+    monkeypatch.setattr(vector_store_module, "_load_vector_index", slow_load)
+    with ThreadPoolExecutor(2) as pool:
+        preload = pool.submit(collection.load_vectors)
+        search = pool.submit(collection.search, [1.0, 0.0], limit=1)
+        preload.result()
+
+        assert search.result()[0].content == "alpha"
+    assert loads == [1]
+
+
 @pytest.mark.parametrize("name", ["", "/etc/elsewhere", "../outside", "a/b", ".hidden", "with space"])
 def test_collection_names_must_be_one_plain_component(tmp_path: Path, name: str) -> None:
     """A name read from worker-writable metadata can never become a path outside the base's directory."""

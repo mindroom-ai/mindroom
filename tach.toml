@@ -6287,6 +6287,7 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.github_app_auth",
     "mindroom.knowledge.index_metadata",
+    "mindroom.knowledge.index_reader",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_locks",

@@ -43,6 +43,7 @@ from mindroom.knowledge.github_app_auth import (
     get_runtime_github_app_token_provider,
 )
 from mindroom.knowledge.index_metadata import state_for_publication
+from mindroom.knowledge.index_reader import preload_published_vectors
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_locks import (
@@ -65,6 +66,7 @@ from mindroom.knowledge.registry import (
     published_index_collection_exists_for_state,
     published_index_metadata_path,
     published_index_settings_compatible,
+    published_index_storage_path,
     refresh_target_for_published_index_key,
     resolve_published_index_key,
     resolve_refresh_target,
@@ -246,6 +248,11 @@ async def refresh_knowledge_binding_in_subprocess(
         _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=True)
         raise
     _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=False)
+    try:
+        if result.index_published:
+            await preload_published_vectors(published_index_storage_path(key), key.indexing_settings)
+    except Exception:
+        logger.warning("Could not preload published knowledge vectors", base_id=key.base_id, exc_info=True)
     return result
 
 
