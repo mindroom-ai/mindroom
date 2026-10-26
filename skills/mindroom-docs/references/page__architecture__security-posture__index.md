@@ -204,6 +204,8 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   By default these tools run in a worker, where they see only what the worker already mounts.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git then reopens that worktree by path.
   For a Git-backed knowledge base inside a workspace a worker writes, swapping the knowledge folder for a link between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
+- A conversation database's `sessions` directory swapped for a link inside SQLite's own resolve-then-open window opens the link's target under the expected name, and a missing or empty file there gets the storage v2 tables, because Python's `sqlite3` cannot open a database without following links.
+  Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory; a swap before that window is refused, and a file with tables at the target stops at the conversion's backup, which follows no link.
 
 ## Intentional behaviors
 
