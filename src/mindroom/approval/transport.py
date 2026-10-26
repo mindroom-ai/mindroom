@@ -334,6 +334,11 @@ class ApprovalMatrixTransport:
         """Return whether one bot can safely post into an approval room."""
         return bot.client is not None and room_id in bot.approval_room_ids
 
+    def router_missing(self, room_id: str) -> bool:
+        """Return whether the running router does not serve one room, so no approval card can reach it."""
+        bot = self.bot_provider(ROUTER_AGENT_NAME)
+        return bot is not None and bot.running and not self._bot_has_approval_room(bot, room_id)
+
     def transport_bot(self, room_id: str) -> _ApprovalTransportBot | None:
         """Return the live router bot serving one approval room."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)

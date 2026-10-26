@@ -186,9 +186,11 @@ async def plan_approval_calls(
     """Evaluate policy once and normalize exact calls with integer deadlines.
 
     The approver's auto-approve window in the conversation approves every call that would ask them.
+    A call that would ask in a room without the router is denied with a reason, so the agent can invite the router.
     """
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
-    decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
+    manager = approval_manager.get_approval_store()
+    decisions: dict[str, tuple[ContinuationDecision | None, float, bool, str | None]] = {}
     for tool, invoking_agent in identified:
         requires_approval, timeout_seconds = await evaluate_tool_approval(
             config,
@@ -206,15 +208,17 @@ async def plan_approval_calls(
             auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
             is not None
         )
-        decisions[tool.tool_call_id] = (
-            ContinuationDecision.APPROVED
-            if not requires_approval or window_open
-            else None
-            if approver_id is not None
-            else ContinuationDecision.DENIED,
-            timeout_seconds,
-            requires_approval,
-        )
+        decision, reason = None, None
+        if not requires_approval or window_open:
+            decision = ContinuationDecision.APPROVED
+        elif approver_id is None:
+            decision, reason = (
+                ContinuationDecision.DENIED,
+                "No approval recipient is configured; the tool was denied safely.",
+            )
+        elif room_id is not None and manager is not None and manager.router_missing and manager.router_missing(room_id):
+            decision, reason = ContinuationDecision.DENIED, approval_manager.DEFAULT_ROUTER_MANAGED_ROOM_REASON
+        decisions[tool.tool_call_id] = (decision, timeout_seconds, requires_approval, reason)
     now = datetime.now(UTC)
     calls = tuple(
         ApprovalCall(
@@ -227,11 +231,7 @@ async def plan_approval_calls(
                 (now + timedelta(seconds=decisions[tool.tool_call_id][1])).timestamp() * 1_000_000_000,
             ),
             decision=decisions[tool.tool_call_id][0],
-            reason=(
-                "No approval recipient is configured; the tool was denied safely."
-                if decisions[tool.tool_call_id][0] is ContinuationDecision.DENIED
-                else None
-            ),
+            reason=decisions[tool.tool_call_id][3],
             human_approval_required=decisions[tool.tool_call_id][2],
         )
         for tool, invoking_agent in identified

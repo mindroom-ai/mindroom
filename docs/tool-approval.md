@@ -90,7 +90,8 @@ Add an `auto_approve` rule for such a function to keep it available.
 
 ## When the Router Is Missing
 
-Approval cards need the router in the room, so a gated call in a room without the router fails with `Tool approval needs the router in this room.`
-Every agent in a room has a built-in `invite_router` tool that invites the router into the current room, waits briefly for it to join, and reports when the invite is still pending so the agent retries after the router joins.
+Approval cards need the router in the room, so a gated call in a room without the router is denied with `Tool approval needs the router in this room.`
+The agent gets that denial as the call's result and can recover on its own: every agent in a room has a built-in `invite_router` tool that invites the router into the current room, waits briefly for it to join, and reports when the invite is still pending.
+Once the router has joined, the agent retries the call, and the card appears as usual.
 The router accepts that invite only when its [`router.accept_invites`](configuration/router.md) allows the inviting agent's Matrix account; for a team, that is the team's account rather than the member agent's.
 Otherwise enable that setting or add the router to the room manually, then retry.
