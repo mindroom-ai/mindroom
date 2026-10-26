@@ -1638,7 +1638,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
     ).in_request_order()
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == "\n\nChecking status.\n\n\nStill checking.\n\n\nDone."
+    assert messages[0].content == "\n\nChecking status.\n\nStill checking.\n\nDone."
     assert "🔧" not in str(messages[0].content)
 
 
@@ -1709,7 +1709,7 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
     assert messages[0].role == "user"
     assert messages[0].content == render_msg_tag(
         sender="@mindroom_research:localhost",
-        body="Please see:\n\n\nActual content",
+        body="Please see:\n\nActual content",
         event_id="$agent",
     )
 

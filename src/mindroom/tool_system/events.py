@@ -502,38 +502,31 @@ def is_visible_tool_marker_line(line: str) -> bool:
 
 
 def strip_visible_tool_markers(text: str) -> str:
-    """Remove display-only tool marker lines before text re-enters model context."""
+    """Remove display-only tool marker lines before text re-enters model context.
+
+    The text around each removed marker stays one blank line apart, as a hidden tool call leaves it; a marker that
+    opens or ends the text leaves nothing. A markdown separator (``---``) after a marker goes with it. Text without
+    markers is returned unchanged.
+    """
     lines = text.splitlines()
     if not any(is_visible_tool_marker_line(line) for line in lines):
         return text
-
-    filtered_lines: list[str] = []
+    pieces: list[list[str]] = [[]]
     index = 0
     while index < len(lines):
         line = lines[index]
-        if not is_visible_tool_marker_line(line):
-            filtered_lines.append(line)
-            index += 1
-            continue
-
         index += 1
-        spacer_lines: list[str] = []
-        while index < len(lines) and not lines[index].strip():
-            spacer_lines.append(lines[index])
-            index += 1
-
-        # Tool markers rendered by MindRoom are often followed by a markdown
-        # separator. Remove the separator with the marker, but preserve ordinary
-        # blank-line spacing so surrounding prose does not get smashed together.
-        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
-            filtered_lines.extend(spacer_lines)
-            index += 1
-            if index < len(lines) and not lines[index].strip():
-                index += 1
+        if not is_visible_tool_marker_line(line):
+            pieces[-1].append(line)
             continue
-
-        filtered_lines.extend(spacer_lines)
-    return "\n".join(filtered_lines).rstrip()
+        after_spacer = index
+        while after_spacer < len(lines) and not lines[after_spacer].strip():
+            after_spacer += 1
+        if after_spacer < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[after_spacer]):
+            index = after_spacer + 1
+        pieces.append([])
+    segments = ("\n".join(piece).strip("\n") for piece in pieces)
+    return "\n\n".join(segment for segment in segments if segment.strip()).rstrip()
 
 
 def message_tool_trace(content: Mapping[str, object]) -> list[ToolTraceEntry] | None:

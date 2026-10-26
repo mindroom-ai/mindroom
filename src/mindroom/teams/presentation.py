@@ -28,6 +28,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     is_visible_tool_marker_line,
     remap_visible_tool_marker_indices,
+    strip_visible_tool_markers,
 )
 
 if TYPE_CHECKING:
@@ -384,8 +385,8 @@ class TeamStreamPresentation:
         """
         per_member, consensus = self.per_member, self.consensus
         if self.show_tool_calls:
-            per_member = {member_id: _without_tool_markers(text) for member_id, text in per_member.items()}
-            consensus = _without_tool_markers(consensus)
+            per_member = {member_id: strip_visible_tool_markers(text) for member_id, text in per_member.items()}
+            consensus = strip_visible_tool_markers(consensus)
         return "\n\n".join(
             render_team_member_slots(
                 self.member_ids,
@@ -405,19 +406,6 @@ class TeamStreamPresentation:
         )
         header = format_team_header([self.display_names_by_id[member_id] for member_id in self.member_ids])
         return header + "\n\n".join(parts) if parts else ""
-
-
-def _without_tool_markers(text: str) -> str:
-    """Return slot text without its tool marker lines, the text around each marker a blank line apart."""
-    pieces: list[list[str]] = [[]]
-    for line in text.split("\n"):
-        if is_visible_tool_marker_line(line):
-            pieces.append([])
-        else:
-            pieces[-1].append(line)
-    if len(pieces) == 1:
-        return text
-    return "\n\n".join(segment for piece in pieces if (segment := "\n".join(piece).strip("\n")).strip())
 
 
 def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) -> None:
