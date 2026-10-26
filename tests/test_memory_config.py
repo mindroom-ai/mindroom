@@ -532,6 +532,21 @@ class TestMemoryConfig:
                 "memory.embedder.config.credentials_service, memory.embedder.config.api_key and"
                 " memory.embedder.config.document_prefix do not apply to the huggingface provider; remove them",
             ),
+            (
+                "sentence_transformers",
+                {"host": "http://local:8080"},
+                "memory.embedder.config.host does not apply to the sentence_transformers provider; remove it",
+            ),
+            (
+                "huggingface",
+                {"host": "http://tei.local"},
+                "memory.embedder.config.host does not apply to the huggingface provider; remove it",
+            ),
+            (
+                "Ollama",
+                {"api_key": "sk-test"},
+                "memory.embedder.config.api_key does not apply to the ollama provider; remove it",
+            ),
         ],
     )
     def test_embedder_rejects_the_fields_its_provider_ignores(
@@ -554,13 +569,12 @@ class TestMemoryConfig:
 
         assert embedder.provider == provider
 
-    def test_openai_embedder_accepts_every_embedder_field(self) -> None:
-        """The openai provider reads every field, so none of them is rejected."""
-        embedder = _MemoryEmbedderConfig.model_validate(
-            {
-                "provider": "openai",
-                "config": {
-                    "model": "embeddinggemma-2",
+    @pytest.mark.parametrize(
+        ("provider", "fields"),
+        [
+            (
+                "openai",
+                {
                     "credentials_service": "embedder",
                     "api_key": "sk-test",
                     "host": "http://local/v1",
@@ -568,10 +582,20 @@ class TestMemoryConfig:
                     "query_prefix": "q: ",
                     "document_prefix": "d: ",
                 },
-            },
-        )
+            ),
+            (" OpenAI ", {"api_key": "sk-test", "query_prefix": "q: "}),
+            ("ollama", {"host": "http://ollama.local:11434", "dimensions": 768}),
+            # A Mem0-only provider's collection name includes dimensions, so it stays accepted though unread.
+            ("huggingface", {"dimensions": 384}),
+            ("sentence_transformers", {"dimensions": 384}),
+        ],
+    )
+    def test_embedder_accepts_the_fields_its_provider_may_set(self, provider: str, fields: dict[str, object]) -> None:
+        """The provider name is compared case-insensitively, and each accepted field loads as configured."""
+        embedder = _MemoryEmbedderConfig.model_validate({"provider": provider, "config": {"model": "embed", **fields}})
 
-        assert embedder.config.dimensions == 768
+        assert embedder.provider == provider.strip().lower()
+        assert embedder.config.model_dump(exclude_none=True) == {"model": "embed", **fields}
 
     def test_keyless_local_endpoint_constructs_both_real_clients(
         self,
