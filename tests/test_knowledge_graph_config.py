@@ -48,6 +48,32 @@ def test_knowledge_graph_is_off_by_default() -> None:
     assert config.knowledge_graph_agents() == []
 
 
+def test_graph_edits_are_on_by_default_and_follow_defaults() -> None:
+    """An agent with a graph edits it unless it or defaults turn edits off; an agent without a graph never does."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(display_name="Mind", knowledge_graph=True),
+            "careful": AgentConfig(display_name="Careful", knowledge_graph=True, knowledge_graph_edits=False),
+            "plain": AgentConfig(display_name="Plain"),
+        },
+        models=_MODELS,
+        knowledge_graph={"model": "luna"},
+    )
+    assert config.agent_edits_knowledge_graph("mind")
+    assert not config.agent_edits_knowledge_graph("careful")
+    assert not config.agent_edits_knowledge_graph("plain")
+    assert not _config(defaults=DefaultsConfig(knowledge_graph_edits=False)).agent_edits_knowledge_graph("mind")
+
+
+def test_graph_edits_need_a_graph() -> None:
+    """An agent that allows graph edits without a graph is a config error rather than a silent no-op."""
+    with pytest.raises(ValidationError, match="knowledge_graph_edits needs knowledge_graph"):
+        Config(
+            agents={"mind": AgentConfig(display_name="Mind", knowledge_graph_edits=True)},
+            models=_MODELS,
+        )
+
+
 def test_enabled_graph_requires_a_model() -> None:
     """An enabled graph needs knowledge_graph.model."""
     with pytest.raises(ValidationError, match=r"knowledge_graph\.model"):

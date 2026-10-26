@@ -391,11 +391,11 @@ agents:
 ```
 
 1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
-2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
+2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks; an agent with [`knowledge_graph_edits`](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) is also asked to fix the mistakes it found in the graph.
 3. The agent answers the prompt like any message, with its own tools and [approval rules](https://docs.mindroom.chat/tool-approval/); a shared agent's call that needs approval is denied, because no person asked for the run, while a private agent's call waits in the thread until its requester answers or the request expires.
 4. When the run ends, MindRoom marks the thread resolved and adds its tool results to the graph; the agent's own summary is not added, and an interrupted run adds nothing.
 
-The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
+The prompt tells the agent to only read, apart from fixing its graph when it may edit it, and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
 The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 A turn whose message was redacted can still be listed until the agent next replies in that conversation.
 
@@ -408,5 +408,5 @@ A turn whose message was redacted can still be listed until the agent next repli
 | `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run, if people talked to the agent since |
 | `model` | the agent's model | A key of `models` to run the exploration with |
 
-Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`; for an agent with `knowledge_graph_edits`, its `{fix_step}` and `{fix_exception}` placeholders insert `EXPLORATION_FIX_STEP` and `EXPLORATION_FIX_EXCEPTION`, which are overridable too and start with their own separator, a line break and a comma.
 Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.

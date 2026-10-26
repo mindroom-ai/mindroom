@@ -28,7 +28,7 @@ from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.extraction import ENTITY_TYPES, extraction_instructions
 from mindroom.knowledge_graph.names import KnownEntity
 from mindroom.knowledge_graph.scope import GraphScope
-from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _FactSource
+from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _EntityRef, _FactSource, _MergedEntities
 from mindroom.knowledge_graph.usage import UsageTarget, current_usage_target
 
 if TYPE_CHECKING:
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from falkordb.query_result import QueryResult
+    from graphiti_core.driver.driver import GraphDriver
     from graphiti_core.prompts.models import Message
     from pydantic import BaseModel
 
@@ -87,11 +88,14 @@ async def _seed_fact(
     valid_at: datetime,
     invalid_at: datetime | None = None,
     seen: int = 1,
-) -> None:
-    """Store a fact supported by ``seen`` episodes, one day apart from ``valid_at``, numbered in their descriptions."""
+) -> str:
+    """Store a fact supported by ``seen`` episodes, one day apart from ``valid_at``, numbered in their descriptions.
+
+    Return the fact's uuid.
+    """
 
     # Graphiti's objects belong to the store's graph loop, so the seeding runs there.
-    async def seed() -> None:
+    async def seed() -> str:
         graphiti = await graph_store._graphiti_client()
         driver = graphiti.driver.clone(database=scope.graph_name)
         embedder = graphiti.embedder
@@ -126,14 +130,15 @@ async def _seed_fact(
         )
         await edge.generate_embedding(embedder)
         await edge.save(driver)
+        return edge.uuid
 
-    await graph_store._run(seed())
+    return await graph_store._run(seed())
 
 
 @pytest.mark.asyncio
 async def test_search_facts_returns_validity_and_sources(store: GraphitiStore) -> None:
-    """A fact comes back with when it held and which episode supports it."""
-    await _seed_fact(
+    """A fact comes back with its id, when it held, and which episode supports it."""
+    fact_id = await _seed_fact(
         store,
         ALPHA,
         fact="Alice leads Project Atlas",
@@ -145,6 +150,7 @@ async def test_search_facts_returns_validity_and_sources(store: GraphitiStore) -
     facts = await store.search_facts(ALPHA, "who leads Project Atlas", limit=5)
 
     assert [fact.fact for fact in facts] == ["Alice leads Project Atlas"]
+    assert facts[0].uuid == fact_id
     assert facts[0].valid_at == JAN
     assert facts[0].invalid_at == MAR
     assert facts[0].sources == [
@@ -226,10 +232,13 @@ async def _seed_entity(
     facts: int = 0,
     name_embedding: list[float] | None = None,
     created_at: datetime | None = None,
-) -> None:
-    """Store an entity with ``facts`` edges to other new entities, and optionally a chosen name embedding and age."""
+) -> str:
+    """Store an entity with ``facts`` edges to other new entities, and optionally a chosen name embedding and age.
 
-    async def seed() -> None:
+    Return the entity's uuid.
+    """
+
+    async def seed() -> str:
         graphiti = await graph_store._graphiti_client()
         driver = graphiti.driver.clone(database=scope.graph_name)
         node = EntityNode(name=name, group_id=scope.graph_name, summary=summary)
@@ -256,8 +265,9 @@ async def _seed_entity(
             )
             await edge.generate_embedding(graphiti.embedder)
             await edge.save(driver)
+        return node.uuid
 
-    await graph_store._run(seed())
+    return await graph_store._run(seed())
 
 
 async def _search_ranking(graph_store: GraphitiStore, scope: GraphScope, query: str) -> list[str]:
@@ -300,15 +310,16 @@ async def test_entity_prefers_an_exact_name_over_a_better_search_hit(store: Grap
 @pytest.mark.asyncio
 async def test_entity_with_several_exact_names_picks_the_one_with_most_facts(store: GraphitiStore) -> None:
     """Names that differ only in case are all exact matches, and the entity with the most facts wins."""
-    await _seed_entity(store, ALPHA, "dana", summary="A stray duplicate.", facts=1)
+    stray = await _seed_entity(store, ALPHA, "dana", summary="A stray duplicate.", facts=1)
     await _seed_entity(store, ALPHA, "Dana", summary="A person.", facts=3)
-    await _seed_entity(store, ALPHA, "DANA", summary="Another duplicate.")
+    another = await _seed_entity(store, ALPHA, "DANA", summary="Another duplicate.")
 
     entity = await store.entity(ALPHA, "Dana")
 
     assert entity is not None
     assert entity.summary == "A person."
-    assert entity.others == []
+    # The other entities of that name are listed, most facts first, so they can be looked up and merged by id.
+    assert entity.others == [_EntityRef(name="dana", uuid=stray), _EntityRef(name="DANA", uuid=another)]
 
 
 @pytest.mark.asyncio
@@ -340,20 +351,35 @@ async def test_entity_without_exact_match_lists_other_close_matches(store: Graph
     ranking = await _search_ranking(store, ALPHA, "Atlas dashboard")
     assert ranking[0] == "Atlas dashboard v2"
     assert sorted(ranking) == ["Atlas Labs", "Atlas dashboard v2", "Project dashboard"]
-    assert [entity.name, *entity.others] == ranking
+    assert [entity.name, *(other.name for other in entity.others)] == ranking
 
 
 @pytest.mark.asyncio
 async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: GraphitiStore) -> None:
-    """A configured alias, Matrix ID, or agent key finds the entity under its one name, ahead of one named the alias."""
-    await _seed_entity(store, ALPHA, "Robin", summary="A stray duplicate.")
+    """A configured alias, Matrix ID, or agent key finds the entity under its one name, ahead of one named the alias.
+
+    The entity named exactly as asked is listed with its id, so a duplicate extracted under the alias can be merged.
+    """
+    stray = await _seed_entity(store, ALPHA, "Robin", summary="A stray duplicate.")
+    by_id = await _seed_entity(store, ALPHA, "@robin:example.test", summary="Extracted under the Matrix ID.")
     await _seed_entity(store, ALPHA, "Robin Vale", summary="A person.", facts=2)
     await _seed_entity(store, ALPHA, "Mind", summary="The agent.")
 
-    for name in ("robin", "@robin:example.test", "ROBIN VALE"):
+    for name in ("robin", "ROBIN VALE"):
         entity = await store.entity(ALPHA, name)
         assert entity is not None
         assert entity.name == "Robin Vale"
+        assert entity.exact
+    # A name asked for lists the entities under it, which are duplicates that only their ids reach.
+    alias = await store.entity(ALPHA, "robin")
+    assert alias is not None
+    assert alias.others == [_EntityRef(name="Robin", uuid=stray)]
+    matrix_id = await store.entity(ALPHA, "@robin:example.test")
+    assert matrix_id is not None
+    assert matrix_id.others == [_EntityRef(name="@robin:example.test", uuid=by_id)]
+    matrix_id = await store.entity(ALPHA, "@robin:example.test")
+    assert matrix_id is not None
+    assert matrix_id.name == "Robin Vale"
     mind = await store.entity(ALPHA, "mind")
     assert mind is not None
     assert mind.summary == "The agent."
@@ -369,6 +395,233 @@ async def test_entity_falls_back_to_the_name_asked_for(store: GraphitiStore) -> 
 
     assert entity is not None
     assert entity.summary == "A person."
+
+
+async def _seed_edge(
+    graph_store: GraphitiStore,
+    scope: GraphScope,
+    source_uuid: str,
+    target_uuid: str,
+    fact: str,
+    *,
+    source_description: str | None = None,
+) -> str:
+    """Store a fact between two stored entities, supported by one episode when ``source_description`` is given."""
+
+    async def seed() -> str:
+        graphiti = await graph_store._graphiti_client()
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        episodes = []
+        if source_description is not None:
+            episode = EpisodicNode(
+                name="episode",
+                group_id=scope.graph_name,
+                source=EpisodeType.text,
+                source_description=source_description,
+                content=fact,
+                valid_at=JAN,
+            )
+            await episode.save(driver)
+            episodes.append(episode.uuid)
+        edge = EntityEdge(
+            source_node_uuid=source_uuid,
+            target_node_uuid=target_uuid,
+            name="RELATES",
+            fact=fact,
+            group_id=scope.graph_name,
+            episodes=episodes,
+            created_at=JAN,
+            valid_at=JAN,
+        )
+        await edge.generate_embedding(graphiti.embedder)
+        await edge.save(driver)
+        return edge.uuid
+
+    return await graph_store._run(seed())
+
+
+async def _graph_contents(graph_store: GraphitiStore, scope: GraphScope) -> tuple[set[str], set[tuple[str, str, str]]]:
+    """Return a graph's entity names and its facts as (source, fact, target), checking every fact kept its embedding."""
+
+    async def read() -> tuple[set[str], set[tuple[str, str, str]]]:
+        graphiti = await graph_store._graphiti_client()
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        nodes, _, _ = await driver.execute_query("MATCH (n:Entity) RETURN n.name AS name")
+        edges, _, _ = await driver.execute_query(
+            "MATCH (s:Entity)-[e:RELATES_TO]->(t:Entity) "
+            "RETURN s.name AS source, e.fact AS fact, t.name AS target, e.fact_embedding IS NOT NULL AS embedded",
+        )
+        assert all(edge["embedded"] for edge in edges)
+        return {node["name"] for node in nodes}, {(edge["source"], edge["fact"], edge["target"]) for edge in edges}
+
+    return await graph_store._run(read())
+
+
+@pytest.mark.asyncio
+async def test_entity_is_found_by_its_id(store: GraphitiStore) -> None:
+    """An id names one entity, even a duplicate that its name alone never reaches."""
+    await _seed_entity(store, ALPHA, "Dana", summary="A person.", facts=2)
+    duplicate = await _seed_entity(store, ALPHA, "Dana", summary="A duplicate.")
+
+    entity = await store.entity(ALPHA, duplicate)
+
+    assert entity is not None
+    assert entity.uuid == duplicate
+    assert entity.summary == "A duplicate."
+    assert entity.others == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_id_finds_no_entity(store: GraphitiStore) -> None:
+    """An id that names no entity, such as one deleted or merged away, finds nothing rather than a fuzzy match."""
+    gone = await _seed_entity(store, ALPHA, "Ali")
+    # A name embedding equal to the id's, so a search for the id would rank this entity first.
+    [id_embedding] = await _HashEmbedder().aembed([gone], purpose="query")
+    await _seed_entity(store, ALPHA, "Alice Smith", summary="A person.", name_embedding=id_embedding)
+    assert await store.delete_entity(ALPHA, gone) == "Ali"
+    assert (await _search_ranking(store, ALPHA, gone))[0] == "Alice Smith"
+
+    assert await store.entity(ALPHA, gone) is None
+    assert await store.entity(ALPHA, gone.upper()) is None
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_fact_removes_only_that_fact(store: GraphitiStore) -> None:
+    """A deleted fact is gone from its own graph, its entities and other facts stay, and another graph's id finds nothing."""
+    alice = await _seed_entity(store, ALPHA, "Alice")
+    atlas = await _seed_entity(store, ALPHA, "Project Atlas")
+    wrong = await _seed_edge(store, ALPHA, alice, atlas, "Alice waters the Atlas office plant")
+    await _seed_edge(store, ALPHA, alice, atlas, "Alice leads Project Atlas")
+
+    assert await store.delete_fact(BETA, wrong) is None
+    assert await store.delete_fact(ALPHA, wrong) == "Alice waters the Atlas office plant"
+    assert await store.delete_fact(ALPHA, wrong) is None
+
+    assert await _graph_contents(store, ALPHA) == (
+        {"Alice", "Project Atlas"},
+        {("Alice", "Alice leads Project Atlas", "Project Atlas")},
+    )
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_entity_removes_it_with_its_facts(store: GraphitiStore) -> None:
+    """A deleted entity takes the facts that touch it along, and leaves every other entity and fact alone."""
+    path = await _seed_entity(store, ALPHA, "/home/alice/config.yaml", facts=2)
+    alice = await _seed_entity(store, ALPHA, "Alice")
+    atlas = await _seed_entity(store, ALPHA, "Project Atlas")
+    await _seed_edge(store, ALPHA, alice, atlas, "Alice leads Project Atlas")
+
+    assert await store.delete_entity(BETA, path) is None
+    assert await store.delete_entity(ALPHA, path) == "/home/alice/config.yaml"
+    assert await store.delete_entity(ALPHA, path) is None
+
+    assert await _graph_contents(store, ALPHA) == (
+        {"Counterpart 0", "Counterpart 1", "Alice", "Project Atlas"},
+        {("Alice", "Alice leads Project Atlas", "Project Atlas")},
+    )
+
+
+@pytest.mark.asyncio
+async def test_merging_moves_the_duplicates_facts_onto_the_kept_entity(store: GraphitiStore) -> None:
+    """The duplicate's facts keep their direction, sources, and embedding on the kept entity, and the duplicate goes."""
+    alice = await _seed_entity(store, ALPHA, "Alice Smith", summary="A person.")
+    ali = await _seed_entity(store, ALPHA, "Ali", summary="A duplicate.")
+    acme = await _seed_entity(store, ALPHA, "Acme")
+    await _seed_edge(store, ALPHA, alice, acme, "Alice Smith founded Acme")
+    await _seed_edge(store, ALPHA, acme, ali, "Acme employs Ali", source_description="tool_results: hr")
+    await _seed_edge(store, ALPHA, ali, acme, "Ali chairs the Acme board")
+    # A fact between the two would join the kept entity to itself.
+    await _seed_edge(store, ALPHA, ali, alice, "Ali is short for Alice Smith")
+
+    assert await store.merge_entities(ALPHA, ali, "missing") is None
+    assert await store.merge_entities(BETA, ali, alice) is None
+    merged = await store.merge_entities(ALPHA, ali, alice)
+
+    assert merged == _MergedEntities(duplicate="Ali", into="Alice Smith", moved_facts=2)
+    assert await _graph_contents(store, ALPHA) == (
+        {"Alice Smith", "Acme"},
+        {
+            ("Alice Smith", "Alice Smith founded Acme", "Acme"),
+            ("Acme", "Acme employs Ali", "Alice Smith"),
+            ("Alice Smith", "Ali chairs the Acme board", "Acme"),
+        },
+    )
+    entity = await store.entity(ALPHA, "Alice Smith")
+    assert entity is not None
+    assert entity.summary == "A person."
+    employs = next(fact for fact in entity.facts if fact.fact == "Acme employs Ali")
+    assert [source.description for source in employs.sources] == ["tool_results: hr"]
+
+
+@pytest.mark.asyncio
+async def test_a_fact_added_to_the_duplicate_during_a_merge_moves_too(store: GraphitiStore) -> None:
+    """An episode extracted while a merge runs can add a fact to the duplicate, which the merge moves before deleting it."""
+    alice = await _seed_entity(store, ALPHA, "Alice Smith")
+    ali = await _seed_entity(store, ALPHA, "Ali")
+    acme = await _seed_entity(store, ALPHA, "Acme")
+    await _seed_edge(store, ALPHA, ali, acme, "Ali chairs the Acme board")
+    load = EntityEdge.load_fact_embedding
+    ingested: list[str] = []
+
+    async def load_while_ingesting(edge: EntityEdge, driver: GraphDriver) -> None:
+        await load(edge, driver)
+        if not ingested:
+            # What ingestion saves when an episode resolves a new fact against the duplicate.
+            new = EntityEdge(
+                source_node_uuid=ali,
+                target_node_uuid=acme,
+                name="RELATES",
+                fact="Ali founded the Acme lab",
+                group_id=ALPHA.graph_name,
+                episodes=[],
+                created_at=MAR,
+                valid_at=MAR,
+                fact_embedding=[1.0] * 32,
+            )
+            await new.save(driver)
+            ingested.append(new.uuid)
+
+    with patch.object(EntityEdge, "load_fact_embedding", load_while_ingesting):
+        merged = await store.merge_entities(ALPHA, ali, alice)
+
+    assert merged == _MergedEntities(duplicate="Ali", into="Alice Smith", moved_facts=2)
+    assert await _graph_contents(store, ALPHA) == (
+        {"Alice Smith", "Acme"},
+        {
+            ("Alice Smith", "Ali chairs the Acme board", "Acme"),
+            ("Alice Smith", "Ali founded the Acme lab", "Acme"),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_merges_keep_a_fact_between_both_duplicates(store: GraphitiStore) -> None:
+    """Merges in one batch of tool calls run one after another, so a fact between their duplicates survives both."""
+    alice = await _seed_entity(store, ALPHA, "Alice Smith")
+    ali = await _seed_entity(store, ALPHA, "Ali")
+    robert = await _seed_entity(store, ALPHA, "Robert Jones")
+    bob = await _seed_entity(store, ALPHA, "Bob")
+    await _seed_edge(store, ALPHA, ali, bob, "Ali mentors Bob")
+
+    await asyncio.gather(store.merge_entities(ALPHA, ali, alice), store.merge_entities(ALPHA, bob, robert))
+
+    assert await _graph_contents(store, ALPHA) == (
+        {"Alice Smith", "Robert Jones"},
+        {("Alice Smith", "Ali mentors Bob", "Robert Jones")},
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_entity_summary_can_be_rewritten(store: GraphitiStore) -> None:
+    """A summary that still states a deleted fact can be rewritten, and a lookup reads the new one."""
+    alice = await _seed_entity(store, ALPHA, "Alice", summary="Alice leads Project Atlas and waters the office plant.")
+
+    assert await store.update_entity_summary(BETA, alice, "Alice leads Project Atlas.") is None
+    assert await store.update_entity_summary(ALPHA, alice, "Alice leads Project Atlas.") == "Alice"
+
+    entity = await store.entity(ALPHA, alice)
+    assert entity is not None
+    assert entity.summary == "Alice leads Project Atlas."
 
 
 def _holds_embedding(value: object) -> bool:

@@ -78,6 +78,7 @@ agents:
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
+| `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) |
 | `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
@@ -205,6 +206,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `markdown` | `true` |
 | `cheap_model` | `null`; ignored for an agent whose `model` is the same. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `knowledge_graph` | `false` |
+| `knowledge_graph_edits` | `true` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compaction` | enabled; see [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
 | `max_tool_calls_per_turn` | `1000` |

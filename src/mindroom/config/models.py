@@ -435,6 +435,7 @@ class DefaultsConfig(BaseModel):
         ),
     )
     knowledge_graph: bool = Field(default=False, description="Default knowledge graph setting")
+    knowledge_graph_edits: bool = Field(default=True, description="Default knowledge graph edits setting")
     cheap_model: str | None = Field(
         default=None,
         description="Cheaper model key for agents without their own cheap_model, used by cold_cache",

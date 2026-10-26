@@ -69,6 +69,7 @@ CONFIG = {
             "role": "Captures tool schemas.",
             "delegate_to": ["helper"],
             "knowledge_graph": True,
+            "knowledge_graph_edits": True,
         },
         "helper": {"display_name": "Helper", "role": "Helps with delegated work."},
     },
