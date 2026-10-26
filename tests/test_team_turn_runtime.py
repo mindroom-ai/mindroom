@@ -1245,9 +1245,7 @@ async def test_a_resume_that_pauses_on_another_member_s_call_shows_no_paused_not
 
     repaused = await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
     assert isinstance(repaused, PausedAttempt)
-    assert repaused.response_text == (
-        f"{HEADER}**Checker**: Touched.\n\n\n*No team consensus - showing individual responses only*"
-    )
+    assert repaused.response_text == f"{HEADER}**Checker**: Touched."
     writer_call = replace(member_approval("call-touch-2", "risky"), invoking_agent="writer")
     result = await team.resume(repaused, approved=True, approvals=(writer_call,))
 
