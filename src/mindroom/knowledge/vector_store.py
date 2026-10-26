@@ -42,21 +42,32 @@ _MAX_KEYWORD_TERMS = 32
 _WORD = re.compile(r"\w+")
 #: What a collection name may be: one plain file-name component, the same characters Chroma allowed.
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-#: Where a container's memory limit is read from: cgroup v2, then cgroup v1.
-_CGROUP_MEMORY_LIMIT_FILES = ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes")
 
 
-def _default_matrix_cache_bytes(limit_files: Sequence[str] = _CGROUP_MEMORY_LIMIT_FILES) -> int:
-    """Return a quarter of the memory this process may use: its container's limit, else the machine's RAM."""
-    for limit_file in limit_files:
-        with suppress(OSError, ValueError):
-            limit = int(Path(limit_file).read_text(encoding="utf-8"))
-            # cgroup v2 writes "max" for no limit, which int() rejects; v1 writes a number near 2**63.
-            if limit < 1 << 60:
-                return limit // 4
+def _memory_limits(cgroup_root: Path, membership: Path) -> Iterator[int]:
+    """Yield the memory limits binding this process: its cgroup v2 group's and each ancestor's, then cgroup v1's."""
+    with suppress(OSError, StopIteration):
+        lines = membership.read_text(encoding="utf-8").splitlines()
+        group = cgroup_root / next(line[3:] for line in lines if line.startswith("0::")).strip().lstrip("/")
+        for directory in (group, *group.parents):
+            # "max", meaning no limit, is skipped.
+            with suppress(OSError, ValueError):
+                yield int((directory / "memory.max").read_text(encoding="utf-8"))
+            if directory == cgroup_root:
+                break
+    with suppress(OSError, ValueError):
+        yield int((cgroup_root / "memory" / "memory.limit_in_bytes").read_text(encoding="utf-8"))
+
+
+def _default_matrix_cache_bytes(
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    membership: Path = Path("/proc/self/cgroup"),
+) -> int:
+    """Return a quarter of the memory this process may use: the tightest of its cgroup limits and the machine's RAM."""
+    limits = list(_memory_limits(cgroup_root, membership))
     with suppress(OSError, ValueError, AttributeError):
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 4
-    return 512 * 1024 * 1024
+        limits.append(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+    return min(limits) // 4 if limits else 512 * 1024 * 1024
 
 
 #: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.

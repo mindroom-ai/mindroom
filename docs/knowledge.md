@@ -515,8 +515,8 @@ See [Memory](memory.md#embedder) for the embedder fields, API key resolution, an
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
 Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
-Once searched, a base's vectors stay in memory until its next refresh, 4 bytes per dimension per chunk (about 12 KB per chunk at 3072 dimensions).
-The largest searched base always stays loaded, and the others, including semantic file-memory indexes, share a quarter of the memory MindRoom may use: its container's memory limit, else the machine's RAM.
+Searching loads a base's vectors into memory, 4 bytes per dimension per chunk (about 12 KB per chunk at 3072 dimensions), and keeps them for later searches.
+The largest searched base always stays loaded; the others, including semantic file-memory indexes, share a quarter of the memory MindRoom may use (the tightest of its container or service memory limit and the machine's RAM), and the least recently searched are dropped when they exceed it.
 Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
 Private agent knowledge is indexed under `<storage_path>/knowledge_db/private/<requester>/`, outside the private roots that sandboxed workers can write, with one directory per requester and agent.
 Removing a private instance leaves its index behind; each index directory's `indexing_settings.json` names the `knowledge_path` it was built from.

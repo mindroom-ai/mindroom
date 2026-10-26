@@ -455,17 +455,30 @@ def test_the_matrix_cache_takes_a_quarter_of_the_memory_the_process_may_use(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A container's memory limit sizes the cache budget; without one, the machine's RAM does."""
-    cgroup_v2 = tmp_path / "memory.max"
-    cgroup_v1 = tmp_path / "memory.limit_in_bytes"
-    cgroup_v2.write_text("2147483648\n", encoding="utf-8")
-    assert vector_store_module._default_matrix_cache_bytes((str(cgroup_v2), str(cgroup_v1))) == 512 * 1024 * 1024
-
-    cgroup_v2.write_text("max\n", encoding="utf-8")
-    cgroup_v1.write_text(f"{2**63 - 4096}\n", encoding="utf-8")
+    """The tightest of the process's cgroup limits, its own group's or an ancestor's, and the machine's RAM sizes it."""
+    gib = 1024**3
     monkeypatch.setattr(
         vector_store_module.os,
         "sysconf",
-        {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 4 * 1024 * 1024}.__getitem__,
+        {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 16 * gib // 4096}.__getitem__,
     )
-    assert vector_store_module._default_matrix_cache_bytes((str(cgroup_v2), str(cgroup_v1))) == 4 * 1024**3
+    cgroup_root = tmp_path / "cgroup"
+    service = cgroup_root / "system.slice" / "mindroom.service"
+    service.mkdir(parents=True)
+    (cgroup_root / "memory.max").write_text("max\n", encoding="utf-8")
+    (cgroup_root / "system.slice" / "memory.max").write_text("max\n", encoding="utf-8")
+    (service / "memory.max").write_text(f"{2 * gib}\n", encoding="utf-8")
+    membership = tmp_path / "self-cgroup"
+    membership.write_text("0::/system.slice/mindroom.service\n", encoding="utf-8")
+    budget = vector_store_module._default_matrix_cache_bytes
+    assert budget(cgroup_root, membership) == gib // 2
+
+    (cgroup_root / "system.slice" / "memory.max").write_text(f"{gib}\n", encoding="utf-8")
+    assert budget(cgroup_root, membership) == gib // 4, "a tighter ancestor limit binds the process"
+
+    membership.write_text("0::/\n", encoding="utf-8")
+    assert budget(cgroup_root, membership) == 4 * gib, "without a limit, a quarter of the machine's RAM"
+
+    (cgroup_root / "memory").mkdir()
+    (cgroup_root / "memory" / "memory.limit_in_bytes").write_text(f"{2**63 - 4096}\n", encoding="utf-8")
+    assert budget(cgroup_root, tmp_path / "missing") == 4 * gib, "cgroup v1's no-limit value never exceeds RAM"
