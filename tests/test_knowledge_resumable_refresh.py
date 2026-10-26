@@ -1116,7 +1116,7 @@ async def test_batch_overlaps_its_embedding_requests_up_to_the_in_flight_cap(
 
 
 @pytest.mark.asyncio
-async def test_permanent_batch_error_leaves_no_embedding_request_running(
+async def test_permanent_batch_error_cancels_the_other_request_tasks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1151,6 +1151,71 @@ async def test_permanent_batch_error_leaves_no_embedding_request_running(
     await asyncio.sleep(0.05)
     assert tracked.started == knowledge_manager_module._EMBEDDING_REQUESTS_IN_FLIGHT
     assert tracked.single_requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_batch_starts_no_further_provider_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider threads still embedding one text at a time stop asking once a permanent rejection fails the batch."""
+    tracked = _use_in_flight_embedder(monkeypatch)
+    # Short responses retire batching, so the other requests go on one text per request on their threads.
+    tracked.short_batch = True
+    rejected = Event()
+    others_on_single_texts = Event()
+    release = Event()
+    entered: list[str] = []
+    original_single = tracked.single_request
+
+    def _slow_single(text: str) -> list[float]:
+        entered.append(text)
+        if len(entered) >= knowledge_manager_module._EMBEDDING_REQUESTS_IN_FLIGHT - 1:
+            others_on_single_texts.set()
+        release.wait(timeout=5)
+        return original_single(text)
+
+    def _reject_one(texts: list[str]) -> None:
+        # Every request is in flight before any returns, so each other worker's short response sends it on to one
+        # text per request, and the rejection only comes once all of them are inside that loop.
+        tracked.saturated.wait(timeout=5)
+        if "content 0" in texts:
+            others_on_single_texts.wait(timeout=5)
+            rejected.set()
+            msg = "embedder request failed (HTTP 400)"
+            raise EmbedderRequestError(msg)
+
+    monkeypatch.setattr(tracked, "single_request", _slow_single)
+    monkeypatch.setattr(tracked, "hold", _reject_one)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 40)
+
+    outcome = await _manager(_config(tmp_path, docs_path)).reindex_all()
+    entered_when_failed = len(entered)
+    release.set()
+    await asyncio.sleep(0.3)
+
+    assert outcome.error is not None
+    assert rejected.is_set()
+    assert entered_when_failed == knowledge_manager_module._EMBEDDING_REQUESTS_IN_FLIGHT - 1
+    # Each of those threads finishes the request it was already making, and starts no other.
+    assert len(entered) == entered_when_failed
+
+
+@pytest.mark.asyncio
+async def test_embedding_requests_in_flight_never_exceed_the_file_index_concurrency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator who limits file indexing to one at a time also gets one embedding request at a time."""
+    tracked = _use_in_flight_embedder(monkeypatch)
+    monkeypatch.setattr(knowledge_manager_module, "_max_concurrent_knowledge_file_indexes", lambda _runtime_paths: 1)
+    monkeypatch.setattr(tracked, "hold", lambda _texts: time.sleep(0.01))
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 20)
+
+    assert (await _manager(_config(tmp_path, docs_path)).reindex_all()).published
+    assert tracked.peak_in_flight == 1
 
 
 @pytest.mark.asyncio
