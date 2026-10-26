@@ -3452,6 +3452,7 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
+    "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
 ]
 visibility = [

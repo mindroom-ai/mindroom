@@ -47,6 +47,8 @@ PANEL = "!room:example.org:$panel"
 REQUESTER = "@alice:example.org"
 TEAM_LABEL = "Team (Writer, Checker)"
 PROVIDER = "Synthetic"
+# The checker's piece of a collaborate result while the checker is paused.
+CHECKER_PAUSED_PIECE = "Agent Checker: Requires human input before continuing."
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 
