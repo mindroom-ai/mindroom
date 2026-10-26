@@ -16,6 +16,7 @@ from mindroom.cli.doctor import (
     _check_memory_config,
     _check_memory_embedder,
     _check_pairing,
+    _check_providers,
     _check_single_provider,
     _classify_vertexai_claude_error,
     _validate_provider_key,
@@ -177,7 +178,7 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
         router=RouterConfig(model="default"),
     )
 
-    result = _check_single_provider("openai", config, set(), runtime_paths)
+    result = _check_single_provider("openai", config, runtime_paths)
 
     assert result == (0, 0, 1)
     assert validated == []
@@ -242,6 +243,41 @@ def test_a_provider_without_a_key_check_is_not_probed_even_at_a_custom_endpoint(
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
 
     assert _validate_provider_key(provider, "k", base_url) == (None, "no key check for this provider")
+
+
+def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_uses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Spellings config load accepts group under the runtime's route and get that route's checks."""
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    probed: list[str] = []
+    vertex_models: list[str] = []
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        probed.append(url)
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    def validate_vertex(model_config: ModelConfig, _runtime_paths: RuntimePaths) -> tuple[bool, str]:
+        vertex_models.append(model_config.id)
+        return True, ""
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    monkeypatch.setattr("mindroom.cli.doctor._validate_vertexai_claude_connection", validate_vertex)
+    config = Config(
+        models={
+            "default": ModelConfig(provider="Ollama", id="qwen3.8:27b", host="http://gpu.example:11434"),
+            "small": ModelConfig(provider=" ollama ", id="qwen3.8:27b"),
+            "claude": ModelConfig(provider="VertexAI-Claude", id="claude-sonnet-5-5"),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (2, 0, 0)
+    assert "Providers: ollama (2 models), vertexai_claude (1 model)" in capsys.readouterr().out
+    assert probed == ["http://gpu.example:11434/api/tags"]
+    assert vertex_models == ["claude-sonnet-5-5"]
 
 
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

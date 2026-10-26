@@ -200,10 +200,10 @@ def _models_using_shared_key(config: Config, env_key: str, runtime_paths: Runtim
         return None
 
 
-def _get_custom_base_url(models: list[ModelConfig], provider: str) -> str | None:
-    """Get custom base_url for a provider from model extra_kwargs, if any."""
+def _get_custom_base_url(models: list[ModelConfig]) -> str | None:
+    """Get custom base_url from model extra_kwargs, if any."""
     for model in models:
-        if model.provider == provider and model.extra_kwargs:
+        if model.extra_kwargs:
             base_url = model.extra_kwargs.get("base_url")
             if base_url:
                 return base_url
@@ -359,16 +359,16 @@ def _validate_vertexai_claude_connection(
 def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
     """Get the Ollama host from config or environment."""
     for model in config.models.values():
-        if model.provider == "ollama" and model.host:
+        if provider_route(model.provider) == "ollama" and model.host:
             return model.host
     return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
 
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
-    """Print provider summary and validate API keys. Returns (passed, failed, warnings)."""
+    """Print the providers by route and validate their API keys. Returns (passed, failed, warnings)."""
     provider_models: dict[str, list[str]] = {}
     for name, model in config.models.items():
-        provider_models.setdefault(model.provider, []).append(name)
+        provider_models.setdefault(provider_route(model.provider), []).append(name)
 
     if not provider_models:
         return 0, 0, 0
@@ -383,10 +383,9 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
     passed = 0
     failed = 0
     warnings = 0
-    validated_keys: set[str] = set()
 
     for provider in sorted(provider_models):
-        p, f, w = _check_single_provider(provider, config, validated_keys, runtime_paths)
+        p, f, w = _check_single_provider(provider, config, runtime_paths)
         passed += p
         failed += f
         warnings += w
@@ -412,19 +411,14 @@ def _print_validation(
     return 0, 0, 1
 
 
-def _check_single_provider(
-    provider: str,
-    config: Config,
-    validated_keys: set[str],
-    runtime_paths: RuntimePaths,
-) -> tuple[int, int, int]:
-    """Validate a single provider. Returns (passed, failed, warnings)."""
+def _check_single_provider(provider: str, config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Validate the models of one route, as ``provider_route`` names it. Returns (passed, failed, warnings)."""
     if provider == "vertexai_claude":
         passed = 0
         failed = 0
         warnings = 0
         for model_config in config.models.values():
-            if model_config.provider != provider:
+            if provider_route(model_config.provider) != provider:
                 continue
             valid, detail = _validate_vertexai_claude_connection(model_config, runtime_paths)
             p, f, w = _print_validation(
@@ -455,11 +449,6 @@ def _check_single_provider(
     if not env_key:
         return 0, 0, 0
 
-    # google and gemini share GOOGLE_API_KEY — validate once
-    if env_key in validated_keys:
-        return 0, 0, 0
-    validated_keys.add(env_key)
-
     # Models with their own credential never read the shared key. When the credential store is
     # unreadable that is unknown, so the key counts as needed and only the default endpoint is probed.
     shared_key_models = _models_using_shared_key(config, env_key, runtime_paths)
@@ -470,7 +459,7 @@ def _check_single_provider(
             console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, int(needs_shared_key)
 
-    base_url = _get_custom_base_url(shared_key_models or [], provider)
+    base_url = _get_custom_base_url(shared_key_models or [])
     valid, detail = _validate_provider_key(provider, api_key, base_url)
     return _print_validation(
         valid,
