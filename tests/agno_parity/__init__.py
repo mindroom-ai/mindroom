@@ -1,1 +1,1 @@
-"""Golden fixtures that pin Agno 3.0.9 behavior for the owned runtime replacement."""
+"""The parity goldens' scenarios and support code, and the command that regenerates the goldens from owned code."""

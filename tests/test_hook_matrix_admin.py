@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
-        Config(models={"default": ModelConfig(provider="test", id="test-model")}),
+        Config(models={"default": ModelConfig(provider="openai", id="test-model")}),
         runtime_paths,
     )
 
@@ -59,7 +59,7 @@ def _private_room_config(tmp_path: Path) -> Config:
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General", rooms=[])},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
@@ -733,7 +733,7 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
     """config:reloaded should expose the router-backed matrix admin helper."""
     runtime_paths = orchestrator_runtime_paths(tmp_path)
     config = bind_runtime_paths(
-        Config(models={"default": ModelConfig(provider="test", id="test-model")}),
+        Config(models={"default": ModelConfig(provider="openai", id="test-model")}),
         runtime_paths,
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)

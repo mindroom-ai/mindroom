@@ -24,16 +24,17 @@ from mindroom.history.runtime import (
     resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
 from mindroom.llm.provider import NativeCompactionReplay
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_estimated_tokens
 from mindroom.providers.openai.responses_wire import responses_input, responses_replay
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 from tests.conftest import seed_session
-from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint
+from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint, replay_settings
 from tests.providers.golden_support import pipeline_provider
 from tests.providers.openai_family_support import responses_adapter
 
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.responses import ResponsesAdapter
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
-_ALL_HISTORY = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+_ALL_HISTORY = replay_settings()
 
 
 def _replayed_input(adapter: ResponsesAdapter, messages: list[Message]) -> list[Any]:
@@ -122,12 +123,14 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
             session=session,
             scope=_SCOPE,
             history_settings=resolved.history_settings,
-            replay_model=adapter,
+            replay_estimator=adapter,
         )
         decision = classify_compaction_decision(
             plan=resolved.execution_plan,
             force_compact_before_next_run=False,
             current_history_tokens=tokens,
+            allow_native_compaction=True,
+            summary_tokens=0,
         )
         assert decision.mode == "none", (tokens, decision.reason)
         assert 77 < tokens < 2000
@@ -154,7 +157,7 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
     if floor == "canonical":
         block = {"type": "input_image", "image_url": "data:image/png;base64," + b64encode(buffer.getvalue()).decode()}
         message = Message(role="user", content=[block])
-        expected_tokens = (len(stable_serialize(block)) + (3 if native else 0)) // 4
+        expected_tokens = len(stable_serialize(block)) // 4
     else:
         message = Message(
             role="user",
@@ -193,7 +196,7 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
         scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
-        replay_model=adapter,
+        replay_estimator=adapter,
     )
     assert tokens == expected_tokens
     assert session == before
@@ -304,7 +307,7 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
                 scope=_SCOPE,
                 history_settings=_ALL_HISTORY,
                 native_route=native.route,
-                replay_model=adapter,
+                replay_estimator=adapter,
             ),
         )
     assert estimates[0] == estimates[1]
@@ -414,6 +417,57 @@ def test_responses_image_file_id_retains_unknown_dimension_allowance(tmp_path: P
     assert 3000 <= tokens < 3100
 
 
+def _reasoned_answer(ciphertext: str, *, reasoning_tokens: int = 0, own_turn: bool = False) -> list[Message]:
+    """Return a question and an answer whose stored output carries one encrypted reasoning item."""
+    output = [
+        {"type": "reasoning", "id": "rs_plan", "summary": [], "encrypted_content": ciphertext},
+        {
+            "type": "message",
+            "id": "msg_answer",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Ready", "annotations": []}],
+        },
+    ]
+    provider_data: dict[str, Any] = {"mindroom_response_output": output}
+    if own_turn:
+        provider_data[MODEL_PROVENANCE_KEY] = {"id": "gpt-6-astra", "provider": "openai"}
+    answer = Message(
+        role="assistant",
+        content="Ready",
+        provider_data=provider_data,
+        metrics=MessageMetrics(tokens=TokenCounts(reasoning_tokens=reasoning_tokens)),
+        from_history=not own_turn,
+    )
+    return [Message(role="user", content="Plan the trip.", from_history=not own_turn), answer]
+
+
+def test_responses_budget_ignores_encrypted_reasoning_length(tmp_path: Path) -> None:
+    """Encrypted reasoning is opaque base64; its length says nothing about the tokens the provider counts."""
+    adapter = responses_adapter(tmp_path, store=False)
+    short, long = _reasoned_answer("gAAAA"), _reasoned_answer("gAAAA" + "Zm9vYmFy" * 5000)
+    assert any(item.get("type") == "reasoning" for item in _replayed_input(adapter, long))
+    assert adapter.estimate_portable_replay_tokens(long) == adapter.estimate_portable_replay_tokens(short)
+
+
+@pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-5.2-codex"])
+@pytest.mark.parametrize(("own_turn", "charged"), [(False, 20_000), (True, 0)])
+def test_responses_budget_charges_earlier_reasoning_its_reported_tokens(
+    tmp_path: Path,
+    model_id: str,
+    *,
+    own_turn: bool,
+    charged: int,
+) -> None:
+    """A model that renders earlier turns' reasoning holds it in context; the running turn's is sized mid-turn."""
+    adapter = responses_adapter(tmp_path, model_id, store=False)
+    reasoned = _reasoned_answer("gAAAA", reasoning_tokens=20_000, own_turn=own_turn)
+    unreasoned = _reasoned_answer("gAAAA", own_turn=own_turn)
+    assert any(item.get("type") == "reasoning" for item in _replayed_input(adapter, reasoned))
+    tokens = adapter.estimate_portable_replay_tokens(reasoned) - adapter.estimate_portable_replay_tokens(unreasoned)
+    assert tokens == charged
+
+
 def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments(tmp_path: Path) -> None:
     """Only typed Responses image input is discounted, never similar-looking text."""
     literal = "data:image/png;base64," + "aGVsbG8=" * 1000
@@ -480,12 +534,14 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> 
         scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
+        replay_estimator=None,
     )
     with_summary = estimate_prompt_visible_history_tokens(
         session=_session("session", runs=runs, summary=ScopeSummary(text="S" * 400, updated_at=datetime.now(UTC))),
         scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
+        replay_estimator=None,
     )
 
     assert with_summary == without_summary
@@ -542,12 +598,13 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         session=session,
         scope=_SCOPE,
         history_settings=inputs.history_settings,
-        replay_model=adapter,
+        replay_estimator=adapter,
     )
     canonical_estimate = estimate_prompt_visible_history_tokens(
         session=session,
         scope=_SCOPE,
         history_settings=inputs.history_settings,
+        replay_estimator=None,
     )
 
     prepared = await prepare_scope_history(
@@ -558,8 +615,15 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         config=config,
         scope_context=ScopeSessionContext(scope=_SCOPE, storage=storage, session=session, session_id="session-1"),
         allow_native_compaction=False,
+        compaction_lifecycle=None,
+        pipeline_timing=None,
     )
-    final = finalize_history_preparation(prepared_scope_history=prepared, config=config, static_prompt_tokens=0)
+    final = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=0,
+        pipeline_timing=None,
+    )
 
     assert route_estimate > canonical_estimate
     assert prepared.compaction_decision.current_history_tokens == route_estimate

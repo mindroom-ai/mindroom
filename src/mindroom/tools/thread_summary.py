@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     icon="MessageCircleMore",
     icon_color="text-cyan-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_summary",
     function_names=("set_thread_summary",),
 )
 def register_thread_summary_tools() -> type[ThreadSummaryTools]:

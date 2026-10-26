@@ -150,7 +150,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://core.telegram.org/bots/api",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#telegram",
     function_names=(
         "delete_message",
         "edit_message",

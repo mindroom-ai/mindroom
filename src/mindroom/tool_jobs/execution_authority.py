@@ -28,17 +28,21 @@ if TYPE_CHECKING:
 class JobTool:
     """One function a MindRoom-assembled toolkit offers an actor, with the evidence its grant is checked against.
 
-    ``function`` is what the toolkit's configured entry offers, which names the call and says whether it stops the
-    model step; the function the loop calls and a job runs is the call's own, which can differ, as the CLI shell
-    window's does. ``toolkit_name`` is the authored toolkit, ``toolkit`` the concrete toolkit built for the actor,
-    and ``authority`` the actor's execution scope and file access with the toolkit's construction, as they were
-    when the actor was built.
+    ``function`` is what the toolkit's configured entry offers, which names the call, its authored toolkit, and
+    whether it stops the model step; the function the loop calls and a job runs is the call's own, which can differ,
+    as the CLI shell window's does. ``toolkit`` is the concrete toolkit built for the actor, and ``authority`` the
+    actor's execution scope and file access with the toolkit's construction, as they were when the actor was built.
     """
 
     function: ToolFunction
-    toolkit_name: str
     toolkit: Toolkit
     authority: Mapping[str, Any]
+
+    @property
+    def toolkit_name(self) -> str:
+        """Return the authored toolkit the actor is offered the function from."""
+        assert self.function.toolkit is not None, "a job tool is a function of a configured toolkit"
+        return self.function.toolkit
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -81,7 +85,7 @@ def authorized_tool_call(owner: ToolExecutionIdentity, call: JobCall) -> Iterato
 
 @contextmanager
 def enclosing_grant() -> Iterator[None]:
-    """Run a call without a grant of its own, such as a function the framework generated, inside owned work.
+    """Run a call without a grant of its own, such as a function MindRoom adds beside its assembled toolkits, inside owned work.
 
     It runs under its enclosing call's grant, which is then checked with that call's own arguments; a call with a
     grant of its own is bound by ``authorized_tool_call`` where it is admitted.

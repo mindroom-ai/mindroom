@@ -101,7 +101,7 @@ def test_history_settings_resolution() -> None:
 def test_compaction_resolution() -> None:
     config = _representative_config()
 
-    merged = config.resolve_entity("overriding_agent").compaction_config
+    merged = config.resolve_entity("overriding_agent").history_settings.compaction_config
     assert merged.enabled is True
     assert merged.threshold_tokens is None
     assert merged.threshold_percent == 0.6
@@ -110,13 +110,13 @@ def test_compaction_resolution() -> None:
     assert merged.model == "summary-model"
     assert merged.timeout_seconds == 75.0
 
-    disabled = config.resolve_entity("overriding_team").compaction_config
+    disabled = config.resolve_entity("overriding_team").history_settings.compaction_config
     assert disabled.enabled is False
     assert disabled.threshold_tokens == 12_000
     assert disabled.timeout_seconds == 420.0
 
     for inheriting_scope in ("inheriting_agent", "inheriting_team", None):
-        inherited = config.resolve_entity(inheriting_scope).compaction_config
+        inherited = config.resolve_entity(inheriting_scope).history_settings.compaction_config
         assert inherited == CompactionConfig(
             enabled=False,
             threshold_tokens=12_000,
@@ -125,7 +125,8 @@ def test_compaction_resolution() -> None:
             model="summary-model",
             timeout_seconds=420.0,
         )
-        assert config.resolve_entity(inheriting_scope).has_authored_compaction_config is True
+    for scope in ("overriding_agent", "overriding_team", "inheriting_agent", "inheriting_team", None):
+        assert config.resolve_entity(scope).history_settings.has_authored_compaction_config is True
 
 
 def test_memory_resolution() -> None:
@@ -198,13 +199,21 @@ def test_knowledge_resolution() -> None:
 
 def test_unauthored_compaction_reports_not_authored() -> None:
     config = Config(
-        agents={"plain_agent": AgentConfig(display_name="Plain Agent")},
+        agents={
+            "plain_agent": AgentConfig(display_name="Plain Agent"),
+            "compacting_agent": AgentConfig(
+                display_name="Compacting Agent",
+                compaction=CompactionOverrideConfig(enabled=True),
+            ),
+        },
         defaults=DefaultsConfig(tools=[], compaction=None),
         models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
-    assert config.resolve_entity("plain_agent").has_authored_compaction_config is False
-    assert config.resolve_entity(None).has_authored_compaction_config is False
+    assert [
+        config.resolve_entity(scope).history_settings.has_authored_compaction_config
+        for scope in ("plain_agent", "compacting_agent", None)
+    ] == [False, True, False]
 
 
 def test_resolve_entity_returns_a_fresh_view_per_call() -> None:
@@ -232,10 +241,6 @@ def test_unknown_entity_raises_on_field_access() -> None:
 
     with pytest.raises(ValueError, match="Unknown entity: missing"):
         _ = view.history_settings
-    with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = view.compaction_config
-    with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = view.has_authored_compaction_config
     with pytest.raises(ValueError, match="Unknown entity: missing"):
         _ = view.model_name
 

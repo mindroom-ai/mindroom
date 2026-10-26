@@ -28,6 +28,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_target,
 )
+from tests.conftest import call_proxy_sync_for_test
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -187,7 +188,7 @@ def _call(
     credentials_manager: CredentialsManager,
     execution_env: dict[str, str] | None = None,
 ) -> None:
-    sandbox_proxy_module._call_proxy_sync(
+    call_proxy_sync_for_test(
         runtime_paths=runtime_paths,
         tool_name=tool_name,
         function_name="run",

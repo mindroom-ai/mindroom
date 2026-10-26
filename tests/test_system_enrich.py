@@ -49,6 +49,7 @@ from tests.conftest import (
     make_turn_context,
     message_origin,
     patch_response_runner_module,
+    process_and_respond_for_test,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -354,6 +355,8 @@ def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedEx
         config=config,
         runtime_paths=runtime_paths_for(config),
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     assert members.failed_agent_names == []
     return members
@@ -369,6 +372,7 @@ def _built_team(config: Config, members: ResolvedExactTeamMembers, *, system_enr
         execution_identity=None,
         model_name="default",
         configured_team_name=None,
+        timezone="UTC",
         system_enrichment=system_enrichment,
     )
 
@@ -389,8 +393,9 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     built = _built_team(config, _team_members(config, monkeypatch), system_enrichment=rendered)
     spec = built.spec
 
-    assert spec.system_message is not None
-    assert rendered.strip() in str(spec.system_message.content)
+    leader_system = spec.leader.system_message
+    assert leader_system is not None
+    assert rendered.strip() in str(leader_system.content)
     member_systems = [member.spec.system_message for member in spec.members]
     assert all(message is not None and rendered.strip() in str(message.content) for message in member_systems)
     prepared = await prepare_materialized_team_execution(
@@ -418,7 +423,7 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     [transient] = prepared.turn.transient
     assert transient.add_to_agent_memory is False
     assert "Current location" in str(transient.content)
-    assert "Current location" not in str(spec.system_message.content)
+    assert "Current location" not in str(leader_system.content)
 
 
 @pytest.mark.asyncio
@@ -479,7 +484,8 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ),
     ):
-        generation = await bot._response_runner._process_and_respond(
+        generation = await process_and_respond_for_test(
+            bot._response_runner,
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$event",),
@@ -553,7 +559,7 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         ),
     ):
         async with response_span(runner, request):
-            generation = await runner._process_and_respond_streaming(request)
+            generation = await process_and_respond_for_test(runner, request, streaming=True)
 
     assert generation.delivery.event_id == "$response"
     assert generation.delivery.response_text == "stream chunk"

@@ -17,13 +17,15 @@ from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request, scope_history_messages
 from mindroom.history.summary_input import build_summary_input, messages_for_runs
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.schema import TableNames
 from mindroom.skill_learning.transcript import conversation_messages
+from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.agent_loop.helpers import collect, context, gated, spec
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.history_helpers import replay_settings
 from tests.session_storage.agno_layout import SESSION_ID, converted_store
 
 if TYPE_CHECKING:
@@ -165,7 +167,7 @@ def _compacted_run(tmp_path: Path) -> RunRecord:
 
 
 def test_compaction_reads_stored_calls_as_a_request_replays_them(tmp_path: Path) -> None:
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=2)
+    settings = replay_settings(max_tool_calls_from_history=2)
     run = _compacted_run(tmp_path)
     stored = copy.deepcopy(run.messages)
 
@@ -177,13 +179,14 @@ def test_compaction_reads_stored_calls_as_a_request_replays_them(tmp_path: Path)
 
 
 def test_the_summary_input_leaves_out_placeholders_and_their_results(tmp_path: Path) -> None:
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
 
     text, included = build_summary_input(
         previous_summary=None,
         compacted_runs=[_compacted_run(tmp_path)],
         max_input_tokens=100_000,
         history_settings=settings,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert len(included) == 1

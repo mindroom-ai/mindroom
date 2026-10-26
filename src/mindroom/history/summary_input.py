@@ -17,7 +17,7 @@ from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_f
 from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
 from mindroom.history.request_messages import filter_tool_calls, replayable_messages
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
+from mindroom.token_budget import stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 
 if TYPE_CHECKING:
@@ -66,7 +66,7 @@ def build_summary_input(
     compacted_runs: Sequence[AnyRunRecord],
     max_input_tokens: int,
     history_settings: ResolvedHistorySettings,
-    token_estimator: Callable[[str], int] = estimate_compaction_input_tokens,
+    token_estimator: Callable[[str], int],
 ) -> tuple[str, list[AnyRunRecord]]:
     """Fit prior summary and ordered runs into one serialized summary request."""
     summary_block = _previous_summary_block(previous_summary)
@@ -285,6 +285,9 @@ def _message_open_tag(message: Message) -> str:
         attrs.append(f'tool_call_id="{escape(message.tool_call_id, quote=True)}"')
     if message.role == "tool" and message.tool_name:
         attrs.append(f'tool_name="{escape(message.tool_name, quote=True)}"')
+    if message.tool_call_error:
+        # A failed call's error text reads like any result, so the summary would record it as one.
+        attrs.append('error="true"')
     return f"<message {' '.join(attrs)}>"
 
 

@@ -261,7 +261,7 @@ def test_spend_charges_team_members_and_helpers_to_the_requester(
     assert snapshot.spend_usd == {ALICE: pytest.approx(3.0 + 3.0 + 0.2)}
 
 
-def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> None:
+def test_spend_prices_usage_recorded_through_session_storage(tmp_path: Path) -> None:
     """Usage written by real session storage must match the price table's model identities."""
     config = _config()
     paths = _paths(tmp_path)

@@ -28,7 +28,7 @@ from mindroom.model_defaults import (
 )
 from mindroom.providers.credentials import uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, provider_failure
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_keys
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
@@ -60,14 +60,20 @@ from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    import httpx
+    import httpx2
     from openai import AsyncOpenAI
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["ENDPOINT_VARIABLES", "OPENAI_FAMILY_PROVIDERS", "ProviderRuntime", "build_provider"]
+__all__ = [
+    "ENDPOINT_VARIABLES",
+    "OPENAI_FAMILY_PROVIDERS",
+    "ProviderRuntime",
+    "accepted_extra_kwargs",
+    "build_provider",
+]
 
 logger = get_logger(__name__)
 
@@ -167,6 +173,8 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
 ENDPOINT_VARIABLES = {key: route.base_url_variable for key, route in _CHAT_ROUTES.items() if route.base_url_variable}
 # Every route this module builds, as ``provider_route`` names it.
 OPENAI_FAMILY_PROVIDERS = frozenset(_CHAT_ROUTES) | {"codex"}
+# The ``extra_kwargs`` keys each Responses route accepts.
+_RESPONSES_ACCEPTED: dict[str, frozenset[str]] = {"openai": RESPONSES_FIELDS, "codex": CODEX_FIELDS}
 _ROUTE_KEY_VARIABLES = frozenset({"azure", "zai"})
 # Providers whose models authenticate without the shared key.
 _NO_SHARED_KEY = frozenset({"llama_cpp", "kimi"})
@@ -184,7 +192,7 @@ class ProviderRuntime:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
     codex_default_instructions: str
-    http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
+    http_client: httpx2.AsyncClient = MODEL_HTTP_CLIENT
 
 
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
@@ -232,7 +240,7 @@ def _client_options(
 def _sdk_client_kwargs(
     configured: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> dict[str, Any]:
     """Return SDK client keywords: the configured values that are set, with ``client_params`` merged over them.
 
@@ -264,7 +272,7 @@ def _openai_client(
     api_key: str,
     options: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> AsyncOpenAI:
     from openai import AsyncOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
@@ -275,12 +283,12 @@ def _route_base_url(
     route_key: str,
     client_params: Mapping[str, Any] | None,
     base_url: str | None,
-    runtime: ProviderRuntime,
+    runtime_paths: RuntimePaths,
 ) -> str:
     """Return a route's endpoint: the config's, else its endpoint variable's, else its default."""
     route = _CHAT_ROUTES[route_key]
     configured = _authored_base_url(client_params, base_url) or (
-        runtime.runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
+        runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
     )
     # Groq and Cerebras endpoints are hosts, as configs for their SDKs give them; the route appends its API path.
     if route_key == "groq":
@@ -349,26 +357,24 @@ def _chat_client_factory(
         def azure_client() -> AsyncOpenAI:
             from openai import AsyncAzureOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
-            key = api_key or process_env.get(api_key_env)
+            # The SDK refuses a key beside an Entra ID token, so a model signing in with one never reads the variable.
+            key = api_key or (None if alternative_auth else process_env.get(api_key_env))
             if not (key or alternative_auth):
                 msg = (
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     f"{api_key_env} environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
                 raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
-            # TODO(simplify): Azure accepts `timeout` and `max_retries` but leaves them out of its client. Build it from
-            # the shared client options, as the other routes do. Operators who set either would notice.
             azure: dict[str, Any] = {
+                **options,
+                # Azure has no default endpoint, and the SDK rejects an empty base URL beside azure_endpoint.
+                "base_url": base_url or None,
                 "api_key": key,
                 "api_version": settings.api_version or "2024-10-21",
-                "organization": settings.organization,
                 "azure_endpoint": settings.azure_endpoint or process_env.get(AZURE_OPENAI_ENV_BY_KEY["endpoint"]),
                 "azure_deployment": settings.azure_deployment or process_env.get(AZURE_OPENAI_ENV_BY_KEY["deployment"]),
-                "base_url": base_url or None,
                 "azure_ad_token": settings.azure_ad_token,
                 "azure_ad_token_provider": settings.azure_ad_token_provider,
-                "default_headers": settings.default_headers,
-                "default_query": settings.default_query,
             }
             return AsyncAzureOpenAI(**_sdk_client_kwargs(azure, settings, http_client))
 
@@ -425,7 +431,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
     api_key = _configured_key(route_key, model_config, runtime)
     if route_key in {"openrouter", "zai"} and not api_key:
         logger.warning("No API key found in environment or CredentialsManager", provider=route_key)
-    base_url = _route_base_url(route_key, settings.client_params, settings.base_url, runtime)
+    base_url = _route_base_url(route_key, settings.client_params, settings.base_url, runtime.runtime_paths)
     endpoint = (
         (settings.client_params or {}).get("azure_endpoint") or settings.azure_endpoint or base_url
         if route_key == "azure"
@@ -490,10 +496,8 @@ def _build_responses(
 ) -> ResponsesAdapter:
     extra_kwargs = dict(model_config.extra_kwargs or {})
     model_id = model_config.id
-    accepted = RESPONSES_FIELDS
     if route_key == "codex":
         model_id = normalize_codex_model_id(model_id)
-        accepted = CODEX_FIELDS
         _with_agent_cache_key(extra_kwargs, runtime)
         if runtime.execution_identity is not None:
             extra_kwargs["session_id"] = derive_session_routing_key(
@@ -504,7 +508,7 @@ def _build_responses(
         ResponsesSettings,
         extra_kwargs,
         provider=model_config.provider,
-        accepted=accepted,
+        accepted=_RESPONSES_ACCEPTED[route_key],
     )
     # One storage setting drives both request building and history replay.
     store = (settings.request_params or {}).get("store", settings.store)
@@ -513,7 +517,7 @@ def _build_responses(
         base_url = _authored_base_url(settings.client_params, settings.base_url) or CODEX_BASE_URL
         provider, provider_name = "OpenAI Codex", "OpenAI Codex Responses"
     else:
-        base_url = _route_base_url("openai", settings.client_params, settings.base_url, runtime)
+        base_url = _route_base_url("openai", settings.client_params, settings.base_url, runtime.runtime_paths)
         provider, provider_name = "OpenAI", "OpenAI Responses"
     endpoint = base_url.rstrip("/")
     identity = ModelIdentity(id=model_id, provider=provider, provider_name=provider_name, endpoint=endpoint)
@@ -522,12 +526,7 @@ def _build_responses(
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
-        # TODO(simplify): a store-false route, Codex's default, sends no previous_response_id yet claims to continue
-        # stored responses, so its receipt becomes a system message after the last response instead of joining the
-        # prompt. Derive this from `store is not False`. Models on store-false routes would see the receipt move.
-        continues_stored_responses=True,
         provider_default_sampling=_provider_default_sampling(model_id),
-        streams_only=route_key == "codex",
     )
     wire = ResponsesWire(
         route=route_key,
@@ -564,11 +563,36 @@ def _build_responses(
     return ResponsesAdapter(identity=identity, capabilities=capabilities, wire=wire, settings=settings, clients=clients)
 
 
+def _responses_route(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Literal["openai", "codex"] | None:
+    """Return the Responses route that serves one OpenAI-family model, or None when Chat Completions serves it.
+
+    ``provider: openai`` uses Responses when ``api: responses`` is set, or when ``api`` is unset and the
+    model and endpoint support native tool search.
+    """
+    route_key = provider_route(model_config.provider)
+    if route_key == "codex":
+        return "codex"
+    if route_key != "openai":
+        return None
+    extra_kwargs = model_config.extra_kwargs or {}
+    base_url = _route_base_url("openai", extra_kwargs.get("client_params"), extra_kwargs.get("base_url"), runtime_paths)
+    if model_config.api == "responses" or (
+        model_config.api is None and openai_native_tool_search_supported("openai", model_config.id, base_url=base_url)
+    ):
+        return "openai"
+    return None
+
+
+def accepted_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the ``extra_kwargs`` keys the route that serves one OpenAI-family model accepts."""
+    if (responses_route := _responses_route(model_config, runtime_paths)) is not None:
+        return settings_keys(ResponsesSettings, _RESPONSES_ACCEPTED[responses_route])
+    return settings_keys(ChatSettings, _CHAT_ROUTES[provider_route(model_config.provider)].accepted)
+
+
 def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatAdapter | ResponsesAdapter:
     """Return the adapter for one OpenAI-family model config, without the pipeline wrappers.
 
-    ``provider: openai`` uses Responses when ``api: responses`` is set, or when ``api`` is unset and the
-    model and endpoint support native tool search; otherwise Chat Completions.
     The SDK loads here, with the model, so the model's first request does not import it.
     Raises ``ValueError`` for providers outside the family and for ``extra_kwargs`` the route does not accept.
     """
@@ -576,17 +600,9 @@ def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatA
     import openai  # noqa: F401, PLC0415 - keep the SDK out of module import time
 
     route_key = provider_route(model_config.provider)
-    if route_key == "codex":
-        return _build_responses("codex", model_config, runtime)
-    if route_key == "openai":
-        extra_kwargs = model_config.extra_kwargs or {}
-        base_url = _route_base_url("openai", extra_kwargs.get("client_params"), extra_kwargs.get("base_url"), runtime)
-        if model_config.api == "responses" or (
-            model_config.api is None
-            and openai_native_tool_search_supported("openai", model_config.id, base_url=base_url)
-        ):
-            return _build_responses("openai", model_config, runtime)
-    if route_key not in _CHAT_ROUTES:
+    if route_key not in OPENAI_FAMILY_PROVIDERS:
         msg = f"Provider {model_config.provider!r} is not an OpenAI-family provider"
         raise ValueError(msg)
+    if (responses_route := _responses_route(model_config, runtime.runtime_paths)) is not None:
+        return _build_responses(responses_route, model_config, runtime)
     return _build_chat(route_key, model_config, runtime)

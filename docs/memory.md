@@ -67,6 +67,7 @@ A `file` member of a team that uses Mem0 does not see that team's memory in its 
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory.
+The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder
 
@@ -372,5 +373,5 @@ Save from the Memory page to write the changes to `config.yaml`.
 
 ## Agno Learning
 
-Agno Learning is retired: configs that still set `learning` or `learning_mode` load with a warning and the values are ignored.
+Agno Learning is retired: a config that sets `learning` or `learning_mode` on an agent or in `defaults` fails validation with `Unknown key`, so remove them.
 Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.

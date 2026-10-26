@@ -3,8 +3,8 @@
 One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request
 fetches its URL-backed media, then builds its SDK client and wire body off the event loop (Bedrock credential
 resolution and attachment encoding block), streams the reply through the SDK's message stream, and parses the
-finished message once. A request with ``stream=False`` is sent as one non-streaming call instead. The only
-state an adapter keeps is the ambient Google credentials a Vertex route discovers once.
+finished message once. The only state an adapter keeps is the ambient Google credentials a Vertex route
+discovers once.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dep
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    import httpx
+    import httpx2
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types.beta import BetaMessage
@@ -200,7 +200,7 @@ class ClaudeProvider:
     capabilities: Capabilities
     route: ClaudeRouteKind
     settings: ClaudeSettings
-    http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
+    http_client: httpx2.AsyncClient = MODEL_HTTP_CLIENT
     google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
     # Claude sizes replayed history canonically.
     replay_estimator: ClassVar[None] = None
@@ -248,8 +248,7 @@ class ClaudeProvider:
         """Send one request and yield its events; the SDK's message stream accumulates the final message.
 
         ``message_start`` and ``message_delta`` report the usage so far, as a partial ``UsageReported``, so a stream
-        that stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
-        streaming and yields its usage and finished turn once the response arrives.
+        that stops early still settles what Anthropic bills.
         """
         started = time.monotonic()
         request = replace(request, messages=await inline_url_media(request.messages, self.http_client))
@@ -257,16 +256,6 @@ class ClaudeProvider:
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
         try:
-            if not request.stream:
-                response = await (
-                    client.beta.messages.create(**kwargs) if prepared.beta else client.messages.create(**kwargs)
-                )
-                # TODO(simplify): A non-streaming reply leaves time_to_first_token unset. Stamp it when the whole
-                # reply arrives, as the other adapters do. Stored run metrics and operators would notice (#3075).
-                usage, completed = self._finished_turn(response, request, prepared, started, None)
-                yield usage
-                yield completed
-                return
             manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
                 async for event in events:
@@ -305,7 +294,6 @@ class ClaudeProvider:
         message = assistant_message_from_response(
             response,
             record_context_management=self.settings.context_management is not None,
-            streamed=request.stream,
         )
         stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)

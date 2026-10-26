@@ -16,11 +16,11 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import (
-    child_execution_identity,
     observe_child_event,
     observe_child_record,
     prepare_child_turn,
 )
+from mindroom.delegation.state import child_execution_identity
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.messages import Message
@@ -407,25 +407,33 @@ async def test_a_direct_delegation_that_fails_hands_over_and_records_its_redacte
 
 
 @pytest.mark.asyncio
-async def test_direct_delegation_records_failure_and_returns_receipt(tmp_path: Path) -> None:
-    """Converting an exception into text without a failed audit record must fail this test."""
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [(RuntimeError("child exploded"), "child exploded"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_direct_delegation_records_failure_and_returns_receipt(
+    tmp_path: Path,
+    error: Exception,
+    reason: str,
+) -> None:
+    """Converting an exception into text without a failed audit record must fail this test.
+
+    An exception without text, such as a bare ``TimeoutError``, reports its type.
+    """
     tools, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
     with (
         tool_runtime_context(context),
-        patch(
-            "mindroom.ai.ai_response",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("child exploded"),
-        ),
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock, side_effect=error),
     ):
         result = await tools.run_subagent(agent_name="child", task="Do the work")
 
     run = _only_run(tmp_path)
     assert run["status"] == "failed"
-    assert run["error"] == "child exploded"
-    assert "Delegation to 'child' failed: child exploded" in result
+    assert run["error"] == reason
+    assert f"Delegation to 'child' failed: {reason}" in result
     assert str(run["record_reference"]) in result
 
 
@@ -518,6 +526,10 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
             runtime_paths=runtime_paths,
             depth=0,
             budget_monitor=None,
+            model=None,
+            agent_mode="standard",
+            previous=None,
+            persona=None,
         )
         result = await run_delegated_child_response(
             child,
@@ -554,6 +566,10 @@ async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> Non
             runtime_paths=runtime_paths,
             depth=0,
             budget_monitor=None,
+            model=None,
+            agent_mode="standard",
+            previous=None,
+            persona=None,
         )
         await run_delegated_child_response(
             child,

@@ -24,10 +24,12 @@ from chromadb.errors import InternalError, NotFoundError
 from mindroom.knowledge.chroma_client import KnowledgeCollection
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.indexing_config import storage_key_for_base
+from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from chromadb.api.client import Client
@@ -40,9 +42,8 @@ logger = get_logger(__name__)
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
 
-#: Source identity every indexed chunk carries, so a collection doubles as an
+#: Source signature every indexed chunk carries beside its ``SOURCE_PATH_KEY``, so a collection doubles as an
 #: index from source path to the vectors and signature that path produced.
-SOURCE_PATH_KEY = "source_path"
 SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 SOURCE_SIZE_KEY = "source_size"
 SOURCE_DIGEST_KEY = "source_digest"
@@ -106,6 +107,16 @@ def candidate_collection_name(space: CollectionSpace) -> str:
 def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCollection:
     """Return a handle on one collection in this base's storage directory; nothing is opened yet."""
     return KnowledgeCollection(path=str(space.storage_path), name=collection_name)
+
+
+def row_count(collection: KnowledgeCollection) -> int:
+    """Return how many rows one existing collection holds."""
+    return collection.collection().count()
+
+
+def readers_drained(space: CollectionSpace) -> AbstractContextManager[None]:
+    """Wait out every native reader of this base's collections, and admit none until released."""
+    return collection_lifetime_lock(space.storage_path, exclusive=True)
 
 
 def _delete_if_present(client: Client, collection_name: str) -> None:
@@ -224,7 +235,7 @@ def delete_source_path_vectors(collection: KnowledgeCollection, relative_paths: 
 def _source_content_hash(source_metadata: Mapping[str, Any]) -> str:
     """Return the hash every row of one file version carries, from the file's identity and signature.
 
-    The input is the sorted metadata JSON, a colon, and the path, the order Agno's content hash used.
+    The input is the sorted metadata JSON, a colon, and the path, which rows indexed by earlier releases hashed too.
     """
     return hashlib.sha256(
         ":".join([json.dumps(source_metadata, sort_keys=True), source_metadata[SOURCE_PATH_KEY]]).encode(),

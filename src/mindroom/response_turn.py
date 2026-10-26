@@ -119,13 +119,7 @@ def apply_exact_approval_decisions(
 ) -> list[RunRequirement]:
     """Apply decisions only when they exactly identify one persisted call each."""
     pending = [requirement for requirement in requirements if requirement.needs_confirmation]
-    call_ids: list[str] = []
-    for requirement in pending:
-        tool = requirement.tool_execution
-        if not tool.tool_call_id:
-            msg = "Paused tools no longer match the approval continuation"
-            raise RuntimeError(msg)
-        call_ids.append(tool.tool_call_id)
+    call_ids = [requirement.tool_execution.tool_call_id for requirement in pending]
     decision_ids = set(decisions)
     if len(call_ids) != len(set(call_ids)) or set(call_ids) != decision_ids or set(denial_reasons) != decision_ids:
         msg = "Paused tools no longer match the approval continuation"
@@ -317,8 +311,9 @@ class ResponseTurnContext:
 
     Built once by the caller that owns the turn, then passed unchanged through
     the entity envelope, its prepare chain, and the turn drivers. For agent
-    turns ``entity_label`` is the configured agent name; team turns refine it
-    to the materialized team label via ``dataclasses.replace``.
+    turns ``entity_label`` is the configured agent name; team turns arrive
+    named by the entity whose bot runs them, whose timezone dates the turn,
+    and refine it to the materialized team label via ``dataclasses.replace``.
     """
 
     entity_label: str
@@ -551,17 +546,18 @@ def paused_attempt_from_response(
         raise RuntimeError(msg)
     delegation = DelegationState.from_metadata(record.metadata)
     if delegation.pending_tools:
+        pending_tools = [ToolExecution.from_dict(tool) for tool in delegation.pending_tools]
         if delegation.pending_child_id is not None:
             # A source that recorded no toolkit leaves its call unowned, as a missing key does.
             toolkit_owners = {
-                (source.child.child_agent_name, str(tool["tool_name"])): source.toolkit_name
-                for tool in delegation.pending_tools
-                if (source := delegation.pending_tool_sources.get(str(tool["tool_call_id"]))) is not None
+                (source.child.child_agent_name, tool.tool_name): source.toolkit_name
+                for tool in pending_tools
+                if (source := delegation.pending_tool_sources.get(tool.tool_call_id)) is not None
                 and source.toolkit_name is not None
             }
         paused = _paused_attempt_from_pause(
             toolkit_owners=toolkit_owners,
-            tools=[ToolExecution.from_dict(tool) for tool in delegation.pending_tools],
+            tools=pending_tools,
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
             session_id=record.session_id,
             run_id=record.run_id,
@@ -594,17 +590,11 @@ def _paused_attempt_from_pause(
 ) -> PausedAttempt | None:
     """Build one restartable pause from a run's paused tools and confirmation requirements."""
     pending_requirements = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
-    if any(not requirement.tool_execution.tool_call_id for requirement in pending_requirements):
-        msg = "Paused approval requirement is missing its exact tool-call ID"
-        raise RuntimeError(msg)
     requirement_call_ids = [requirement.tool_execution.tool_call_id for requirement in pending_requirements]
     if len(requirement_call_ids) != len(set(requirement_call_ids)):
         msg = "Paused approval requirements contain duplicate tool-call IDs"
         raise RuntimeError(msg)
     pending_tools = [tool for tool in tools if tool.requires_confirmation and tool.confirmed is None]
-    if any(not tool.tool_call_id for tool in pending_tools):
-        msg = "Paused approval tool is missing its exact tool-call ID"
-        raise RuntimeError(msg)
     tool_call_ids = [tool.tool_call_id for tool in pending_tools]
     if len(tool_call_ids) != len(set(tool_call_ids)):
         msg = "Paused approval tools contain duplicate tool-call IDs"
@@ -999,8 +989,9 @@ async def run_blocking_response_turn(
                 continuation = settled
             _raise_continuation_budget_exhausted()
     except asyncio.CancelledError:
-        # Kept as main behaves: a blocking turn records a cancel from the recorder's state,
-        # a streaming turn from the running attempt's partial output.
+        # TODO(simplify): a blocking turn records a cancel from the recorder's state, a streaming turn from the running
+        # attempt's partial output. Build an interrupted turn's record from the loop's terminal record in one place
+        # for both stream modes (#3108). Models would notice previews in replayed stopped turns.
         _record_turn_excluded_fallback(
             ctx,
             adapter,

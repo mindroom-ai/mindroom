@@ -15,13 +15,12 @@ from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
-    ResolvedHistorySettings,
     ScopeSummary,
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from tests.history_helpers import _completed_run, _session
+from tests.history_helpers import _completed_run, _session, replay_settings
 
 _SYSTEM_MESSAGE = Message(role="system", content="You are a careful engineer.\n\nStay concise.")
 _SEARCH_PARAMETERS = {
@@ -133,15 +132,13 @@ def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages()
         ],
     )
     original_snapshots = [message.to_dict() for run in session.runs for message in run.messages]
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=1,
-    )
+    history_settings = replay_settings(max_tool_calls_from_history=1)
 
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
     assert estimated_tokens > 0
@@ -154,7 +151,7 @@ def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt
         Message(role="assistant", content="assistant answer"),
         Message(role="tool", content="tool result"),
     ]
-    history_settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    history_settings = replay_settings()
     contaminated_session = _session(
         "session-1",
         runs=[
@@ -176,14 +173,16 @@ def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt
         session=contaminated_session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     ) == estimate_prompt_visible_history_tokens(
         session=clean_session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
 
-def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
+def test_estimate_prompt_visible_history_tokens_drops_a_tool_result_whose_call_the_message_limit_cut() -> None:
     session = _session(
         "session-1",
         runs=[
@@ -210,22 +209,20 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
             ),
         ],
     )
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="messages", limit=3),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = replay_settings(HistoryPolicy(mode="messages", limit=3))
 
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
     expected_messages = [
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
-    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, replay_model=None)
+    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, replay_estimator=None)
 
 
 def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_removes_all_runs() -> None:
@@ -233,15 +230,13 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
         "session-1",
         summary=ScopeSummary(text="merged summary", updated_at=datetime.now(UTC)),
     )
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="messages", limit=3),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = replay_settings(HistoryPolicy(mode="messages", limit=3))
 
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
     expected_wrapper = str(compaction_summary_message("merged summary", run_local=False).content)

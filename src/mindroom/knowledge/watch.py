@@ -56,6 +56,26 @@ def _ensure_watch_root(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def _skip_unusable_base(base_ids: list[str], exc: OSError | ValueError) -> None:
+    logger.warning("Knowledge source not watched: its path is unusable", base_ids=base_ids, error=str(exc))
+
+
+def _refresh_target_or_none(
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> KnowledgeRefreshTarget | None:
+    """Resolve one base's refresh target, or None when its path is unusable, so other bases still start.
+
+    Worker code can replace a shared base's folder inside its own workspace with a link or a file.
+    """
+    try:
+        return resolve_refresh_target(base_id, config=config, runtime_paths=runtime_paths, create=True)
+    except (OSError, ValueError) as exc:
+        _skip_unusable_base([base_id], exc)
+        return None
+
+
 def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> dict[KnowledgeSourceRoot, _WatchTarget]:
     targets_by_key: dict[KnowledgeSourceRoot, list[str]] = {}
     for base_id in sorted(config.knowledge_bases):
@@ -65,18 +85,19 @@ def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> 
         if config.get_private_knowledge_base_agent(base_id) is not None:
             continue
 
-        refresh_target = resolve_refresh_target(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            create=True,
-        )
+        refresh_target = _refresh_target_or_none(base_id, config, runtime_paths)
+        if refresh_target is None:
+            continue
         targets_by_key.setdefault(source_root_for_refresh_target(refresh_target), []).append(base_id)
 
     targets: dict[KnowledgeSourceRoot, _WatchTarget] = {}
     for key, base_ids in targets_by_key.items():
         path = Path(key.knowledge_path)
-        _ensure_watch_root(path)
+        try:
+            _ensure_watch_root(path)
+        except (OSError, ValueError) as exc:
+            _skip_unusable_base(base_ids, exc)
+            continue
         targets[key] = _WatchTarget(key=key, path=path, base_ids=tuple(base_ids))
     return targets
 
@@ -94,12 +115,9 @@ def _shared_poll_targets(
         if config.get_private_knowledge_base_agent(base_id) is not None:
             continue
 
-        refresh_target = resolve_refresh_target(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            create=True,
-        )
+        refresh_target = _refresh_target_or_none(base_id, config, runtime_paths)
+        if refresh_target is None:
+            continue
         targets[refresh_target] = _PollTarget(
             key=refresh_target,
             base_id=base_id,

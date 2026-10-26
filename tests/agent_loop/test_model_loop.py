@@ -23,9 +23,9 @@ from mindroom.agent_loop.model_loop import (
     SendRequest,
     run_model_loop,
 )
-from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
+from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, PreparedTools
 from mindroom.llm.errors import ProviderError, RateLimited
-from mindroom.llm.events import ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
@@ -68,7 +68,7 @@ async def _run(
         async for event in run_model_loop(
             agent.model,
             messages,
-            prepare_run_tools(agent),
+            PreparedTools(functions=agent.functions),
             record=record,
             run=context(),
             hooks=hooks,
@@ -95,10 +95,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
 
     assert events[0] == ReasoningDelta("hmm")
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
-    assert events[-2:] == [
-        RequestCompleted(usage(12, 3, time_to_first_token=0.25)),
-        LoopEnded(paused=False),
-    ]
+    assert events[-1] == LoopEnded(paused=False)
     assert record.content == "Hello, Alice."
     assert record.status is RunStatus.running  # The run, not the loop, ends the record.
     assert record.tools is None
@@ -123,6 +120,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     }
     assistant = messages[-1]
     assert (assistant.role, assistant.content) == ("assistant", "Hello, Alice.")
+    assert assistant.metrics == usage(12, 3, time_to_first_token=0.25)
     assert assistant.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
     [request] = model.requests
     assert request.messages == tuple(messages[:2])
@@ -150,7 +148,7 @@ async def test_request_settings_come_from_the_template_and_tools_from_the_spec()
         template.deferred_tools,
     )
     assert [tool.name for tool in request.tools] == ["add", "echo"]
-    assert request.tools[0].parameters == prepare_run_tools(spec(model, toolkit(add))).functions["add"].parameters
+    assert request.tools[0].parameters == spec(model, toolkit(add)).functions["add"].parameters
 
 
 async def test_a_stream_that_never_completes_raises_a_provider_error() -> None:
@@ -183,7 +181,6 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
 
     assert _names(events) == [
         "TextDelta",
-        "RequestCompleted",
         "ToolStarted",
         "ToolStarted",
         "ToolCompleted",
@@ -191,7 +188,6 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
         "TextDelta",
         "TextDelta",
         "TextDelta",
-        "RequestCompleted",
         "LoopEnded",
     ]
     started = [event.call for event in events if isinstance(event, ToolStarted)]
@@ -211,7 +207,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 6)
 
 
-async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts() -> None:
+async def test_unknown_tools_and_bad_arguments_answer_the_model_with_error_results() -> None:
     model = ScriptedModel(
         [
             calls(
@@ -225,10 +221,11 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts(
     )
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(add)), messages)
+    with capture_logs() as logs:
+        events, record = await _run(spec(model, toolkit(add)), messages)
 
     tool_messages = [message for message in messages if message.role == "tool"]
-    assert [(m.tool_call_id, m.tool_call_error) for m in tool_messages] == [("c1", None), ("c2", True), ("c3", False)]
+    assert [(m.tool_call_id, m.tool_call_error) for m in tool_messages] == [("c1", True), ("c2", True), ("c3", False)]
     assert tool_messages[0].content == MISSING_TOOL_ERROR_TEXT
     assert "validation error" in str(tool_messages[1].content)
     assert tool_messages[2].content == '{"sum": 7}'
@@ -237,6 +234,8 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts(
     assert record.tools is not None
     assert [tool.tool_call_id for tool in record.tools] == ["c2", "c3"]
     assert model.requests[1].messages[-3:] == tuple(tool_messages)
+    # The run's agent is named on the warning for the tool it was not offered.
+    assert [entry["entity"] for entry in logs if entry["event"] == "tool_not_offered"] == ["code"]
 
 
 async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests() -> None:
@@ -294,8 +293,34 @@ async def test_a_stop_after_tool_call_ends_the_loop_without_another_request() ->
     assert messages[-1].stop_after_tool_call is True
 
 
-async def test_a_batch_that_stops_the_run_skips_the_batch_hooks_as_agno_did() -> None:
-    """No later request reads what a batch hook adds after a stopping batch, so Agno fired none there."""
+async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_its_stop_flag() -> None:
+    """A denied call is answered with its note, marked failed; a stored call that stops the run still stops it."""
+    model = ScriptedModel([answer("never sent")])
+    execution = ToolExecution(tool_call_id="c1", tool_name="echo", tool_args={"text": "switch"}, stop_after_call=True)
+    execution.requires_confirmation = True
+    requirement = RunRequirement(execution)
+    requirement.reject("Alice declined.")
+    record = _record()
+    record.requirements = [requirement]
+    messages = _prompt()
+
+    events, _ = await _run(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
+
+    assert events == [LoopEnded(paused=False)]
+    assert model.requests == []
+    denial = messages[-1]
+    assert (denial.role, denial.tool_call_id, denial.tool_name, denial.tool_args, denial.content) == (
+        "tool",
+        "c1",
+        "echo",
+        {"text": "switch"},
+        "Alice declined.",
+    )
+    assert (denial.tool_call_error, denial.stop_after_tool_call) == (True, True)
+
+
+async def test_a_batch_that_stops_the_run_skips_the_batch_hooks() -> None:
+    """No later request reads what a batch hook adds after a stopping batch, so none fires there."""
     batches: list[list[str | None]] = []
 
     async def after_batch(_messages: list[Message], results: Sequence[Message]) -> None:
@@ -685,12 +710,14 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     assert len(record.metrics.details["model"]) == 1
 
 
-async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagates() -> None:
+@pytest.mark.parametrize("retried", [False, True], ids=["one-attempt", "retried-sum"])
+async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagates(retried: bool) -> None:
     async def throttle() -> None:
         msg = "slow down"
         raise RateLimited(msg, provider="Synthetic")
 
-    model = ScriptedModel([[UsageReported(usage(7, 0), final=False), Await(throttle)]])
+    # After a retry the reports add up the attempts, which the pipeline marks on them.
+    model = ScriptedModel([[UsageReported(usage(7, 0), final=False, sums_attempts=retried), Await(throttle)]])
     messages = _prompt()
     record = _record()
 
@@ -698,6 +725,10 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
         await _run(spec(model), messages, record=record)
 
     assert messages[-1].metrics == usage(7, 0)
+    assert messages[-1].provider_data == {
+        **({AGGREGATE_USAGE_KEY: True} if retried else {}),
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
     assert record.metrics is not None
     assert record.metrics.tokens.input_tokens == 7
 
@@ -737,9 +768,8 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
     )
     messages = _prompt()
 
-    events, record = await _run(spec(model), messages)
+    _, record = await _run(spec(model), messages)
 
-    assert events[-2] == RequestCompleted(usage(1, 1))
     assert record.metrics is not None
     assert record.metrics.details == {
         "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI Chat")],

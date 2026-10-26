@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from mindroom import execution_preparation
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config, ResolvedRuntimeModel
@@ -33,7 +33,6 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import current_entity_id
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
-    _build_unseen_context_messages,
     _fallback_static_token_budget,
     _messages_with_current_prompt,
     _prepare_bound_team_execution_context,
@@ -51,22 +50,32 @@ from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
     PreparedHistoryState,
-    ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
+from mindroom.timestamp_formatting import format_timestamp_ms
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
-from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message
+from tests.conftest import (
+    bind_runtime_paths,
+    build_unseen_context_messages_for_test,
+    make_turn_context,
+    make_visible_message,
+)
 from tests.fakes.scripted_model import ScriptedModel
+from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.history.request_messages import TurnMessages
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.response_turn import ResponseTurnContext
 
 
 def _config() -> Config:
@@ -104,7 +113,63 @@ def _bound_agent_config(tmp_path: Path, *, tools: tuple[str, ...] = ()) -> tuple
 
 def _build(config: Config, runtime_paths: RuntimePaths) -> AgentBuild:
     """Build the test agent as a reply does."""
-    return create_agent("test_agent", config, runtime_paths, execution_identity=None)
+    return create_agent(
+        "test_agent",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
+
+
+async def _prepare_agent_execution_context_for_test(
+    ctx: ResponseTurnContext,
+    **options: Any,  # noqa: ANN401
+) -> _PreparedExecutionContext:
+    """Prepare one agent's execution context through ``prepare_agent_execution_context`` with a plain turn's options.
+
+    ``options`` names the arguments a test sets; the turn's transient context, sender, timestamp, event id, compaction
+    lifecycle, and timing otherwise stay unset, as for a plain prompt with no compat guidance.
+    """
+    turn_options: dict[str, Any] = {
+        "transient_context_messages": (),
+        "compaction_lifecycle": None,
+        "current_sender_id": None,
+        "current_timestamp_ms": None,
+        "current_event_id": None,
+        "current_prompt_is_structured": False,
+        "include_openai_compat_guidance": False,
+        "pipeline_timing": None,
+    }
+    return await prepare_agent_execution_context(ctx, **(turn_options | options))
+
+
+def _build_thread_history_messages_for_test(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    **options: Any,  # noqa: ANN401
+) -> TurnMessages:
+    """Build the fallback thread turn through ``_build_thread_history_messages`` with a plain turn's options.
+
+    ``options`` names the arguments a test sets; the turn's transient context, sender, display names, timestamp, event
+    id, render limits, static budget, and attachment context otherwise stay unset.
+    """
+    turn_options: dict[str, Any] = {
+        "transient_context_messages": (),
+        "current_sender_id": None,
+        "member_display_names": {},
+        "current_timestamp_ms": None,
+        "current_event_id": None,
+        "current_prompt_is_structured": False,
+        "timezone": "UTC",
+        "max_messages": None,
+        "max_message_length": None,
+        "missing_sender_label": None,
+        "static_token_budget": None,
+        "attachment_context": None,
+    }
+    return _build_thread_history_messages(prompt, thread_history, **(turn_options | options))
 
 
 def _tool_trace_content() -> dict[str, object]:
@@ -116,11 +181,11 @@ def _tool_trace_content() -> dict[str, object]:
 
 
 def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="runs", limit=1),
-        max_tool_calls_from_history=None,
-    )
     compaction_config = CompactionConfig(enabled=False, reserve_tokens=100)
+    history_settings = replace(
+        replay_settings(HistoryPolicy(mode="runs", limit=1)),
+        compaction_config=compaction_config,
+    )
     execution_plan = resolve_history_execution_plan(
         config=_config(),
         compaction_config=compaction_config,
@@ -152,8 +217,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         session=session,
         resolved_inputs=HistoryPreparationInputs(
             history_settings=history_settings,
-            compaction_config=compaction_config,
-            has_authored_compaction_config=False,
             active_model_name="test-model",
             active_context_window=10_000,
             execution_plan=execution_plan,
@@ -198,7 +261,7 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
     monkeypatch.setattr(Config, "resolve_runtime_model", resolve_runtime_model)
     monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
 
-    result = await prepare_agent_execution_context(
+    result = await _prepare_agent_execution_context_for_test(
         make_turn_context("test_agent"),
         scope_context=None,
         build=build,
@@ -238,7 +301,7 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
     prepare_common = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
 
-    await prepare_agent_execution_context(
+    await _prepare_agent_execution_context_for_test(
         make_turn_context("test_agent"),
         scope_context=None,
         build=build,
@@ -252,6 +315,48 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
     )
 
     assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 4_000
+
+
+@pytest.mark.asyncio
+async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team thread with no session of its own fills at most the team's replay window, less its reserve."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            "agents": {"test_agent": {"display_name": "Test Agent"}},
+            "defaults": {
+                "tools": [],
+                "compaction": {"enabled": False, "reserve_tokens": 500, "replay_window_tokens": 4_000},
+            },
+            "models": {"default": {"provider": "openai", "id": "test-model", "context_window": 6_000}},
+        },
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+    prepare_common = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
+
+    await _prepare_bound_team_execution_context(
+        make_turn_context("test_agent"),
+        scope_context=None,
+        member_names=["test_agent"],
+        leader_system_message=Message(role="system", content="You lead the team."),
+        leader_tools=(),
+        model=ScriptedModel([]),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        timezone="UTC",
+        team_name=None,
+        history_settings=config.resolve_entity(None).history_settings,
+        active_model_name="default",
+        active_context_window=6_000,
+    )
+
+    assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 3_500
 
 
 @pytest.mark.asyncio
@@ -280,9 +385,9 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -334,9 +439,9 @@ async def test_interactive_selection_keeps_context_after_question(
         current_sender_id="@alice:localhost",
         current_event_id="$question",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -457,9 +562,9 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -500,9 +605,9 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -539,9 +644,9 @@ async def test_scheduled_history_limit_ignores_events_after_current() -> None:
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -572,9 +677,9 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -632,9 +737,9 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
         response_sender_id="@mindroom_general:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
-        render_messages_text_fn=render_prepared_messages_text,
         fallback_static_token_budget=100,
     )
 
@@ -642,6 +747,38 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
     assert all(body in str(message.content) for body, message in zip(expected_context, prepared.turn.context))
     assert "Poll the deployment queue" in str(prepared.turn.prompt.content)
     assert all("Automated Task" not in str(message.content) for message in prepared.turn.context)
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_context_sizes_history_against_the_model_the_turn_runs_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History budgets come from the turn's own model and window, not from the agent's configured default."""
+    config, runtime_paths = _bound_agent_config(tmp_path, tools=())
+    build = _build(config, runtime_paths)
+    prepare_scope_history = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+
+    await _prepare_agent_execution_context_for_test(
+        make_turn_context("test_agent"),
+        scope_context=None,
+        build=build,
+        system_message=prompt_for_turn(build),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=ResolvedRuntimeModel(model_name="large", context_window=48_000),
+    )
+
+    resolved_inputs = prepare_scope_history.await_args.kwargs["resolved_inputs"]
+    assert (resolved_inputs.active_model_name, resolved_inputs.active_context_window) == ("large", 48_000)
 
 
 @pytest.mark.asyncio
@@ -661,7 +798,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
         lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
     )
 
-    prepared = await prepare_agent_execution_context(
+    prepared = await _prepare_agent_execution_context_for_test(
         make_turn_context(
             "test_agent",
             room_id="!room:localhost",
@@ -680,9 +817,10 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
         runtime_paths=runtime_paths,
         config=config,
         current_sender_id="@alice:localhost",
+        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
     )
 
-    tools = prepare_run_tools(build.spec).specs()
+    tools = PreparedTools(functions=build.spec.functions).specs()
     assert tools
     estimator = build_static_token_estimator(system_message, tools, build.request_template.deferred_tools.names)
     assert prepared.prepared_history.prepared_context_tokens == estimator.estimate(
@@ -704,7 +842,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     """Team history sized from the previous request takes off only the static estimate's system prompt and tools."""
     config, runtime_paths = _bound_agent_config(tmp_path)
     leader_system_message = Message(role="system", content="You lead the team.")
-    leader_tools = prepare_run_tools(_build(config, runtime_paths).spec).specs()
+    leader_tools = PreparedTools(functions=_build(config, runtime_paths).spec.functions).specs()
     prepare_bound_scope_history = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", prepare_bound_scope_history)
     monkeypatch.setattr(
@@ -724,6 +862,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         thread_history=None,
         runtime_paths=runtime_paths,
         config=config,
+        timezone="UTC",
         team_name=None,
         history_settings=config.resolve_entity(None).history_settings,
         active_model_name=None,
@@ -733,6 +872,63 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     kwargs = prepare_bound_scope_history.await_args.kwargs
     estimator = build_static_token_estimator(leader_system_message, leader_tools, frozenset())
     assert kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replays_persisted_history", [True, False])
+async def test_bound_team_execution_context_estimates_the_messages_as_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replays_persisted_history: bool,
+) -> None:
+    """A team turn's history is sized by the messages the leader receives, as an agent turn's is."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    leader_system_message = Message(role="system", content="You lead the team.")
+    monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", AsyncMock(return_value=MagicMock()))
+    static_prompt_tokens: list[object] = []
+
+    def finalize_history_preparation(**kwargs: object) -> PreparedHistoryState:
+        static_prompt_tokens.append(kwargs["static_prompt_tokens"])
+        return PreparedHistoryState(replays_persisted_history=replays_persisted_history, native_history=None)
+
+    monkeypatch.setattr(execution_preparation, "finalize_history_preparation", finalize_history_preparation)
+    team_id = "@mindroom_team:localhost"
+
+    prepared = await _prepare_bound_team_execution_context(
+        make_turn_context(
+            "test_agent",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            reply_to_event_id="$current",
+            active_event_ids=frozenset(),
+        ),
+        scope_context=None,
+        member_names=["test_agent"],
+        leader_system_message=leader_system_message,
+        leader_tools=(),
+        model=ScriptedModel([]),
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="Earlier question", event_id="$older"),
+            make_visible_message(sender=team_id, body="Earlier team answer", event_id="$answer"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        runtime_paths=runtime_paths,
+        config=config,
+        timezone="UTC",
+        team_name=None,
+        history_settings=config.resolve_entity(None).history_settings,
+        active_model_name=None,
+        active_context_window=None,
+        response_sender_id=team_id,
+        current_sender_id="@alice:localhost",
+    )
+
+    assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
+    estimator = build_static_token_estimator(leader_system_message, (), frozenset())
+    # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
+    sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
+    assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))
 
 
 @pytest.mark.asyncio
@@ -752,7 +948,7 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
     )
 
     build = _build(config, runtime_paths)
-    prepared = await prepare_agent_execution_context(
+    prepared = await _prepare_agent_execution_context_for_test(
         make_turn_context(
             "test_agent",
             room_id="!room:localhost",
@@ -794,6 +990,7 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
         runtime_paths=runtime_paths,
         config=config,
         current_sender_id="@alice:localhost",
+        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
     )
 
     assert [message.content for message in prepared.turn.context] == [
@@ -805,10 +1002,88 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
     assert all(agent_id not in str(message.content) for message in prepared.turn.context)
 
 
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_context_names_the_current_prompts_sender_event_and_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The current prompt carries the sender, event id, and timestamp the turn hands in."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+
+    build = _build(config, runtime_paths)
+    prepared = await _prepare_agent_execution_context_for_test(
+        make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
+        scope_context=None,
+        build=build,
+        system_message=prompt_for_turn(build),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
+        current_sender_id="@alice:localhost",
+        current_event_id="$current",
+        current_timestamp_ms=1_700_000_000_000,
+    )
+
+    assert prepared.turn.prompt.content == config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO") + render_msg_tag(
+        sender="@alice:localhost",
+        body="Current request",
+        event_id="$current",
+        ts=format_timestamp_ms(1_700_000_000_000, timezone=config.timezone),
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_message_time_is_rendered_in_the_responding_agents_timezone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent with its own timezone sees the current message's time in that zone, not the global one."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    config.timezone = "UTC"
+    config.agents["test_agent"].timezone = "America/Los_Angeles"
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+
+    build = _build(config, runtime_paths)
+    prepared = await _prepare_agent_execution_context_for_test(
+        make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
+        scope_context=None,
+        build=build,
+        system_message=prompt_for_turn(build),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
+        current_sender_id="@alice:localhost",
+        current_event_id="$current",
+        current_timestamp_ms=1_774_018_800_000,
+    )
+
+    assert prepared.turn.prompt.content == config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO") + render_msg_tag(
+        sender="@alice:localhost",
+        body="Current request",
+        event_id="$current",
+        ts="2026-03-20 08:00 PDT",
+    )
+
+
 def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> None:
     """Oversized Matrix fallback messages should stay in context with a capped body."""
     long_body = "x" * 201
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -820,6 +1095,7 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         max_message_length=200,
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -845,14 +1121,13 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
         return len(text.split())
 
     budget = 20
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         history,
         response_sender_id="@mindroom_code:localhost",
         config=config,
         static_token_budget=budget,
         estimate_static_tokens_fn=estimate,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     kept = [message.content for message in messages[1:-1]]
@@ -869,14 +1144,13 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
     assert messages[-1].content == "Current request"
     assert estimate(render_prepared_messages_text(messages)) <= budget
 
-    untrimmed = _build_thread_history_messages(
+    untrimmed = _build_thread_history_messages_for_test(
         "Current request",
         history,
         response_sender_id="@mindroom_code:localhost",
         config=config,
         static_token_budget=1_000,
         estimate_static_tokens_fn=estimate,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
     assert len(untrimmed) == len(history) + 1
     assert untrimmed[0].content == render_msg_tag(sender="@alice:localhost", body="message 1", event_id="$m1")
@@ -893,21 +1167,21 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
         return len(text.split())
 
     full_text = render_prepared_messages_text(
-        _build_thread_history_messages(
+        _build_thread_history_messages_for_test(
             "Current request",
             history,
             response_sender_id="@mindroom_code:localhost",
             config=_config(),
+            estimate_static_tokens_fn=estimate_text_tokens,
         ).in_request_order(),
     )
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         history,
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
         static_token_budget=estimate(full_text),
         estimate_static_tokens_fn=estimate,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [message.content for message in messages[:-1]] == [
@@ -924,14 +1198,13 @@ def test_fallback_thread_history_marks_history_dropped_entirely() -> None:
     def estimate(text: str) -> int:
         return len(text.split())
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         history,
         response_sender_id="@mindroom_code:localhost",
         config=config,
         static_token_budget=30,
         estimate_static_tokens_fn=estimate,
-        render_messages_text_fn=render_prepared_messages_text,
     ).in_request_order()
 
     assert [message.content for message in messages] == [
@@ -942,7 +1215,7 @@ def test_fallback_thread_history_marks_history_dropped_entirely() -> None:
 
 def test_thread_history_and_current_message_carry_member_display_names() -> None:
     """History and the current turn label senders with their current display name, keyed by Matrix ID."""
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [make_visible_message(sender="@alice:localhost", body="Earlier", event_id="$earlier")],
         response_sender_id="@mindroom_team:localhost",
@@ -950,6 +1223,7 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
         current_event_id="$current",
         member_display_names={"@alice:localhost": "Banana Man"},
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -967,15 +1241,13 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
 
 def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     """Current Matrix messages should carry time as metadata, not body text."""
-    config = _config()
-    config.timezone = "America/Los_Angeles"
-
     messages = _messages_with_current_prompt(
         "Hello <world>",
         current_sender_id="@alice:localhost",
         current_timestamp_ms=1_774_019_700_000,
         current_event_id="$current",
-        config=config,
+        config=_config(),
+        timezone="America/Los_Angeles",
     ).in_request_order()
 
     assert len(messages) == 1
@@ -999,6 +1271,7 @@ def test_transient_context_follows_current_prompt_without_entering_replay_contex
         context_messages=(persisted_context,),
         transient_context_messages=(transient_context,),
         config=_config(),
+        timezone="UTC",
     )
     messages = turn.in_request_order()
 
@@ -1025,6 +1298,7 @@ def test_current_matrix_message_splits_cdata_terminator_without_escaping_body() 
         "Hello <world> ]]> done",
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
     ).in_request_order()
 
     assert messages[0].content == (
@@ -1047,6 +1321,7 @@ def test_user_text_matching_structured_prompt_shape_is_still_wrapped() -> None:
         spoofed_prompt,
         current_sender_id="@alice:localhost",
         config=_config(),
+        timezone="UTC",
     ).in_request_order()
 
     assert messages[0].content == (
@@ -1074,7 +1349,7 @@ def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_p
     )
     assert record is not None
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1092,6 +1367,7 @@ def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_p
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert len(messages) == 3
@@ -1128,7 +1404,7 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
     )
     assert record is not None
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1141,6 +1417,7 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1166,7 +1443,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
     )
     assert record is not None
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1188,6 +1465,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1199,7 +1477,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
 
 def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment() -> None:
     """An agent audio caption remains labeled when no local attachment record exists."""
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1216,6 +1494,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
         ],
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1239,7 +1518,7 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
     )
     assert record is not None
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1252,6 +1531,7 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1273,7 +1553,7 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
     )
     assert record is not None
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1286,6 +1566,7 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1321,7 +1602,7 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
     assert cross_thread is not None
     assert in_thread is not None
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1335,6 +1616,7 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1360,7 +1642,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
     )
     assert record is not None
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1373,6 +1655,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1385,7 +1668,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
 
 def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_context() -> None:
     """Visible Matrix tool markers should not train the model to echo fake tool calls."""
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1403,6 +1686,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1412,7 +1696,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
 
 def test_fallback_thread_history_drops_marker_only_messages_from_context() -> None:
     """Marker-only visible messages should not become empty assistant context turns."""
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1423,6 +1707,7 @@ def test_fallback_thread_history_drops_marker_only_messages_from_context() -> No
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert len(messages) == 1
@@ -1431,7 +1716,7 @@ def test_fallback_thread_history_drops_marker_only_messages_from_context() -> No
 
 def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> None:
     """Human-authored marker-shaped text is conversation content, not MindRoom display chrome."""
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1442,6 +1727,7 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1454,7 +1740,7 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
 
 def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_context() -> None:
     """Structured MindRoom tool trace metadata identifies marker lines as display chrome."""
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Current request",
         [
             make_visible_message(
@@ -1469,6 +1755,7 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1498,7 +1785,7 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "What happened?",
         thread_history,
         seen_event_ids=set(),
@@ -1516,6 +1803,37 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         sender="@alice:localhost",
         body="@mindroom_missing_agent Please investigate this",
         event_id="$spawn-root",
+    )
+
+
+@pytest.mark.parametrize("relayed_sender", ["You (interrupted reply draft)", "You (partial reply)"])
+def test_unseen_context_names_a_relayed_sender_that_reads_like_a_draft_label_as_written(relayed_sender: str) -> None:
+    """A relayed sender named like a draft label keeps that name instead of rendering under the agent's account."""
+    thread_history = [
+        make_visible_message(
+            sender="@mindroom_code:localhost",
+            body="Relayed text",
+            event_id="$relayed",
+            content={"body": "Relayed text", ORIGINAL_SENDER_KEY: relayed_sender},
+        ),
+        make_visible_message(sender="@alice:localhost", body="What happened?", event_id="$question"),
+    ]
+
+    turn, _unseen_event_ids = build_unseen_context_messages_for_test(
+        "What happened?",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$question",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert turn.in_request_order()[0].content == render_msg_tag(
+        sender=relayed_sender,
+        body="Relayed text",
+        event_id="$relayed",
     )
 
 
@@ -1542,7 +1860,7 @@ def test_unseen_context_stops_at_current_thread_event() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "Current message",
         thread_history,
         seen_event_ids=set(),
@@ -1580,7 +1898,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "What happened?",
         thread_history,
         seen_event_ids=set(),
@@ -1612,7 +1930,7 @@ def test_unseen_context_keeps_other_agent_message_tagged() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "What did the agents find?",
         thread_history,
         seen_event_ids=set(),
@@ -1648,7 +1966,7 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
         ),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "What next?",
         thread_history,
         seen_event_ids={"$answer"},
@@ -1705,7 +2023,7 @@ def test_unseen_context_never_presents_own_hook_output_as_assistant_turns(source
         make_visible_message(sender="@alice:localhost", body="Status?", event_id="$question"),
     ]
 
-    turn, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = build_unseen_context_messages_for_test(
         "Status?",
         thread_history,
         seen_event_ids={"$ask", "$answer"},
@@ -1733,11 +2051,12 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
         content={"body": "Started a deep_research job."},
     )
 
-    messages = _build_thread_history_messages(
+    messages = _build_thread_history_messages_for_test(
         "Status?",
         [reply, _hook_message("deep_research done · confident · 2 rounds", "$done")],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
+        estimate_static_tokens_fn=estimate_text_tokens,
     ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [
@@ -1763,7 +2082,7 @@ def test_unseen_context_labels_relayed_hook_prompt_under_its_requester() -> None
         make_visible_message(sender="@alice:localhost", body="Thanks", event_id="$question"),
     ]
 
-    turn, _ = _build_unseen_context_messages(
+    turn, _ = build_unseen_context_messages_for_test(
         "Thanks",
         thread_history,
         seen_event_ids=set(),

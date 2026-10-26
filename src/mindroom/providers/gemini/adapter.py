@@ -28,8 +28,9 @@ from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFI
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.credentials import uses_alternative_auth
 from mindroom.providers.errors import classify_provider_error, provider_failure
-from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
+from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.gemini.wire import (
     GeminiReply,
     MediaRoute,
@@ -45,7 +46,7 @@ from mindroom.providers.gemini.wire import (
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from google.genai import Client
     from google.genai.types import GenerateContentConfig, GenerateContentResponse
@@ -56,39 +57,6 @@ if TYPE_CHECKING:
 
 _PROVIDER = "Google"
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class GeminiSettings:
-    """The ``extra_kwargs`` a Gemini model accepts."""
-
-    api_key: str | None = field(default=None, metadata=SECRET)
-    vertexai: bool = False
-    project_id: str | None = None
-    location: str | None = None
-    # A google.auth credentials object; only programmatic callers can supply one.
-    credentials: object | None = field(default=None, metadata=SECRET)
-    client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
-    timeout: float | None = None
-    generation_config: Mapping[str, Any] | None = None
-    generative_model_kwargs: Mapping[str, Any] | None = None
-    safety_settings: Sequence[Any] | None = None
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    max_output_tokens: int | None = None
-    stop_sequences: Sequence[str] | None = None
-    logprobs: bool | None = None
-    presence_penalty: float | None = None
-    frequency_penalty: float | None = None
-    seed: int | None = None
-    cached_content: str | None = None
-    thinking_budget: int | None = None
-    include_thoughts: bool | None = None
-    thinking_level: str | None = None
-    # Google Search grounding, sent in place of the request's function tools, so a grounded model calls no
-    # function; kept as main behaves.
-    search: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -110,7 +78,7 @@ class GeminiProvider:
         return settings_params(self.settings)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
+        """Send one streamed ``generateContent`` request and yield its events.
 
         Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
         """
@@ -120,34 +88,26 @@ class GeminiProvider:
         # Client construction reads credentials from disk; its failures are configuration errors, not transient.
         client = self._sdk_client()
         provider = self.identity.provider_name
-        upload = None if self.vertexai else partial(uploaded_file_uri, client, provider=provider)
+        # The client, which ``client_params`` can switch to Vertex AI, names the route; Vertex AI has no Files API.
+        upload = None if client.vertexai else partial(uploaded_file_uri, client, provider=provider)
         try:
             contents, system_instruction = await format_contents(request.messages, MediaRoute(provider, upload))
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
             call = {"model": self.identity.id, "contents": cast("Any", contents), "config": cast("Any", config or None)}
-            if request.stream:
-                chunks = await client.aio.models.generate_content_stream(**call)
-                async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
-                    async for chunk in responses:
-                        # A chunk without output, such as grounding or code-execution progress, is still activity.
-                        for event in read_chunk(reply, chunk) or [StreamProgress()]:
-                            first_output_at = output_started(first_output_at, event)
-                            yield event
-            else:
-                whole = read_chunk(reply, await client.aio.models.generate_content(**call), whole_response=True)
-                first_output_at = time.monotonic()
-                # A reply that arrives whole yields no deltas; its usage still comes first, so a malformed call
-                # settles it.
-                for event in whole:
-                    if isinstance(event, UsageReported):
+            chunks = await client.aio.models.generate_content_stream(**call)
+            async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
+                async for chunk in responses:
+                    # A chunk without output, such as grounding or code-execution progress, is still activity.
+                    for event in read_chunk(reply, chunk) or [StreamProgress()]:
+                        first_output_at = output_started(first_output_at, event)
                         yield event
         except ProviderError:
             # Media and chunk failures arrive normalized.
             raise
         except Exception as error:
             raise _provider_error(error, provider=provider) from error
-        if request.stream and not reply.finished:
+        if not reply.finished:
             # The stream ended before Gemini ended the reply, so the turn did not finish.
             return
         for event in self._finished_turn(reply, started=started, first_output_at=first_output_at):
@@ -232,7 +192,7 @@ class GeminiProvider:
         if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
             msg = "Participation decisions cannot safely apply Gemini body overrides"
             raise ValueError(msg)
-        return without_tool_selection(config, vertexai=self.vertexai) if config else config
+        return without_tool_selection(config, vertexai=self._sdk_client().vertexai) if config else config
 
     def _sdk_client(self) -> Client:
         if self._client is None:
@@ -294,4 +254,4 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
     )
 
 
-__all__ = ["GeminiProvider", "GeminiSettings", "build_provider"]
+__all__ = ["GeminiProvider", "build_provider"]

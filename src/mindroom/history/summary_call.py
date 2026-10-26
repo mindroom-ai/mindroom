@@ -1,9 +1,9 @@
 """One portable summary call and its bounded retry policy.
 
-The summary request goes through the provider pipeline as one non-streaming call with every retry below this module,
-the SDK's and the pipeline's, and the prompt cache turned off, and thinking off where the route can turn it off, bounded
-by the compaction deadline. This module owns the call's lifecycle, cancellation, complete-output validation, and the
-retry decision chunk execution uses.
+The summary request goes through the provider pipeline as one call with every retry below this module, the SDK's and
+the pipeline's, and the prompt cache turned off, and thinking off where the route can turn it off, bounded by the
+compaction deadline. This module owns the call's lifecycle, cancellation, complete-output validation, and the retry
+decision chunk execution uses.
 """
 
 from __future__ import annotations
@@ -230,13 +230,12 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float,
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None = None,
+    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
 ) -> str:
     """Bound the provider request, then persist returned usage before validating the summary text it returns."""
     provider_done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     request = ModelRequest(
         messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
-        stream=False,
         overrides=_SUMMARY_OVERRIDES,
     )
     response_task = asyncio.create_task(

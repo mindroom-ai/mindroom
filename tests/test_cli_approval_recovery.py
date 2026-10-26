@@ -24,6 +24,7 @@ from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
+from mindroom.agent_cli.delegation import approval_calls_for_cli_pause
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
@@ -36,6 +37,7 @@ from mindroom.approval import execution as approval_execution
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.read_protocol import SearchHit
@@ -64,8 +66,8 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
-from tests.approval_continuation_helpers import approval_continuation, carries_approval_receipt
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
+from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
 from tests.conftest import install_model_providers, stored_session_state, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import store_fold
@@ -80,7 +82,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     shell_cli_owner,
 )
 from tests.response_runner_helpers import _bot
-from tests.test_agent_cli_authority import _runtime_context
+from tests.test_agent_cli_authority import _runtime_context, _turn_context
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -99,17 +101,19 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         supports_native_tool_approval=True,
-        **options,
+        **({"knowledge": None, "active_model_name": None} | options),
     )
 
 
 def _with_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
     """Return ``build`` also offering ``toolkit``, each of its functions authored under its name."""
-    return replace(
-        build,
-        spec=replace(build.spec, toolkits=(*build.spec.toolkits, toolkit)),
-        tool_owners={**build.tool_owners, **{function.name: toolkit.name for function in toolkit.functions}},
+    authored = replace(
+        toolkit,
+        functions=tuple(
+            replace(function, toolkit=toolkit.name, registered_toolkit=toolkit.name) for function in toolkit.functions
+        ),
     )
+    return replace(build, spec=replace(build.spec, toolkits=(*build.spec.toolkits, authored)))
 
 
 def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tuple[RunRecord, ConversationSession]:
@@ -301,7 +305,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
         ),
     )
-    with approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id):
+    with approval_receipt_context(RECEIPT_CALLS, run_id=continuation.run_id):
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
@@ -804,7 +808,6 @@ async def _checkpointed_batch(
         metadata={"agent_mode": "minimal"},
     )
     catalog = PreparedAgentToolCatalog(
-        agent_name="helper",
         run=RunContext(
             run_id="saved-run",
             user_id=runtime.requester_id,
@@ -834,7 +837,7 @@ async def _checkpointed_batch(
     ]
     state = LoopState(
         messages=[assistant],
-        offered=PreparedTools(functions={}, instructions=()),
+        offered=PreparedTools(functions={}),
         tools=(),
         run=catalog.run,
         record=record,
@@ -843,7 +846,7 @@ async def _checkpointed_batch(
         request_template=EMPTY_REQUEST,
     )
     await checkpoint.capture(state, planned)
-    checkpoint.complete("call_completed", ToolValue(content="completed sibling result", images=(sibling_image,)))
+    checkpoint.complete("call_completed", ToolOutcome(content="completed sibling result", images=(sibling_image,)))
     await checkpoint.persist_approval("old-bash")
     persisted = store.get_run("saved-run")
     saved_session = store.load_session(runtime.session_id, "agent")
@@ -855,9 +858,10 @@ async def _checkpointed_batch(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize(
-    ("shell", "missing_shell_function", "nested"),
-    [(shell, missing, None) for shell in (False, True) for missing in (None, "run_shell_command")]
-    + [(True, None, "media"), (True, None, "approval"), (True, None, "suspend")],
+    ("shell", "missing_shell_function", "nested", "preset"),
+    [(shell, missing, None, False) for shell in (False, True) for missing in (None, "run_shell_command")]
+    + [(True, None, "media", False), (True, None, "approval", False), (True, None, "suspend", False)]
+    + [(True, None, None, True)],
 )
 async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
     tmp_path: Path,
@@ -865,12 +869,14 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     shell: bool,
     missing_shell_function: str | None,
     nested: str | None,
+    preset: bool,
 ) -> None:
     """An approved saved call keeps its exact owner, and its old Bash stays interrupted.
 
-    The follow-up turn sends the approval receipt the runner binds with its first request only.
+    The follow-up turn sends the approval receipt the runner binds with its first request only. A shell that
+    ``openclaw_compat`` brings in is approved under the preset and still runs as the agent's shell.
     """
-    runtime = _helper_runtime(tmp_path, tools=["shell"])
+    runtime = _helper_runtime(tmp_path, tools=["openclaw_compat"] if preset else ["shell"])
     registry = TurnToolRegistry()
     runtime = replace(
         runtime,
@@ -932,6 +938,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     media_toolkit = adapt_toolkit(toolkit)
     name = "run_shell_command" if shell else "media"
     namespace = "shell" if shell else "media"
+    approval_toolkit = "openclaw_compat" if preset else namespace
     arguments = {"args": "exact approved shell"} if shell else {"value": "exact approved media"}
     tool = ToolExecution(tool_call_id="hidden", tool_name=name, tool_args=arguments, requires_confirmation=True)
     requirement = RunRequirement(tool)
@@ -966,13 +973,13 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
                 "helper",
                 100,
                 decision=ApprovalDecision.APPROVED,
-                toolkit_name=namespace,
+                toolkit_name=approval_toolkit,
                 arguments_digest=approval_arguments_digest(arguments),
             ),
         ),
         cli_call={
             "kind": "agent_cli",
-            "toolkit": namespace,
+            "toolkit": approval_toolkit,
             "function": name,
             "arguments": arguments,
             "call_id": "hidden",
@@ -1092,7 +1099,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 
     with (
         tool_runtime_context(runtime),
-        approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id),
+        approval_receipt_context(RECEIPT_CALLS, run_id=continuation.run_id),
     ):
         if missing_shell_function:
             saved_before = stored_runs()
@@ -1240,6 +1247,114 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             await recover()
         assert searches == []
         response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize(
+    ("deferred", "saved_trace"),
+    [(True, True), (False, True), (False, False)],
+    ids=["deferred", "eager", "eager-without-saved-trace"],
+)
+async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deferred: bool,
+    saved_trace: bool,
+) -> None:
+    """A toolkit an authored tool brings in is called under its own name and approved under that tool.
+
+    The model calls ``attachments``, which ``matrix_message`` brings in, and the approval arrives after its Bash
+    stopped waiting, so the call runs in the rebuilt agent, which attaches ``matrix_message`` and offers the call as
+    ``attachments`` again. The saved approval names ``matrix_message`` as approvals saved before toolkits answered
+    to their own tool name did, so those resume the same way. The resumed call keeps that name in the reply's tool
+    trace, also when the reply's records lost the paused trace.
+    """
+    runtime = _helper_runtime(tmp_path, tools=["shell", {"matrix_message": {"defer": deferred}}])
+    runtime.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="list_attachments", action="require_approval")],
+    )
+    registry = TurnToolRegistry()
+    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
+    persist_entity_accounts(runtime.config, runtime.runtime_paths)
+    identity = build_execution_identity_from_runtime_context(runtime)
+
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
+        owner = shell_cli_owner(registry)
+        queued = await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(
+                operation="tools.call",
+                call_id=uuid4(),
+                toolkit="attachments",
+                function="list_attachments",
+                arguments={},
+            ),
+        )
+        await settled_receipt(owner, queued["call_id"])
+        return "Bash stopped waiting"
+
+    install_scripted_shell(monkeypatch, run_shell_command)
+
+    async def stop_waiting(paused):
+        error = ResponsePausedForApproval(paused)
+        emit_cli_suspension(error)
+        raise error
+
+    runtime = replace(runtime, cli_approval_handler=stop_waiting)
+    ScriptedProvider(steps=[[("bash", {"command": "list my attachments"})]]).install(monkeypatch)
+    with tool_runtime_context(runtime), pytest.raises(ResponsePausedForApproval) as raised:
+        await ai.ai_response(
+            replace(_turn_context(), agent_mode="minimal", run_id=None),
+            prompt="list my attachments",
+            runtime_paths=runtime.runtime_paths,
+            config=runtime.config,
+            execution_identity=identity,
+            supports_native_tool_approval=True,
+        )
+    paused = raised.value.paused
+    assert paused.cli_call is not None
+    call_id = paused.cli_call["call_id"]
+    # The call is shown under the toolkit the model called; its approval names the tool that brings it in.
+    assert [entry.toolkit_name for entry in paused.tool_trace] == ["attachments"]
+    assert paused.toolkit_owners == {("helper", "list_attachments"): "matrix_message"}
+    assert (paused.cli_call["toolkit"], paused.cli_call["function"]) == ("matrix_message", "list_attachments")
+    continuation = approval_continuation(
+        approval_id="implied-approval",
+        run_id=paused.run_id,
+        session_id=runtime.session_id,
+        entity_name="helper",
+        room_id=runtime.room_id,
+        thread_id=runtime.resolved_thread_id,
+        requester_id=runtime.requester_id,
+        state="claimed",
+        calls=tuple(
+            replace(call, decision=ApprovalDecision.APPROVED) for call in approval_calls_for_cli_pause(paused, "helper")
+        ),
+        cli_call=paused.cli_call,
+    )
+    execution = _approval_execution(tmp_path, runtime, monkeypatch, None)
+    response = AsyncMock(return_value=CompletedApprovalRun(response_text="Listed", metadata_content={}))
+    monkeypatch.setattr(approval_execution, "_stream_continuation_turn", response)
+
+    with tool_runtime_context(runtime):
+        result = await execution.continue_run(
+            continuation,
+            paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace if saved_trace else ()),
+            execution_identity=identity,
+            tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
+            decisions={call_id: True},
+            denial_reasons={call_id: None},
+            tool_trace_collector=[],
+            typing_log_context={},
+            progress=None,
+        )
+
+    assert result.response_text == "Listed"
+    [follow_up] = response.await_args.args[0].transient_enrichment_items
+    assert "Exact saved tool attachments.list_attachments decision/result:" in follow_up.text
+    assert [entry.toolkit_name for entry in response.await_args.args[1].tool_trace] == ["attachments"]
+    assert '"status": "ok"' in follow_up.text
 
 
 @pytest.mark.parametrize(

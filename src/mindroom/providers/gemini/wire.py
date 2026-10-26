@@ -27,7 +27,8 @@ from google.genai.types import (
 )
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
+from mindroom.llm.media import IMAGE_HEADER_BYTES, canonical_mime_type, image_mime_type
+from mindroom.llm.messages import tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from mindroom.llm.media import Audio, File, Image, Video
-    from mindroom.llm.messages import Message
+    from mindroom.llm.messages import Message, ToolResultView
     from mindroom.llm.provider import StopReason, StreamEvent, ToolChoice, ToolSpec
 
 logger = get_logger(__name__)
@@ -72,6 +73,17 @@ _FORMAT_TO_MIME = {
     "webm": "video/webm",
     "pdf": "application/pdf",
 }
+# Text types outside ``text/``, which Gemini reads as plain text.
+_TEXT_FILE_MIME_TYPES = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/x-javascript",
+        "application/x-python",
+    },
+)
 # The finish reason of a candidate whose tool call the model malformed.
 _MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
 _FILTERED_FINISH_REASONS = frozenset(
@@ -133,6 +145,10 @@ async def format_contents(
             contents[-1]["parts"].extend(parts)
         elif parts:
             contents.append({"role": role, "parts": parts})
+    for content in contents:
+        # Gemini 4 rejects a last user turn that ends with anything but its function responses, as a request ending
+        # with a model turn, so the text and media that follow tool results go before them.
+        content["parts"].sort(key=lambda part: "function_response" in part)
     return contents, system_instruction
 
 
@@ -148,11 +164,17 @@ def _message_parts(message: Message, role: str) -> list[dict[str, Any]]:
         parts.extend(_function_call_part(call) for call in message.tool_calls)
         return parts
     if _is_tool_result(message):
-        function_response: dict[str, Any] = {"name": message.tool_name, "response": {"result": content}}
-        if call_id := _provider_id(message.tool_call_id):
-            function_response["id"] = call_id
-        return [{"function_response": function_response}]
+        return [{"function_response": _function_response(tool_result_view(message))}]
     return [_text_part(content, message.provider_data)] if isinstance(content, str) else []
+
+
+def _function_response(result: ToolResultView) -> dict[str, Any]:
+    """Return one result as a function response; a failed call's content goes under ``error``, as the API documents."""
+    response = {"error": result.content} if result.is_error else {"result": result.content}
+    function_response: dict[str, Any] = {"name": result.name, "response": response}
+    if call_id := _provider_id(result.call_id):
+        function_response["id"] = call_id
+    return function_response
 
 
 async def _with_media(message: Message, parts: list[dict[str, Any]], route: MediaRoute) -> list[dict[str, Any]]:
@@ -285,22 +307,47 @@ def _file_mime_type(file: File, name: str, declared: str | None = None) -> str:
     return file.mime_type or declared or mimetypes.guess_type(name)[0] or "application/pdf"
 
 
-async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
+def _sent_file_type(mime_type: str) -> str | None:
+    """Return the type a file of ``mime_type`` is sent as: plain text for any text type, None for a type Gemini rejects.
+
+    Gemini reads PDFs, text, images, audio, and video; it rejects other types, such as ``application/octet-stream``.
+    """
+    canonical = canonical_mime_type(mime_type) or ""
+    if canonical.startswith("text/") or canonical in _TEXT_FILE_MIME_TYPES:
+        return "text/plain"
+    if canonical == "application/pdf" or canonical.startswith(("image/", "audio/", "video/")):
+        return canonical
+    return None
+
+
+def _omitted_file(file: File, mime_type: str) -> dict[str, Any]:
+    return {"text": f"[Attachment omitted: {file.filename or 'file'} ({mime_type}) is a file type Gemini cannot read]"}
+
+
+def _typed_file_part(file: File, mime_type: str, part: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+    """Return ``part`` built for the type the file is sent as, or the note naming a file Gemini cannot read."""
+    sent_type = _sent_file_type(mime_type)
+    return _omitted_file(file, mime_type) if sent_type is None else part(sent_type)
+
+
+async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:  # noqa: PLR0911
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        return _inline(data, _file_mime_type(file, file.filename or ""))
+        return _typed_file_part(file, _file_mime_type(file, file.filename or ""), partial(_inline, data))
     if (url := file.url) is not None:
         # Gemini fetches a Cloud Storage file, or an HTTPS file of known type, itself; other files are downloaded.
-        if url.startswith("gs://"):
-            return _file_uri(url, _file_mime_type(file, url))
-        if url.startswith("https://") and file.mime_type:
-            return _file_uri(url, file.mime_type)
+        if url.startswith("gs://") or (url.startswith("https://") and file.mime_type):
+            return _typed_file_part(file, _file_mime_type(file, url), partial(_file_uri, url))
+        if file.mime_type and _sent_file_type(file.mime_type) is None:
+            return _omitted_file(file, file.mime_type)
         data, declared = await _downloaded(url, "file", route)
-        return _inline(data, _file_mime_type(file, url, declared))
+        return _typed_file_part(file, _file_mime_type(file, url, declared), partial(_inline, data))
     if file.filepath is None:
         return None
     mime_type = _file_mime_type(file, file.filepath)
-    return await _local_part(file.filepath, "file", route, lambda _: mime_type)
+    if (sent_type := _sent_file_type(mime_type)) is None:
+        return _omitted_file(file, mime_type)
+    return await _local_part(file.filepath, "file", route, lambda _: sent_type)
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +357,8 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
 
 def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
     """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes."""
-    # A tool without a description sends an empty one, kept as main behaves.
+    # TODO(simplify): a tool without a description sends an empty one. Leave it out, as Chat, Responses, and Ollama do
+    # (#3113). Models would notice: Gemini tool declarations change for tools without a description.
     declarations = [
         _without_none(name=tool.name, description=tool.description or "", parameters=convert_schema(tool.parameters))
         for tool in sorted(tools, key=lambda tool: tool.name)
@@ -499,7 +547,7 @@ def convert_schema(  # noqa: C901, PLR0911, PLR0912
 
 def _property_schema(value: Mapping[str, Any], root: Mapping[str, Any], visited: frozenset[str]) -> dict[str, Any]:
     value_type = value.get("type", "")
-    # A ["<type>", "null"] list type is sent as its first entry, kept as main behaves.
+    # A ["<type>", "null"] list type is sent as its first entry, marked nullable.
     nullable = isinstance(value_type, list) and "null" in value_type
     converted = convert_schema({**value, "type": value_type[0]} if nullable else value, root, visited)
     if converted is None:
@@ -559,28 +607,21 @@ class GeminiReply:
         return self.finish_reason is not None or self.prompt_blocked
 
 
-def read_chunk(
-    reply: GeminiReply,
-    chunk: GenerateContentResponse,
-    *,
-    whole_response: bool = False,
-) -> list[StreamEvent]:
-    """Add one streamed chunk (or one ``whole_response`` from a non-streamed call) to ``reply`` and return its events.
+def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse) -> list[StreamEvent]:
+    """Add one streamed chunk to ``reply`` and return its events.
 
     Gemini repeats the reply's cumulative usage on every chunk, so each chunk that carries usage reports it first, as
-    a partial report that replaces the one before. Only a finished candidate's usage, the reply's total, counts toward
-    the reply's own usage, apart from a whole response without candidates (see the TODO below). A candidate that ended
-    in a malformed tool call reports its usage and nothing else; ``malformed_tool_call_error`` then ends the reply. A
-    chunk that shows Google Search grounding or code execution at work reports that hosted tool's start.
+    a partial report that replaces the one before. Only the usage of a finished candidate or of a blocked prompt, the
+    reply's total, counts toward the reply's own usage. A candidate that ended in a malformed tool call reports its
+    usage and nothing else; ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search
+    grounding or code execution at work reports that hosted tool's start.
     """
     if not chunk.candidates:
-        if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason is not None:
-            # A blocked prompt gets feedback instead of a candidate, which ends the reply.
-            reply.prompt_blocked = True
-        # TODO(simplify): a chunk without candidates counts its usage only when the reply arrives whole, blocked or
-        # not, so a streamed blocked prompt reports none. Also count a streamed chunk that blocks the prompt.
-        # Operators would see the usage of streamed blocked prompts.
-        if not whole_response or chunk.usage_metadata is None:
+        if chunk.prompt_feedback is None or chunk.prompt_feedback.block_reason is None:
+            return []
+        # A blocked prompt gets feedback instead of a candidate, which ends the reply.
+        reply.prompt_blocked = True
+        if chunk.usage_metadata is None:
             return []
         reply.usage = _usage_metrics(chunk.usage_metadata)
         return [UsageReported(reply.usage, final=False)]

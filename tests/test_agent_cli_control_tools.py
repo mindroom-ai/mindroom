@@ -24,7 +24,6 @@ from mindroom.agent_cli.lifetime import cli_control_calls, response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -43,7 +42,7 @@ from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
 from mindroom.response_turn import PausedAnswer, PausedAttempt, apply_exact_approval_decisions
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
-from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, execute_agent_tool_call
+from mindroom.tool_system.agent_tool_calls import AgentToolCallWaiting, DeferredAgentToolkit, execute_agent_tool_call
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -54,7 +53,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import bind_runtime_paths, seed_session_row
+from tests.conftest import bind_runtime_paths, live_turn_tools_for_test, seed_session_row
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -65,12 +64,14 @@ from tests.test_compact_context import _make_config
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.agent_cli.turn import LiveTurnTools
+
 
 def _owner(catalog, **options) -> LiveTurnTools:
     async def authorize(key, arguments):
         return None
 
-    return LiveTurnTools(
+    return live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -179,6 +180,9 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         # The control ends the run after its batch, so no further request is sent.
         assert record.content is None
         assert [item.stop_after_call for item in results] == [True, True]
+        # The second Bash call never ran, so it answers as a failed call, as a call over the limit does.
+        assert [item.is_error for item in results] == [False, True]
+        assert results[1].result == "Bash cancelled before dispatch: continuation requires a rebuilt tool catalog."
         first, second = [await owner.get_call(item["call_id"]) for item in receipts]
         assert first["status"] == ("failed" if raises else "completed")
         assert first["outcome"] == ("switch rejected" if raises else payload)
@@ -271,11 +275,12 @@ async def test_hidden_delegation_uses_native_child_owner(
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
-    owner = LiveTurnTools(
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
+    owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
-        run_child=child_response,
         delegation_depth=depth,
     )
     call_id = uuid4()
@@ -291,7 +296,8 @@ async def test_hidden_delegation_uses_native_child_owner(
             ),
         )
     receipt = await owner.get_call(str(call_id))
-    assert receipt["status"] == "completed", receipt
+    # A refused delegation answers as a failed call.
+    assert receipt["status"] == ("completed" if allowed else "failed"), receipt
     assert len(children) == int(allowed)
     if allowed:
         assert receipt["outcome"].startswith("child done\n\nDelegation")
@@ -341,13 +347,15 @@ async def _allow(key, arguments) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("saved_gate", [True, False])
 @pytest.mark.parametrize("approved", [True, False])
 async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_id(
     tmp_path,
     monkeypatch,
     approved,
+    saved_gate,
 ) -> None:
-    """The CLI caller chooses call IDs, so an approval saved under one in the run never admits a new call."""
+    """The CLI caller chooses call IDs, so a decision saved under one in the run never decides a new call."""
     config = _delegation_config()
     config.tool_approval.default = "require_approval"
     paths = _runtime_paths(tmp_path)
@@ -372,20 +380,21 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         approval_handler=decide,
     )
     call_id = uuid4()
-    # A recovered follow-up turn inherits the run metadata that approved an earlier call under this ID.
+    # A recovered follow-up turn inherits the run metadata that decided an earlier call under this ID.
     assert catalog.record is not None
-    catalog.record.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): True}).to_dict()}
+    catalog.record.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): saved_gate}).to_dict()}
     children = []
 
     async def child_response(child, **kwargs):
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
-    owner = LiveTurnTools(
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
+    owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
-        run_child=child_response,
     )
 
     async def checkpoint(parent):
@@ -407,7 +416,8 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
 
     assert asked == [str(call_id)]
     assert [child.task for child in children] == (["a task nobody approved"] if approved else [])
-    assert receipt["status"] == "completed", receipt
+    # The requester's denial answers as a failed call.
+    assert receipt["status"] == ("completed" if approved else "failed"), receipt
     await owner.close()
 
 
@@ -500,11 +510,12 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 await asyncio.Event().wait()
             return await run_delegated_child_response(child, **kwargs)
 
-        owner = LiveTurnTools(
+        monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
+        owner = live_turn_tools_for_test(
             CliTurnOwner(identity, "turn", "run"),
             catalog=catalog,
             authorize=_allow,
-            run_child=child_response,
         )
 
         async def checkpoint(parent):
@@ -516,15 +527,18 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         if mode in {"recover", "recover_again"}:
             binding = await catalog.bind(ToolKey("delegate", "run_subagent"))
             events = [event async for event in execute_agent_tool_call(binding, str(call_id), arguments)]
-            requirement = next(event.requirement for event in events if event.kind == "waiting")
-            assert requirement is not None
+            requirement = next(event.requirement for event in events if isinstance(event, AgentToolCallWaiting))
             with catalog.execution_context():
                 paused = await advance_cli_delegation(
                     binding,
                     requirement,
                     parent_bash_call_id="bash-parent",
                     delegation_depth=0,
-                    run_child=child_response,
+                    refresh_scheduler=None,
+                    decisions=None,
+                    denial_reasons=None,
+                    approval_calls=(),
+                    on_event=lambda _event: None,
                 )
             assert isinstance(paused, PausedAttempt)
             assert paused.cli_call is not None
@@ -565,6 +579,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 agent_mode="minimal",
                 history_storage=catalog.store,
                 supports_native_tool_approval=True,
+                knowledge=None,
+                active_model_name=None,
             )
 
             async def authorize_binding(binding):
@@ -689,8 +705,9 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     memory = adapt_toolkit(MemoryTools("helper", paths.storage_root, config, paths))
     catalog = await _catalog(tmp_path, [memory])
     identity = build_execution_identity_from_runtime_context(catalog.runtime_context)
-    compact = adapt_toolkit(CompactContextTools("helper", config, paths, identity))
-    await catalog.prepare([compact], {"compact_context": "compact_context"})
+    await catalog.prepare(
+        [adapt_toolkit(CompactContextTools("helper", config, paths, identity), key="compact_context")],
+    )
     binding = await catalog.bind(ToolKey("memory", "add_memory"))
     events = [
         event

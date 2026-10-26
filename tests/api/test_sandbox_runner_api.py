@@ -28,6 +28,7 @@ from uuid import uuid4
 
 import pytest
 from agno.tools import Toolkit
+from agno.tools.function import Function
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
@@ -3470,13 +3471,13 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
 ) -> None:
     """Sandbox toolkit rebuilds should load persisted credentials from runner storage."""
 
-    class DummyTool:
+    class DummyTool(Toolkit):
         def __init__(self, token: str | None = None) -> None:
-            self.name = "dummy"
             self.token = token
-            self.functions = {"run": type("F", (), {"entrypoint": lambda _unused: None})()}
-            self.async_functions = {}
-            self.requires_connect = False
+            super().__init__(name="dummy", tools=[self.run])
+
+        def run(self) -> None:
+            return None
 
     tool_name = "dummy_cred_tool"
     stored_value = "value123"
@@ -4690,13 +4691,9 @@ def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
     """Sandbox runner should rebuild tools with worker scope and routing agent context."""
     _set_sandbox_token(monkeypatch)
     captured_kwargs: dict[str, object] = {}
-    toolkit = SimpleNamespace(
-        requires_connect=False,
-        functions={"ping": SimpleNamespace(entrypoint=lambda: {"ok": True})},
-        async_functions={},
-    )
+    toolkit = Toolkit(name="homeassistant", tools=[Function(name="ping", entrypoint=lambda: {"ok": True})])
 
-    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> SimpleNamespace:
+    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> Toolkit:
         assert tool_name == "homeassistant"
         captured_kwargs.update(kwargs)
         return toolkit

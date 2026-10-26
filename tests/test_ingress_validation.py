@@ -36,7 +36,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
                 agents={"test_agent": {"display_name": "Test Agent"}},
                 bot_accounts=["@bridge_bot:localhost"],
                 mindroom_user=MindRoomUserConfig(),
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 authorization={"aliases": {canonical_human: [bridge_human]}},
             ),
         ),

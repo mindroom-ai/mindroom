@@ -64,7 +64,7 @@ Provider adapters, storage, the loop, and teams are built and unit-tested during
 ## Retired Features
 
 - Agno Learning (`learning`, `learning_mode`): a second memory system beside mem0 and file memory, with its own extraction calls and `learning/<agent>.db`, which the maintainer judged not useful.
-  Configs that still set these fields load with a warning; existing learning databases are left on disk.
+  Configs that still set these fields fail validation with an error naming each field, because requiring a config edit was judged better than keeping tables that warn about and drop retired fields; existing learning databases are left on disk, since nothing reads them.
 - `compress_tool_results`: Agno's extra model call that rewrites tool results; off by default.
 - Agno's `{key}` and `$key` substitution in system prompts, which no MindRoom prompt uses.
 

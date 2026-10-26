@@ -725,6 +725,33 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
     queue_thread_summary.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_post_response_effects_report_once_whether_a_question_reply_lost_its_buttons_metadata() -> None:
+    """A question reply that cannot get its buttons logs whether its interactive metadata is missing, once."""
+    logger = MagicMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Pick one.\n\nReact with an emoji or type the number to respond.",
+        ),
+        ResponseOutcome(),
+        PostResponseEffectsDeps(logger=logger, add_interactive_buttons=AsyncMock()),
+    )
+
+    logger.warning.assert_called_once_with(
+        "Interactive question buttons skipped",
+        response_event_id="$response",
+        add_interactive_buttons_is_none=False,
+        terminal_status="completed",
+        final_visible_body_is_none=False,
+        suppressed=False,
+        interactive_metadata_is_none=True,
+    )
+
+
 @pytest.mark.parametrize(
     ("terminal_status", "run_succeeded"),
     [

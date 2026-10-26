@@ -17,13 +17,13 @@
       "id": "qwen3.8:27b",
       "provider": "ollama"
     },
+    "output_schema": null,
     "portable_replay": null,
     "provider_tools_disabled": true,
-    "response_format": null,
-    "stream": false,
     "tool_choice": "none",
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -47,9 +47,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -69,22 +71,21 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
       "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "qwen3.8:27b",
           "provider": "Ollama"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -97,12 +98,12 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
       "model": "qwen3.8:27b",
-      "stream": false,
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -124,24 +125,26 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/x-ndjson"
     },
-    "json": {
-      "created_at": "2026-10-20T00:00:00.000000Z",
-      "done": true,
-      "done_reason": "stop",
-      "eval_count": 12,
-      "eval_duration": 640000000,
-      "load_duration": 21000000,
-      "message": {
-        "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
-        "role": "assistant"
-      },
-      "model": "qwen3.8:27b",
-      "prompt_eval_count": 42,
-      "prompt_eval_duration": 120000000,
-      "total_duration": 812000000
-    },
+    "ndjson": [
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": true,
+        "done_reason": "stop",
+        "eval_count": 12,
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "message": {
+          "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b",
+        "prompt_eval_count": 42,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      }
+    ],
     "status": 200
   },
   "scenario": "tool_choice_none"

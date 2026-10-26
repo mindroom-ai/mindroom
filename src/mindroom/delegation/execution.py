@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, ca
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.approval.receipt_readers import add_approval_receipt_reader
+from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_call_ids
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
@@ -25,7 +25,6 @@ from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
-    child_execution_identity,
     child_run_context,
     child_tool_runtime_context,
     finish_child_turn,
@@ -59,9 +58,12 @@ from mindroom.delegation.state import (
     DelegationState,
     child_call_id,
     child_card_id,
+    child_execution_identity,
     delegation_card_id,
+    member_call_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.failure_text import failure_text
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
@@ -203,11 +205,9 @@ def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, 
     independently, so a call id alone does not name a call, as the driver's own keys say.
     """
     return {
-        (requirement.member_agent_id, call_id): answer
+        (requirement.member_agent_id, requirement.tool_execution.tool_call_id): answer
         for requirement in response.requirements or ()
-        if _delegation_call(requirement)
-        and (call_id := requirement.tool_execution.tool_call_id) is not None
-        and (answer := requirement.external_execution_result) is not None
+        if _delegation_call(requirement) and (answer := requirement.external_execution_result) is not None
     }
 
 
@@ -268,23 +268,28 @@ async def _run_child(
     approval_calls: Sequence[ApprovalCall],
     fresh: bool,
 ) -> _ChildOutcome:
-    """Reserve the child and run it in its execution scope; the caller holds its liveness through settlement."""
+    """Reserve the child and run it in its execution scope; the caller holds its liveness through settlement.
+
+    ``decisions``, ``denial_reasons``, and ``approval_calls`` name the child's calls by its own ids, as
+    ``child_call_id`` gives them, and so does a bound approval receipt within the scope.
+    """
     await reserve_child_turn(child, owner=caller_identity, runtime_paths=runtime_paths)
     async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
-        response = await run_with_tool_execution_identity(
-            child_execution_identity(child),
-            operation=lambda: _execute_child(
-                child,
-                run_child=run_child,
-                config=config,
-                runtime_paths=runtime_paths,
-                refresh_scheduler=refresh_scheduler,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
-                approval_calls=approval_calls,
-                fresh=fresh,
-            ),
-        )
+        with approval_receipt_call_ids(partial(child_call_id, child.delegation_id)):
+            response = await run_with_tool_execution_identity(
+                child_execution_identity(child),
+                operation=lambda: _execute_child(
+                    child,
+                    run_child=run_child,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    refresh_scheduler=refresh_scheduler,
+                    decisions=decisions,
+                    denial_reasons=denial_reasons,
+                    approval_calls=approval_calls,
+                    fresh=fresh,
+                ),
+            )
         observation.keep_outcome(response.response)
         return response
 
@@ -526,14 +531,14 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
     child_state = DelegationState.from_metadata(response.metadata)
     for tool in paused.tools:
         projected = deepcopy(tool)
-        projected.tool_call_id = child_card_id(child.delegation_id, str(tool.tool_call_id))
+        projected.tool_call_id = child_card_id(child.delegation_id, tool.tool_call_id)
         state.pending_tools.append(projected.to_dict())
         state.pending_tool_sources[projected.tool_call_id] = deepcopy(
-            child_state.pending_tool_sources.get(str(tool.tool_call_id))
+            child_state.pending_tool_sources.get(tool.tool_call_id)
             or DelegationPendingTool(
                 child=child,
-                tool_call_id=str(tool.tool_call_id),
-                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, str(tool.tool_name))),
+                tool_call_id=tool.tool_call_id,
+                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, tool.tool_name)),
             ),
         )
         state.pending_requirements.append(RunRequirement(projected).to_dict())
@@ -549,7 +554,7 @@ async def _complete_approved_child_tools(
 ) -> None:
     """Publish each resumed tool's result, read from its exact approved attempt, in the parent's live trace."""
     for pending_tool in pending_tools:
-        call_id = str(pending_tool["tool_call_id"])
+        call_id = ToolExecution.from_dict(pending_tool).tool_call_id
         source = tool_sources[call_id]
         response = await read_child_run(source.child, config, runtime_paths)
         for tool in (response.tools or ()) if response is not None else ():
@@ -611,14 +616,17 @@ def _resolve_delegation_requirement(
     result: str,
     emit_call: Callable[[ToolStarted | ToolCompleted], None],
     *,
-    output_request: ToolOutputFileRequest | None = None,
+    failed: bool,
 ) -> str:
     """Answer one external call with its finished result and close its live tool trace, including rejections.
 
+    Every answer says whether it ``failed``: a call delegation refused, or whose child did not complete, is marked
+    failed so Claude and Gemini read it as a failure.
     The answer stays on the parent's requirement, so a later entry never advances the call again; the parent's
     continuation hands every answer to the loop's own decision check.
     """
-    result = _finalize_delegation_output(result, output_request)
+    if failed:
+        requirement.tool_execution.is_error = True
     requirement.set_external_execution_result(result)
     emit_call(ToolCompleted(requirement.tool_execution.call))
     return result
@@ -639,7 +647,7 @@ async def _background_child_outcome(
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    output_request: ToolOutputFileRequest | None = None,
+    output_request: ToolOutputFileRequest | None,
 ) -> BackgroundOutcome:
     """Keep child execution, approvals, liveness and settlement owned by its background job."""
 
@@ -656,7 +664,7 @@ async def _background_child_outcome(
         return finished(
             "failed",
             f"{primary_error}\n\nDelegation {stage} did not complete; recovery may still be required: "
-            f"{redact_sensitive_text(str(error))}",
+            f"{redact_sensitive_text(failure_text(error))}",
         )
 
     run = partial(
@@ -696,7 +704,7 @@ async def _background_child_outcome(
             raise
         except Exception as error:
             # What the failed child hands its caller, credentials redacted, however its cleanup ends.
-            primary_error = redact_sensitive_text(str(error))
+            primary_error = redact_sensitive_text(failure_text(error))
             try:
                 await interrupt_child(
                     child,
@@ -760,15 +768,15 @@ async def _await_background_child(
     owner: ToolExecutionIdentity,
     depth: int,
     background_after: float | None,
-    settle: Callable[[str], Awaitable[str]],
+    settle: Callable[[str, bool], Awaitable[str]],
     record_return: Callable[[object], Awaitable[None]],
     parent_call: _ParentCall,
 ) -> str:
     """Hand a new child to its job, or find the job a crash left it with, then wait for it as the parent's call.
 
     Returns what the parent's call returns: the child's result, or its job handle while the job keeps working.
-    ``settle`` closes the parent call with that text and returns it as the model reads it; ``record_return``
-    records it on the reply.
+    ``settle`` closes the parent call with that text, failed when its second argument is true, and returns it as the
+    model reads it; ``record_return`` records it on the reply.
 
     The parent's liveness claim ends once the job owns the child: the job claims liveness itself while it runs the
     child, and a parent claim held across the wait would block cancel cleanup.
@@ -793,8 +801,8 @@ async def _await_background_child(
         if not background.has_job(child.delegation_id):
             # No job owns the child yet, so it settles as an ordinary child failure.
             raise
-        # Revoked access or a closed runtime ends this wait; the parent's call reports it.
-        settled = await settle(str(error))
+        # Revoked access or a closed runtime ends this wait; the parent's call fails with it, as an ordinary job's does.
+        settled = await settle(str(error), True)
         await record_return(str(error))
         return settled
     except BaseException:
@@ -803,7 +811,8 @@ async def _await_background_child(
     try:
         result = await delegation_result(background, waited.job) if waited.claim is not None else None
         returned = result or format_job_handle(waited.job)
-        settled = await settle(returned)
+        # A child that ended any other way than completed fails the call, as an ordinary job's call does.
+        settled = await settle(returned, waited.claim is not None and waited.job.status != "completed")
         await record_return(returned)
         if waited.claim is not None:
             # The outcome counts as read once the parent run saves this call's result, as a native call's does.
@@ -993,12 +1002,12 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-    delegation_depth: int = 0,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    decisions: dict[str, bool] | None = None,
-    denial_reasons: dict[str, str | None] | None = None,
-    approval_calls: Sequence[ApprovalCall] = (),
-    on_event: ResumeEvents | None = None,
+    delegation_depth: int,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    decisions: dict[str, bool] | None,
+    denial_reasons: dict[str, str | None] | None,
+    approval_calls: Sequence[ApprovalCall],
+    on_event: ResumeEvents | None,
     background: ToolJobRuntime | None = None,
     tag_call_event: _CallEventTag = _untagged,
 ) -> str | None:
@@ -1015,9 +1024,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # Bind this exact parent call and its presentation before resolving the target.
     tool = requirement.tool_execution
     tool_name = tool.tool_name
-    if not tool.tool_call_id or not tool_name:
-        msg = "Delegation requirement has no exact tool-call identity"
-        raise RuntimeError(msg)
     requirement_key = delegation_card_id(requirement.member_agent_id, tool.tool_call_id)
 
     def emit_call(event: ToolStarted | ToolCompleted) -> None:
@@ -1047,7 +1053,10 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         )
     if card_decision is not None or child_decisions is not None:
         # The run that made the call continues with its result, so that run reads the approval's receipt.
-        add_approval_receipt_reader(requirement.member_run_id or response.run_id)
+        add_approval_receipt_reader(
+            requirement.member_run_id or response.run_id,
+            partial(member_call_id, requirement.member_agent_id),
+        )
     # A child saved before a crash keeps its accepted owner when startup policy changes.
     if retained is not None:
         if background is not None and not background.has_job(retained.delegation_id):
@@ -1056,16 +1065,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # An excluded delegate toolkit runs its child natively, outside the job runtime.
         background = None
         if BACKGROUND_AFTER in (tool.tool_args or {}):
-            tool.is_error = True
-            return resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.")
+            return resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.", failed=True)
     try:
         background_after = read_background_after(
             tool.tool_args,
             owned_execution=job_owns_execution() or delegation_depth > 0,
         )
     except ValueError as error:
-        tool.is_error = True
-        return resolve_result(str(error))
+        return resolve_result(str(error), failed=True)
     args = application_arguments(tool.tool_args)
     target = await _resolve_delegation_target(
         tool,
@@ -1076,7 +1083,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         depth=delegation_depth,
     )
     if isinstance(target, str):
-        return resolve_result(target)
+        return resolve_result(target, failed=True)
 
     # Recheck current authorization and output policy, including resumed calls.
     authorization = authorize_delegation(
@@ -1117,7 +1124,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
             if waited_child is not None and on_event is not None:
                 _settle_pending_child_tools(previous_state.pending_tools, on_event, reason=authorization)
-        result = resolve_result(authorization)
+        result = resolve_result(authorization, failed=True)
         if requirement.id in state.hooks:
             await after_delegation(
                 state.hooks[requirement.id],
@@ -1126,8 +1133,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 result=authorization,
             )
         return result
-    if output_request is not None:
-        resolve_result = partial(resolve_result, output_request=output_request)
 
     # Approval and the before hook must settle before a child can start.
     gated = tool_may_require_approval(config, tool_name)
@@ -1147,7 +1152,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         await persist(state)
         return None
     if state.gates.get(requirement_key) is False:
-        return resolve_result("Delegation denied by requester; child was not executed.")
+        return resolve_result("Delegation denied by requester; child was not executed.", failed=True)
     if card_decision is not None:
         # The approved gate card shows the projected call; the child starts from this separate requirement.
         call = next((call for call in approval_calls if call.tool_call_id == requirement_key), None)
@@ -1166,7 +1171,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         await persist(state)
     hook_state = state.hooks[requirement.id]
     if hook_state.blocked_result is not None:
-        blocked_result = resolve_result(hook_state.blocked_result)
+        blocked_result = resolve_result(hook_state.blocked_result, failed=True)
         await after_delegation(
             hook_state,
             config=config,
@@ -1255,7 +1260,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             call_id=tool.tool_call_id,
                         ),
                         # The job already applied the output policy to the child's result.
-                        settle=lambda result: detach(result=resolve_result(result, output_request=None)),
+                        settle=lambda result, failed: detach(result=resolve_result(result, failed=failed)),
                         record_return=record_return,
                     )
                 child_outcome = await _run_child(
@@ -1306,7 +1311,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     await detach(result=None, error=error)
                     raise
                 # The cause reaches the parent model and the child's record, so credentials in it are redacted.
-                reason = redact_sensitive_text(str(error))
+                reason = redact_sensitive_text(failure_text(error))
                 await interrupt_child(
                     child,
                     config=config,
@@ -1320,7 +1325,10 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         # Completed and failed children both close the parent call and its after hook.
         receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
-    result = resolve_result(_child_result_text(child, receipt))
+    result = resolve_result(
+        _finalize_delegation_output(_child_result_text(child, receipt), output_request),
+        failed=child.status != "completed",
+    )
     await after_delegation(
         hook_state,
         config=config,

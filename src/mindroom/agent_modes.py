@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 AgentMode = Literal["standard", "minimal"]
+_MAX_TRACKED_CHOICES = 1000
 
 
 def _key(agent_name: str, session_id: str) -> str:
@@ -59,7 +60,7 @@ def set_agent_mode(
             "mode": mode,
             "set_at": datetime.now(UTC).isoformat(),
         }
-        write_bounded_override_records(path, records, max_records=1000)
+        write_bounded_override_records(path, records, max_records=_MAX_TRACKED_CHOICES)
 
 
 def clear_agent_mode(runtime_paths: RuntimePaths, state_root: Path, agent_name: str, session_id: str) -> bool:
@@ -69,5 +70,5 @@ def clear_agent_mode(runtime_paths: RuntimePaths, state_root: Path, agent_name: 
         records = load_cached_override_records(path, _valid)
         if records.pop(_key(agent_name, session_id), None) is None:
             return False
-        write_bounded_override_records(path, records, max_records=1000)
+        write_bounded_override_records(path, records, max_records=_MAX_TRACKED_CHOICES)
     return True

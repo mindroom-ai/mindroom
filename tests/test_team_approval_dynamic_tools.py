@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall
 from mindroom.event_journal.approval_continuations import ApprovalDecision
@@ -18,7 +19,7 @@ from mindroom.response_turn import CompletedApprovalRun
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import ToolDispatchContext
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.conftest import (
     bind_runtime_paths,
@@ -83,7 +84,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         thread_id=target.resolved_thread_id,
         requester_id=identity.requester_id,
         calls=calls,
-        execution_identity=serialize_tool_execution_identity(identity),
+        execution_identity=identity,
         runtime_model_name="default",
         team_member_names=("alpha", "beta"),
         team_mode="coordinate",
@@ -107,6 +108,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
                 target=target,
                 tool_trace_collector=[],
                 progress=progress,
+                cli_approval_handler=None,
             )
     assert isinstance(result, CompletedApprovalRun)
     assert continued.await_args.kwargs["progress"] is progress
@@ -230,7 +232,7 @@ async def _exercise_team_member_assembly(
         monkeypatch.setattr("mindroom.teams.resume.required_approval_tool_names", required_resolver)
 
     def inspect_members(*, members: ResolvedExactTeamMembers, **_kwargs: object) -> None:
-        functions = {build.spec.id: set(build.tool_owners) for build in members.builds}
+        functions = {build.spec.id: {name for _agent, name in tool_owners_by_agent(build)} for build in members.builds}
         assert set(functions) == {"alpha", "beta"}
         assert "add" in functions["alpha"]
         assert "add" not in functions["beta"]
@@ -281,4 +283,10 @@ async def _exercise_team_member_assembly(
                 ),
             ),
             progress=None,
+            member_model_names=None,
+            history_scope=None,
+            prior_tool_trace=(),
+            prior_presentation_state=None,
+            show_tool_calls=True,
+            tool_trace_collector=[],
         )

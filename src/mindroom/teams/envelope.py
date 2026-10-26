@@ -2,8 +2,8 @@
 
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
 turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply, its
-pause, and the text a stopped or failed blocking turn records render from the finished run's records, kept as main
-behaves: each member run's text in the order the runs ended, then the consensus; the reply delivers no tool trace.
+pause, and the text a stopped or failed blocking turn records render from the finished run's records: each member
+run's text in the order the runs ended, then the consensus; the reply delivers no tool trace.
 A streamed reply shows its trace through its chunks, keeps the configured member order, and adds each failed member
 run's reason when the team run ends, as a resumed reply does. ``run_prepared_team`` runs an OpenAI-compatible API
 team turn under the same leader hooks and storage.
@@ -28,7 +28,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_run_context,
-    render_prepared_team_messages_text,
+    render_prepared_messages_text,
 )
 from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.native import with_native_history
@@ -148,7 +148,7 @@ class PreparedTeamExecution:
     @property
     def prompt_text(self) -> str:
         """Return the prompt-visible text derived from the turn's messages."""
-        return render_prepared_team_messages_text(self.turn.in_request_order())
+        return render_prepared_messages_text(self.turn.in_request_order())
 
     def run_input(self, media: MediaInputs) -> list[Message]:
         """Return one attempt's request body, media on the prompt: the summary, the replayed history, then the turn."""
@@ -177,6 +177,9 @@ async def prepare_materialized_team_execution(
 ) -> PreparedTeamExecution:
     """Prepare one built team's turn: its prompt and unseen context, the scope's history, and the run metadata."""
     spec = built.spec
+    leader = spec.leader
+    # ``build_team_spec`` renders the leader prompt, which sizes the static part of every leader request.
+    assert leader.system_message is not None
     ctx = replace(
         ctx,
         transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
@@ -188,9 +191,9 @@ async def prepare_materialized_team_execution(
         ctx,
         scope_context=scope_context,
         member_names=[member.spec.id for member in spec.members],
-        leader_system_message=spec.system_message,
+        leader_system_message=leader.system_message,
         leader_tools=leader_tool_specs(spec),
-        model=spec.model,
+        model=leader.model,
         prompt=message,
         transient_context_messages=(
             (Message(role="user", content=transient_turn_context, add_to_agent_memory=False),)
@@ -200,6 +203,7 @@ async def prepare_materialized_team_execution(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
+        timezone=built.timezone,
         entity_name=configured_team_name,
         history_settings=built.history_settings,
         active_model_name=runtime_model.model_name,
@@ -236,7 +240,7 @@ async def prepare_materialized_team_execution(
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        model_params=spec.model.model_params,
+        model_params=leader.model.model_params,
         extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
     )
     return PreparedTeamExecution(
@@ -257,12 +261,16 @@ async def prepare_materialized_team_execution(
 
 @dataclass(frozen=True)
 class _LeaderRun:
-    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata."""
+    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata.
+
+    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
+    """
 
     spec: TeamSpec
     storage: RunStorage | None
     hooks: LoopHooks
     request_template: ModelRequest
+    stream: bool
     model_name: str
     metadata: dict[str, Any] | None
 
@@ -290,6 +298,7 @@ class _LeaderRun:
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
             request_template=self.request_template,
+            stream=self.stream,
         )
 
 
@@ -324,7 +333,8 @@ def _leader_run(
             ),
             entity_name=configured_team_name,
         ),
-        request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
+        request_template=with_native_history(ModelRequest(messages=()), history.native_history),
+        stream=stream,
         model_name=prepared.runtime_model_name,
         metadata=prepared.run_metadata,
     )
@@ -434,6 +444,8 @@ class _TeamTurn:
     turn_recorder: TurnRecorder
     reason_prefix: str
     holder: _TeamTurnHolder
+    # The zone of the entity whose bot runs the turn, which dates all of it.
+    timezone: str
 
     @property
     def runtime_paths(self) -> RuntimePaths:
@@ -471,7 +483,7 @@ class _TeamTurn:
             ),
             prompt=prompt,
             model_prompt=None,
-            full_prompt=render_prepared_team_messages_text(run_input),
+            full_prompt=render_prepared_messages_text(run_input),
             metadata=metadata,
         )
 
@@ -523,6 +535,7 @@ class _TeamTurn:
             execution_identity=self.execution_identity,
             model_name=runtime_model.model_name,
             configured_team_name=self.configured_team_name,
+            timezone=self.timezone,
             system_enrichment=render_system_enrichment_block(self.ctx.system_enrichment_items),
         )
         prepared = await prepare_materialized_team_execution(
@@ -734,8 +747,7 @@ class _TeamTurn:
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, rendered into the document it shows.
 
-        A blocking pause renders its runs' records, kept as main behaves; a streamed one freezes the document its
-        events built.
+        A blocking pause renders its runs' records; a streamed one freezes the document its events built.
         """
         paused = paused_attempt_from_response(
             record,
@@ -781,9 +793,9 @@ class _TeamTurn:
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
-        # its trace through its chunks. A blocking reply renders the finished runs, kept as main behaves; a streamed
-        # one records the document its events built and its failed member runs' reasons, in the configured order.
-        # The "No team response generated." fallback is display chrome, not replayable assistant text.
+        # its trace through its chunks. A blocking reply renders the finished runs (``format_team_response``); a
+        # streamed one records the document its events built and its failed member runs' reasons, in the configured
+        # order. The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
             body_text = format_team_response(record)
             leader_text = finished_run_text(record)
@@ -955,6 +967,8 @@ def _team_turn(
         turn_recorder=turn_recorder,
         reason_prefix=reason_prefix,
         holder=_TeamTurnHolder(team_members=team_members, member_model_names=team_members.model_names),
+        # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
+        timezone=config.get_entity_timezone(ctx.entity_label),
     )
 
 

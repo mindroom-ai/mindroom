@@ -45,7 +45,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import bound_log_context
 from tests.conftest import FakeMediaResponse, make_matrix_client_mock, make_visible_message
-from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
+from tests.providers.anthropic_family_support import claude_turn, route_provider, sse_reply
 from tests.providers.golden_support import Wire
 
 if TYPE_CHECKING:
@@ -885,11 +885,11 @@ async def test_a_text_attachment_whose_mime_type_has_parameters_reaches_claude_a
         record_path.write_text(json.dumps({**payload, "mime_type": "text/plain; charset=utf-8"}), encoding="utf-8")
     resolved = resolve_scoped_attachments(tmp_path, [record.attachment_id])
     _, _, files, _ = attachment_records_to_media(resolved)
-    wire = Wire(json_reply([{"type": "text", "text": "Read."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
 
     await claude_turn(
         route_provider("anthropic", tmp_path, wire),
-        ModelRequest(messages=[Message(role="user", content="Summarize.", files=files)], stream=False),
+        ModelRequest(messages=[Message(role="user", content="Summarize.", files=files)]),
     )
 
     (user,) = wire.body()["messages"]

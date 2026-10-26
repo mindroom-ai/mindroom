@@ -17,18 +17,15 @@
       "id": "z-ai/glm-5.3",
       "provider": "openrouter"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and",
-      "from_history": false,
       "provider_data": {
-        "finish_reason": "length",
         "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "z-ai/glm-5.3",
@@ -36,8 +33,7 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "cost": 0.00021,
@@ -45,10 +41,12 @@
       "output_tokens": 8,
       "total_tokens": 50
     },
-    "stop_reason": "length"
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {
+      "model": "z-ai/glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -59,7 +57,9 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "z-ai/glm-5.3"
+      "stream_options": {
+        "include_usage": true
+      }
     },
     "headers": {
       "accept": "application/json",
@@ -70,37 +70,88 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "choices": [
-        {
-          "finish_reason": "length",
-          "index": 0,
-          "message": {
-            "content": "Pack a light rain jacket and",
-            "role": "assistant"
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "z-ai/glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "Pack a light rain jacket and"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "z-ai/glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "length",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "z-ai/glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "z-ai/glm-5.3",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "usage": {
+            "completion_tokens": 8,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "cost": 0.00021,
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 50
           }
         }
-      ],
-      "created": 1792540800,
-      "id": "chatcmpl-parity",
-      "model": "z-ai/glm-5.3",
-      "object": "chat.completion",
-      "system_fingerprint": "fp_parity",
-      "usage": {
-        "completion_tokens": 8,
-        "completion_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "cost": 0.00021,
-        "prompt_tokens": 42,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        },
-        "total_tokens": 50
+      },
+      {
+        "data": "[DONE]"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "output_limit_stop"

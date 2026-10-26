@@ -1146,6 +1146,12 @@ class _MultiAgentOrchestrator:
             return config.teams[entity_name].display_name
         return entity_name
 
+    @staticmethod
+    def _entity_requested_username(config: Config, entity_name: str) -> str | None:
+        """Return a generated agent's stored Matrix username, so a wiped matrix_state recreates the same ID."""
+        instance = config.personal_agent_instance(entity_name)
+        return None if instance is None else instance.matrix_username
+
     async def _prepare_entity_accounts(
         self,
         config: Config,
@@ -1166,6 +1172,7 @@ class _MultiAgentOrchestrator:
                     entity_name,
                     self._entity_display_name(config, entity_name),
                     runtime_paths=self.runtime_paths,
+                    username=self._entity_requested_username(config, entity_name),
                 )
             self._validate_entity_accounts(config)
             users = prepared_users
@@ -1201,7 +1208,13 @@ class _MultiAgentOrchestrator:
                     username=config.mindroom_user.username,
                 ),
             )
-        requests.extend(ManagedAccountProvisioningRequest(entity_name) for entity_name in entity_names)
+        requests.extend(
+            ManagedAccountProvisioningRequest(
+                entity_name,
+                username=self._entity_requested_username(config, entity_name),
+            )
+            for entity_name in entity_names
+        )
         preflight_managed_account_provisioning(requests, self.runtime_paths)
 
     def validate_managed_entity_identities(self) -> None:
@@ -1573,6 +1586,10 @@ class _MultiAgentOrchestrator:
             self._router_reply_memberships_live_sync_ready.set()
         if bot.agent_name == ROUTER_AGENT_NAME and bot.running and bot.client is not None:
             await self._approval_recovery.mark_router_ready()
+        if self.config is not None and self.config.personal_agent_instance(bot.agent_name) is not None:
+            router = self.agent_bots.get(ROUTER_AGENT_NAME)
+            if isinstance(router, AgentBot):
+                router.personal_room_target_ready()
         self._schedule_ready_turn_dispatch_recovery()
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:

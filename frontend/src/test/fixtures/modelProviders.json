@@ -1,0 +1,21 @@
+[
+  "anthropic",
+  "azure",
+  "bedrock_claude",
+  "cerebras",
+  "codex",
+  "deepseek",
+  "gemini",
+  "google",
+  "groq",
+  "kimi",
+  "kimi_code",
+  "llama_cpp",
+  "ollama",
+  "openai",
+  "openai_codex",
+  "openrouter",
+  "synthetic",
+  "vertexai_claude",
+  "zai"
+]

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
 from mindroom.reply_lifecycle import ReplyState
+from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import membership_state, outbox, reply_messages, reply_spans
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.response_sources import ResponseSources
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
     from .backend import Row, Transaction
 
@@ -113,7 +115,7 @@ class ApprovalDecision(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ApprovalCall:
-    """One exact tool call in the current paused generation."""
+    """One exact tool call of one paused generation."""
 
     tool_call_id: str
     tool_name: str
@@ -189,9 +191,12 @@ class ApprovalContinuation:
     sources: ResponseSources
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
+    # Every earlier generation's calls, each decided before the continuation advanced past it, in pause order.
+    earlier_calls: tuple[ApprovalCall, ...] = ()
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     show_tool_calls: bool = True
-    execution_identity: dict[str, object] = field(default_factory=dict)
+    # The identity the paused run executed under; the resumed run and its tools execute under it again.
+    execution_identity: ToolExecutionIdentity = field(kw_only=True)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
     team_member_model_names: tuple[tuple[str, str], ...] = ()
@@ -241,7 +246,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "entity_kind": continuation.entity_kind,
         "requester_id": continuation.requester_id,
         "delegation_storage_bindings": continuation.delegation_storage_bindings,
-        "execution_identity": continuation.execution_identity,
+        "execution_identity": serialize_tool_execution_identity(continuation.execution_identity),
         "runtime_model_name": continuation.runtime_model_name,
         "team_member_names": list(continuation.team_member_names),
         "team_member_model_names": [list(item) for item in continuation.team_member_model_names],
@@ -274,7 +279,7 @@ def get(
     *,
     approval_id: str,
 ) -> ApprovalContinuation | None:
-    """Load one continuation and its exact ordered sources and calls."""
+    """Load one continuation and its exact ordered sources and every generation's calls."""
     row = transaction.fetchone(
         f"""
         SELECT {_CONTINUATION_COLUMNS}
@@ -287,11 +292,11 @@ def get(
         return None
     call_rows = transaction.fetchall(
         """
-        SELECT tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
+        SELECT generation, tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
                human_approval_required, toolkit_name, arguments_digest
         FROM approval_continuation_calls
-        WHERE principal_id = ? AND approval_id = ? AND generation = ?
-        ORDER BY call_ordinal
+        WHERE principal_id = ? AND approval_id = ? AND generation <= ?
+        ORDER BY generation, call_ordinal
         """,
         (principal_id, approval_id, int(row["generation"])),
     )
@@ -307,13 +312,30 @@ def _shows_tool_calls(presentation: str) -> bool:
     return json.loads(presentation)["show_tool_calls"] is True
 
 
+def _call(row: Row) -> ApprovalCall:
+    """Decode one stored exact call."""
+    return ApprovalCall(
+        tool_call_id=str(row["tool_call_id"]),
+        tool_name=str(row["tool_name"]),
+        invoking_agent=str(row["invoking_agent"]),
+        toolkit_name=cast("str | None", row["toolkit_name"]),
+        arguments_digest=cast("str | None", row["arguments_digest"]),
+        expires_at_ns=int(row["expires_at_ns"]),
+        decision=(ApprovalDecision(str(row["decision"])) if row["decision"] is not None else None),
+        reason=cast("str | None", row["reason"]),
+        human_approval_required=(
+            bool(row["human_approval_required"]) if row["human_approval_required"] is not None else None
+        ),
+    )
+
+
 def _from_rows(
     transaction: Transaction,
     principal_id: str,
     row: Row,
     call_rows: tuple[Row, ...],
 ) -> ApprovalContinuation:
-    """Decode one normalized continuation aggregate."""
+    """Decode one normalized continuation aggregate from its row and the calls of each generation up to its own."""
     context = json.loads(str(row["context_json"]))
     if not isinstance(context, dict):
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
@@ -329,22 +351,7 @@ def _from_rows(
     claim_span_id = cast("str | None", row["claim_span_id"])
     claimed = row["state"] == "ready" and claim_span_id is not None
     claim_span = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
-    calls = tuple(
-        ApprovalCall(
-            tool_call_id=str(call["tool_call_id"]),
-            tool_name=str(call["tool_name"]),
-            invoking_agent=str(call["invoking_agent"]),
-            toolkit_name=cast("str | None", call["toolkit_name"]),
-            arguments_digest=cast("str | None", call["arguments_digest"]),
-            expires_at_ns=int(call["expires_at_ns"]),
-            decision=(ApprovalDecision(str(call["decision"])) if call["decision"] is not None else None),
-            reason=cast("str | None", call["reason"]),
-            human_approval_required=(
-                bool(call["human_approval_required"]) if call["human_approval_required"] is not None else None
-            ),
-        )
-        for call in call_rows
-    )
+    generation = int(row["generation"])
     return ApprovalContinuation(
         cli_call=cast("dict[str, object] | None", stored["cli_call"]),
         approval_id=str(row["approval_id"]),
@@ -358,14 +365,18 @@ def _from_rows(
         requester_id=cast("str", stored["requester_id"]),
         response_event_id=reply.event_id,
         sources=span.sources,
-        calls=calls,
+        calls=tuple(_call(call) for call in call_rows if int(call["generation"]) == generation),
+        earlier_calls=tuple(_call(call) for call in call_rows if int(call["generation"]) < generation),
         state="claimed" if claimed else cast("ApprovalContinuationState", row["state"]),
         delegation_storage_bindings=cast(
             "dict[str, dict[str, object]]",
             stored["delegation_storage_bindings"],
         ),
         show_tool_calls=_shows_tool_calls(reply.presentation),
-        execution_identity=cast("dict[str, object]", stored["execution_identity"]),
+        execution_identity=parse_tool_execution_identity_payload(
+            stored["execution_identity"],
+            error_prefix="Approval continuation execution_identity",
+        ),
         runtime_model_name=cast("str | None", stored["runtime_model_name"]),
         team_member_names=tuple(cast("list[str]", stored["team_member_names"])),
         team_member_model_names=tuple(
@@ -396,7 +407,7 @@ def _from_rows(
             else cast("str | None", row["runtime_generation"])
         ),
         failure_reason=cast("str | None", row["failure_reason"]),
-        generation=int(row["generation"]),
+        generation=generation,
         span_id=cast("str | None", row["span_id"]),
         claim_span_id=claim_span_id,
     )
@@ -537,16 +548,16 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
     placeholders = ", ".join("?" for _approval_id in approval_ids)
     call_rows = transaction.fetchall(
         f"""
-        SELECT calls.approval_id, calls.tool_call_id, calls.tool_name,
+        SELECT calls.approval_id, calls.generation, calls.tool_call_id, calls.tool_name,
                calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason,
                calls.human_approval_required, calls.toolkit_name, calls.arguments_digest
         FROM approval_continuation_calls AS calls
         JOIN approval_continuations AS continuations
           ON continuations.principal_id = calls.principal_id
          AND continuations.approval_id = calls.approval_id
-         AND continuations.generation = calls.generation
+         AND calls.generation <= continuations.generation
         WHERE calls.approval_id IN ({placeholders})
-        ORDER BY calls.approval_id/*bytes*/, calls.call_ordinal
+        ORDER BY calls.approval_id/*bytes*/, calls.generation, calls.call_ordinal
         """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
         approval_ids,
     )

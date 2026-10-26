@@ -12,10 +12,7 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 import yaml
-from agno.agent import Agent
-from agno.models.openai import OpenAIChat
 from agno.run import RunContext
-from agno.team import Team
 from agno.tools import openai as agno_openai
 
 from mindroom.agents import create_agent
@@ -41,6 +38,7 @@ from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key, r
 from tests.agent_tool_helpers import offered_function, run_offered, source_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
+    call_proxy_sync_for_test,
     make_conversation_reader_mock,
     make_matrix_client_mock,
     make_relation_lookup,
@@ -121,7 +119,7 @@ def test_ordinary_json_is_opaque_across_worker_transport(
         },
     )
 
-    result = sandbox_proxy._call_proxy_sync(
+    result = call_proxy_sync_for_test(
         runtime_paths=paths,
         tool_name="calculator",
         function_name="add",
@@ -265,7 +263,7 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
     assert media[0].content == content
 
 
-@pytest.mark.parametrize("shape", ["value", "nested", "key", "nonfinite", "positional", "agent", "context", "team"])
+@pytest.mark.parametrize("shape", ["value", "nested", "key", "nonfinite", "positional", "actor", "context"])
 def test_invalid_arguments_rejected_before_worker_side_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -290,9 +288,9 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         "key": {Opaque(): "value"},
         "nonfinite": float("nan"),
         "positional": Opaque(),
-        "agent": Agent(model=OpenAIChat(id="gpt-6-astra", api_key=_MODEL_KEY)),
+        # What an entrypoint's ``agent`` or ``team`` parameter receives, carrying the toolkit's state.
+        "actor": ToolCallActor(session_state={"secret": _MODEL_KEY}),
         "context": {"alias": RunContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY})},
-        "team": Team(members=[]),
     }[shape]
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -300,7 +298,7 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         process_env={"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
     )
     with pytest.raises((TypeError, ValueError), match=r"[Aa]rgument"):
-        sandbox_proxy._call_proxy_sync(
+        call_proxy_sync_for_test(
             runtime_paths=paths,
             tool_name="calculator",
             function_name="add",
@@ -340,7 +338,7 @@ def test_declared_unused_agent_keeps_call_arguments(positional: bool, tmp_path: 
 def test_worker_keyword_names_must_be_strings() -> None:
     """The boundary rejects non-JSON keys instead of silently coercing them."""
     with pytest.raises(TypeError, match="worker argument"):
-        sandbox_proxy._worker_call_arguments((), {1: "value"}, entrypoint=None, inert_agent=False)  # type: ignore[invalid-argument-type]
+        sandbox_proxy._worker_call_arguments((), {1: "value"}, entrypoint=lambda: None, inert_agent=False)  # type: ignore[invalid-argument-type]
 
 
 def _context_agent(
@@ -405,6 +403,8 @@ def _context_agent(
         include_interactive_questions=False,
         persist_runtime_state=False,
         supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
     )
     return agent, context
 

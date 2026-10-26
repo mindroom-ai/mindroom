@@ -29,10 +29,10 @@ from mindroom.mcp_gateway.types import (
     ToolSchemaResult,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -41,6 +41,7 @@ from mindroom.tool_system.runtime_context import (
     worker_runtime_context,
 )
 from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -60,14 +61,15 @@ _MESSAGES: dict[GatewayErrorCode, str] = {
     GatewayErrorCode.UNAUTHORIZED: "Agent access has changed. Check your selection in Connections.",
     GatewayErrorCode.APPROVAL_REQUIRED: "This tool requires approval and cannot run through this gateway.",
     GatewayErrorCode.TOOL_UNAVAILABLE: "This tool is currently unavailable.",
+    GatewayErrorCode.TOOL_DECLINED: "A MindRoom plugin declined this call, so it did not run.",
     GatewayErrorCode.INVALID_ARGUMENTS: "Tool arguments are invalid or exceed the allowed size.",
     GatewayErrorCode.RESULT_TOO_LARGE: "The tool result exceeds the allowed size.",
     GatewayErrorCode.SCHEMA_TOO_LARGE: "The tool schema exceeds the allowed size.",
 }
 
 
-def _error(context: AgentToolContext, code: GatewayErrorCode) -> GatewayErrorResponse:
-    error: GatewayErrorDetail = {"code": code, "message": _MESSAGES[code]}
+def _error(context: AgentToolContext, code: GatewayErrorCode, message: str | None = None) -> GatewayErrorResponse:
+    error: GatewayErrorDetail = {"code": code, "message": message or _MESSAGES[code]}
     if code is GatewayErrorCode.CONNECTION_REQUIRED:
         origin = (context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/")
         error["connection_url"] = f"{origin}/connections"
@@ -106,12 +108,12 @@ def _require_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
     return entry
 
 
-def _blocked(context: AgentToolContext, function: Function) -> bool:
+def _blocked(context: AgentToolContext, function: Function | ToolFunction) -> bool:
     return function.requires_confirmation is True or tool_may_require_approval(context.config, function.name)
 
 
 def _function(context: AgentToolContext, toolkit: Toolkit, name: str) -> Function:
-    function = {**toolkit.functions, **toolkit.async_functions}.get(name)
+    function = toolkit.get_async_functions().get(name)
     if function is None:
         raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     if _blocked(context, function):
@@ -174,7 +176,7 @@ async def _guard[T: GatewaySuccessResponse](
     try:
         return await operation
     except GatewayError as exc:
-        return _error(context, exc.code)
+        return _error(context, exc.code, exc.message)
     except OAuthConnectionRequired:
         return _error(context, GatewayErrorCode.CONNECTION_REQUIRED)
     except Exception:
@@ -208,6 +210,8 @@ async def search_tools(
             selected_toolkit = toolkit
 
             async def selected(built: Toolkit) -> SearchResponse:
+                # Adapted, each function carries the description ``get_tool`` shows, which Agno derives from its
+                # docstring when the tool sets none.
                 items: list[SearchItem] = [
                     {
                         "agent": context.agent_name,
@@ -215,7 +219,7 @@ async def search_tools(
                         "function": function.name,
                         "description": (function.description or "")[:256],
                     }
-                    for function in {**built.functions, **built.async_functions}.values()
+                    for function in adapt_toolkit(built).functions
                     if _handle(function.name) and not _blocked(context, function)
                 ]
                 return _search_results(items, query, limit)
@@ -313,6 +317,8 @@ def _guard_dispatch(function: ToolFunction, require_current_config: Callable[[],
         await run_gateway_sync(require_current_config)
         return await entrypoint(*args, **kwargs)
 
+    # An async generator function is not a coroutine function, so ``guarded_sync`` guards it: the check runs on the
+    # tool thread, which returns the unstarted stream for ``run_tool_call`` to drain on the event loop.
     return replace(function, entrypoint=guarded_async if inspect.iscoroutinefunction(entrypoint) else guarded_sync)
 
 
@@ -335,10 +341,7 @@ async def invoke_tool(
         return _error(context, GatewayErrorCode.INVALID_ARGUMENTS)
 
     async def selected(built: Toolkit) -> InvocationResponse:
-        source = _function(context, built, function)
-        if inspect.isgeneratorfunction(source.entrypoint) or inspect.isasyncgenfunction(source.entrypoint):
-            raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
-        target = adapt_function(source)
+        target = adapt_function(_function(context, built, function))
         _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
         plugins = await run_gateway_sync(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
         policy = build_tool_hook_middleware(
@@ -363,7 +366,10 @@ async def invoke_tool(
             )
         except Exception as exc:
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE) from exc
-        result = to_json_compatible(value)
+        if isinstance(value, ToolOutcome) and value.is_error:
+            # The policy answers a call a plugin hook declined with a failed outcome, whose text says why.
+            raise GatewayError(code=GatewayErrorCode.TOOL_DECLINED, message=value.content)
+        result = to_json_compatible(client_tool_result(value))
         if _connection_required(result):
             raise GatewayError(code=GatewayErrorCode.CONNECTION_REQUIRED)
         payload: InvocationResponse = {"result": result}

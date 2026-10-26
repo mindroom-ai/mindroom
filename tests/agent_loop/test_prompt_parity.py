@@ -2,7 +2,7 @@
 
 Helper call sites, Matrix replies, and voice calls send their requests through the owned provider layer, so one
 recorder compares every request they send, byte for byte, with the golden, beside whatever a voice call exports to
-the realtime model. The team goldens are compared in ``tests/team_runtime/test_prompt_parity.py``.
+the realtime model. The team goldens are compared in ``tests/teams/test_prompt_parity.py``.
 """
 
 from __future__ import annotations
@@ -13,8 +13,15 @@ import pytest
 
 from mindroom.agent_loop.prompt import PromptSpec, render_instructions, render_system_message
 from mindroom.llm.messages import Message
-from tests.agno_parity.prompt_scenarios import FIXTURE_DIR, SCENARIOS, Recorder, call_dict, load_golden, normalize
-from tests.providers.golden_support import ordered_json
+from tests.agno_parity.golden_files import render
+from tests.agno_parity.prompt_scenarios import (
+    FIXTURE_DIR,
+    SCENARIOS,
+    golden_path,
+    load_golden,
+    record_scenario,
+    regenerated_golden,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,8 +31,8 @@ TEAM = [name for name in GOLDENS if name.startswith("team_")]
 RECORDED = [name for name in GOLDENS if name not in TEAM]
 
 
-def test_every_golden_is_compared_here_or_by_the_team_runtime() -> None:
-    """Each prompt golden is compared by this module or by the team runtime."""
+def test_every_golden_is_compared_here_or_by_the_team_prompt_tests() -> None:
+    """Each prompt golden is compared by this module or by ``tests/teams/test_prompt_parity.py``."""
     assert set(GOLDENS) == set(SCENARIOS)
     assert sorted({*RECORDED, *TEAM}) == GOLDENS
 
@@ -33,28 +40,19 @@ def test_every_golden_is_compared_here_or_by_the_team_runtime() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", RECORDED)
 async def test_recorded_requests_equal_the_goldens(name: str, tmp_path: Path) -> None:
-    """Each entry point sends its golden requests byte for byte, through the owned provider layer."""
-    golden = load_golden(name)
-    scenario = SCENARIOS[name]
-    recorder = Recorder(responder=scenario.responder)
+    """Each entry point sends its golden requests byte for byte, through the owned provider layer.
 
-    with recorder.installed():
-        output = await scenario.run(tmp_path)
+    The golden also holds what a scenario hands a model outside MindRoom's loop, such as a realtime call's
+    instructions and tools; the realtime call's model is LiveKit's, so its golden pins only what the call exports.
+    """
+    recorded = await record_scenario(name, tmp_path)
 
-    assert scenario.description == golden["description"]
-    assert normalize(output.input, tmp_path) == golden["input"]
-    # What a scenario hands a model outside MindRoom's loop, such as a realtime call's instructions and tools.
-    exported = normalize(output.exported, tmp_path)
-    assert exported == golden.get("exported")
-    assert ordered_json(exported) == ordered_json(golden.get("exported"))
-    # The realtime call's model is LiveKit's, so its golden pins only what the call exports to it.
-    assert recorder.calls or output.exported is not None
-    ordered = recorder.ordered_calls()
+    regenerated = regenerated_golden(name, recorded, tmp_path)
+    assert regenerated == load_golden(name)
+    assert render(regenerated) == golden_path(name).read_text(encoding="utf-8")
+    assert recorded.calls or recorded.output.exported is not None
     # Every request, the compaction summary included, went through the provider registry rather than an Agno model.
-    assert all(isinstance(message, Message) for call in ordered for message in call.messages)
-    requests = normalize([call_dict(call) for call in ordered], tmp_path)
-    assert requests == golden["requests"]
-    assert ordered_json(requests) == ordered_json(golden["requests"])
+    assert all(isinstance(message, Message) for call in recorded.calls for message in call.messages)
 
 
 def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:
@@ -66,8 +64,8 @@ def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:
     )
 
 
-def test_sections_render_in_agno_order() -> None:
-    """Each input lands in its section, in the order and with the separators Agno rendered."""
+def test_sections_render_in_a_fixed_order_with_fixed_separators() -> None:
+    """Each input lands in its section, in a fixed order and with fixed separators."""
     spec = PromptSpec(
         persona="Persona.",
         role="Role.",

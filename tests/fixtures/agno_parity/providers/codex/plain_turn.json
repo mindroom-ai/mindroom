@@ -19,16 +19,14 @@
       "id": "gpt-6.1-sol",
       "provider": "codex"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
-    "stream": true,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6.1-sol",
@@ -39,18 +37,19 @@
         "mindroom_response_stored": false,
         "response_id": "resp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
+      "model": "gpt-6.1-sol",
+      "stream": true,
       "include": [
         "reasoning.encrypted_content"
       ],
@@ -65,10 +64,8 @@
         }
       ],
       "instructions": "You are a helpful assistant.",
-      "model": "gpt-6.1-sol",
       "reasoning": {},
-      "store": false,
-      "stream": true
+      "store": false
     },
     "headers": {
       "accept": "application/json",

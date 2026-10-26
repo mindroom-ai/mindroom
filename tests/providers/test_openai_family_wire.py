@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +36,7 @@ from mindroom.llm.provider import (
     RequestOverrides,
     TextDelta,
     ToolSpec,
+    TurnCompleted,
     UsageReported,
     complete,
 )
@@ -43,10 +45,17 @@ from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.errors import provider_error
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.tool_policy import without_provider_tools
-from tests.providers.openai_family_support import golden_provider, provider_runtime, unsigned_jwt
+from tests.providers.golden_support import PacedBytes, encoded_response
+from tests.providers.openai_family_support import (
+    golden_provider,
+    openai_family_adapter,
+    provider_runtime,
+    unsigned_jwt,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,6 +67,8 @@ _RESPONSE_USAGE = {"input_tokens": 42, "output_tokens": 12, "total_tokens": 54}
 _OPENAI_CHAT = {"provider": "openai", "api": "chat_completions", "id": "gpt-6-astra", "api_key": "test-key"}
 _OPENAI_RESPONSES = {"provider": "openai", "api": "responses", "id": "gpt-6-astra", "api_key": "test-key"}
 _CALL = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
+# A new id a Chat turn stores a call under: when its server sent none, or on the ``openai`` dialect one it rewrites.
+_NEW_CHAT_ID = r"call_[0-9a-f]{32}"
 
 
 def _chunk(delta: dict[str, Any] | None = None, *, finish_reason: str | None = None, **extra: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -162,10 +173,10 @@ async def _adapter_turn(built: _Built, request: ModelRequest) -> Any:  # noqa: A
 
 
 @pytest.mark.asyncio
-async def test_usage_on_several_chat_chunks_adds_up_as_agno_summed_it(tmp_path: Path) -> None:
+async def test_usage_on_several_chat_chunks_adds_up(tmp_path: Path) -> None:
     """Each chunk's usage adds to the turn's, so every partial report and the final one hold the running sum.
 
-    Agno added every usage-bearing chunk to the assistant message's metrics; a server that repeats its cumulative
+    Every usage-bearing chunk adds to the assistant message's metrics, so a server that repeats its cumulative
     usage on each chunk is counted once per chunk.
     """
     first = {"prompt_tokens": 40, "completion_tokens": 1, "total_tokens": 41}
@@ -217,83 +228,234 @@ async def test_chat_finish_reason_maps_to_stop_reason(tmp_path: Path, finish_rea
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_splits_think_tags_and_records_finish_reason(tmp_path: Path) -> None:
-    completion = {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "m",
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {"role": "assistant", "content": "<think>Rain.</think>Pack a coat."},
-            },
-        ],
-        "usage": _USAGE,
-    }
-    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply(completion))
+async def test_a_chat_stream_moves_a_leading_think_block_to_reasoning(tmp_path: Path) -> None:
+    """A server without a reasoning parser streams a model's reasoning inside ``<think>``; it never shows as text."""
+    reply = _chat_reply(
+        _chunk({"content": "<thi"}),
+        _chunk({"content": "nk>Rain.</th"}),
+        _chunk({"content": "ink>\n\nPack"}),
+        _chunk({"content": " a coat."}, finish_reason="stop"),
+    )
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, reply)
 
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
+    events = [event async for event in built.provider.stream(ModelRequest(messages=[_user()]))]
 
-    assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain.")
-    assert turn.message.provider_data["finish_reason"] == "stop"
-    assert "stream" not in built.body()
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.message.content, completed.message.reasoning_content) == ("Pack a coat.", "Rain.")
+    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Pack a coat."
+    assert "".join(event.text for event in events if isinstance(event, ReasoningDelta)) == "Rain."
+    assert "finish_reason" not in (completed.message.provider_data or {})
+    assert built.body()["stream"] is True
     assert built.requests[0].headers["authorization"] == "Bearer not-provided"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("content", "expected"),
+    ("provider", "content", "expected"),
     [
-        ("<think>\n\n</think>Pack a coat.", ("<think>\n\n</think>Pack a coat.", None)),
-        ("Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
+        ("llama_cpp", "\n<think>Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
+        ("llama_cpp", "<think>\n\n</think>Pack a coat.", ("Pack a coat.", None)),
+        ("llama_cpp", "Rain.</think>Pack a coat.", ("Rain.</think>Pack a coat.", None)),
+        ("llama_cpp", "Pack a coat. <think>Rain.</think>", ("Pack a coat. <think>Rain.</think>", None)),
+        ("llama_cpp", "<think>Rain, cut off at </th", (None, "Rain, cut off at </th")),
+        ("groq", "<think>Rain.</think>Pack a coat.", ("<think>Rain.</think>Pack a coat.", None)),
     ],
-    ids=["empty-reasoning-kept", "no-opening-tag-split"],
+    ids=[
+        "leading-whitespace",
+        "empty-reasoning-dropped",
+        "no-opening-tag-kept",
+        "later-tag-kept",
+        "unclosed-reasoning",
+        "groq-keeps-the-tags",
+    ],
 )
-async def test_chat_completion_splits_think_tags_as_agno_did(
+async def test_a_chat_stream_splits_only_a_think_block_that_opens_the_reply(
     tmp_path: Path,
+    provider: str,
     content: str,
-    expected: tuple[str, str | None],
+    expected: tuple[str | None, str | None],
 ) -> None:
-    """Agno's Chat split at a closing tag alone but kept a reply whose reasoning was empty unchanged."""
+    """Only a reply that opens with ``<think>`` streams reasoning, and a block the reply never closes is all reasoning.
+
+    Groq and Cerebras replies keep the tags as text.
+    """
+    reply = _chat_reply(_chunk({"content": content}, finish_reason="stop"))
+    built = _Built(tmp_path, {"provider": provider, "id": "qwen", "api_key": "k"}, reply)
+
+    events = [event async for event in built.provider.stream(ModelRequest(messages=[_user()]))]
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.message.content, completed.message.reasoning_content) == expected
+    text = "".join(event.text for event in events if isinstance(event, TextDelta))
+    reasoning = "".join(event.text for event in events if isinstance(event, ReasoningDelta))
+    assert (text or None, reasoning or None) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server_id", "stored"),
+    [
+        (None, _NEW_CHAT_ID),
+        ("functions.get_weather:0", _NEW_CHAT_ID),
+        (f"call_{'a' * 35}", f"call_{'a' * 35}"),
+        (f"call_{'a' * 36}", _NEW_CHAT_ID),
+    ],
+    ids=["omitted", "unprefixed", "at-40-characters", "past-40-characters"],
+)
+async def test_a_chat_call_keeps_only_a_server_id_that_chat_requests_send_unchanged(
+    tmp_path: Path,
+    server_id: str | None,
+    stored: str,
+) -> None:
+    """On the ``openai`` dialect, a call without an id or with one outside the Chat rule gets a new id that fits it.
+
+    That dialect's requests rewrite an id that is not ``call_`` and at most 40 characters, so the call is stored under
+    one they send unchanged.
+    """
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _tool_call_reply(server_id))
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert re.fullmatch(stored, turn.tool_calls[0]["id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "server_id", "stored"),
+    [
+        ("groq", "functions.get_weather:0", re.escape("functions.get_weather:0")),
+        ("cerebras", "functions.get_weather:0", re.escape("functions.get_weather:0")),
+        ("groq", None, _NEW_CHAT_ID),
+    ],
+    ids=["groq", "cerebras", "groq-omitted"],
+)
+async def test_a_groq_or_cerebras_call_keeps_the_id_its_server_sent(
+    tmp_path: Path,
+    route: str,
+    server_id: str | None,
+    stored: str,
+) -> None:
+    """Groq and Cerebras requests send stored ids unchanged, so a call keeps its server's id, even outside the Chat rule.
+
+    Only a call its server sent without an id gets a new one.
+    """
+    built = _Built(tmp_path, _DECISION_ROUTES[route][0], _tool_call_reply(server_id))
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    [call] = turn.tool_calls
+    assert re.fullmatch(stored, call["id"])
+
+
+class _Packing(BaseModel):
+    item: str
+
+
+@pytest.mark.asyncio
+async def test_a_groq_request_for_structured_output_reads_the_whole_reply(tmp_path: Path) -> None:
+    """Groq does not stream structured output, so a request for it asks for the whole reply instead of a stream."""
     completion = {
         "id": "chatcmpl-1",
         "object": "chat.completion",
         "created": 1,
-        "model": "m",
-        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
-        "usage": _USAGE,
+        "model": "openai/gpt-oss-120b",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": '{"item": "coat"}'}, "finish_reason": "stop"},
+        ],
+        "usage": {**_USAGE, "queue_time": 0.011},
     }
-    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply(completion))
+    built = _Built(tmp_path, _DECISION_ROUTES["groq"][0], _json_reply(completion))
 
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
+    turn = await _turn(built, ModelRequest(messages=[_user()], output_schema=_Packing))
 
-    assert (turn.content, turn.message.reasoning_content) == expected
+    body = built.body()
+    assert ("stream" in body, body["response_format"]) == (False, {"type": "json_object"})
+    assert (turn.content, turn.stop_reason) == ('{"item": "coat"}', "end")
+    tokens = turn.usage.tokens
+    assert (tokens.input_tokens, tokens.output_tokens, turn.usage.provider_metrics) == (42, 12, {"queue_time": 0.011})
+
+
+def _tool_call_reply(server_id: str | None) -> dict[str, Any]:
+    """Return a Chat stream with one ``get_weather`` call under ``server_id``, or no id when it is None."""
+    call: dict[str, Any] = {"index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+    if server_id is not None:
+        call["id"] = server_id
+    return _chat_reply(_chunk({"tool_calls": [call]}, finish_reason="tool_calls"))
+
+
+_COAT = _chunk({"content": "Pack a coat."})
+_STOP = _chunk({}, finish_reason="stop")
+_DONE = {"data": "[DONE]"}
+
+
+def _chat_events(*chunks: dict[str, Any]) -> dict[str, Any]:
+    return {"status": 200, "headers": {"content-type": "text/event-stream"}, "sse": list(chunks)}
+
+
+def _streamed_chat(*chunks: dict[str, Any]) -> dict[str, Any]:
+    """Return a Chat stream whose body streams as a server's does, so the adapter can tell where it ends."""
+    return {**_chat_events(*chunks), "pause_seconds": 0.0}
 
 
 @pytest.mark.asyncio
-async def test_chat_tool_calls_without_ids_get_generated_ids(tmp_path: Path) -> None:
-    delta = {"tool_calls": [{"index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]}
-    built = _Built(
-        tmp_path,
+@pytest.mark.parametrize(
+    ("ending", "stop_reason"),
+    [([_STOP, _DONE], "end"), ([_STOP], "end"), ([_DONE], None)],
+    ids=["finish-reason-and-done", "finish-reason-without-done", "done-without-finish-reason"],
+)
+async def test_a_chat_stream_ends_its_turn_at_a_finish_reason_or_done(
+    tmp_path: Path,
+    ending: list[dict[str, Any]],
+    stop_reason: str | None,
+) -> None:
+    """OpenAI-compatible servers may omit ``finish_reason`` or ``[DONE]``; either one ends the turn."""
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _streamed_chat(_COAT, *ending))
+
+    turn = await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert (turn.content, turn.stop_reason) == ("Pack a coat.", stop_reason)
+
+
+class _RecordedBody(PacedBytes):
+    """A streamed response body that records whether it was closed."""
+
+    closed = False
+
+    async def aclose(self) -> None:
+        """Record the close."""
+        self.closed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", [[_STOP, _DONE], []], ids=["ended-at-done", "cut-off"])
+async def test_a_chat_stream_closes_its_response_body(tmp_path: Path, ending: list[dict[str, Any]]) -> None:
+    """The response body is closed once the stream stops, at ``[DONE]`` or cut off, which releases its connection."""
+    whole = encoded_response(_chat_events(_COAT, *ending))
+    body = _RecordedBody([whole.content])
+    adapter = openai_family_adapter(
         {"provider": "llama_cpp", "id": "qwen"},
-        _chat_reply(_chunk(delta, finish_reason="tool_calls")),
+        tmp_path,
+        lambda _request: httpx.Response(200, headers=whole.headers, stream=body),
     )
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
+    [event async for event in adapter.stream(ModelRequest(messages=[_user()]))]
 
-    assert len(turn.tool_calls[0]["id"]) == 36
+    assert body.closed
 
 
 @pytest.mark.asyncio
-async def test_a_chat_stream_without_a_finish_reason_reports_no_stop_reason(tmp_path: Path) -> None:
-    """OpenAI-compatible servers may end a stream without ``finish_reason``; the text still arrives whole."""
-    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _chat_reply(_chunk({"content": "Pack a coat."})))
+async def test_a_chat_stream_cut_off_without_a_finish_reason_or_done_ends_no_turn(tmp_path: Path) -> None:
+    """A body that ends after text without either was cut off: its text arrives, but the turn does not end.
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
+    The request pipeline turns the missing turn into its retryable early-end error.
+    """
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _streamed_chat(_COAT))
 
-    assert (turn.content, turn.stop_reason) == ("Pack a coat.", None)
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
+
+    assert events == [TextDelta("Pack a coat.")]
 
 
 @pytest.mark.asyncio
@@ -337,52 +499,6 @@ async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fiel
     assert turn.message.reasoning_content == "Rain is likely this afternoon."
     assert turn.message.provider_data["reasoning_details"] == first + second
     assert turn.message.provider_data["model_extra"] == {"provider": "Anthropic"}
-
-
-def _completion(message: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "m",
-        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", **message}}],
-        "usage": _USAGE,
-    }
-
-
-_REASONING_DETAILS = [{"type": "reasoning.text", "text": "Rain is likely."}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("model_config", "reasoning_fields", "reasoning_details"),
-    [
-        (
-            {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k"},
-            {"reasoning_content": "Rain is likely."},
-            None,
-        ),
-        (
-            {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"},
-            {"reasoning": "Rain is likely.", "reasoning_details": _REASONING_DETAILS},
-            _REASONING_DETAILS,
-        ),
-    ],
-    ids=["deepseek", "openrouter"],
-)
-async def test_a_non_streamed_chat_reply_keeps_its_reasoning(
-    tmp_path: Path,
-    model_config: dict[str, Any],
-    reasoning_fields: dict[str, Any],
-    reasoning_details: list[dict[str, str]] | None,
-) -> None:
-    """Helper and decision requests do not stream; the reasoning those replies carry is kept like a streamed one."""
-    built = _Built(tmp_path, model_config, _json_reply(_completion({"content": "Pack a coat.", **reasoning_fields})))
-
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
-
-    assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
-    assert turn.message.provider_data.get("reasoning_details") == reasoning_details
 
 
 @pytest.mark.asyncio
@@ -504,7 +620,7 @@ async def test_http_errors_map_to_typed_provider_errors(
 ) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _json_reply(body, status=status))
     # A caller that retries the request itself turns the SDK's retries off, so the adapter's own error arrives at once.
-    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(caller_retries=True))
+    request = ModelRequest(messages=[_user()], overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(ProviderError) as info:
         await _turn(built, request)
@@ -597,15 +713,32 @@ async def test_a_context_window_error_inside_a_stream_is_typed(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_a_stream_error_event_whose_error_is_text_reads_as_that_text(tmp_path: Path) -> None:
+    """An error event that carries its error as a bare string is classified by the string, not the SDK's placeholder."""
+    error = "This model's maximum context length is 131072 tokens."
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _chat_reply({"data": {"error": error}}))
+
+    with pytest.raises(ContextWindowExceeded, match="maximum context length"):
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+
+@pytest.mark.asyncio
 async def test_an_error_body_without_a_message_reports_the_response_text(tmp_path: Path) -> None:
     """Servers that answer outside the OpenAI error shape still surface what they said."""
     built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply({"detail": "Not Found"}, status=404))
-    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(caller_retries=True))
+    request = ModelRequest(messages=[_user()], overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(InvalidRequest) as info:
         await _turn(built, request)
 
     assert (str(info.value), info.value.status_code) == ('{"detail": "Not Found"}', 404)
+
+
+def test_an_sdk_failure_without_text_is_named_by_its_type() -> None:
+    """A failure the SDK raises without text reports its type name, so the reply says what failed."""
+    error = provider_error(RuntimeError(), provider="OpenAI Chat")
+
+    assert (type(error), str(error)) == (ProviderError, "RuntimeError")
 
 
 def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
@@ -748,36 +881,6 @@ async def test_failed_response_reports_its_usage_before_raising(tmp_path: Path) 
 
 
 _REASONING_ITEM = {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Rain is likely."}]}
-_MESSAGE_ITEM = {
-    "id": "msg_1",
-    "type": "message",
-    "role": "assistant",
-    "status": "completed",
-    "content": [{"type": "output_text", "text": "Pack a coat.", "annotations": []}],
-}
-
-
-@pytest.mark.asyncio
-async def test_a_non_streamed_response_keeps_its_reasoning_summary(tmp_path: Path) -> None:
-    """A helper call on the Responses route reads the reasoning summary; a stored response needs no reasoning copy."""
-    built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(_response(output=[_REASONING_ITEM, _MESSAGE_ITEM])))
-
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
-
-    assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
-    assert turn.message.provider_data["response_id"] == "resp_1"
-    assert "reasoning_output" not in turn.message.provider_data
-
-
-@pytest.mark.asyncio
-async def test_a_non_streamed_failed_response_raises_its_error(tmp_path: Path) -> None:
-    failed = _response("failed", error={"code": "server_error", "message": "The server had an error."})
-    built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(failed))
-
-    with pytest.raises(ProviderUnavailable, match="The server had an error") as info:
-        await _adapter_turn(built, ModelRequest(messages=[_user()], stream=False))
-
-    assert (info.value.status_code, info.value.code, info.value.provider) == (None, "server_error", "OpenAI Responses")
 
 
 @pytest.mark.asyncio
@@ -959,6 +1062,44 @@ async def test_native_compaction_replays_without_storage_and_records_its_route(t
     assert turn.message.provider_data["mindroom_response_stored"] is False
 
 
+_UNSTORED_OUTPUT = [
+    {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "opaque"},
+    {"id": "cmp_1", "type": "compaction", "encrypted_content": "checkpoint"},
+    {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "Pack", "annotations": []}],
+    },
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listed", [True, False], ids=["listed-by-the-ended-response", "only-streamed"])
+async def test_an_unstored_response_keeps_its_output_for_replay_without_its_compaction_item(
+    tmp_path: Path,
+    *,
+    listed: bool,
+) -> None:
+    """An unstored reply keeps its output for replay, from the ended response or, when that lists none, its stream.
+
+    The compaction item stays out of that output.
+    """
+    done = [
+        {"type": "response.output_item.done", "sequence_number": 2 + index, "output_index": index, "item": item}
+        for index, item in enumerate(_UNSTORED_OUTPUT)
+    ]
+    ended = _completed(_UNSTORED_OUTPUT if listed else None)
+    reply = _responses_reply(*_text_events("Pack"), *done, ended)
+    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"store": False}}, reply)
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    reasoning, _compaction, message = _UNSTORED_OUTPUT
+    assert turn.message.provider_data[RESPONSE_OUTPUT_KEY] == [reasoning, message]
+
+
 def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path: Path) -> None:
     """The Responses adapter answers the history planner like the Claude one: a route hash, or None without support."""
     built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(_completed()))
@@ -1029,7 +1170,7 @@ async def test_a_temperature_override_is_sent_as_the_models_temperature(
     await _turn(built, ModelRequest(messages=[_user()], tools=[tool], overrides=RequestOverrides(temperature=0.2)))
 
     body = built.body()
-    assert list(body) == ["messages", "model", "stream", "stream_options", "temperature", "tools"]
+    assert list(body) == ["model", "stream", "messages", "stream_options", "temperature", "tools"]
     assert body["temperature"] == temperature
 
 
@@ -1331,76 +1472,39 @@ _PACK_SUMMARY_DELTA = {
 }
 
 
-def _reasoning_reply(*, stream: bool, summary: bool) -> dict[str, Any]:
+def _reasoning_reply(*, summary: bool) -> dict[str, Any]:
     output = [_PACK_REASONING, _PACK_MESSAGE] if summary else [_PACK_MESSAGE]
-    if not stream:
-        return _json_reply(_response(output=output))
     created, text = _text_events(_PACK)
     return _responses_reply(created, *([_PACK_SUMMARY_DELTA] if summary else []), text, _completed(output))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stream", "extra_kwargs", "summary", "stored"),
+    ("extra_kwargs", "summary", "stored"),
     [
-        (True, {}, False, None),
-        (True, {"reasoning": {"effort": "low"}}, False, _PACK),
-        (True, {"reasoning": {"effort": "low", "summary": "auto"}}, True, f"Think. {_PACK}"),
-        (True, {"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
-        (False, {}, False, None),
-        (False, {"reasoning": {"effort": "low"}}, False, _PACK),
-        (False, {"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
+        ({}, False, None),
+        ({"reasoning": {"effort": "low"}}, False, None),
+        ({"reasoning": {"effort": "low", "summary": "auto"}}, True, "Think. "),
+        ({"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
     ],
-    ids=[
-        "streamed-unset",
-        "streamed-authored",
-        "streamed-authored-summary-in-reasoning",
-        "streamed-reasoning-summary",
-        "blocking-unset",
-        "blocking-authored",
-        "blocking-with-summary",
-    ],
+    ids=["unset", "authored", "authored-summary-in-reasoning", "reasoning-summary"],
 )
-async def test_authored_reasoning_stores_the_output_text_as_agno_did(
+async def test_a_response_stores_only_the_reasoning_summary_it_returns_as_reasoning(
     tmp_path: Path,
     *,
-    stream: bool,
     extra_kwargs: dict[str, Any],
     summary: bool,
     stored: str | None,
 ) -> None:
-    """With ``reasoning`` authored, Agno stored the output text as reasoning unless a summary took its place.
-
-    A stream copied every text delta, after any summary text, unless ``reasoning_summary`` was set; a blocking
-    response stored its summary when it had one and its output text otherwise.
-    """
-    built = _Built(
-        tmp_path,
-        {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs},
-        _reasoning_reply(stream=stream, summary=summary),
-    )
-
-    turn = await _turn(built, ModelRequest(messages=[_user()], stream=stream))
-
-    assert (turn.content, turn.message.reasoning_content) == (_PACK, stored)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("summary", [False, True], ids=["without-summary", "with-summary"])
-async def test_the_stored_copy_of_the_output_text_never_streams_as_reasoning(
-    tmp_path: Path,
-    *,
-    summary: bool,
-) -> None:
-    """With ``reasoning`` authored, only a reasoning summary streams as reasoning; the text's stored copy does not."""
-    config = {**_OPENAI_RESPONSES, "extra_kwargs": {"reasoning": {"effort": "low"}}}
-    built = _Built(tmp_path, config, _reasoning_reply(stream=True, summary=summary))
+    """Authored ``reasoning`` settings never make the output text a reply's reasoning, streamed or stored."""
+    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs}, _reasoning_reply(summary=summary))
 
     events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
 
-    expected = [TextDelta(_PACK)]
     deltas = [event for event in events if isinstance(event, (ReasoningDelta, TextDelta))]
-    assert deltas == ([ReasoningDelta("Think. "), *expected] if summary else expected)
+    assert deltas == [*([ReasoningDelta("Think. ")] if summary else []), TextDelta(_PACK)]
+    [turn] = [event for event in events if isinstance(event, TurnCompleted)]
+    assert (turn.message.content, turn.message.reasoning_content) == (_PACK, stored)
 
 
 @pytest.mark.asyncio
@@ -1517,19 +1621,45 @@ async def test_client_params_override_the_configured_client_options(
 
 
 @pytest.mark.asyncio
-async def test_client_params_base_url_is_the_groq_host(tmp_path: Path) -> None:
+async def test_an_azure_model_sends_with_its_configured_timeout_and_retries(tmp_path: Path) -> None:
+    """``timeout`` and ``max_retries`` set in ``extra_kwargs`` reach the Azure client, as on the other routes."""
+    model_config = {
+        "provider": "azure",
+        "id": "gpt-6-astra",
+        "api_key": "test-key",
+        "extra_kwargs": {**_AZURE_CLIENT, "timeout": 30, "max_retries": 0},
+    }
+    built = _Built(tmp_path, model_config, _json_reply({"error": {"message": "down"}}, status=500))
+
+    with pytest.raises(ProviderError):
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert len(built.requests) == 1
+    assert built.requests[0].extensions["timeout"]["read"] == 30
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client_base_url", "host"),
+    [("http://client.test", "http://client.test"), (None, "http://groq.test"), ("", "http://groq.test")],
+)
+async def test_client_params_base_url_is_the_groq_host_when_set(
+    tmp_path: Path,
+    client_base_url: str | None,
+    host: str,
+) -> None:
     config = {
         "provider": "groq",
         "id": "openai/gpt-oss-120b",
         "api_key": "k",
-        "extra_kwargs": {"base_url": "http://groq.test", "client_params": {"base_url": "http://client.test"}},
+        "extra_kwargs": {"base_url": "http://groq.test", "client_params": {"base_url": client_base_url}},
     }
     built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
 
     await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert str(built.requests[0].url) == "http://client.test/openai/v1/chat/completions"
-    assert built.provider.identity.endpoint == "http://client.test/openai/v1"
+    assert str(built.requests[0].url) == f"{host}/openai/v1/chat/completions"
+    assert built.provider.identity.endpoint == f"{host}/openai/v1"
 
 
 @pytest.mark.asyncio
@@ -1663,11 +1793,7 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
         runtime,
     ).capabilities
 
-    assert (gpt6.native_tool_search, gpt6.native_compaction, gpt6.continues_stored_responses) == (
-        True,
-        True,
-        True,
-    )
+    assert (gpt6.native_tool_search, gpt6.native_compaction) == (True, True)
     assert (gpt5.native_tool_search, gpt5.native_compaction) == (False, False)
     assert stored.native_compaction is False
     assert (proxied.native_tool_search, proxied.native_compaction) == (False, False)

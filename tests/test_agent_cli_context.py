@@ -9,6 +9,7 @@ import pytest
 
 from mindroom import agents
 from mindroom.agent_cli.minimal_agent import minimal_context_documents, minimal_turn, prepare_minimal_catalog
+from mindroom.agent_cli.response_owner import tool_catalog
 from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig
 from mindroom.error_handling import MinimalModeUnavailableError
@@ -16,6 +17,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import KnowledgeSourceDescription
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.test_agent_cli_authority import _runtime_context
 
@@ -41,6 +43,8 @@ def _minimal_build(runtime: ToolRuntimeContext, *, tools: tuple[str, ...] = ("sh
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
     )
 
 
@@ -112,6 +116,18 @@ def test_the_knowledge_document_lists_each_base_the_agent_s_search_reaches(tmp_p
     assert documents["knowledge"] == "handbook: The team handbook.\nrunbooks: Operations runbooks."
 
 
+def test_a_catalog_runs_under_its_own_agent_s_runtime_context(tmp_path: Path) -> None:
+    """An agent's generated functions run under its catalog's runtime context, so that context must be the agent's."""
+    runtime = _runtime_context(tmp_path)
+    build = _minimal_build(runtime)
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
+    run = RunContext(run_id="run", user_id=runtime.requester_id, session=session)
+    storage = RunStorage(None, session, None)
+    with pytest.raises(ValueError, match="needs its runtime context, not 'other'"):
+        tool_catalog(build, run=run, runtime=replace(runtime, agent_name="other"), storage=storage)
+    assert tool_catalog(build, run=run, runtime=runtime, storage=storage).runtime_context is runtime
+
+
 @pytest.mark.asyncio
 async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_path: Path) -> None:
     """Minimal Bash is refused for anyone but the turn's own requester, with the way back to standard mode."""
@@ -135,3 +151,34 @@ async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_pa
             storage=RunStorage(None, session, None),
             delegation_depth=1,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("toolkit unavailable"), "toolkit unavailable"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_catalog_whose_toolkits_fail_names_why_before_the_recovery_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    text: str,
+) -> None:
+    """A failure while preparing the tools names its exception's text, or its type name when it has none."""
+    runtime = _runtime_context(tmp_path)
+    build = _minimal_build(runtime)
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
+
+    async def fail(*_arguments: object, **_options: object) -> None:
+        raise error
+
+    monkeypatch.setattr(PreparedAgentToolCatalog, "prepare", fail)
+    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError) as raised:
+        await prepare_minimal_catalog(
+            build,
+            run=RunContext(run_id="run", user_id=runtime.requester_id, session=session),
+            storage=RunStorage(None, session, None),
+            delegation_depth=0,
+        )
+    assert str(raised.value) == f"{text}. Return to standard mode with `!mode helper standard`."

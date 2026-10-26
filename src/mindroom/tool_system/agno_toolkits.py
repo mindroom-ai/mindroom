@@ -13,7 +13,7 @@ import inspect
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_type_hints, runtime_checkable
 
 from agno.media import Audio as AgnoAudio
 from agno.media import File as AgnoFile
@@ -36,7 +36,7 @@ from mindroom.tool_system.declarations import finished_tool_schema
 from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from mindroom.tool_system.invocation import ToolCallContext
 
@@ -61,14 +61,23 @@ _UNBINDABLE_KINDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class _Rejected:
-    """Fields whose value the owned loop cannot honor: adapting a function for which ``sets`` holds raises ``error``.
+    """Fields whose value the agent loop cannot honor: a function for which ``sets`` holds is refused with ``error``.
 
-    Rejected rather than dropped, because the tool's author relies on what the value asks for.
+    Rejected rather than dropped, because the tool's author relies on what the value asks for. A function adapted
+    alone raises it; a toolkit's adapter names the function in ``AdaptedToolkit.refused`` instead, so an agent refuses
+    the toolkit only while it still offers the function (``offered_refusal``).
     """
 
     sets: Callable[[Function], bool]
     error: str
 
+
+# Agno adds a function's instructions to the system prompt only with ``add_instructions``.
+_FUNCTION_INSTRUCTIONS = _Rejected(
+    sets=lambda function: function.add_instructions and function.instructions is not None,
+    error="sets instructions for Agno to add to the system prompt, which MindRoom adds only per toolkit; set"
+    " them on the toolkit instead",
+)
 
 # Every field of Agno's ``Function``, each named by one row: "mapped" fields reach the ``ToolFunction``, a rejected
 # field fails the function that sets it, and an "ignored" field is left unread for the reason beside it.
@@ -97,13 +106,9 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
         sets=lambda function: bool(function.requires_user_input),
         error="sets Agno's requires_user_input, but MindRoom never pauses a run to ask its user for input",
     ),
-    # Agno adds a function's instructions to the system prompt only with ``add_instructions``; a deferred toolkit
-    # turns that off once it has captured them for its search results.
-    ("instructions", "add_instructions"): _Rejected(
-        sets=lambda function: function.add_instructions and function.instructions is not None,
-        error="sets instructions for Agno to add to the system prompt, which MindRoom adds only per toolkit; set"
-        " them on the toolkit instead",
-    ),
+    # A toolkit's adapter hands them over as ``function_instructions`` instead, which tool search shows for a
+    # deferred toolkit and an agent refuses in an eager one.
+    ("instructions", "add_instructions"): _FUNCTION_INSTRUCTIONS,
     # Agno reads these only for a function that requires user input, which is rejected.
     ("user_input_fields", "user_input_schema"): "ignored",
     # Agno also showed the result in the reply text; MindRoom gives a tool's result only to the model.
@@ -112,40 +117,125 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
     ("cache_results", "cache_dir", "cache_ttl"): "ignored",
     # Metadata for people, Agno's discovery, and MCP clients; the model never sees it.
     ("title", "annotations", "has_side_effects"): "ignored",
-    # MindRoom stamps it for the function filters that run before adaptation; a run names each function's owner by
-    # the toolkit entry it was assembled in.
+    # The adapter's caller names each function's toolkit (``ToolFunction.toolkit``).
     ("owning_toolkit",): "ignored",
     # Set only by Agno's component registry, which MindRoom does not use.
     ("source_toolkit",): "ignored",
 }
 
 
-def adapt_toolkit(toolkit: Toolkit) -> AdaptedToolkit:
-    """Adapt the functions of ``toolkit`` in Agno's async-run order; they share one ``actor_state``."""
+@runtime_checkable
+class FunctionScopedInstructions(Protocol):
+    """A toolkit whose instructions describe its functions, so they name only the ones an agent is offered."""
+
+    def instructions_for(self, function_names: Collection[str]) -> str:
+        """Return the toolkit's instructions for an agent offered ``function_names`` of it."""
+        ...
+
+
+def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None, registered: str | None = None) -> AdaptedToolkit:
+    """Adapt the functions of ``toolkit`` in Agno's async-run order, one per name; they share one ``actor_state``.
+
+    ``key`` is the authored toolkit an agent is offered the functions from, which each one carries as its
+    ``toolkit``; None for a toolkit generated for the agent, and for a caller that names the toolkit beside each
+    function, as the MCP gateway's search does. ``registered`` is the registered tool they come from, which each
+    one carries as its ``registered_toolkit``; it is ``key`` unless an implied or preset tool brings the toolkit in.
+    A function's prompt instructions are handed over as ``function_instructions``, and a function that sets any
+    other field MindRoom refuses is adapted without it and named in ``refused``, so whoever offers the toolkit
+    refuses it only for a function it still offers.
+    """
     functions = toolkit.get_async_functions().values()
     actor_state: dict[str, Any] = {}
+    adapted: list[ToolFunction] = []
+    refused: dict[str, str] = {}
+    for function in functions:
+        offered = _without_instructions(function)
+        if (refusal := _refusal(offered)) is not None:
+            refused[function.name] = refusal
+        adapted.append(
+            replace(_adapt(offered), toolkit=key, registered_toolkit=registered or key, actor_state=actor_state),
+        )
+    instructions, guidance = _prompt_and_guidance(toolkit, toolkit.instructions)
     return AdaptedToolkit(
         name=toolkit.name,
-        functions=tuple(replace(adapt_function(function), actor_state=actor_state) for function in functions),
-        instructions=toolkit.instructions if toolkit.add_instructions else None,
-        guidance=toolkit.instructions or None,
+        functions=tuple(adapted),
+        instructions=instructions,
+        guidance=guidance,
+        function_instructions={
+            function.name: function.instructions
+            for function in functions
+            if _FUNCTION_INSTRUCTIONS.sets(function) and function.instructions is not None
+        },
+        refused=refused,
     )
 
 
+def with_offered_instructions(toolkit: Toolkit, adapted: AdaptedToolkit) -> AdaptedToolkit:
+    """Return ``adapted``, the functions an agent offers of ``toolkit``, with the instructions ``toolkit`` gives for them.
+
+    Only a toolkit whose instructions describe its functions (``FunctionScopedInstructions``) gives other ones.
+    """
+    if not isinstance(toolkit, FunctionScopedInstructions):
+        return adapted
+    rendered = toolkit.instructions_for([function.name for function in adapted.functions])
+    instructions, guidance = _prompt_and_guidance(toolkit, rendered)
+    return replace(adapted, instructions=instructions, guidance=guidance)
+
+
+def _prompt_and_guidance(toolkit: Toolkit, instructions: str | None) -> tuple[str | None, str | None]:
+    """Return what the prompt shows of ``instructions``, only when ``add_instructions`` asks, and the guidance."""
+    return (instructions if toolkit.add_instructions else None), instructions or None
+
+
+def offered_refusal(toolkit: AdaptedToolkit) -> str | None:
+    """Return why an agent cannot offer ``toolkit``: the first function it offers that sets a field MindRoom refuses.
+
+    A function's prompt instructions count only while ``function_instructions`` holds them, which a deferred toolkit
+    hands to tool search instead.
+    """
+    for function in toolkit.functions:
+        if (refusal := toolkit.refused.get(function.name)) is not None:
+            return refusal
+        if function.name in toolkit.function_instructions:
+            return f"Tool function {function.name!r} {_FUNCTION_INSTRUCTIONS.error}"
+    return None
+
+
+def _without_instructions(function: Function) -> Function:
+    """Return ``function`` without the prompt instructions its toolkit's adapter hands over separately."""
+    if not _FUNCTION_INSTRUCTIONS.sets(function):
+        return function
+    copy = function.model_copy(deep=False)
+    copy.instructions = None
+    return copy
+
+
 def adapt_function(function: Function) -> ToolFunction:
+    """Return one Agno function as a ``ToolFunction``, refusing it when it sets a field MindRoom refuses."""
+    if (refusal := _refusal(function)) is not None:
+        raise ValueError(refusal)
+    return _adapt(function)
+
+
+def _refusal(function: Function) -> str | None:
+    """Return why MindRoom refuses ``function``: the first field it sets that the agent loop cannot honor."""
+    for handling in _FUNCTION_FIELDS.values():
+        if isinstance(handling, _Rejected) and handling.sets(function):
+            return f"Tool function {function.name!r} {handling.error}"
+    return None
+
+
+def _adapt(function: Function) -> ToolFunction:
     """Process one Agno function once, on a copy, and return it as a ``ToolFunction`` with its finished schema.
 
     ``process_entrypoint`` rewrites a user-authored schema in place and replaces the entrypoint with its coercing
     wrapper, so the shared ``Function`` stays untouched for whoever else holds it. A MindRoom wrapper that forges its
-    entrypoint's signature declares how the schema Agno derives from it is completed.
+    entrypoint's signature declares how the schema Agno derives from it is completed. A field MindRoom refuses is
+    left unread.
     """
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
-    for handling in _FUNCTION_FIELDS.values():
-        if isinstance(handling, _Rejected) and handling.sets(function):
-            msg = f"Tool function {function.name!r} {handling.error}"
-            raise ValueError(msg)
     prepared = function.model_copy(deep=False)
     prepared.parameters = deepcopy(function.parameters)
     # An explicit strict setting on the function wins; MindRoom never asks Agno for strict schemas otherwise.
@@ -206,7 +296,7 @@ def _bound_by_annotation(hint: object) -> InjectedValue:
 
 # AGNO_COMPAT: Agno toolkits take the calling agent as a parameter.
 # Reason: Agno injects its Agent or Team object into entrypoint parameters named ``agent`` or ``team``, or annotated
-# with those types, and the owned loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
+# with those types, and the agent loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
 # DaytonaTools reads the parameter, and it reads and writes ``agent.session_state``, as Agno's AntigravityTools and
 # SuperserveTools also do. That attribute is the Agno agent's own state, not the run's stored session state, and
 # MindRoom built one agent per reply, so the stand-in carries the adapted toolkit's ``actor_state``, which is never
@@ -238,7 +328,7 @@ def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dic
             metadata=context.metadata,
             session_state=context.session_state,
         ),
-        # The owned loop gives a tool no run media, so each media name receives None.
+        # The agent loop gives a tool no run media, so each media name receives None.
         InjectedValue.MEDIA: None,
     }
     return {name: supplied[value] for name, value in function.injected_params.items() if value in supplied}
@@ -306,14 +396,20 @@ class StreamCollector:
 
 
 def tool_value(result: object) -> ToolValue:
-    """Read a tool's return value: a ``ToolResult`` carries text and media, anything else is its text.
+    """Read a tool's return value: a ``ToolResult`` or ``ToolValue`` gives its text and media, anything else its text."""
+    value = read_tool_value(result)
+    return ToolValue(content=str(result)) if value is None else value
+
+
+def read_tool_value(result: object) -> ToolValue | None:
+    """Read a ``ToolResult``'s text and media; None for a value that is neither a ``ToolResult`` nor a ``ToolValue``.
 
     A value already in owned terms, as a tool job's saved result or minimal mode's Bash facade returns, stands as it is.
     """
     if isinstance(result, ToolValue):
         return result
     if not isinstance(result, ToolResult):
-        return ToolValue(content=str(result))
+        return None
     return ToolValue(
         content=result.content,
         images=tuple(_owned_image(image) for image in result.images or ()),
@@ -328,15 +424,16 @@ def _media_id(media_id: str | None) -> dict[str, str]:
     return {"id": media_id} if media_id is not None else {}
 
 
-def _filepath(filepath: object) -> str | None:
-    return None if filepath is None else str(filepath)
+def _filepath(filepath: object, content: object) -> str | None:
+    # Bytes the tool returned stand, so a path that worker code can later swap for a link is never read in their place.
+    return None if filepath is None or content is not None else str(filepath)
 
 
 def _owned_image(image: AgnoImage) -> Image:
     return Image(
         **_media_id(image.id),
         url=image.url,
-        filepath=_filepath(image.filepath),
+        filepath=_filepath(image.filepath, image.content),
         content=image.content,
         format=image.format,
         mime_type=image.mime_type,
@@ -352,7 +449,7 @@ def _owned_audio(audio: AgnoAudio) -> Audio:
     return Audio(
         **_media_id(audio.id),
         url=audio.url,
-        filepath=_filepath(audio.filepath),
+        filepath=_filepath(audio.filepath, audio.content),
         content=audio.content,
         format=audio.format,
         mime_type=audio.mime_type,
@@ -369,7 +466,7 @@ def _owned_video(video: AgnoVideo) -> Video:
     return Video(
         **_media_id(video.id),
         url=video.url,
-        filepath=_filepath(video.filepath),
+        filepath=_filepath(video.filepath, video.content),
         content=video.content,
         format=video.format,
         mime_type=video.mime_type,
@@ -389,7 +486,7 @@ def _owned_file(file: AgnoFile) -> File:
     return File(
         **_media_id(file.id),
         url=file.url,
-        filepath=_filepath(file.filepath),
+        filepath=_filepath(file.filepath, content),
         content=content,
         mime_type=file.mime_type,
         file_type=file.file_type,
@@ -408,6 +505,7 @@ __all__ = [
     "AgnoImage",
     "AgnoVideo",
     "Function",
+    "FunctionScopedInstructions",
     "StreamCollector",
     "ToolCallActor",
     "ToolResult",
@@ -417,6 +515,9 @@ __all__ = [
     "framework_arguments",
     "injected_parameters",
     "model_arguments",
+    "offered_refusal",
+    "read_tool_value",
     "tool_value",
     "warm_agno_tool_imports",
+    "with_offered_instructions",
 ]

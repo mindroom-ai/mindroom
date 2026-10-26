@@ -52,7 +52,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/hackernews",
+    docs_url="https://docs.mindroom.chat/tools/research-sources/#hackernews",
     function_names=("get_top_hackernews_stories", "get_user_details"),
 )
 def hackernews_tools() -> type[HackerNewsTools]:

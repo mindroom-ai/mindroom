@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
 # Legacy format: Requests contain only created_at and metrics.
-# Last legacy release: v2026.9.297; replacement request model attribution is unreleased.
+# Last legacy release: v2026.9.303; replacement: v2026.9.304, which attributes each request to its model.
 # Current producer: save_compaction_usage also emits one untagged, single-model request.
 # Handling: Inherit only a single run model; the caller must reconcile every counter.
 # Coverage: tests/test_request_usage.py::test_request_export_keeps_short_calls_distinct_and_preserves_all_counters;

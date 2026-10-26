@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 from urllib.parse import urlsplit
 
 from agno.tools import Toolkit
 
+from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -70,13 +72,9 @@ class ReportPublishingTools(Toolkit):
     def _register_functions(self) -> None:
         register_toolkit_functions(
             self,
-            sync_entrypoints={
+            entrypoints={
                 "publish_report": self.publish_report,
                 "revoke_public_report": self.revoke_public_report,
-            },
-            async_entrypoints={
-                "publish_report": self.apublish_report,
-                "revoke_public_report": self.arevoke_public_report,
             },
             descriptions=_TOOL_DESCRIPTIONS,
             parameters=_TOOL_PARAMETERS,
@@ -93,7 +91,7 @@ class ReportPublishingTools(Toolkit):
             message="Report Publishing tool context is unavailable in this runtime path.",
         )
 
-    def publish_report(
+    async def publish_report(
         self,
         source_type: str,
         source: dict[str, Any],
@@ -110,11 +108,17 @@ class ReportPublishingTools(Toolkit):
                 message="Set confirm_public to true to publish this report as a public link.",
             )
         try:
-            publishable = _resolve_publishable_source(context, source_type, source)
-            report = ReportPublishingStore(context.runtime_paths.storage_root).publish_report(
-                source=publishable,
-                published_by=context.requester_id,
-                base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+            publishable = await run_blocking_until_complete(_resolve_publishable_source, context, source_type, source)
+            store = ReportPublishingStore(context.runtime_paths.storage_root)
+            # A cancelled call never shows its link, so its requester could neither use nor revoke it.
+            report = await run_blocking_or_compensate(
+                partial(
+                    store.publish_report,
+                    source=publishable,
+                    published_by=context.requester_id,
+                    base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+                ),
+                lambda published: store.revoke_public_report(published.slug, revoked_by=context.requester_id),
             )
         except (DynamicWorkflowError, ReportPublishingError) as exc:
             return self._payload("error", source_type=source_type, message=str(exc))
@@ -128,16 +132,18 @@ class ReportPublishingTools(Toolkit):
             published_at=report.published_at,
         )
 
-    def revoke_public_report(self, slug: str) -> str:
+    async def revoke_public_report(self, slug: str) -> str:
         """Revoke a previously published public report link."""
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
         try:
             store = ReportPublishingStore(context.runtime_paths.storage_root)
-            report = store.get_public_report(slug, include_revoked=True)
+            report = await run_blocking_until_complete(partial(store.get_public_report, slug, include_revoked=True))
             _authorize_public_report_for_context(context, report)
-            revoked = store.revoke_public_report(slug, revoked_by=context.requester_id)
+            revoked = await run_blocking_until_complete(
+                partial(store.revoke_public_report, slug, revoked_by=context.requester_id),
+            )
         except ReportPublishingError as exc:
             return self._payload("error", slug=slug, message=str(exc))
         return self._payload(
@@ -147,19 +153,6 @@ class ReportPublishingTools(Toolkit):
             source=revoked.source,
             revoked_at=revoked.revoked_at,
         )
-
-    async def apublish_report(
-        self,
-        source_type: str,
-        source: dict[str, Any],
-        confirm_public: bool,
-    ) -> str:
-        """Publish an authorized report artifact through a revocable public link."""
-        return self.publish_report(source_type, source, confirm_public)
-
-    async def arevoke_public_report(self, slug: str) -> str:
-        """Revoke a previously published public report link."""
-        return self.revoke_public_report(slug)
 
 
 def _resolve_publishable_source(

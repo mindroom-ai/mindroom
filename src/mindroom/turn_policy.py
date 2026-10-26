@@ -434,11 +434,9 @@ class TurnPolicy:
         self,
         room: nio.MatrixRoom,
         requester_user_id: str,
-        availability: _ResponderAvailability | None = None,
     ) -> list[MatrixID]:
         """Return candidates from the boundary-prepared room membership snapshot."""
-        if availability is None:
-            availability = self.responder_availability()
+        availability = self.responder_availability()
         candidates = classify_responder_candidates_from_cached_room(
             room,
             requester_user_id,
@@ -639,10 +637,9 @@ class TurnPolicy:
         agents_in_thread: list[MatrixID],
         context: MessageContext,
         room: nio.MatrixRoom,
-        requester_user_id: str,
         *,
         availability: _ResponderAvailability,
-        available_responders_in_room: list[MatrixID] | None = None,
+        available_responders_in_room: list[MatrixID],
     ) -> TeamResolution:
         """Decide team formation using sender-visible candidates without losing explicit intent."""
         planning_thread_history = context.planning_thread_history
@@ -662,12 +659,6 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        if available_responders_in_room is None:
-            available_responders_in_room = await self.responder_candidates_for_room(
-                room,
-                requester_user_id,
-                availability,
-            )
         # Only a DM auto team depends on DM status, and it needs an unthreaded message
         # with several responders, so skip the homeserver lookup otherwise.
         is_dm = (
@@ -679,14 +670,12 @@ class TurnPolicy:
             context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
-            room=room,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             is_dm_room=is_dm,
             is_thread=context.is_thread,
             available_responders_in_room=available_responders_in_room,
             materializable_agent_names=availability.materializable_agent_names,
-            allow_explicit_private_agents=True,
         )
 
     async def _plan_router_dispatch(
@@ -882,7 +871,6 @@ class TurnPolicy:
                 agents_in_thread,
                 context,
                 room,
-                requester_user_id,
                 availability=availability,
                 available_responders_in_room=sender_visible_responders_in_room,
             )

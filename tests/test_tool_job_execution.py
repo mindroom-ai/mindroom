@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -46,17 +47,19 @@ from mindroom.tool_jobs.results import (
 from mindroom.tool_jobs.runtime import JobAccessError, job_summary, register_background_runtime
 from mindroom.tool_system.agno_toolkits import AgnoImage, Toolkit, ToolResult
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.invocation import ToolCallContext, ToolOutcome
+from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_function import ToolValue
-from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_async_entrypoint_blocking_call
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     ProcessRuntime,
     SpanRecorder,
+    always_owned,
     call_job_tool,
     cancel_settled,
     job_actor,
@@ -69,6 +72,7 @@ from tests.tool_job_helpers import (
     tool_job_runtime,
     toolkit_job_tools,
     wait_for_status,
+    write_saved_job,
 )
 
 if TYPE_CHECKING:
@@ -156,6 +160,41 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
         else:
             assert payload.state_delta["large"]["value"] == text
         assert not outcome.is_error
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(OSError("disk full"), "disk full"), (MemoryError(), "MemoryError")],
+    ids=["with_text", "without_text"],
+)
+async def test_a_result_that_cannot_be_saved_fails_its_call_with_the_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    text: str,
+) -> None:
+    """A call whose result cannot be encoded fails with why, or the exception's type name when it has no text."""
+
+    async def tool() -> str:
+        return "ran"
+
+    def encode(_payload: ToolResultPayload) -> dict[str, object]:
+        raise error
+
+    context, runtime = await _managed_context(tmp_path)
+    actor = job_actor(job_tool(tool))
+    monkeypatch.setattr(execution, "encode_result_payload", encode)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                outcome = await call_job_tool(actor, "tool", call_id="unsaved-call", run_id="unsaved-run")
+        assert outcome == ToolOutcome(
+            content=f"The call ran, but its result could not be saved ({text}). Its effects stand: do not call it again.",
+            is_error=True,
+        )
     finally:
         await runtime.shutdown()
 
@@ -435,6 +474,52 @@ async def test_oversized_result_becomes_a_failed_job(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_a_call_a_plugin_hook_declines_fails_its_job_with_the_decline(tmp_path: Path) -> None:
+    """A managed call a before-call hook declines never runs: its job fails, and its call reads the decline as failed."""
+    ran: list[str] = []
+
+    async def write_note() -> str:
+        ran.append("note")
+        return "noted"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        ctx.decline("notes are paused")
+
+    declined = (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: write_note\n"
+        "Reason: notes are paused\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    policy = build_tool_hook_middleware(
+        HookRegistry.from_plugins([_plugin("policy", [decline])]),
+        "leader",
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
+    context, runtime = await _managed_context(tmp_path)
+    owner = build_execution_identity_from_runtime_context(context)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                outcome = await call_job_tool(
+                    job_actor(job_tool(write_note)),
+                    "write_note",
+                    call_id="note-call",
+                    run_id="note-run",
+                    middleware=(policy,),
+                )
+        assert outcome == ToolOutcome(content=declined, is_error=True)
+        assert ran == []
+        job = (await runtime.list_jobs(owner=owner, depth=0))[0]
+        assert (job.status, job.result) == ("failed", declined)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_resource_owner_releases_only_after_last_child() -> None:
     """Parent cleanup remains deferred until both accepted operations settle."""
     closed = []
@@ -475,7 +560,7 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(tm
     model = ScriptedModel([calls(tool_call("read", "read-call")), answer("done")])
     actor = job_actor(*toolkit_job_tools(ConnectionTools(), authored_name="connection").values())
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         return await run_job_turn(actor, model, session_id=context.session_id)
 
@@ -495,9 +580,16 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fails", [False, True])
-async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, fails: bool) -> None:
-    """Generator output and failures settle before their execution resources close."""
+@pytest.mark.parametrize(
+    ("failure", "error_text"),
+    [(None, None), ("text", "iteration failed"), ("no text", "TimeoutError")],
+)
+async def test_generator_result_finishes_inside_owned_operation(
+    tmp_path: Path,
+    failure: str | None,
+    error_text: str | None,
+) -> None:
+    """Generator output and failures settle before their execution resources close; a failure without text names its type."""
     started, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def generated() -> AsyncIterator[ToolResult | str]:
@@ -505,9 +597,11 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
             yield "event text"
             started.set()
             await release.wait()
-            if fails:
+            if failure == "text":
                 msg = "iteration failed"
                 raise ValueError(msg)
+            if failure == "no text":
+                raise TimeoutError
             yield ToolResult(content="picture", images=[AgnoImage(content=b"image")])
         finally:
             closed.set()
@@ -518,7 +612,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
     model = ScriptedModel([calls(tool_call("generated", "generator-call")), answer("done")])
     actor = job_actor(job_tool(generated))
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         return await run_job_turn(actor, model, session_id=context.session_id)
 
@@ -534,11 +628,11 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
             signal.clear()
             result = await runtime.wait(job_id, owner=owner, depth=0)
             assert closed.is_set()
-            assert result.job.status == ("failed" if fails else "completed")
+            assert result.job.status == ("failed" if failure else "completed")
             payload = await read_result_payload(runtime, result.job)
-            if fails:
-                assert payload.error == "iteration failed"
-                assert result.job.result == "iteration failed"
+            if failure:
+                assert payload.error == error_text
+                assert result.job.result == error_text
             else:
                 assert isinstance(payload.value, ToolValue)
                 assert payload.value.content == "event textpicture"
@@ -581,6 +675,37 @@ async def test_exact_call_reattachment_rejects_changed_arguments(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_a_reattached_call_reads_a_job_saved_failed_without_error_text_as_failed(tmp_path: Path) -> None:
+    """A call that reattaches to a failed job older releases saved without error text fails with a text that says so."""
+
+    async def times_out() -> str:
+        raise TimeoutError
+
+    actor = job_actor(job_tool(times_out))
+    context, runtime = await _managed_context(tmp_path)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                first = await call_job_tool(actor, "times_out", call_id="same-call", run_id="same-run")
+    finally:
+        await runtime.shutdown()
+    assert first == ToolOutcome(content="TimeoutError", is_error=True)
+    [job] = (await saved_jobs(tmp_path)).values()
+    # Releases through v2026.10.512 saved the empty text of such an exception; the runtime saved it as the result alone.
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(replace(job, result="", has_result_payload=False))))
+    restored = await tool_job_runtime(tmp_path)
+    register_background_runtime(context.runtime_paths, restored)
+    try:
+        await restored.recover()
+        async with execution_resources():
+            with tool_runtime_context(context):
+                again = await call_job_tool(actor, "times_out", call_id="same-call", run_id="same-run")
+    finally:
+        await restored.shutdown()
+    assert again == ToolOutcome(content="Background tool job failed.", is_error=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("save_fails", [False, True])
 async def test_fast_result_acknowledges_exact_saved_run(  # noqa: PLR0915 - Receipt, save, and restart boundaries.
     tmp_path: Path,
@@ -613,7 +738,7 @@ async def test_fast_result_acknowledges_exact_saved_run(  # noqa: PLR0915 - Rece
 
         monkeypatch.setattr(type(storage), "_save", fail_save)
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         set_consumption_storage(storage_factory)
         try:
@@ -670,7 +795,7 @@ async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Pa
     model = ScriptedModel([calls(tool_call("slow_tool", "sync-call")), answer("done")])
     actor = job_actor(job_tool(slow_tool, authored_name="slow"))
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         return await run_job_turn(actor, model, session_id=context.session_id)
 
@@ -724,7 +849,7 @@ async def test_a_jobs_blocking_call_runs_on_its_own_thread_not_the_shared_pool(t
     model = ScriptedModel([calls(tool_call("offloading", "offloading-call")), answer("done")])
     actor = job_actor(job_tool(offloading, authored_name="threads"))
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def parent_run() -> object:
         return await run_job_turn(actor, model, session_id=context.session_id)
 
@@ -774,7 +899,7 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
         )
         controls = job_actor(*toolkit_job_tools(_job_controls(context), authored_name="job").values())
 
-        @owned_tool_execution()
+        @owned_tool_execution(enabled=always_owned)
         async def cancel() -> object:
             set_consumption_storage(storage_factory)
             with tool_runtime_context(context):
@@ -822,7 +947,7 @@ async def test_saved_result_reread_preserves_later_session_state(
 
     storage = storage_factory()
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def run(actor: JobActor, model: ScriptedModel, state: dict[str, object], run_id: str) -> RunRecord:
         set_consumption_storage(storage_factory)
         with tool_runtime_context(context):
@@ -883,7 +1008,7 @@ async def test_job_list_skips_a_call_that_returned_inline_earlier_in_the_same_tu
     actor = job_actor(job_tool(report), *controls)
     storage = storage_factory()
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def run() -> object:
         set_consumption_storage(storage_factory)
         with tool_runtime_context(context):
@@ -919,7 +1044,7 @@ async def test_a_key_a_sibling_writes_as_the_job_starts_survives_its_merge(
     context, runtime = await _managed_context(tmp_path)
     state: dict[str, object] = {"changed": 0}
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> ToolOutcome:
         async with execution_resources():
             with tool_runtime_context(context):
@@ -1017,7 +1142,7 @@ async def test_streamed_state_conflict_notice_reaches_the_tool_message(tmp_path:
     state: dict[str, object] = {"changed": 0, "conflict": "old"}
     model = ScriptedModel([calls(tool_call("generated", "stream-state")), answer("done")])
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> object:
         with tool_runtime_context(context):
             return await run_job_turn(job_actor(job_tool(generated)), model, session_state=state)
@@ -1246,7 +1371,7 @@ async def test_a_call_cancelled_while_its_reply_waits_tells_the_model_not_to_run
 
     storage = storage_factory()
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> object:
         set_consumption_storage(storage_factory)
         return await run_job_turn(
@@ -1291,7 +1416,7 @@ async def test_a_finished_call_counts_as_read_when_its_reply_fails_on_the_next_s
 
     storage = storage_factory()
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def reply() -> None:
         set_consumption_storage(storage_factory)
         await run_job_turn(job_actor(job_tool(report)), model, "Go", session_id=context.session_id, store=storage)

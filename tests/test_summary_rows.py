@@ -680,9 +680,9 @@ def test_folded_tool_call_ids_are_the_folded_messages_and_members_calls(store: C
     """Interrupted records leave out every call a fold summarized: folded calls, results, and folded members' tools."""
     team_run = _team_run("team-run", RunStatus.running)
     folded_member = _run("m1", parent="team-run", agent_id="helper")
-    folded_member.tools = [ToolExecution(tool_call_id="member-call"), ToolExecution(tool_name="no id")]
+    folded_member.tools = [ToolExecution(tool_call_id="member-call", tool_name="probe")]
     later_member = _run("m2", parent="team-run", agent_id="helper")
-    later_member.tools = [ToolExecution(tool_call_id="later-member-call")]
+    later_member.tools = [ToolExecution(tool_call_id="later-member-call", tool_name="probe")]
     toolless_member = _run("m0", parent="team-run", agent_id="helper")
     _save(store, folded_member, later_member, toolless_member, kind="team")
     orphan_result = _result("orphan-result")

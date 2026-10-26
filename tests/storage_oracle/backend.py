@@ -13,7 +13,6 @@ from abc import ABC, abstractmethod
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_loop.run import resumed_record
@@ -485,7 +484,6 @@ class Driver(ABC):
                 tool_name=tool_name,
                 tool_args={},
                 result=result,
-                created_at=self.determinism.now,
             ),
         ]
         turn.body.extend((call, answer))
@@ -507,7 +505,6 @@ class Driver(ABC):
                 tool_name="dangerous",
                 tool_args={},
                 requires_confirmation=True,
-                created_at=self.determinism.now,
             )
             member.messages.append(
                 self._message(
@@ -541,7 +538,6 @@ class Driver(ABC):
         return RunRequirement(
             tool_execution=deepcopy(tool),
             id=f"{run_id}.req",
-            created_at=datetime.fromtimestamp(self.determinism.now, UTC),
         )
 
     def _terminal(self, session: ConversationSession, record: AnyRunRecord) -> object:
@@ -609,7 +605,6 @@ class Driver(ABC):
                 tool_name="dangerous",
                 tool_args={},
                 requires_confirmation=True,
-                created_at=self.determinism.now,
             )
             turn.body.append(
                 self._message(

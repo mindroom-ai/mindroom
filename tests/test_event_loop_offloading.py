@@ -21,15 +21,16 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.request_messages import TurnMessages
-from mindroom.history.types import HistoryPolicy, PreparedHistoryState, ResolvedHistorySettings
+from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_turn_context, prepare_agent_and_prompt_for_test, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
+from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -182,6 +183,7 @@ async def test_knowledge_base_lookup_runs_off_event_loop(
             "docs",
             config,
             test_runtime_paths(tmp_path),
+            execution_identity=None,
         ),
     )
     try:
@@ -207,9 +209,8 @@ def _build(turn_context: str | None = None) -> AgentBuild:
         spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_message=None, toolkits=()),
         prompt=PromptSpec(role="test", turn_context=turn_context, instructions=()),
         request_template=ModelRequest(messages=()),
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        history_settings=replay_settings(),
         store=None,
-        tool_owners={},
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,
@@ -269,7 +270,7 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
     config = Config.model_validate({"agents": {"general": {"display_name": "General", "role": "test"}}})
     runtime_paths = test_runtime_paths(tmp_path)
     prepare_task = asyncio.get_running_loop().create_task(
-        ai_module._prepare_agent_and_prompt(
+        prepare_agent_and_prompt_for_test(
             make_turn_context("general"),
             prompt="hello",
             runtime_paths=runtime_paths,
@@ -345,7 +346,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
     config = _prompt_preparation_config(memory_backend)
     pipeline_timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
     prepare_task = asyncio.create_task(
-        ai_module._prepare_agent_and_prompt(
+        prepare_agent_and_prompt_for_test(
             make_turn_context("general"),
             prompt="raw prompt",
             runtime_paths=test_runtime_paths(tmp_path),
@@ -433,7 +434,7 @@ async def test_prepare_agent_and_prompt_keeps_cold_default_workspace_serial(
         },
     )
     pipeline_timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
-    prepared = await ai_module._prepare_agent_and_prompt(
+    prepared = await prepare_agent_and_prompt_for_test(
         make_turn_context("mind"),
         prompt="hello",
         runtime_paths=test_runtime_paths(tmp_path),
@@ -465,7 +466,7 @@ async def test_serial_agent_build_cancellation_drains_the_build(
     monkeypatch.setattr(ai_module, "create_agent", blocked_create_agent)
 
     task = asyncio.create_task(
-        ai_module._prepare_agent_and_prompt(
+        prepare_agent_and_prompt_for_test(
             make_turn_context("general"),
             prompt="hello",
             runtime_paths=test_runtime_paths(tmp_path),
@@ -520,7 +521,7 @@ async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_build(
     monkeypatch.setattr(ai_module, "create_agent", create_agent_mock)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
 
-    prepared = await ai_module._prepare_agent_and_prompt(
+    prepared = await prepare_agent_and_prompt_for_test(
         make_turn_context("general"),
         prompt="hello",
         runtime_paths=test_runtime_paths(tmp_path),
@@ -575,7 +576,7 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
     config = _prompt_preparation_config("file")
     runtime_paths = test_runtime_paths(tmp_path)
     monkeypatch.setattr(ai_module, "agent_build_can_overlap_file_memory", lambda *_args: False)
-    sequential = await ai_module._prepare_agent_and_prompt(
+    sequential = await prepare_agent_and_prompt_for_test(
         make_turn_context("general"),
         prompt="raw prompt",
         runtime_paths=runtime_paths,
@@ -583,7 +584,7 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
         model_prompt="model metadata",
     )
     monkeypatch.setattr(ai_module, "agent_build_can_overlap_file_memory", lambda *_args: True)
-    parallel = await ai_module._prepare_agent_and_prompt(
+    parallel = await prepare_agent_and_prompt_for_test(
         make_turn_context("general"),
         prompt="raw prompt",
         runtime_paths=runtime_paths,

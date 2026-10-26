@@ -20,12 +20,12 @@
       "id": "claude-sonnet-5-5",
       "provider": "vertexai_claude"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -49,9 +49,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -71,18 +73,13 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
-      "citations": {
-        "documents": [],
-        "raw": [],
-        "urls": []
-      },
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -111,7 +108,6 @@
         "stop_reason": "tool_use"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {

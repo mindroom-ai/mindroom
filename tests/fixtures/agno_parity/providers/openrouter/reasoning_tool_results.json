@@ -9,11 +9,9 @@
       },
       {
         "content": "What should I pack for Paris tomorrow?",
-        "from_history": true,
         "role": "user"
       },
       {
-        "from_history": true,
         "metrics": {
           "cost": 0.00021,
           "input_tokens": 42,
@@ -39,7 +37,6 @@
         },
         "reasoning_content": "Check the forecast first.",
         "role": "assistant",
-        "stop_after_tool_call": false,
         "tool_calls": [
           {
             "function": {
@@ -53,7 +50,6 @@
       },
       {
         "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
-        "from_history": true,
         "role": "tool",
         "tool_args": {
           "city": "Paris",
@@ -69,12 +65,12 @@
       "id": "z-ai/glm-5.3",
       "provider": "openrouter"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -98,9 +94,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -120,14 +118,14 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -145,8 +143,7 @@
         "system_fingerprint": "fp_parity"
       },
       "reasoning_content": "The forecast says light rain.",
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "cost": 0.00021,
@@ -155,10 +152,12 @@
       "reasoning_tokens": 4,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
+      "model": "z-ai/glm-5.3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -196,8 +195,6 @@
           "tool_call_id": "call_parity_weather"
         }
       ],
-      "model": "z-ai/glm-5.3",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

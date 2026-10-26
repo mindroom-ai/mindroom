@@ -72,7 +72,7 @@ def split_interrupted_tool_trace(
         if tool.result is None and tool.is_error is None:
             interrupted.append(format_tool_started_event(tool.call)[1])
         else:
-            completed.append(format_tool_completed_event(tool.call)[1])
+            completed.append(format_tool_completed_event(tool.call))
     return completed, interrupted
 
 
@@ -84,8 +84,11 @@ def _render_interruption_summary(snapshot: InterruptedReplaySnapshot) -> str:
     redacted Matrix previews are rendered separately as explicitly quoted data.
     """
     details: list[str] = []
-    if snapshot.completed_tools:
-        details.append(f"{len(snapshot.completed_tools)} tool call(s) had finished")
+    failed = sum(tool.is_error for tool in snapshot.completed_tools)
+    if finished := len(snapshot.completed_tools) - failed:
+        details.append(f"{finished} tool call(s) had finished")
+    if failed:
+        details.append(f"{failed} tool call(s) had failed")
     if snapshot.interrupted_tools:
         details.append(f"{len(snapshot.interrupted_tools)} tool call(s) were still running")
     summary = _INTERRUPTION_SUMMARIES.get(snapshot.original_status, "(turn ended without a model-visible completion")
@@ -100,7 +103,7 @@ def _quoted_tool_preview(preview: str) -> str:
 
 
 def _render_retained_tool_sentence(tool: ToolTraceEntry, *, interrupted: bool) -> str:
-    """Render one retained tool event without implying terminal success."""
+    """Render one retained tool event: still running, failed with its error, or finished with its output."""
     tool_name = tool.tool_name.replace("`", r"\`")
     if interrupted:
         sentence = f"The `{tool_name}` tool was still running"
@@ -108,12 +111,13 @@ def _render_retained_tool_sentence(tool: ToolTraceEntry, *, interrupted: bool) -
             sentence += f" with input preview {_quoted_tool_preview(tool.args_preview)}"
         sentence += "; no output was available before interruption."
     else:
-        sentence = f"The `{tool_name}` tool finished"
+        outcome, result_kind = ("failed", "error") if tool.is_error else ("finished", "output")
+        sentence = f"The `{tool_name}` tool {outcome}"
         previews: list[str] = []
         if tool.args_preview:
             previews.append(f"input preview {_quoted_tool_preview(tool.args_preview)}")
         if tool.result_preview:
-            previews.append(f"output preview {_quoted_tool_preview(tool.result_preview)}")
+            previews.append(f"{result_kind} preview {_quoted_tool_preview(tool.result_preview)}")
         if previews:
             sentence += " with " + " and ".join(previews)
         sentence += "."

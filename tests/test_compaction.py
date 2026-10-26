@@ -24,7 +24,9 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
-from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
@@ -122,12 +124,10 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     ("plan_changes", "force", "history_tokens", "allow_native", "expected"),
     [
         ({}, True, 70_000, True, ("required", "forced", 59_904)),
-        ({}, True, None, True, ("required", "forced", 0)),
         ({"text_compaction_available": False}, True, 5_000, True, ("none", "forced_unavailable", None)),
         ({"authored_compaction_enabled": False}, False, 60_000, True, ("none", "auto_disabled", None)),
         ({"text_compaction_available": False}, False, 60_000, True, ("none", "compaction_unavailable", None)),
         ({"replay_budget_tokens": None}, False, 60_000, True, ("none", "missing_budget", None)),
-        ({}, False, None, True, ("none", "missing_budget", None)),
         ({}, False, 10_000, True, ("none", "under_trigger", 10_000)),
         ({}, False, 60_000, True, ("required", "history_exceeds_hard_budget", 59_904)),
         ({}, False, 12_001, False, ("required", "over_trigger_native_disabled", 10_000)),
@@ -138,7 +138,7 @@ def test_compaction_policy_classifies_every_branch(
     plan_changes: dict[str, object],
     *,
     force: bool,
-    history_tokens: int | None,
+    history_tokens: int,
     allow_native: bool,
     expected: tuple[str, str, int | None],
 ) -> None:
@@ -150,6 +150,7 @@ def test_compaction_policy_classifies_every_branch(
         force_compact_before_next_run=force,
         current_history_tokens=history_tokens,
         allow_native_compaction=allow_native,
+        summary_tokens=0,
     )
 
     assert (decision.mode, decision.reason, decision.fitted_replay_tokens) == expected
@@ -206,6 +207,8 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
             plan=_make_execution_plan(),
             force_compact_before_next_run=False,
             current_history_tokens=12_001,
+            allow_native_compaction=True,
+            summary_tokens=0,
         ),
         compaction_reply_outcome="none",
         replay_plan=ResolvedReplayPlan(
@@ -223,9 +226,10 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="test-model",
         model_provider="openai",
+        tool_count=0,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=123, output_tokens=45, total_tokens=168)),
         prepared_history=prepared_history,
     )
@@ -249,21 +253,25 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
 
 
 def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_path: Path) -> None:
-    """Context cache counters should not exceed the context size exposed to clients."""
+    """Context cache counters should not exceed the context size exposed to clients.
+
+    An OpenAI-compatible server can report more cached tokens than prompt tokens.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent")},
             defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(
-                    provider="vertexai_claude",
-                    id="claude-opus-5",
-                    context_window=200_000,
-                ),
-            },
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=200_000)},
         ),
         runtime_paths,
+    )
+    counts = TokenCounts(input_tokens=153_294, cache_read_tokens=281_264, cache_write_tokens=500)
+    answer = Message(
+        role="assistant",
+        content="ok",
+        metrics=MessageMetrics(tokens=counts),
+        provider_data=model_provenance("test-model", "OpenAI Chat"),
     )
 
     metadata = build_ai_run_metadata_content(
@@ -272,13 +280,12 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
-        model="claude-opus-5",
-        model_provider="VertexAI",
-        metrics=RunMetrics(tokens=TokenCounts(input_tokens=153_294, cache_read_tokens=281_264)),
-        context_input_tokens=153_294,
-        context_cache_read_tokens=281_264,
-        context_cache_write_tokens=500,
+        status=RunStatus.completed,
+        model="test-model",
+        model_provider="OpenAI",
+        tool_count=0,
+        metrics=RunMetrics(tokens=counts),
+        context_run=RunRecord(run_id="run-1", agent_id="test_agent", status=RunStatus.completed, messages=[answer]),
     )
 
     context = metadata[AI_RUN_METADATA_KEY]["context"]

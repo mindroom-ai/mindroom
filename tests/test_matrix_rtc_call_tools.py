@@ -13,13 +13,13 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.tools.function import Function
+from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -30,7 +30,7 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelP
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -70,6 +70,7 @@ from tests.authorization_helpers import (
 from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -162,13 +163,12 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
             name="Helper",
             model=ScriptedModel([]),
             system_message=None,
-            toolkits=tuple(adapt_toolkit(toolkit) for toolkit in toolkits),
+            toolkits=offered_toolkits([adapt_toolkit(toolkit, key=toolkit.name) for toolkit in toolkits], agent=AGENT),
         ),
         prompt=PromptSpec(role=role, instructions=()),
         request_template=ModelRequest(messages=()),
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        history_settings=replay_settings(),
         store=None,
-        tool_owners={},
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,
@@ -184,7 +184,7 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
 
 
 def _functions(build: AgentBuild) -> Mapping[str, ToolFunction]:
-    return prepare_run_tools(build.spec).functions
+    return build.spec.functions
 
 
 def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  # noqa: ANN202
@@ -302,7 +302,15 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         active_model_name=None,
     )
     call_build = cache._build(knowledge=None, refresh_scheduler=None)
-    chat_build = create_agent(AGENT, config, runtime_paths, None, supports_native_tool_approval=True)
+    chat_build = create_agent(
+        AGENT,
+        config,
+        runtime_paths,
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
+    )
     call_functions = _functions(call_build)
     chat_functions = _functions(chat_build)
 
@@ -422,6 +430,16 @@ async def test_wrapped_tool_executes_async_entrypoint() -> None:
 
     async def add(a: int, b: int) -> str:
         return f"sum={a + b}"
+
+    assert await _wrap(_function(add))({"a": 1, "b": 1}) == "sum=2"
+
+
+@pytest.mark.asyncio
+async def test_wrapped_tool_gives_the_realtime_model_the_text_of_a_tool_result() -> None:
+    """A tool that returns a tool result, as MCP-backed tools do, gives the voice model its text, not its repr."""
+
+    async def add(a: int, b: int) -> ToolResult:
+        return ToolResult(content=f"sum={a + b}")
 
     assert await _wrap(_function(add))({"a": 1, "b": 1}) == "sum=2"
 
@@ -1550,18 +1568,22 @@ async def test_a_realtime_tool_whose_toolkit_fails_to_connect_answers_with_its_f
     assert connect is not None
     attempts: list[str] = []
 
-    async def failing_once() -> Callable[[], Awaitable[None]] | None:
+    async def failing_twice() -> Callable[[], Awaitable[None]] | None:
         attempts.append("connect")
         if len(attempts) == 1:
             msg = "server unreachable"
             raise ConnectionError(msg)
+        if len(attempts) == 2:
+            raise TimeoutError
         return await connect()
 
-    build = replace(build, spec=replace(build.spec, toolkits=(replace(toolkit, connect=failing_once),)))
+    build = replace(build, spec=replace(build.spec, toolkits=(replace(toolkit, connect=failing_twice),)))
     tooling = await _call_tools_over(build, tmp_path, monkeypatch)
     [tool] = tooling.tools
 
     assert await tool({"value": "a"}) == "Tool lookup failed: server unreachable"
+    # An exception without text still tells the voice model what failed.
+    assert await tool({"value": "a"}) == "Tool lookup failed: TimeoutError"
     assert await tool({"value": "b"}) == "found b"
     assert log == ["server connect"]
     assert tooling.close is not None

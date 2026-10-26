@@ -98,7 +98,7 @@ def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None
         with_current_room_member_access(
             Config(
                 agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         ),
         tmp_path,
@@ -116,7 +116,7 @@ def test_agent_bot_requires_reply_membership_index(
     config = _runtime_bound_config(
         Config(
             agents={"calculator": AgentConfig(display_name="CalculatorAgent")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         tmp_path,
     )
@@ -293,7 +293,7 @@ class TestAgentBot(AgentBotTestBase):
         config = _runtime_bound_config(
             Config(
                 agents={"general": AgentConfig(display_name="GeneralAgent", model="default")},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -359,7 +359,7 @@ class TestAgentBot(AgentBotTestBase):
                     "general": AgentConfig(display_name="GeneralAgent", model="default"),
                     "writer": AgentConfig(display_name="WriterAgent", model="default"),
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -707,6 +707,7 @@ class TestAgentBot(AgentBotTestBase):
             wait_for_membership_idle=AsyncMock(),
             next_batch=AsyncMock(return_value=None),
             change_membership=AsyncMock(return_value=True),
+            wait_for_room_ready=AsyncMock(return_value=True),
         )
         bot.journal_principal = MagicMock(return_value=principal)
         bot._ingestion_session = session
@@ -733,6 +734,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ]
         assert session.wait_for_membership_idle.await_count == 3
+        # Each successful join, the no-op one included, returns once nio can send to the room.
+        assert session.wait_for_room_ready.await_args_list == [call(room_id)] * 3
         assert principal.ingestion_membership_position.await_args_list == [
             call(room_id),
             call(room_id),

@@ -81,7 +81,7 @@ from mindroom.interactive_models import InteractivePrompt
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
-from tests.conftest import postgres_journal_schema_url
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, postgres_journal_schema_url
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import pause_shown_reply, paused_for_approval, reply_shown_for_approval
@@ -134,19 +134,9 @@ _CONTENDED_CLAIM_WAIT_SECONDS = 0.5
 # which is why it is small: an implementation that releases early gets there in
 # microseconds, so no plausible machine turns a real failure into a pass.
 _MUST_NOT_FINISH_SECONDS = 0.25
-# How long a worker thread waits to be let go. Never reached unless the test is
-# already failing, so it only bounds the damage.
-_WORKER_WAIT_SECONDS = 5.0
-# How long a released holder process is given to exit. It is already unblocked
-# by the time this is waited on, so reaching it means that process is wedged.
-_HOLDER_EXIT_SECONDS = 30.0
 # The pause an operation leaves between the statements it holds a connection
 # with. Short next to anything it is racing, long enough to cost no core.
 _STATEMENT_GAP_SECONDS = 0.001
-# How long every write outstanding at a close is given to be answered once that
-# close has returned. Reached only when one was abandoned, so it bounds a
-# failure rather than waiting one out.
-_SETTLEMENT_WAIT_SECONDS = 5.0
 # More writes at once than the writer queue used to be bounded at, because the
 # bound is what decided how many a close could reach. A close that answers only
 # what it dequeues wakes one parked producer per entry, so any count at or
@@ -1665,7 +1655,7 @@ async def _read_with_writes_between_page_queries(
 
     def land() -> None:
         for write in writes():
-            asyncio.run_coroutine_threadsafe(write, loop).result(_WORKER_WAIT_SECONDS)
+            asyncio.run_coroutine_threadsafe(write, loop).result(SETTLE_TIMEOUT_SECONDS)
 
     return await store.backend.read(
         lambda transaction: reads.read_conversation(
@@ -3538,7 +3528,7 @@ class TestProjectedInteractivePrompts:
 
         def pause_after_membership_claim() -> None:
             ownership_claimed.set()
-            assert release_refetch.wait(_WORKER_WAIT_SECONDS), "the refetch transaction was never released"
+            assert release_refetch.wait(SETTLE_TIMEOUT_SECONDS), "the refetch transaction was never released"
 
         racing_refetch = EventJournalStore(
             backend=_PausingBackend(
@@ -3556,7 +3546,7 @@ class TestProjectedInteractivePrompts:
                 content=text("Old membership"),
             ),
         )
-        await asyncio.to_thread(ownership_claimed.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(ownership_claimed.wait, SETTLE_TIMEOUT_SECONDS)
         assert ownership_claimed.is_set(), "the refetch never claimed the membership row"
 
         acknowledgement = asyncio.create_task(
@@ -5087,10 +5077,7 @@ class TestBoundedHydrationInstallation:
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 
-# How long a racer is given to queue behind the held row before the test calls
-# it a failure, and how often that is checked. Generous because the wait is a
-# condition rather than a delay: reaching it early costs nothing.
-_QUEUE_TIMEOUT_SECONDS = 20.0
+# How often a racer queued behind the held row is checked for.
 _QUEUE_POLL_SECONDS = 0.01
 
 # Racer connections parked on a heavyweight lock. `pg_stat_activity` is
@@ -5201,7 +5188,7 @@ def _watch_queued_racers(database_url: str, application_name: str, expected: int
     """Poll until enough racers are waiting, or say how many turned up."""
     import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
 
-    deadline = time.monotonic() + _QUEUE_TIMEOUT_SECONDS
+    deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
     with psycopg.connect(database_url, autocommit=True) as connection:
         while True:
             row = connection.execute(_QUEUED_RACERS, (application_name,)).fetchone()
@@ -5230,7 +5217,7 @@ def _watch_until_queued_or_finished(
     """
     import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
 
-    deadline = time.monotonic() + _QUEUE_TIMEOUT_SECONDS
+    deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
     with psycopg.connect(database_url, autocommit=True) as connection:
         while not finished.is_set():
             row = connection.execute(_QUEUED_RACERS, (application_name,)).fetchone()
@@ -5272,7 +5259,7 @@ class TestDeliveryRetirementAndEchoAreCrossProcessOrdered:
 
         def pause_after_claim() -> None:
             retirement_claimed.set()
-            assert release_retirement.wait(_WORKER_WAIT_SECONDS), "retirement was never released"
+            assert release_retirement.wait(SETTLE_TIMEOUT_SECONDS), "retirement was never released"
 
         retiring = EventJournalStore(
             backend=_PausingBackend(
@@ -5289,7 +5276,7 @@ class TestDeliveryRetirementAndEchoAreCrossProcessOrdered:
                 membership_epoch=0,
             ),
         )
-        await asyncio.to_thread(retirement_claimed.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(retirement_claimed.wait, SETTLE_TIMEOUT_SECONDS)
         assert retirement_claimed.is_set(), "retirement never claimed the membership row"
 
         inbound, projected = message(
@@ -5336,7 +5323,7 @@ class TestInteractiveActivationAndDepartureAreCrossProcessOrdered:
 
         def pause_after_claim() -> None:
             registration_claimed.set()
-            assert release_registration.wait(_WORKER_WAIT_SECONDS), "the registration was never released"
+            assert release_registration.wait(SETTLE_TIMEOUT_SECONDS), "the registration was never released"
 
         registering = EventJournalStore(
             backend=_PausingBackend(
@@ -5353,7 +5340,7 @@ class TestInteractiveActivationAndDepartureAreCrossProcessOrdered:
         )
         registration = asyncio.create_task(registering.admit(inbound, projected))
         try:
-            await asyncio.to_thread(registration_claimed.wait, _WORKER_WAIT_SECONDS)
+            await asyncio.to_thread(registration_claimed.wait, SETTLE_TIMEOUT_SECONDS)
             assert registration_claimed.is_set(), "the registration never claimed the membership row"
 
             departure = asyncio.create_task(
@@ -5436,7 +5423,7 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
             )
 
         async def after_the_fence() -> None:
-            committed = await asyncio.to_thread(fence_finished.wait, _WORKER_WAIT_SECONDS)
+            committed = await asyncio.to_thread(fence_finished.wait, SETTLE_TIMEOUT_SECONDS)
             assert committed, "the fence never committed"
 
         hydrating = EventJournalStore(
@@ -5456,7 +5443,7 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
                 expected_membership_epoch=epoch,
             ),
         )
-        await asyncio.to_thread(inside_the_walk.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(inside_the_walk.wait, SETTLE_TIMEOUT_SECONDS)
         assert inside_the_walk.is_set(), "the walk never reached its epoch decision"
         fence = asyncio.create_task(admit_room_membership(fencing, ROOM, "leave", source=DepartureSource.REPORTED))
         fence.add_done_callback(lambda _: fence_finished.set())
@@ -5486,7 +5473,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
 
         def pause_after_recovery_claim() -> None:
             inside_final.set()
-            assert release_final.wait(_WORKER_WAIT_SECONDS), "the recovery transaction was never released"
+            assert release_final.wait(SETTLE_TIMEOUT_SECONDS), "the recovery transaction was never released"
 
         recovering = EventJournalStore(
             backend=_PausingBackend(
@@ -5504,7 +5491,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
                 expected_membership_epoch=await reader.membership_epoch(ROOM),
             ),
         )
-        await asyncio.to_thread(inside_final.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(inside_final.wait, SETTLE_TIMEOUT_SECONDS)
         assert inside_final.is_set(), "the repayment never claimed its exact recovery row"
         replacement = asyncio.create_task(
             rival_stores.second.principal(principal_id).record_room_history_recovery(ROOM),
@@ -5557,7 +5544,7 @@ class TestOutbox:
 
         def pause_discovery() -> None:
             discovered.set()
-            assert release.wait(_WORKER_WAIT_SECONDS), "ACK discovery was never released"
+            assert release.wait(SETTLE_TIMEOUT_SECONDS), "ACK discovery was never released"
 
         racing = EventJournalStore(
             backend=_PausingBackend(
@@ -5582,7 +5569,7 @@ class TestOutbox:
             ),
         )
         try:
-            assert await asyncio.to_thread(discovered.wait, _WORKER_WAIT_SECONDS), "ACK did not discover its owner"
+            assert await asyncio.to_thread(discovered.wait, SETTLE_TIMEOUT_SECONDS), "ACK did not discover its owner"
             await store.record_pending_turn(TurnRecord.create(["$a", "$source"], completed=False))
         finally:
             release.set()
@@ -5656,11 +5643,11 @@ class TestOutbox:
 
         def pause_writer() -> None:
             writer_claimed.set()
-            assert release_writer.wait(_WORKER_WAIT_SECONDS), "ordinary writer was never released"
+            assert release_writer.wait(SETTLE_TIMEOUT_SECONDS), "ordinary writer was never released"
 
         def pause_ack() -> None:
             ack_claimed.set()
-            assert release_ack.wait(_WORKER_WAIT_SECONDS), "acknowledgement was never released"
+            assert release_ack.wait(SETTLE_TIMEOUT_SECONDS), "acknowledgement was never released"
 
         def claims(sql: str) -> bool:
             return "UPDATE turn_records SET record_json = record_json" in sql
@@ -5694,7 +5681,7 @@ class TestOutbox:
             if mutation == "projection"
             else writer_store.record_visible_echo(source, "$echo"),
         )
-        assert await asyncio.to_thread(writer_claimed.wait, _WORKER_WAIT_SECONDS), "writer never claimed its row"
+        assert await asyncio.to_thread(writer_claimed.wait, SETTLE_TIMEOUT_SECONDS), "writer never claimed its row"
         acknowledgement = asyncio.create_task(
             principal.acknowledge_matrix_delivery(
                 delivery_id=revision,
@@ -5716,7 +5703,7 @@ class TestOutbox:
                 expected=1,
             ),
         )
-        independently_claimed = asyncio.create_task(asyncio.to_thread(ack_claimed.wait, _WORKER_WAIT_SECONDS))
+        independently_claimed = asyncio.create_task(asyncio.to_thread(ack_claimed.wait, SETTLE_TIMEOUT_SECONDS))
         try:
             # A correct ACK waits for the canonical claim; the old path claims a
             # different row, then deadlocks when both transactions continue.
@@ -5759,11 +5746,11 @@ class TestOutbox:
         def pause_writer() -> None:
             if pause_enabled:
                 writer_claimed.set()
-                assert release_writer.wait(_WORKER_WAIT_SECONDS), "current ledger writer was never released"
+                assert release_writer.wait(SETTLE_TIMEOUT_SECONDS), "current ledger writer was never released"
 
         def pause_ack() -> None:
             ack_claimed.set()
-            assert release_ack.wait(_WORKER_WAIT_SECONDS), "frozen FINAL was never released"
+            assert release_ack.wait(SETTLE_TIMEOUT_SECONDS), "frozen FINAL was never released"
 
         def claims(sql: str) -> bool:
             return "UPDATE turn_records SET record_json = record_json" in sql
@@ -5823,7 +5810,7 @@ class TestOutbox:
 
         pause_enabled = True
         echo = asyncio.create_task(store.record_visible_echo(source, "$echo"))
-        assert await asyncio.to_thread(writer_claimed.wait, _WORKER_WAIT_SECONDS), "writer never claimed its row"
+        assert await asyncio.to_thread(writer_claimed.wait, SETTLE_TIMEOUT_SECONDS), "writer never claimed its row"
         acknowledgement = asyncio.create_task(
             ack_principal.acknowledge_matrix_delivery(
                 delivery_id=driving,
@@ -5845,7 +5832,7 @@ class TestOutbox:
                 expected=1,
             ),
         )
-        independently_claimed = asyncio.create_task(asyncio.to_thread(ack_claimed.wait, _WORKER_WAIT_SECONDS))
+        independently_claimed = asyncio.create_task(asyncio.to_thread(ack_claimed.wait, SETTLE_TIMEOUT_SECONDS))
         try:
             done, _ = await asyncio.wait((queued, independently_claimed), return_when=asyncio.FIRST_COMPLETED)
             for completed in done:
@@ -5908,7 +5895,7 @@ class TestOutbox:
 
         def pause() -> None:
             claimed.set()
-            assert release.wait(_WORKER_WAIT_SECONDS), "turn writer was never released"
+            assert release.wait(SETTLE_TIMEOUT_SECONDS), "turn writer was never released"
 
         writer = EventJournalStore(
             backend=_PausingBackend(
@@ -5926,7 +5913,7 @@ class TestOutbox:
                 ),
             ),
         )
-        await asyncio.to_thread(claimed.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(claimed.wait, SETTLE_TIMEOUT_SECONDS)
         assert claimed.is_set(), "the ledger did not claim the canonical row"
         selected = TurnRecord.create(
             ["$source"],
@@ -6910,7 +6897,7 @@ class TestApprovalContinuations:
 
         def pause() -> None:
             reached.set()
-            assert release.wait(_WORKER_WAIT_SECONDS)
+            assert release.wait(SETTLE_TIMEOUT_SECONDS)
 
         holding = EventJournalStore(
             backend=_PausingBackend(
@@ -6935,7 +6922,7 @@ class TestApprovalContinuations:
             pause_shown_reply(holding, self.continuation(), shown) if approval_first else redact(holding),
         )
         try:
-            await asyncio.to_thread(reached.wait, _WORKER_WAIT_SECONDS)
+            await asyncio.to_thread(reached.wait, SETTLE_TIMEOUT_SECONDS)
             assert reached.is_set()
             second = asyncio.create_task(
                 redact(racing) if approval_first else pause_shown_reply(racing, self.continuation(), shown),
@@ -6977,6 +6964,39 @@ class TestApprovalContinuations:
         assert row is not None
         stored = json.loads(str(row["context_json"]))
         assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
+
+    async def test_continuation_loads_the_execution_identity_its_run_paused_under(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A restored continuation carries its typed identity, and an unreadable stored identity fails its load."""
+        await self.admit_sources(alice)
+        continuation = self.continuation()
+        await paused_for_approval(alice, continuation)
+        restored = await alice.approval_continuation("approval-1")
+        assert restored is not None
+        assert restored.execution_identity == continuation.execution_identity
+
+        row = await alice._backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            ),
+        )
+        assert row is not None
+        stored = json.loads(str(row["context_json"]))
+        stored["execution_identity"]["agent_name"] = ""
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(stored), "approval-1"),
+            ),
+        )
+        with pytest.raises(
+            TypeError,
+            match=r"^Approval continuation execution_identity\.agent_name must be a non-empty string$",
+        ):
+            await alice.approval_continuation("approval-1")
 
     async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
         """Only one response lifecycle may continue the exact persisted run."""
@@ -7136,6 +7156,56 @@ class TestApprovalContinuations:
         assert advanced.run_id == "run-2"
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
+
+    async def test_advanced_continuation_keeps_every_earlier_generation_s_decided_calls(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Every loader returns the calls each earlier approval decided, in pause order, beside the current generation's."""
+        alice = journal_store.principal("agent@alice")
+        await self.admit_sources(alice)
+
+        def call(tool_call_id: str, decision: ApprovalDecision | None = ApprovalDecision.APPROVED) -> ApprovalCall:
+            return ApprovalCall(
+                tool_call_id=tool_call_id,
+                tool_name="write_file",
+                invoking_agent="agent",
+                expires_at_ns=time.time_ns() + 60_000_000_000,
+                decision=decision,
+            )
+
+        async def advance(claimant_generation: int, calls: tuple[ApprovalCall, ...]) -> ApprovalContinuation:
+            advanced = await advance_continuation(
+                alice,
+                "approval-1",
+                claimant_generation=claimant_generation,
+                run_id=f"run-{claimant_generation + 2}",
+                session_id="session-1",
+                calls=calls,
+            )
+            assert advanced is not None
+            return advanced
+
+        initial = self.continuation()
+        first = await paused_for_approval(alice, replace(initial, calls=(*initial.calls, call("call-1b"))))
+        assert first is not None
+        assert first.earlier_calls == ()
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        second = await advance(claimed.generation, (call("call-2"),))
+        assert second.earlier_calls == first.calls
+        assert await alice.activate_approval_continuation("approval-1", expected_generation=second.generation)
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        latest = (call("call-3", decision=None),)
+
+        third = await advance(claimed.generation, latest)
+
+        [paged] = [continuation for _principal, continuation in await journal_store.approval_continuations()]
+        assert [
+            (continuation.calls, continuation.earlier_calls)
+            for continuation in (third, *await alice.pending_approvals(), paged)
+        ] == [(latest, (*first.calls, *second.calls))] * 3
 
     async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
         self,
@@ -7409,7 +7479,7 @@ class TestApprovalContinuations:
 
         def pause_after_continuation_read() -> None:
             reservation_read.set()
-            assert release_reservation.wait(_WORKER_WAIT_SECONDS), "the reservation was never released"
+            assert release_reservation.wait(SETTLE_TIMEOUT_SECONDS), "the reservation was never released"
 
         reserving = EventJournalStore(
             backend=_PausingBackend(
@@ -7440,7 +7510,7 @@ class TestApprovalContinuations:
             ),
         )
         try:
-            await asyncio.to_thread(reservation_read.wait, _WORKER_WAIT_SECONDS)
+            await asyncio.to_thread(reservation_read.wait, SETTLE_TIMEOUT_SECONDS)
             assert reservation_read.is_set(), "the reservation never read its continuation"
             failure = asyncio.create_task(
                 rival_stores.second.principal(principal_id).request_approval_failure(
@@ -7497,7 +7567,7 @@ class TestApprovalContinuations:
 
         def pause_after_continuation_read() -> None:
             decision_read.set()
-            assert release_decision.wait(_WORKER_WAIT_SECONDS), "the decision was never released"
+            assert release_decision.wait(SETTLE_TIMEOUT_SECONDS), "the decision was never released"
 
         deciding = EventJournalStore(
             backend=_PausingBackend(
@@ -7515,7 +7585,7 @@ class TestApprovalContinuations:
             ),
         )
         try:
-            await asyncio.to_thread(decision_read.wait, _WORKER_WAIT_SECONDS)
+            await asyncio.to_thread(decision_read.wait, SETTLE_TIMEOUT_SECONDS)
             assert decision_read.is_set(), "the decision never read its continuation"
             failure = asyncio.create_task(
                 rival_stores.second.principal(principal_id).request_approval_failure(
@@ -7568,7 +7638,7 @@ class TestApprovalContinuations:
 
         def pause_after_continuation_lock() -> None:
             continuation_locked.set()
-            assert release_decision.wait(_WORKER_WAIT_SECONDS), "the decision was never released"
+            assert release_decision.wait(SETTLE_TIMEOUT_SECONDS), "the decision was never released"
 
         deciding = EventJournalStore(
             backend=_PausingBackend(
@@ -7588,7 +7658,7 @@ class TestApprovalContinuations:
             ),
         )
         try:
-            await asyncio.to_thread(continuation_locked.wait, _WORKER_WAIT_SECONDS)
+            await asyncio.to_thread(continuation_locked.wait, SETTLE_TIMEOUT_SECONDS)
             assert continuation_locked.is_set(), "the decision never locked its continuation"
             departure = asyncio.create_task(
                 admit_room_membership(
@@ -8186,7 +8256,7 @@ class TestApprovalContinuations:
 
         def pause_after_source_settlement() -> None:
             source_settled.set()
-            assert release_finish.wait(_WORKER_WAIT_SECONDS), "continuation completion was never released"
+            assert release_finish.wait(SETTLE_TIMEOUT_SECONDS), "continuation completion was never released"
 
         finishing = EventJournalStore(
             backend=_PausingBackend(
@@ -8197,7 +8267,7 @@ class TestApprovalContinuations:
         ).principal("agent@alice")
         finish = asyncio.create_task(finishing.finish_approval_continuation("approval-1"))
         try:
-            await asyncio.to_thread(source_settled.wait, _WORKER_WAIT_SECONDS)
+            await asyncio.to_thread(source_settled.wait, SETTLE_TIMEOUT_SECONDS)
             assert source_settled.is_set(), "completion never settled its first source"
             departure = asyncio.create_task(
                 admit_room_membership(
@@ -8344,7 +8414,7 @@ class TestApprovalContinuations:
 
         def pause_after_membership_lock() -> None:
             membership_locked.set()
-            assert release_departure.wait(_WORKER_WAIT_SECONDS), "router departure was never released"
+            assert release_departure.wait(SETTLE_TIMEOUT_SECONDS), "router departure was never released"
 
         departing = EventJournalStore(
             backend=_PausingBackend(
@@ -8355,7 +8425,7 @@ class TestApprovalContinuations:
         ).principal("router@alice")
         departure = asyncio.create_task(admit_room_membership(departing, ROOM, "leave", source=DepartureSource.LOCAL))
         try:
-            await asyncio.to_thread(membership_locked.wait, _WORKER_WAIT_SECONDS)
+            await asyncio.to_thread(membership_locked.wait, SETTLE_TIMEOUT_SECONDS)
             assert membership_locked.is_set(), "departure never locked router membership"
             cleanup = asyncio.create_task(
                 responder.discard_unavailable_approval_continuation(
@@ -9157,7 +9227,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
             return "landed"
 
         writing = asyncio.create_task(journal_store.backend.write(busy))
-        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
         closing = asyncio.create_task(journal_store.close())
         closed_early = await _finished_within_grace(closing)
         release.set()
@@ -9183,7 +9253,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
             return "read"
 
         reading = asyncio.create_task(journal_store.backend.read(busy))
-        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
         closing = asyncio.create_task(journal_store.close())
         closed_early = await _finished_within_grace(closing)
         release.set()
@@ -9205,7 +9275,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
             return "recovery read"
 
         reading = asyncio.create_task(journal_store.backend.recovery_read(busy))
-        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
         closing = asyncio.create_task(journal_store.close())
         closed_early = await _finished_within_grace(closing)
         release.set()
@@ -9239,12 +9309,12 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         def interleaved_snapshot(transaction: Transaction) -> tuple[int, int]:
             before = read_epoch(transaction)
             first_read.set()
-            assert writer_committed.wait(_WORKER_WAIT_SECONDS), "concurrent journal write did not commit"
+            assert writer_committed.wait(SETTLE_TIMEOUT_SECONDS), "concurrent journal write did not commit"
             return before, read_epoch(transaction)
 
         recovery = asyncio.create_task(journal_store.backend.recovery_read(interleaved_snapshot))
         try:
-            assert await asyncio.to_thread(first_read.wait, _WORKER_WAIT_SECONDS), "recovery read did not start"
+            assert await asyncio.to_thread(first_read.wait, SETTLE_TIMEOUT_SECONDS), "recovery read did not start"
             await journal_store.backend.write(
                 lambda transaction: transaction.execute(
                     "UPDATE room_membership SET membership_epoch = ? WHERE principal_id = ? AND room_id = ?",
@@ -9278,7 +9348,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         await asyncio.gather(*(started.wait() for started in workers_started))
         closing = asyncio.create_task(backend.close())
         try:
-            finished, _ = await asyncio.wait({closing}, timeout=_MUST_NOT_FINISH_SECONDS)
+            finished, _ = await asyncio.wait({closing}, timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
             release_workers.set()
             await asyncio.gather(*blockers)
@@ -9310,7 +9380,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
             return "read"
 
         reading = asyncio.create_task(backend.read(busy))
-        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
         closing = asyncio.create_task(backend.close())
         await close_started.wait()
         closing.cancel()
@@ -9346,7 +9416,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
             return "read"
 
         reading = asyncio.create_task(backend.read(busy))
-        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
         first_close = asyncio.create_task(backend.close())
         second_close = asyncio.create_task(backend.close())
         second_returned_early = await _finished_within_grace(second_close)
@@ -9373,12 +9443,12 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         def slow(transaction: Transaction) -> str:
             transaction.execute(_INSERT_MEMBERSHIP, ("agent@alice", ROOM, 1))
             running.set()
-            release.wait(_WORKER_WAIT_SECONDS)
+            release.wait(SETTLE_TIMEOUT_SECONDS)
             finished.set()
             return "landed"
 
         writing = asyncio.create_task(journal_store.backend.write(slow))
-        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
         writing.cancel()
         returned_early = await _finished_within_grace(writing)
         release.set()
@@ -9405,12 +9475,12 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         def slow(transaction: Transaction) -> str:
             transaction.fetchall("SELECT 1 AS one")
             running.set()
-            release.wait(_WORKER_WAIT_SECONDS)
+            release.wait(SETTLE_TIMEOUT_SECONDS)
             finished.set()
             return "read"
 
         reading = asyncio.create_task(journal_store.backend.read(slow))
-        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
         reading.cancel()
         returned_early = await _finished_within_grace(reading)
         release.set()
@@ -9440,7 +9510,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         def first(transaction: Transaction) -> str:
             transaction.execute(_INSERT_MEMBERSHIP, ("agent@alice", ROOM, 1))
             first_running.set()
-            release_first.wait(_WORKER_WAIT_SECONDS)
+            release_first.wait(SETTLE_TIMEOUT_SECONDS)
             msg = "the cancelled write fails"
             raise RuntimeError(msg)
 
@@ -9450,7 +9520,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
             return "second landed"
 
         cancelled = asyncio.create_task(journal_store.backend.write(first))
-        await asyncio.to_thread(first_running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(first_running.wait, SETTLE_TIMEOUT_SECONDS)
         cancelled.cancel()
         following = asyncio.create_task(journal_store.backend.write(second))
         await _finished_within_grace(following)
@@ -9503,7 +9573,7 @@ class TestClosingAnswersEveryWriteItWillNotRun:
             return "landed"
 
         held = asyncio.create_task(backend.write(busy))
-        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
         outstanding = [
             asyncio.create_task(backend.write(queued)) for _ in range(_WRITES_OUTNUMBERING_THE_OLD_QUEUE_BOUND)
         ]
@@ -9515,7 +9585,7 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         await _finished_within_grace(closing)
         release.set()
         await closing
-        answered, abandoned = await asyncio.wait(outstanding, timeout=_SETTLEMENT_WAIT_SECONDS)
+        answered, abandoned = await asyncio.wait(outstanding, timeout=SETTLE_TIMEOUT_SECONDS)
         # Read eagerly rather than inside the assertion below, which stops at
         # the first answer it dislikes and would leave the rest reported as
         # exceptions nobody retrieved.
@@ -9559,7 +9629,7 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         writer = backend._writes._writer_task
         assert writer is not None
         writer.cancel()
-        answered, abandoned = await asyncio.wait({writing}, timeout=_SETTLEMENT_WAIT_SECONDS)
+        answered, abandoned = await asyncio.wait({writing}, timeout=SETTLE_TIMEOUT_SECONDS)
         refusals = [task.exception() for task in answered]
         await _release_writes_the_store_abandoned(backend, abandoned)
         await backend.close()
@@ -9609,7 +9679,7 @@ class TestQueuedWritesCommitTogether:
 
         try:
             holding = asyncio.create_task(backend.write(hold))
-            assert await asyncio.to_thread(started.wait, _SETTLEMENT_WAIT_SECONDS), "the held write never ran"
+            assert await asyncio.to_thread(started.wait, SETTLE_TIMEOUT_SECONDS), "the held write never ran"
             queued = [asyncio.create_task(backend.write(insert(n))) for n in (1, 2, 3)]
             # Each write is queued once its task first runs.
             await asyncio.sleep(0)
@@ -10096,7 +10166,7 @@ class TestCrossProcessWriters:
             yield release
         finally:
             release.write_text("release")
-            async with asyncio.timeout(_HOLDER_EXIT_SECONDS):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 await holder.wait()
 
     async def test_opening_waits_out_a_write_lock_another_process_holds(self, tmp_path: Path) -> None:

@@ -2,8 +2,7 @@
 """Ask a model for structured output the way its provider supports, and read the answer back into the schema.
 
 Each adapter renders a request's output schema in its provider's wire format; a route that only offers JSON mode
-also needs a JSON prompt at the end of the system message. The prompt text and the lenient parsing are kept as main
-behaves: helper prompts are model-visible.
+also needs a JSON prompt at the end of the system message, which the model reads.
 """
 
 from __future__ import annotations
@@ -13,8 +12,6 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
-
-from mindroom.llm.messages import split_thinking
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -75,14 +72,17 @@ def _without_title(field: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in field.items() if key != "title"}
 
 
+# TODO(simplify): every helper answer parses leniently, repairing fences, markdown, and quotes and merging several
+# objects, also on routes that enforce the schema. Ask by forced tool call or schema where a route supports it, a
+# schema-derived prompt otherwise, and parse strictly (#3114). Helper models would notice: a malformed answer fails.
 def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T | None:
     """Read a model's text answer into ``schema``, or return None when no attempt validates.
 
     Tries the text as is, then with code fences, markdown around keys, control characters, and unescaped quotes in
     values cleaned up, then each top-level JSON object, merging several by the schema's fields.
-    A leading ``<think>`` block is dropped first.
+    Inline reasoning is dropped first (``_answer_text``).
     """
-    _, content = split_thinking(content)
+    content = _answer_text(content)
     parsed = _validated(content, schema)
     if parsed is not None:
         return parsed
@@ -96,6 +96,19 @@ def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T | None:
         if parsed is not None:
             return parsed
     return _merged(candidates, schema)
+
+
+def _answer_text(content: str) -> str:
+    """Return the answer of a complete reply's text: what follows its first ``</think>``, else all of it.
+
+    Streamed replies split inline reasoning by a narrower rule (``ThinkTagSplitter``, ``providers/assistant_turn.py``):
+    only a block the reply opens with ``<think>``, because a stream cannot hold its text back until a ``</think>``
+    that may never come. A JSON answer needs the wider rule: a chat template that opens the block in the prompt
+    leaves the model writing only its end (``reasoning</think>{...}``), and reasoning left before the JSON can carry
+    draft objects that the lenient parse below would merge into the answer.
+    """
+    _, closed, answer = content.partition("</think>")
+    return answer if closed else content
 
 
 def _validated[T: BaseModel](text: str, schema: type[T]) -> T | None:

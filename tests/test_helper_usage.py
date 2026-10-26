@@ -23,7 +23,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.custom_tools.calculator import CalculatorTools
-from mindroom.custom_tools.dynamic_workflow import _aexecute_participant, _arun_agent, _WorkflowRun
+from mindroom.custom_tools.dynamic_workflow import _execute_participant, _run_room_agent_turn, _WorkflowRun
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
 from mindroom.history.session_context import (
@@ -167,8 +167,8 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     helper_results: list[object] = []
 
     async def add(self: CalculatorTools, a: float, b: float) -> str:
-        helper = create_agent("helper", config, paths, identity)
-        helper_results.append(await _arun_agent(helper_context, helper, "Sample task."))
+        helper = create_agent("helper", config, paths, identity, knowledge=None, active_model_name=None)
+        helper_results.append(await _run_room_agent_turn(helper_context, helper, "Sample task."))
         if outcome == "cancel":
             raise asyncio.CancelledError
         return original_add(self, a, b)
@@ -288,6 +288,9 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     prior_presentation_state=paused.response_presentation_state,
                     prior_tool_trace=paused.tool_trace,
                     progress=None,
+                    member_model_names=None,
+                    show_tool_calls=True,
+                    tool_trace_collector=[],
                 )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
         execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
@@ -403,8 +406,8 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
     assert report.request_breakdown is not None
     assert [(row.kind, row.model_provider, row.model, row.totals.total_tokens) for row in report.request_breakdown] == [
         ("run", "test-provider", "reply-model", 10),
-        ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
-        ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
+        ("memory_extraction", "OpenAI Chat", "gpt-6-luna", 150),
+        ("memory_extraction", "OpenAI Chat", "gpt-6-luna", 150),
     ]
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 0
@@ -517,7 +520,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
     with helper_usage_context(scope_context):
         assert scope_context is not None
         storage = scope_context.storage
-        result = await _aexecute_participant(
+        result = await _execute_participant(
             context,
             {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
             "Sample task.",
@@ -598,7 +601,7 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
     scope_context = load_scope()
     with helper_usage_context(scope_context):
         participant = asyncio.create_task(
-            _aexecute_participant(
+            _execute_participant(
                 context,
                 {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
                 "Sample task.",

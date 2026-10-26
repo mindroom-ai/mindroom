@@ -24,6 +24,7 @@ from mindroom.scheduling.tasks import (
     get_scheduled_tasks_for_room,
     save_edited_scheduled_task,
     scheduled_task_read_sort_key,
+    scheduled_task_timezone,
 )
 
 if TYPE_CHECKING:
@@ -140,7 +141,10 @@ async def list_schedules(
                 runtime_paths=runtime_paths,
                 include_non_pending=include_cancelled,
             )
-            tasks.extend(build_scheduled_task_read_model(task, timezone=runtime_config.timezone) for task in room_tasks)
+            tasks.extend(
+                build_scheduled_task_read_model(task, timezone=scheduled_task_timezone(task.workflow, runtime_config))
+                for task in room_tasks
+            )
     finally:
         await client.close()
 
@@ -190,13 +194,16 @@ async def update_schedule(
                 workflow=updated_workflow,
                 existing_task=existing_task,
                 runtime_paths=runtime_paths,
-                timezone=runtime_config.timezone,
+                timezone=scheduled_task_timezone(updated_workflow, runtime_config),
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{e!s}") from e
 
         return _to_response_task(
-            build_scheduled_task_read_model(updated_task, timezone=runtime_config.timezone),
+            build_scheduled_task_read_model(
+                updated_task,
+                timezone=scheduled_task_timezone(updated_task.workflow, runtime_config),
+            ),
             runtime_paths,
         )
     finally:

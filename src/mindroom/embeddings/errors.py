@@ -5,8 +5,13 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from mindroom.llm.errors import ProviderUnavailable
+from mindroom.providers.openai.errors import provider_error
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from mindroom.llm.errors import ProviderError
 
 _EMBEDDER_AUTH_FAILED_DETAIL = "embedder authentication failed (HTTP 401)"
 _EMBEDDER_PERMISSION_DENIED_DETAIL = "embedder permission denied (HTTP 403)"
@@ -19,12 +24,14 @@ class EmbedderRequestError(RuntimeError):
 
     The embedder boundary raises this instead of the provider exception so
     upstream loggers cannot render a raw response body that may echo a secret.
-    ``retry_after_seconds`` carries the provider's ``Retry-After`` hint, which
+    ``retryable`` says whether the same request may succeed later, and
+    ``retry_after_seconds`` carries the provider's ``Retry-After`` hint; both
     would otherwise be lost with the original exception.
     """
 
-    def __init__(self, detail: str, *, retry_after_seconds: float | None = None) -> None:
+    def __init__(self, detail: str, *, retryable: bool = False, retry_after_seconds: float | None = None) -> None:
         super().__init__(detail)
+        self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
 
 
@@ -53,58 +60,84 @@ def extract_classified_embedder_detail(text: str | None) -> str | None:
     return match.group(0) if match else None
 
 
-def _is_embedder_provider_error(exc: BaseException) -> bool:
-    """Return whether an exception came from the embedding provider SDK."""
+def as_embedder_error(exc: BaseException) -> EmbedderRequestError | None:
+    """Return ``exc`` as a classified embedder error, classifying a raw OpenAI SDK error; None for anything else."""
+    if isinstance(exc, EmbedderRequestError):
+        return exc
     # Deferred so slim entry points never pay the openai SDK import; when a
     # provider call raised, the SDK is already loaded.
     from openai import OpenAIError  # noqa: PLC0415
 
-    return isinstance(exc, OpenAIError)
+    return openai_embedder_error(exc) if isinstance(exc, OpenAIError) else None
 
 
 def classified_embedder_error(exc: BaseException) -> str | None:
     """Return a safe detail only for a known embedding-provider failure."""
-    if isinstance(exc, EmbedderRequestError) or _is_embedder_provider_error(exc):
-        return describe_embedder_error(exc)
-    return None
+    error = as_embedder_error(exc)
+    return None if error is None else str(error)
 
 
-_TRANSIENT_STATUS_CODES = frozenset({408, 429})
-_MIN_TRANSIENT_SERVER_STATUS = 500
-_MAX_HTTP_STATUS = 599
-_CLASSIFIED_HTTP_STATUS_PATTERN = re.compile(r"embedder request failed \(HTTP (\d{3})\)")
+_UNAUTHORIZED_STATUS = 401
+_FORBIDDEN_STATUS = 403
 
 
-def _status_code_is_transient(status_code: int) -> bool:
-    return status_code in _TRANSIENT_STATUS_CODES or (_MIN_TRANSIENT_SERVER_STATUS <= status_code <= _MAX_HTTP_STATUS)
+def embedder_request_error(
+    error: BaseException,
+    failure: ProviderError | None,
+    *,
+    retry_after_seconds: float | None = None,
+) -> EmbedderRequestError:
+    """Return the credential-safe error of one failed embedding request.
+
+    ``failure`` is the typed provider error the embedder's SDK mapping made of
+    ``error``, or None when the mapping did not recognize it, which makes the
+    failure final. The detail names only the HTTP status, an unreachable
+    endpoint, or ``error``'s type, never provider text, and ``failure``'s type
+    alone decides whether the request is retried, by the rule model requests
+    follow.
+    """
+    status_code = failure.status_code if failure is not None else None
+    if status_code == _UNAUTHORIZED_STATUS:
+        detail = _EMBEDDER_AUTH_FAILED_DETAIL
+    elif status_code == _FORBIDDEN_STATUS:
+        detail = _EMBEDDER_PERMISSION_DENIED_DETAIL
+    elif status_code is not None:
+        detail = f"embedder request failed (HTTP {status_code})"
+    elif isinstance(failure, ProviderUnavailable):
+        detail = EMBEDDER_UNREACHABLE_DETAIL
+    else:
+        detail = f"embedder request failed ({type(error).__name__})"
+    retryable = failure is not None and failure.retryable
+    return EmbedderRequestError(detail, retryable=retryable, retry_after_seconds=retry_after_seconds)
+
+
+def openai_embedder_error(error: Exception) -> EmbedderRequestError:
+    """Return the classified error of one OpenAI SDK or transport failure, keeping the provider's ``Retry-After`` hint."""
+    # Deferred like the SDK import in ``as_embedder_error``.
+    from openai import APIStatusError  # noqa: PLC0415
+
+    retry_after_seconds = (
+        _retry_after_seconds_from_headers(error.response.headers) if isinstance(error, APIStatusError) else None
+    )
+    return embedder_request_error(
+        error,
+        provider_error(error, provider="openai"),
+        retry_after_seconds=retry_after_seconds,
+    )
 
 
 def embedder_failure_is_transient(exc: BaseException) -> bool:
     """Return whether an embedding failure is worth retrying.
 
-    Transport faults, timeouts, throttling and server-side errors are retried.
-    Credential rejections, invalid models, dimension mismatches and malformed
-    payloads are not: retrying them repeats the same rejected request, burns
-    the retry budget, and buries the real cause.
+    A failure is retried when its typed provider error says so, by the rule
+    model requests follow. Credential rejections, invalid models, dimension
+    mismatches and malformed payloads are not: retrying them repeats the same
+    rejected request, burns the retry budget, and buries the real cause.
     """
-    if isinstance(exc, EmbedderRequestError):
-        detail = str(exc)
-        if detail == EMBEDDER_UNREACHABLE_DETAIL:
-            return True
-        status_match = _CLASSIFIED_HTTP_STATUS_PATTERN.fullmatch(detail)
-        return status_match is not None and _status_code_is_transient(int(status_match.group(1)))
-    if isinstance(exc, (TimeoutError, ConnectionError)):
-        return True
-    if not _is_embedder_provider_error(exc):
-        return False
-
-    # Deferred like the probe above: slim entry points must not pay the openai
-    # SDK import, and reaching here means a provider call already loaded it.
-    from openai import APIConnectionError, APIStatusError  # noqa: PLC0415
-
-    if isinstance(exc, APIConnectionError):
-        return True
-    return isinstance(exc, APIStatusError) and _status_code_is_transient(exc.status_code)
+    error = as_embedder_error(exc)
+    if error is not None:
+        return error.retryable
+    return isinstance(exc, (TimeoutError, ConnectionError))
 
 
 _CARDINALITY_MISMATCH_PATTERN = re.compile(r"embedder returned \d+ embeddings for \d+ inputs")
@@ -124,17 +157,8 @@ def embedder_batch_cardinality_mismatch(exc: BaseException) -> bool:
 
 def embedder_retry_after_seconds(exc: BaseException) -> float | None:
     """Return the provider's ``Retry-After`` hint in seconds, when it gave one."""
-    if isinstance(exc, EmbedderRequestError):
-        return exc.retry_after_seconds
-    if not _is_embedder_provider_error(exc):
-        return None
-
-    # Deferred for the same reason: keep the openai SDK out of import time.
-    from openai import APIStatusError  # noqa: PLC0415
-
-    if not isinstance(exc, APIStatusError):
-        return None
-    return _retry_after_seconds_from_headers(exc.response.headers)
+    error = as_embedder_error(exc)
+    return None if error is None else error.retry_after_seconds
 
 
 def _retry_after_seconds_from_headers(headers: Mapping[str, str]) -> float | None:
@@ -151,17 +175,4 @@ def _retry_after_seconds_from_headers(headers: Mapping[str, str]) -> float | Non
 
 def describe_embedder_error(exc: BaseException) -> str:
     """Return a compact failure description that never includes provider text."""
-    if isinstance(exc, EmbedderRequestError):
-        return str(exc)
-
-    from openai import APIConnectionError, APIStatusError, AuthenticationError, PermissionDeniedError  # noqa: PLC0415
-
-    if isinstance(exc, AuthenticationError):
-        return _EMBEDDER_AUTH_FAILED_DETAIL
-    if isinstance(exc, PermissionDeniedError):
-        return _EMBEDDER_PERMISSION_DENIED_DETAIL
-    if isinstance(exc, APIStatusError):
-        return f"embedder request failed (HTTP {exc.status_code})"
-    if isinstance(exc, APIConnectionError):
-        return EMBEDDER_UNREACHABLE_DETAIL
-    return f"embedder request failed ({type(exc).__name__})"
+    return str(as_embedder_error(exc) or embedder_request_error(exc, None))

@@ -75,9 +75,9 @@ if TYPE_CHECKING:
     from mindroom.participation import ParticipationGate
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution_authority import JobTool
-    from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
+    from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
     from tests.fakes.scripted_model import ScriptStep
 
 
@@ -96,6 +96,11 @@ def _allow_execution(_owner: ToolExecutionIdentity, _tool: JobTool, _arguments: 
 
 async def _no_cleanup(_job: BackgroundJob) -> None:
     return None
+
+
+def always_owned(*_args: object, **_kwargs: object) -> bool:
+    """Own every call's execution, as a turn with background jobs on does."""
+    return True
 
 
 def tool_job_journal(storage_root: Path) -> EventJournalStore:
@@ -277,7 +282,7 @@ def toolkit_job_tools(
     functions may become jobs.
     """
     return assembled_job_tools(
-        ((authored_name, toolkit, function) for function in adapt_toolkit(toolkit).functions),
+        ((toolkit, function) for function in adapt_toolkit(toolkit, key=authored_name).functions),
         snapshot or {},
     )
 
@@ -387,9 +392,9 @@ async def run_job_turn(
     """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
 
     ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
-    reply does. ``generated`` are functions the framework offers beside the actor's assembled ones, which never
-    become jobs. ``participation`` gates the reply as an agent's turn does, deciding after the job definitions
-    project.
+    reply does. ``generated`` are functions beside the actor's assembled toolkits, as MindRoom adds knowledge search,
+    skill, and team delegation functions, which never become jobs. ``participation`` gates the reply as an agent's
+    turn does, deciding after the job definitions project.
     """
     spec, hooks, session, persist = _job_turn(
         actor,
@@ -757,6 +762,8 @@ class DelegatingLeader:
             delegation_depth=self.depth,
             supports_native_tool_approval=True,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
         hooks = agent_loop_hooks(
             build,

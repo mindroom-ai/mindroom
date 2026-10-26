@@ -9,7 +9,6 @@ import asyncio
 import hashlib
 import json
 import math
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -18,6 +17,7 @@ from enum import Enum
 from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.constants import AGENT_NAME_PATTERN
 from mindroom.custom_tools.todo_state import (
     PRIORITY_ORDER,
     TERMINAL_STATUSES,
@@ -51,8 +51,6 @@ type _TodoPokeSender = Callable[[str, str, str, str | None, str | None], Awaitab
 type _StateWarningKey = tuple[str, str]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
-# Keep synchronized with config.main._AGENT_NAME_PATTERN without importing the config graph here.
-_SAFE_ASSIGNEE_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
@@ -402,7 +400,7 @@ def _poke_scopes(
         for item in snapshot.items:
             if item.item_id not in snapshot.actionable_item_ids or not item.assigned_agent:
                 continue
-            if _SAFE_ASSIGNEE_PATTERN.fullmatch(item.assigned_agent) is None:
+            if AGENT_NAME_PATTERN.fullmatch(item.assigned_agent) is None:
                 _warn_state_once(
                     "todo_poke_assignee_skipped",
                     snapshot.source_path,

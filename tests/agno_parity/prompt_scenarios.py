@@ -1,7 +1,7 @@
 """The prompt-golden scenarios: MindRoom's production entry points driven against a recording model.
 
 Each scenario builds its agents, teams, or helper agents through the production builders and runs one turn; the
-recorder keeps every request the model received: messages, tools, tool choice, and response format.
+recorder keeps every request the model received: messages, tools, tool choice, and output schema.
 Requests are recorded below the request pipeline, where the provider adapter would receive them.
 A scenario that starts with a Matrix reply also exposes that reply as an ``AgentTurn``, so the agent it builds can
 be compared with the golden before the reply itself runs on the owned loop.
@@ -30,7 +30,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
-from pydantic import BaseModel
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
@@ -39,7 +38,7 @@ from mindroom.api.main import initialize_api_app
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.dynamic_workflow import _aexecute_room_agent_participant
+from mindroom.custom_tools.dynamic_workflow import _execute_room_agent_participant
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
@@ -55,7 +54,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry
 from mindroom.providers.assistant_turn import stamp_model
-from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
@@ -74,9 +72,11 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.skills import agent_workspace_skills_root
+from mindroom.tool_system.tool_access import tool_definition
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from mindroom.topic_generator import generate_room_topic_ai
 from mindroom.voice.handler import _process_transcription
+from tests.agno_parity.golden_files import sorted_keys, turn_message
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -92,6 +92,8 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
+    from pydantic import BaseModel
+
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.read_protocol import SearchHit
@@ -103,8 +105,8 @@ if TYPE_CHECKING:
         NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
-        StructuredOutput,
         ToolChoice,
+        ToolSpec,
     )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -165,12 +167,10 @@ class ModelCall:
     model_provider: str
     # Models in the order MindRoom built them, which is deterministic where concurrent calls are not.
     model_index: int
-    stream: bool
     messages: list[OwnedMessage]
-    tools: list[dict[str, Any]] | None
+    tools: list[ToolSpec]
     tool_choice: ToolChoice | None
-    # The goldens hold the format Agno's agent resolved for the route (``agno_response_format``).
-    response_format: dict[str, Any] | type[BaseModel] | None
+    output_schema: type[BaseModel] | None
     # Routes with native tool search send these tools with defer_loading below the recorder, so the record names them.
     deferred_tool_names: list[str]
 
@@ -203,12 +203,10 @@ class Recorder:
             model_id=adapter.identity.id,
             model_provider=adapter.identity.provider,
             model_index=index,
-            stream=request.stream,
             messages=deepcopy(list(request.messages)),
-            # The goldens hold Agno's formatted tools; the owned definition formats the same way, None omitted.
-            tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
+            tools=list(request.tools),
             tool_choice=request.tool_choice,
-            response_format=agno_response_format(request.output_schema, adapter.capabilities.structured_output),
+            output_schema=request.output_schema,
             deferred_tool_names=sorted(request.deferred_tools.names),
         )
         self.calls.append(call)
@@ -300,46 +298,21 @@ class Scenario:
     turn: Callable[[Path], AgentTurn] | None = None
 
 
-def message_dict(message: OwnedMessage) -> dict[str, Any]:
-    """Return a request message as the prompt goldens record it: no volatile keys, transient context marked."""
-    data = {key: value for key, value in message.to_dict().items() if key not in {"id", "created_at", "metrics"}}
-    if not message.add_to_agent_memory:
-        data["add_to_agent_memory"] = False
-    return data
-
-
-def agno_response_format(
-    schema: type[BaseModel] | None,
-    structured_output: StructuredOutput,
-) -> dict[str, Any] | type[BaseModel] | None:
-    """Return the response format Agno's agent resolved for ``schema`` on a route with ``structured_output`` support.
-
-    Agno passed models with native structured output the class, JSON-schema models a ``json_schema`` format, and
-    every other model JSON mode; the owned request carries only the schema, which each adapter renders.
-    """
-    if schema is None or structured_output == "native":
-        return schema
-    if structured_output == "json_schema":
-        return {"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()}}
-    return {"type": "json_object"}
-
-
-def response_format_dict(response_format: object) -> object:
-    """Return a request's response format as the prompt goldens record it."""
-    if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-        return {"pydantic_model": response_format.__name__, "json_schema": response_format.model_json_schema()}
-    return response_format
+def _output_schema_dict(schema: type[BaseModel] | None) -> dict[str, Any] | None:
+    """Return a request's output schema as the goldens record it: its class and its JSON schema."""
+    if schema is None:
+        return None
+    return {"json_schema": schema.model_json_schema(), "model": f"{schema.__module__}:{schema.__qualname__}"}
 
 
 def call_dict(call: ModelCall) -> dict[str, Any]:
     """Return one recorded request as the prompt goldens record it."""
     return {
         "model": {"id": call.model_id, "provider": call.model_provider},
-        "stream": call.stream,
-        "messages": [message_dict(message) for message in call.messages],
-        "tools": call.tools,
+        "messages": [turn_message(message) for message in call.messages],
+        "tools": [tool_definition(tool) for tool in call.tools],
         "tool_choice": call.tool_choice,
-        "response_format": response_format_dict(call.response_format),
+        "output_schema": _output_schema_dict(call.output_schema),
         "deferred_tool_names": call.deferred_tool_names,
     }
 
@@ -352,7 +325,8 @@ def normalize(value: object, root: Path) -> object:
     """
 
     def stable(text: str) -> str:
-        for path in {str(root.resolve()), str(root)}:
+        # The longer path first: a root's real path can contain its own path, as macOS's ``/private/var`` does.
+        for path in sorted({str(root.resolve()), str(root)}, key=len, reverse=True):
             text = text.replace(path, "<TMP>")
         return _DELEGATION_RECORD_DATE.sub("<DATE>", _DATE_PATTERN.sub("<DATE>", text))
 
@@ -621,7 +595,7 @@ def _minimal_shell_turn(root: Path) -> AgentTurn:
 
 
 def _tool_names(call: ModelCall) -> set[str]:
-    return {tool["function"]["name"] for tool in call.tools or [] if "function" in tool}
+    return {tool.name for tool in call.tools}
 
 
 def _tool_call(call_id: str, name: str, arguments: dict[str, object]) -> dict[str, object]:
@@ -822,6 +796,7 @@ async def _schedule_parse(config: Config, runtime_paths: RuntimePaths) -> None:
         runtime_paths,
         [responders["assistant"], responders["researcher"]],
         current_time=datetime(2026, 9, 21, 14, 14, tzinfo=UTC),
+        timezone="UTC",
     )
     assert isinstance(workflow, ScheduledWorkflow), workflow
 
@@ -1055,7 +1030,7 @@ async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
     context = replace(_tool_runtime(config, runtime_paths, "assistant"), room=room)
     participant = {"id": "writer_a", "kind": "room_agent", "agent": "researcher"}
     prompt = "Summarize the travel policy."
-    output = await _aexecute_room_agent_participant(context, participant, prompt, run_scope="travel-report:run_1")
+    output = await _execute_room_agent_participant(context, participant, prompt, run_scope="travel-report:run_1")
     assert output == "ok", output
     return ScenarioOutput(
         {
@@ -1063,7 +1038,7 @@ async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
             "participant": participant,
             "prompt": prompt,
             "run_scope": "travel-report:run_1",
-            "entry_point": "mindroom.custom_tools.dynamic_workflow._aexecute_room_agent_participant",
+            "entry_point": "mindroom.custom_tools.dynamic_workflow._execute_room_agent_participant",
         },
     )
 
@@ -1196,8 +1171,11 @@ _COMPACTION_SUMMARY_TEXT = "Alice asked the assistant to compact the conversatio
 
 
 def answer_compaction(call: ModelCall) -> OwnedMessage:
-    """Call compact_context on the first turn, summarize on the summary request, and answer the rest."""
-    if not call.stream:
+    """Call compact_context on the first turn, summarize on the summary request, and answer the rest.
+
+    The summary request is the only one that offers no tools.
+    """
+    if not call.tools:
         return OwnedMessage(role="assistant", content=_COMPACTION_SUMMARY_TEXT)
     if not _answers_tools(call) and _COMPACT_PROMPT in _last_user_text(call):
         return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_compact", "compact_context", {})])
@@ -1227,7 +1205,7 @@ def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
 async def _run_compaction_summary(root: Path) -> ScenarioOutput:
     first, follow_up = _compaction_turns(root)
     await _agent_turn(first)
-    # The next reply in the scope compacts its history first, with a non-streaming summary request.
+    # The next reply in the scope compacts its history first, with a summary request.
     await _agent_turn(follow_up)
     return ScenarioOutput(first.input)
 
@@ -1464,14 +1442,14 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     "participation_decision": Scenario(
         "Participation check of an agent with participation config and no judgment backend: the reply model's "
-        "non-streaming decision request with tool_choice none and the decision prompt appended, then the reply.",
+        "decision request with tool_choice none and the decision prompt appended, then the reply.",
         _run_participation_decision,
         answer_participation,
         turn=_participation_turn,
     ),
     "compaction_summary": Scenario(
-        "History compaction: a turn calls compact_context, so the next reply first sends the non-streaming summary "
-        "request, then replies with the summary in place of the compacted run.",
+        "History compaction: a turn calls compact_context, so the next reply first sends the summary request, then "
+        "replies with the summary in place of the compacted run.",
         _run_compaction_summary,
         answer_compaction,
         turn=lambda root: _compaction_turns(root)[0],
@@ -1495,6 +1473,43 @@ SCENARIOS: dict[str, Scenario] = {
 }
 
 
+def golden_path(name: str) -> Path:
+    """Return the file of one prompt golden."""
+    return FIXTURE_DIR / f"{name}.json"
+
+
 def load_golden(name: str) -> dict[str, Any]:
     """Return one prompt golden."""
-    return json.loads((FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    return json.loads(golden_path(name).read_text(encoding="utf-8"))
+
+
+@dataclass(frozen=True)
+class RecordedScenario:
+    """What one scenario ran and handed out, and every request it sent, grouped by model in build order."""
+
+    output: ScenarioOutput
+    calls: list[ModelCall]
+
+
+async def record_scenario(name: str, root: Path) -> RecordedScenario:
+    """Run one scenario under ``root`` against the recording provider."""
+    scenario = SCENARIOS[name]
+    recorder = Recorder(responder=scenario.responder)
+    with recorder.installed():
+        output = await scenario.run(root)
+    return RecordedScenario(output, recorder.ordered_calls())
+
+
+def regenerated_golden(name: str, recorded: RecordedScenario, root: Path) -> dict[str, Any]:
+    """Return the prompt golden ``recorded`` regenerates, normalized for its scenario's temporary ``root``.
+
+    The keys of the file and its ``input`` are sorted; ``requests`` and ``exported`` keep the order they were
+    received in, because providers and models receive those values as serialized bytes.
+    """
+    golden: dict[str, Any] = {"description": SCENARIOS[name].description}
+    if recorded.output.exported is not None:
+        golden["exported"] = normalize(recorded.output.exported, root)
+    golden["input"] = sorted_keys(normalize(recorded.output.input, root))
+    golden["requests"] = normalize([call_dict(call) for call in recorded.calls], root)
+    golden["scenario"] = name
+    return golden

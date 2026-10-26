@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import PersonaSourceKind
-    from mindroom.tool_system.agno_toolkits import Function
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _MAX_PERSONA_PROMPT_BYTES = 64 << 10
 _PROFILE_DIRNAME = "subagents"
@@ -273,8 +273,7 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
         delegation_depth=delegation_depth,
         include_matrix_room_runtime_tools=True,
     )
-    # A preset has no functions of its own; its member toolkits are listed by their own names.
-    return [entry.name for entry in surface.runtime_tool_configs if not config.is_tool_preset(entry.name)]
+    return surface.toolkit_names(config)
 
 
 def caller_skill_names(
@@ -338,7 +337,7 @@ def missing_persona_tool(
 def validate_persona_tools(
     tools: tuple[str, ...] | None,
     available_toolkits: Sequence[str],
-    cap: tuple[str, ...] | None = None,
+    cap: tuple[str, ...] | None,
 ) -> None:
     """Require every entry to name one of the caller's toolkits, or a known function of one, within ``cap``."""
     entry = missing_persona_tool(tools, available_toolkits, cap)
@@ -424,7 +423,7 @@ def resolve_persona_request(  # noqa: PLR0911
     available_toolkits: Callable[[], Sequence[str]],
     available_skills: Callable[[], Sequence[str]],
     available_knowledge: Callable[[], Sequence[str]],
-    cap: SubagentPersona | None = None,
+    cap: SubagentPersona | None,
 ) -> PersonaRequest | str:
     """Resolve ``run_subagent`` authoring arguments, returning a user-facing refusal when they are invalid.
 
@@ -548,24 +547,23 @@ def _capped_names(
 def persona_tool_policy(
     persona_tools: tuple[str, ...] | None,
     available_toolkits: Callable[[], Sequence[str]],
-    tool_function_filter: Callable[[Function], bool] | None,
-    disabled_tool_names: frozenset[str],
-) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
-    """Narrow an agent's own tools to an authored persona's explicit list; its principal is unchanged.
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
+) -> tuple[Callable[[ToolFunction], bool] | None, frozenset[str]]:
+    """Narrow an agent's own tools to an authored persona's explicit list, returning the filter and toolkits to omit.
 
-    Toolkits the list never names are not built, nor is the deferred-tool manager, since a persona
-    loads every toolkit it names. Other generated functions stay hidden, except those that load the
+    The principal is unchanged. Toolkits the list never names are not built, nor is the deferred-tool manager, since
+    a persona loads every toolkit it names. Other generated functions stay hidden, except those that load the
     persona's skills and search its knowledge, which exist only when it keeps them; toolkit functions
     are narrowed by concrete toolkit name while the toolkits are built.
     """
     if persona_tools is None:
-        return tool_function_filter, disabled_tool_names
+        return tool_function_filter, frozenset()
     named = {entry.partition(".")[0] for entry in persona_tools}
     unused = {toolkit for toolkit in available_toolkits() if toolkit not in named}
 
-    def visible(function: Function) -> bool:
-        return (function.owning_toolkit is not None or function.name in _GENERATED_PERSONA_FUNCTIONS) and (
+    def visible(function: ToolFunction) -> bool:
+        return (function.toolkit is not None or function.name in _GENERATED_PERSONA_FUNCTIONS) and (
             tool_function_filter is None or tool_function_filter(function)
         )
 
-    return visible, disabled_tool_names | unused | {"dynamic_tools"}
+    return visible, frozenset({*unused, "dynamic_tools"})

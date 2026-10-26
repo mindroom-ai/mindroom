@@ -11,10 +11,23 @@ if TYPE_CHECKING:
 
     from mindroom.llm.runs import AnyRunRecord
 
-# Keys Agno wrote that the owned ``ToolExecution`` does not model (Agno's user-input HITL variants).
+# Keys Agno wrote that the owned ``ToolExecution`` does not model: Agno's user-input HITL variants, and the call's
+# timing and timestamp, which nothing read.
 DROPPED_TOOL_EXECUTION_KEYS = frozenset(
-    {"requires_user_input", "user_input_schema", "user_feedback_schema", "answered", "approval_id"},
+    {
+        "requires_user_input",
+        "user_input_schema",
+        "user_feedback_schema",
+        "answered",
+        "approval_id",
+        "metrics",
+        "created_at",
+    },
 )
+# Keys Agno wrote on requirement dicts that the owned ``RunRequirement`` does not model; nothing read its timestamp.
+DROPPED_REQUIREMENT_KEYS = frozenset({"created_at"})
+# Keys Agno wrote on run and session metrics that the owned metrics do not model; only tests ever filled them in.
+DROPPED_METRICS_KEYS = frozenset({"additional_metrics"})
 # Keys Agno wrote on run dicts that the owned records do not model; nothing in MindRoom reads them.
 DROPPED_RUN_KEYS = frozenset(
     {
@@ -32,6 +45,7 @@ DROPPED_RUN_KEYS = frozenset(
         "citations",
         "followups",
         "events",
+        "team_name",
     },
 )
 
@@ -42,8 +56,10 @@ def without(data: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
 
 
 def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's run dict minus dropped keys, recursively over tools, requirements, and member runs."""
+    """Agno's run dict minus dropped keys, recursively over metrics, tools, requirements, and member runs."""
     result = without(data, DROPPED_RUN_KEYS)
+    if isinstance(result.get("metrics"), dict):
+        result["metrics"] = without(result["metrics"], DROPPED_METRICS_KEYS)
     if "tools" in result:
         result["tools"] = [without(tool, DROPPED_TOOL_EXECUTION_KEYS) for tool in result["tools"]]
     if "requirements" in result:
@@ -54,8 +70,8 @@ def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def expected_requirement_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's requirement dict minus the tool-execution keys the owned type dropped."""
-    result = dict(data)
+    """Agno's requirement dict minus the requirement and tool-execution keys the owned types dropped."""
+    result = without(data, DROPPED_REQUIREMENT_KEYS)
     result["tool_execution"] = without(result["tool_execution"], DROPPED_TOOL_EXECUTION_KEYS)
     return result
 

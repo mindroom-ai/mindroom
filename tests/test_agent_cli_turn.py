@@ -22,6 +22,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom.agent_cli import turn
 from mindroom.agent_cli.json_io import canonical_json
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
+from mindroom.agent_cli.main import main as cli_main
 from mindroom.agent_cli.protocol import (
     ContextReadOperation,
     ToolCallOperation,
@@ -38,9 +39,9 @@ from mindroom.agent_cli.session import (
     TurnToolRegistry,
 )
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
@@ -51,15 +52,19 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, stored_session_state
-from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, settled_receipt
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test, stored_session_state
+from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, run_bash_batch, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit
+from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from agno.run import RunContext
+
+    from mindroom.agent_cli.turn import LiveTurnTools
 
 # Scripted shells call the owner directly; only the real `mindroom-agent` test dials this URL.
 _SHELL_ENV = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
@@ -128,7 +133,7 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
         assert receipt["status"] == "completed", receipt
         return receipt
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -138,10 +143,8 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     async with response_cli_lifetime():
         await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            assert (
-                await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1")
-                == "shell done"
-            )
+            outcome = await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1")
+    assert outcome.content == "shell done"
     assert hooks == [("before", "outer"), ("before", "nested"), ("after", "nested"), ("after", "outer")]
     assert catalog.run.session_state["count"] == 1
     late = ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate")
@@ -172,7 +175,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -220,7 +223,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -246,12 +249,12 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
     await owner.close()
 
 
-async def _native_owner(tmp_path: Path, tools: list, authorize) -> LiveTurnTools:
-    catalog = await _catalog(tmp_path, [_toolkit("calls", *tools)])
+async def _native_owner(tmp_path: Path, tools: list, authorize, middleware: tuple = ()) -> LiveTurnTools:
+    catalog = await _catalog(tmp_path, [_toolkit("calls", *tools)], middleware=middleware)
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
     catalog.store = create_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir(exist_ok=True)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -270,8 +273,8 @@ async def _call_receipt(owner: LiveTurnTools, function: str) -> dict:
     return await settled_receipt(owner, queued["call_id"])
 
 
-async def _start_call(owner: LiveTurnTools, toolkit: str, function: str, **arguments: object) -> None:
-    await owner.operation(
+async def _start_call(owner: LiveTurnTools, toolkit: str, function: str, **arguments: object) -> dict[str, object]:
+    return await owner.operation(
         window=cli_window(),
         operation=ToolCallOperation(
             operation="tools.call",
@@ -311,11 +314,16 @@ async def test_a_command_waits_for_the_cli_calls_it_left_running(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_path: Path) -> None:
-    """A person's approval is never cut short by the timeout of the command that asked for the call."""
+    """A person's approval is never cut short by the timeout of the command that asked for the call.
+
+    The call's receipt reads as waiting while the person decides.
+    """
     effects: list[str] = []
+    call_ids: list[str] = []
 
     async def run_shell_command(args: str, timeout: float | None = None) -> str:  # noqa: ASYNC109
-        await _start_call(owner, "actions", "action", value="sent")
+        receipt = await _start_call(owner, "actions", "action", value="sent")
+        call_ids.append(str(receipt["call_id"]))
         # The CLI client reports the call as waiting and exits, well before the command's timeout.
         return "waiting"
 
@@ -330,6 +338,7 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
     catalog.store = create_state_storage("helper", tmp_path)
 
     async def decide_later(paused):
+        assert (await owner.get_call(call_ids[0]))["status"] == "waiting"
         # The person decides after the command's timeout has passed.
         await asyncio.sleep(0.6)
         requirement = paused.requirements[0]
@@ -337,7 +346,7 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
         return (requirement,)
 
     catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=decide_later)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=_allow,
@@ -352,8 +361,9 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
                 {"args": "work", "timeout": 0.2},
                 "outer",
             )
-    assert result == "waiting"
+    assert result.content == "waiting"
     assert effects == ["sent"]
+    assert (await owner.get_call(call_ids[0]))["status"] == "completed"
     await owner.close()
 
 
@@ -388,7 +398,7 @@ async def test_a_cli_approval_pause_records_its_run_and_that_run_s_model(tmp_pat
         cli_approval_handler=approve,
         active_model_name="ambient-model",
     )
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=_allow,
@@ -401,6 +411,61 @@ async def test_a_cli_approval_pause_records_its_run_and_that_run_s_model(tmp_pat
             await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "work"}, "outer")
     assert pauses == [("session", "run", "run-model")]
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_call_a_plugin_hook_declines_settles_failed_and_the_cli_exits_1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A call a before-call hook declines never runs; its receipt fails with the decline, so ``tools call`` exits 1."""
+    ran: list[str] = []
+
+    async def write_note() -> str:
+        ran.append("note")
+        return "noted"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        ctx.decline("notes are paused")
+
+    policy = build_tool_hook_middleware(
+        HookRegistry.from_plugins([_plugin("policy", [decline])]),
+        "helper",
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
+    owner = await _native_owner(tmp_path, [write_note], _allow, middleware=(policy,))
+    receipts: list[dict] = []
+
+    async def command() -> str:
+        receipts.append(await _call_receipt(owner, "write_note"))
+        return "done"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        assert await owner.run_native_shell(command) == "done"
+    await owner.close()
+    [receipt] = receipts
+
+    assert ran == []
+    assert receipt["status"] == "failed"
+    assert "[TOOL CALL DECLINED]" in json.dumps(receipt["outcome"])
+    assert "Reason: notes are paused" in json.dumps(receipt["outcome"])
+
+    class Client:
+        """The agent CLI's transport, answering with the receipt the turn settled."""
+
+        def operation(self, _payload: dict[str, object]) -> dict[str, object]:
+            return receipt
+
+        def receipt(self, _call_id: str) -> dict[str, object]:
+            return receipt
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    assert cli_main(["tools", "call", "calls.write_note"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -562,7 +627,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
 
     catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
     catalog.store = create_state_storage("helper", tmp_path)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -969,7 +1034,7 @@ async def test_write_failure_prevents_shell_and_inner_effects(
     async def authorize(key, arguments) -> None:
         effects.append("authorize")
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -987,6 +1052,59 @@ async def test_write_failure_prevents_shell_and_inner_effects(
             await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "touch"}, "bash-1")
     assert effects == []
     await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "limit", "text", "failed"),
+    [
+        (None, None, "work", False),
+        (RuntimeError("worker unavailable"), None, "worker unavailable", True),
+        (TimeoutError(), None, "TimeoutError", True),
+        (None, 0, "Tool call limit reached", True),
+    ],
+    ids=["succeeded", "raised", "raised_without_text", "over_the_call_limit"],
+)
+async def test_a_failed_shell_call_answers_its_bash_call_as_failed(
+    tmp_path: Path,
+    failure: Exception | None,
+    limit: int | None,
+    text: str,
+    failed: bool,
+) -> None:
+    """The shell call's failure reaches the model as a failed Bash result, so Claude and Gemini read it as one.
+
+    The batch checkpoint a sibling's approval wait saves answers the call the same way.
+    """
+
+    async def run_shell_command(args: str, tail: int = 100) -> str:
+        if failure is not None:
+            raise failure
+        return args
+
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)], max_tool_calls_per_turn=limit)
+    catalog.store = create_state_storage("helper", tmp_path)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+    )
+    owner.shell_env = _SHELL_ENV
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            record = await run_bash_batch(owner, "work")
+        [bash] = record.tools or []
+        assert (bash.tool_name, bash.result, bash.is_error) == ("bash", text, failed)
+        [result] = [message for message in record.messages if message.role == "tool"]
+        assert (result.content, result.tool_call_error) == (text, failed)
+        await owner.checkpoint.persist("bash-0", refresh=True)
+        assert catalog.store is not None
+        saved = catalog.store.get_run("run")
+        assert saved is not None
+        assert [(tool.result, tool.is_error) for tool in saved.tools or ()] == [(text, failed)]
+        assert (saved.messages[-1].content, saved.messages[-1].tool_call_error) == (text, failed)
+    finally:
+        await owner.close()
 
 
 def _run_cli(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
@@ -1056,7 +1174,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1093,7 +1211,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
                     assert not bash_task.done()
                     assert catalog.run.session_state == {}
                     decision.set()
-                assert await bash_task == "same-window"
+                assert (await bash_task).content == "same-window"
         assert catalog.run.session_state == {"http": "inside-bash"}
         assert catalog.record.messages == []
     finally:
@@ -1134,7 +1252,7 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
 
         catalog = await _catalog(tmp_path / name, [_toolkit("shell", run_shell_command)])
         catalog.store = create_state_storage("helper", tmp_path / name)
-        owner = LiveTurnTools(
+        owner = live_turn_tools_for_test(
             CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
             catalog=catalog,
             authorize=authorize,
@@ -1146,12 +1264,13 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
         call_ids = [f"{owner.owner.turn_id}-{index}" for index in range(2)]
         async with response_cli_lifetime():
             await capture_bash_batch(owner, *((call_id, {"command": "batch"}) for call_id in call_ids))
-            return await asyncio.gather(
+            outcomes = await asyncio.gather(
                 *(
                     owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": str(index)}, call_id)
                     for index, call_id in enumerate(call_ids)
                 ),
             )
+            return [outcome.content for outcome in outcomes]
 
     try:
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
@@ -1190,7 +1309,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
         return None
 
     old = await _catalog(tmp_path, [])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(old.runtime_context), "turn", "run"),
         catalog=old,
         authorize=authorize,
@@ -1214,10 +1333,8 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
     async with response_cli_lifetime():
         await capture_bash_batch(owner, ("new-bash", {"command": "new"}))
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            assert (
-                await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "new"}, "new-bash")
-                == "drained"
-            )
+            outcome = await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "new"}, "new-bash")
+    assert outcome.content == "drained"
     assert calls == ["new binding"]
     assert (await owner.get_call(receipts[0]["call_id"]))["parent_bash_call_id"] == "new-bash"
     await owner.close()
@@ -1257,7 +1374,7 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
         [_toolkit("shell", run_shell_command), _toolkit("state", wait)],
     )
     catalog.store = create_state_storage("helper", tmp_path)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1300,7 +1417,7 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
         return None
 
     catalog = await _catalog(tmp_path, [_toolkit("state", change)])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1379,12 +1496,13 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
             loaded.append(index)
 
             async def selected() -> str:
+                """Return the selected item."""
                 return "selected"
 
-            return _toolkit(f"tool{index}", selected)
+            return _toolkit(f"tool{index}", selected, instructions=f"Select with tool {index}.")
 
         catalog.add_deferred(DeferredAgentToolkit(f"tool{index}", f"Metadata {index}", factory))
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1414,7 +1532,13 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     assert loaded == []
     async with owner._window("describe-bash"):
         descriptor = await owner.operation(window="describe-bash", operation=operation)
-        assert descriptor["input_schema"]["properties"] == {}
+        assert descriptor == {
+            "toolkit": "tool12",
+            "function": "selected",
+            "description": "Return the selected item.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "instructions": ["Select with tool 12."],
+        }
         with pytest.raises(CliOperationError, match=r"^No toolkit 'unassigned'$"):
             await owner.operation(
                 window="describe-bash",
@@ -1449,7 +1573,7 @@ async def test_refused_describe_is_a_caller_safe_rejection(tmp_path: Path) -> No
         raise PermissionError(msg)
 
     catalog = await _catalog(tmp_path, [_toolkit("state", selected)])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1479,7 +1603,7 @@ async def test_live_turn_bounds_receipts_and_concurrent_operations(
         return None
 
     catalog = await _catalog(tmp_path, [_toolkit("state", slow)])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1513,7 +1637,7 @@ async def test_owner_rejects_catalog_bound_to_another_execution_identity(
         return None
 
     with pytest.raises(ValueError, match="identity"):
-        LiveTurnTools(
+        live_turn_tools_for_test(
             CliTurnOwner(
                 replace(
                     build_execution_identity_from_runtime_context(catalog.runtime_context),
@@ -1536,7 +1660,7 @@ async def test_context_page_caps_complete_unicode_envelope(tmp_path: Path) -> No
         return None
 
     context = "😀" * 20000
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1580,7 +1704,7 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
         return None
 
     catalog = await _catalog(tmp_path, [_toolkit("state", change)])
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1676,7 +1800,7 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
     async def authorize(key, arguments):
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1694,10 +1818,12 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
         async with response_cli_lifetime():
             await capture_bash_batch(owner, ("bash-drain", {"command": "outer"}))
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-                assert (
-                    await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "bash-drain")
-                    == "outer complete"
+                outcome = await owner.execute_bash(
+                    ToolKey("shell", "run_shell_command"),
+                    {"args": "outer"},
+                    "bash-drain",
                 )
+            assert outcome.content == "outer complete"
         assert catalog.run.session_state["changed"] is True
         assert hooks == [("before", "outer"), ("before", "nested"), ("after", "nested"), ("after", "outer")]
     finally:
@@ -1725,7 +1851,7 @@ async def test_admitted_describe_waiter_settles_when_its_task_is_cancelled(
     async def authorize(key, arguments):
         return None
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1816,7 +1942,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
     async def authorize(key, arguments):
         pass
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
@@ -1834,7 +1960,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
                 assert not task.done()
                 assert effects == []
                 decide.set()
-                assert await task == "Bash finished after decision"
+                assert (await task).content == "Bash finished after decision"
         finally:
             await owner.close()
             await asyncio.gather(task, return_exceptions=True)

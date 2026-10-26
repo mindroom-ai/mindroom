@@ -19,7 +19,6 @@ from mindroom.llm.errors import (
 from mindroom.llm.events import (
     ReasoningDelta,
     ReportedCall,
-    RequestCompleted,
     RunFinished,
     ToolCompleted,
     ToolStarted,
@@ -100,8 +99,8 @@ def test_file_text_content_round_trips_by_mime_type() -> None:
 def test_file_to_dict_keeps_text_content_and_base64_encodes_text_bytes_that_are_not_utf8() -> None:
     # A tool's Agno ``File`` can carry its content as text, which the stored run keeps as it is.
     assert File(content="plain text").to_dict()["content"] == "plain text"
-    # Latin-1 text bytes cannot be stored as UTF-8 text, so they are stored as base64 like binary content; reading
-    # a text/* file decodes its stored content as UTF-8 text, as Agno did, so these bytes do not come back.
+    # Latin-1 text bytes cannot be stored as UTF-8 text, so they are stored as base64 like binary content, with the
+    # ``content_encoding`` marker that lets them read back as these bytes.
     assert File(content="café".encode("latin-1"), mime_type="text/plain").to_dict()["content"] == "Y2Fm6Q=="
 
 
@@ -221,33 +220,31 @@ def test_message_from_dict_requires_a_role() -> None:
 
 
 def test_tool_execution_is_paused_for_confirmation_or_external_execution() -> None:
-    assert ToolExecution(tool_name="t").is_paused is False
-    assert ToolExecution(tool_name="t", requires_confirmation=True).is_paused is True
-    assert ToolExecution(tool_name="t", external_execution_required=True).is_paused is True
+    assert ToolExecution(tool_call_id="call-t", tool_name="t").is_paused is False
+    assert ToolExecution(tool_call_id="call-t", tool_name="t", requires_confirmation=True).is_paused is True
+    assert ToolExecution(tool_call_id="call-t", tool_name="t", external_execution_required=True).is_paused is True
 
 
 def test_run_requirement_rejects_decisions_it_does_not_need() -> None:
-    plain = RunRequirement(ToolExecution(tool_name="t"))
+    plain = RunRequirement(ToolExecution(tool_call_id="call-t", tool_name="t"))
     assert plain.is_resolved() is True
     with pytest.raises(ValueError, match="does not require confirmation"):
         plain.confirm()
     with pytest.raises(ValueError, match="does not require external execution"):
         plain.set_external_execution_result("x")
 
-    confirmation = RunRequirement(ToolExecution(tool_name="t", requires_confirmation=True))
+    confirmation = RunRequirement(ToolExecution(tool_call_id="call-t", tool_name="t", requires_confirmation=True))
     confirmation.confirm()
     with pytest.raises(ValueError, match="does not require confirmation"):
         confirmation.reject("twice")
 
 
 def test_run_requirement_positional_tool_execution_and_defaults() -> None:
-    execution = ToolExecution(tool_name="t", requires_confirmation=True)
+    execution = ToolExecution(tool_call_id="call-t", tool_name="t", requires_confirmation=True)
     first, second = RunRequirement(execution), RunRequirement(execution)
 
     assert first.id != second.id
-    assert first.created_at.tzinfo is not None
     assert first.needs_confirmation is True
-    assert first.to_dict()["created_at"] == first.created_at.isoformat()
 
 
 def test_run_record_defaults_and_status() -> None:
@@ -281,6 +278,20 @@ def test_run_metrics_sum_keeps_the_cost_only_one_run_reported() -> None:
     total = priced + unpriced
     assert (total.tokens.input_tokens, total.cost, total.duration) == (15, 0.25, 3.0)
     assert (unpriced + priced).cost == 0.25
+
+
+@pytest.mark.parametrize("costs", [(0.0, 2), (-0.0, -0.0), (None, 0.25), (0.25, None), (None, None)])
+def test_a_cost_sums_by_one_rule_in_requests_runs_models_and_teams(costs: tuple[float | None, float | None]) -> None:
+    """Retried requests, run totals, per-model entries, and team turns add two reported costs alike, to the same value."""
+    reports = [MessageMetrics(cost=cost) for cost in costs]
+    run = RunMetrics()
+    for report in reports:
+        run.add(report, model_id="m", provider="P")
+    [entry] = (run.details or {})["model"]
+    team = RunMetrics(cost=costs[0]) + RunMetrics(cost=costs[1])
+
+    request_sum = (reports[0] + reports[1]).cost
+    assert [repr(run.cost), repr(entry.cost), repr(team.cost)] == [repr(request_sum)] * 3
 
 
 def test_token_counts_add_and_subtract_every_counter() -> None:
@@ -489,7 +500,6 @@ def test_run_events_are_frozen_values() -> None:
         ReasoningDelta("why"),
         ToolStarted(tool.call),
         ToolCompleted(tool.call),
-        RequestCompleted(MessageMetrics(tokens=TokenCounts(output_tokens=1))),
         RunFinished(record),
     ]
 
@@ -498,10 +508,9 @@ def test_run_events_are_frozen_values() -> None:
         "ReasoningDelta",
         "ToolStarted",
         "ToolCompleted",
-        "RequestCompleted",
         "RunFinished",
     ]
-    assert events[5].record is record  # type: ignore[union-attr]
+    assert events[4].record is record  # type: ignore[union-attr]
     with pytest.raises(FrozenInstanceError):
         events[0].text = "changed"  # type: ignore[misc]
 

@@ -5,39 +5,13 @@ from __future__ import annotations
 import pytest
 from agno.tools.function import Function
 
+from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import (
-    ToolDescriptor,
-    ToolKey,
     search_tool_metadata,
+    tool_definition,
     validate_tool_arguments,
 )
-
-
-def test_tool_descriptors_keep_same_named_functions_namespaced() -> None:
-    """Selecting a namespaced descriptor returns only that tool's details."""
-    calendar = ToolDescriptor(
-        key=ToolKey(toolkit="calendar", function="list"),
-        description="List calendar events",
-        input_schema={"type": "object", "properties": {"date": {"type": "string"}}},
-        instructions=("Use ISO dates.",),
-    )
-    files = ToolDescriptor(
-        key=ToolKey(toolkit="files", function="list"),
-        description="List files",
-        input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
-        instructions=("Use an absolute path.",),
-    )
-
-    catalog = {calendar.key: calendar, files.key: files}
-
-    assert calendar.key != files.key
-    assert catalog[ToolKey(toolkit="files", function="list")] == files
-    assert catalog[ToolKey(toolkit="files", function="list")].input_schema == {
-        "type": "object",
-        "properties": {"path": {"type": "string"}},
-    }
-    assert catalog[ToolKey(toolkit="files", function="list")].instructions == ("Use an absolute path.",)
 
 
 def test_adapted_schema_is_a_copy_that_leaves_the_function_unchanged() -> None:
@@ -59,6 +33,25 @@ def test_adapted_schema_is_a_copy_that_leaves_the_function_unchanged() -> None:
     assert schema["required"] == ["path"]
     assert function.parameters["required"][0] is function.parameters["required"]
     assert function.entrypoint is list_files
+
+
+def test_a_tool_definition_shows_the_model_its_name_description_and_schema_only() -> None:
+    """Strict mode and the approval flags are each route's to send, and a missing description shows as empty."""
+    parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+    tool = ToolSpec(
+        name="list",
+        description=None,
+        parameters=parameters,
+        strict=True,
+        requires_confirmation=True,
+        external_execution=False,
+        approval_type="mindroom_policy",
+    )
+
+    definition = tool_definition(tool)
+
+    assert definition == {"name": "list", "description": "", "parameters": parameters}
+    assert definition["parameters"] is not parameters
 
 
 def test_search_tool_metadata_preserves_catalog_order_and_requires_all_words() -> None:

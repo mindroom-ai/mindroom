@@ -111,7 +111,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
             before_tokens=0,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
         if content:
             assert await operation is not None

@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
+from mindroom.approval.receipt import build_approval_receipt
+from mindroom.event_journal.approval_continuations import (
+    ApprovalAdvance,
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalDecision,
+)
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.response_sources import ResponseSources
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import message_origin, unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
@@ -19,22 +27,66 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
-    from mindroom.event_journal.approval_continuations import ApprovalCall
     from mindroom.llm.provider import ModelRequest
+
+# The decided calls of a receipt that a test binds only to see which requests carry it, and its text.
+RECEIPT_CALLS = (
+    ApprovalCall(
+        tool_call_id="call-receipt",
+        tool_name="publish_report",
+        invoking_agent="agent",
+        expires_at_ns=1,
+        decision=ApprovalDecision.APPROVED,
+        human_approval_required=True,
+    ),
+)
+RECEIPT_TEXT = build_approval_receipt(RECEIPT_CALLS)
+# Every receipt opens with this line, which the model sees in the system prompt the receipt is appended to.
+_RECEIPT_HEADER = RECEIPT_TEXT.splitlines()[0]
+
+
+def _receipts(request: ModelRequest) -> list[str]:
+    """Return each approval receipt the system prompt of ``request`` carries, from its header to its message's end."""
+    return [
+        content[content.index(_RECEIPT_HEADER) :]
+        for message in request.messages
+        if message.role == "system" and _RECEIPT_HEADER in (content := str(message.content))
+    ]
 
 
 def carries_approval_receipt(request: ModelRequest) -> bool:
-    """Return whether ``request`` carries a projected approval receipt, by the marker its projection sets."""
-    return any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
+    """Return whether the system prompt of ``request`` carries an approval receipt."""
+    return bool(_receipts(request))
+
+
+def receipt_call_ids(request: ModelRequest) -> list[str]:
+    """Return the tool call ids the approval receipt projected into ``request`` names, in its order."""
+    [receipt] = _receipts(request)
+    return re.findall(r"tool call id `([^`]+)`", receipt)
+
+
+def request_call_ids(request: ModelRequest) -> list[str]:
+    """Return the ids of the tool calls the assistant messages of ``request`` hold, in order."""
+    return [call["id"] for message in request.messages for call in message.tool_calls or ()]
 
 
 def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN401
     """Return a ready continuation of one user's message in ``!room:localhost``, with ``changes`` applied.
 
-    Its origin is the requester's own message unless ``changes`` names one.
+    Its origin is the requester's own message, and its run executed as the requester's Matrix turn with ``general``,
+    unless ``changes`` names others.
     """
     requester_id = changes.get("requester_id", "@user:localhost")
     defaults: dict[str, Any] = {
+        "execution_identity": ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=changes.get("entity_name", "general"),
+            requester_id=requester_id,
+            room_id=changes.get("room_id", "!room:localhost"),
+            thread_id=changes.get("thread_id", "$thread"),
+            resolved_thread_id=changes.get("thread_id", "$thread"),
+            session_id=changes.get("session_id", "session-1"),
+        ),
         "approval_id": "approval",
         "run_id": "run-1",
         "session_id": "session-1",

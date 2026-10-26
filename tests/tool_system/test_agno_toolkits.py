@@ -1,4 +1,4 @@
-"""The Agno toolkit adapter reproduces the C3 tool goldens' fields the owned loop reads, for every registered tool."""
+"""The Agno toolkit adapter reproduces the tool goldens' fields the owned loop reads, for every registered tool."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameters
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
-from tests.agno_parity import regenerate_tool_goldens
 from tests.agno_parity import tool_argument_probes as probes
+from tests.agno_parity.golden_files import render
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 # Importing these SDKs to build their tools warns about their own deprecated usage.
 pytestmark = [
@@ -41,11 +40,19 @@ def assert_same_json(actual: object, golden: object) -> None:
     assert json.dumps(actual, indent=2) == json.dumps(golden, indent=2)
 
 
-def assert_instructions_as_golden(toolkit: Toolkit, adapted: AdaptedToolkit, golden: dict[str, Any]) -> None:
-    """The adapter carries the toolkit's instructions only when Agno added them, and no function sets its own."""
-    expected = golden["instructions"] if golden["add_instructions"] else None
-    assert support.normalize_version(adapted.instructions) == expected
+def assert_no_function_instructions(toolkit: Toolkit) -> None:
+    """No function sets instructions of its own, so the toolkit's are all the prompt and the guidance carry."""
     assert all(function.instructions is None for function in toolkit.get_async_functions().values())
+
+
+@pytest.mark.parametrize(
+    ("path", "golden"),
+    [(support.SCHEMAS_PATH, SCHEMAS), (support.ALL_ENABLED_SCHEMAS_PATH, ALL_ENABLED_SCHEMAS)],
+    ids=["schemas", "schemas_all_enabled"],
+)
+def test_the_schema_goldens_are_written_as_the_regeneration_writes_them(path: Path, golden: dict[str, Any]) -> None:
+    """Each file lists its tools in sorted order, each entry as built, so regenerating unchanged tools rewrites nothing."""
+    assert render({name: golden[name] for name in sorted(golden)}) == path.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +67,7 @@ def golden_runtime(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Conf
 def test_the_tool_goldens_cover_every_registered_tool(golden_runtime: tuple[Path, Config, RuntimePaths]) -> None:
     """A registered tool without a golden fails here, as does a golden of a tool no longer registered.
 
-    Only the tools no offline build can produce are left out, the ones the regeneration module skips; a tool has an
+    Only the tools no offline build can produce are left out; a tool has an
     all-enabled golden exactly when it has switches to turn on.
     """
     root, _config, _runtime_paths = golden_runtime
@@ -68,7 +75,7 @@ def test_the_tool_goldens_cover_every_registered_tool(golden_runtime: tuple[Path
         registered = set(BUILTIN_TOOL_METADATA)
         switched = {tool_name for tool_name in SCHEMAS if support.all_enabled_overrides(tool_name)}
 
-    assert set(SCHEMAS) == registered - regenerate_tool_goldens.UNBUILDABLE
+    assert set(SCHEMAS) == registered - support.UNBUILDABLE
     assert set(ALL_ENABLED_SCHEMAS) == switched
 
 
@@ -82,8 +89,8 @@ def test_adapted_tool_matches_golden(tool_name: str, golden_runtime: tuple[Path,
         toolkit = support.build_toolkit(tool_name, config, runtime_paths)
         adapted = adapt_toolkit(toolkit)
     assert adapted.name == toolkit.name
-    assert_same_json(support.golden_entry(toolkit, adapted), SCHEMAS[tool_name])
-    assert_instructions_as_golden(toolkit, adapted, SCHEMAS[tool_name])
+    assert_same_json(support.golden_entry(adapted), SCHEMAS[tool_name])
+    assert_no_function_instructions(toolkit)
 
 
 @pytest.mark.parametrize("tool_name", sorted(ALL_ENABLED_SCHEMAS))
@@ -100,8 +107,8 @@ def test_adapted_all_enabled_tool_matches_golden(
         overrides = support.all_enabled_overrides(tool_name)
         toolkit = support.build_toolkit(tool_name, config, runtime_paths, overrides)
         adapted = adapt_toolkit(toolkit)
-    assert_same_json({"overrides": overrides, **support.golden_entry(toolkit, adapted)}, golden)
-    assert_instructions_as_golden(toolkit, adapted, golden)
+    assert_same_json({"overrides": overrides, **support.golden_entry(adapted)}, golden)
+    assert_no_function_instructions(toolkit)
 
 
 def test_adapting_leaves_the_shared_function_untouched() -> None:

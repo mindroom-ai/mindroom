@@ -27,8 +27,9 @@ from mindroom.llm.runs import (
     TeamRunRecord,
     ToolExecution,
 )
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts, ToolCallMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from tests.llm.agno_dict_helpers import (
+    DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
     DROPPED_TOOL_EXECUTION_KEYS,
     expected_requirement_dict,
@@ -89,6 +90,27 @@ def test_media_from_dict_decodes_content_bytes_as_agno_did() -> None:
     assert binary_file.content == PDF_BYTES
 
 
+def test_a_text_file_that_is_not_utf8_reads_back_as_its_bytes() -> None:
+    """A ``text/*`` file whose bytes are not UTF-8 is stored as base64 that says so, and reads back as those bytes."""
+    latin1 = File(id="f", content="café".encode("latin-1"), mime_type="text/plain")
+
+    stored = latin1.to_dict()
+
+    assert File.from_dict(stored).content == "café".encode("latin-1")
+    assert stored == {"id": "f", "mime_type": "text/plain", "content": "Y2Fm6Q==", "content_encoding": "base64"}
+    # UTF-8 text keeps its text form, which reads back as the same bytes.
+    utf8 = File(id="f", content="café".encode(), mime_type="text/plain")
+    assert utf8.to_dict() == {"id": "f", "mime_type": "text/plain", "content": "café"}
+    assert File.from_dict(utf8.to_dict()).content == "café".encode()
+
+
+def test_a_text_file_stored_before_its_encoding_was_recorded_reads_as_before() -> None:
+    """An unmarked ``text/*`` row reads as UTF-8 text, so an earlier non-UTF-8 file still reads as its base64 text."""
+    earlier = File.from_dict({"id": "f", "mime_type": "text/plain", "content": "Y2Fm6Q=="})
+
+    assert earlier.content == b"Y2Fm6Q=="
+
+
 def test_media_from_dict_ignores_agno_only_keys() -> None:
     image = Image.from_dict(
         {"id": "i", "url": "https://example.invalid/i.png", "media_reference": {"storage_key": "k"}},
@@ -130,17 +152,10 @@ def test_message_metrics_addition_matches_agno() -> None:
     assert (MessageMetrics(tokens=TokenCounts(input_tokens=1)) + MessageMetrics()).to_dict() == {"input_tokens": 1}
 
 
-def test_tool_call_metrics_round_trip_agno_dict() -> None:
-    expected = agno("tool_call_metrics")
+def test_run_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
+    expected = without(agno("run_metrics"), DROPPED_METRICS_KEYS)
 
-    assert ToolCallMetrics.from_dict(expected).to_dict() == expected
-    assert ToolCallMetrics.from_dict({**expected, "timer": None}).to_dict() == expected
-
-
-def test_run_metrics_round_trip_agno_dict() -> None:
-    expected = agno("run_metrics")
-
-    assert RunMetrics.from_dict(expected).to_dict() == expected
+    assert RunMetrics.from_dict(agno("run_metrics")).to_dict() == expected
     assert RunMetrics().to_dict() == {}
 
 
@@ -178,7 +193,7 @@ def test_run_metrics_add_matches_agno_accumulate_model_metrics() -> None:
 def test_run_metrics_addition_matches_agno() -> None:
     owned = RunMetrics.from_dict(agno("run_metrics")) + RunMetrics.from_dict(agno("run_metrics_addend"))
 
-    assert owned.to_dict() == agno("run_metrics_sum")
+    assert owned.to_dict() == without(agno("run_metrics_sum"), DROPPED_METRICS_KEYS)
     assert (RunMetrics(tokens=TokenCounts(input_tokens=1)) + RunMetrics()).to_dict() == {"input_tokens": 1}
 
 
@@ -270,11 +285,60 @@ def test_tool_execution_round_trips_agno_dict_minus_dropped_keys() -> None:
     assert set(agno_dict) - set(owned) == DROPPED_TOOL_EXECUTION_KEYS
 
 
+@pytest.mark.parametrize("stored_id", [None, "", "absent"])
+def test_a_tool_execution_stored_without_a_call_id_reads_with_the_same_id(stored_id: str | None) -> None:
+    """Agno 2.4.7 stored Ollama's calls without ids; each read gives such a call the same id, the rest as stored."""
+    stored = agno("tool_execution")
+    if stored_id == "absent":
+        del stored["tool_call_id"]
+    else:
+        stored["tool_call_id"] = stored_id
+
+    first, second = ToolExecution.from_dict(stored), ToolExecution.from_dict(stored)
+
+    assert first.tool_call_id
+    assert second.tool_call_id == first.tool_call_id
+    # A store that hands the keys back in another order reads the same id.
+    assert ToolExecution.from_dict(dict(reversed(stored.items()))).tool_call_id == first.tool_call_id
+    written = first.to_dict()
+    assert written.pop("tool_call_id") == first.tool_call_id
+    assert written == without(stored, DROPPED_TOOL_EXECUTION_KEYS | {"tool_call_id"})
+
+
+def test_a_run_whose_tool_executions_have_no_call_ids_still_loads() -> None:
+    """A run Agno 2.4.7 stored for Ollama, whose calls had no ids, loads with an id on each, the same on every load."""
+    stored = json.loads((FIXTURE_RUNS / "run_output.json").read_text())["agent_code:run-tools"]
+    for tool in stored["tools"]:
+        tool["tool_call_id"] = None
+    for message in stored["messages"]:
+        for call in message.get("tool_calls") or ():
+            del call["id"]
+        if message["role"] == "tool":
+            del message["tool_call_id"]
+
+    written = RunRecord.from_dict(stored).to_dict()
+
+    assert RunRecord.from_dict(stored).to_dict() == written
+    new_ids = {tool.pop("tool_call_id") for tool in written["tools"]}
+    assert len(new_ids) == len(stored["tools"]) == 3
+    assert all(isinstance(new_id, str) and new_id for new_id in new_ids)
+    expected = expected_run_dict(stored)
+    for tool in expected["tools"]:
+        del tool["tool_call_id"]
+    assert written == expected
+
+
 def test_tool_execution_default_dict_matches_agno_minus_dropped_keys() -> None:
-    owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={}, created_at=7)
+    owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={})
 
     assert owned.to_dict() == without(agno("tool_execution_default"), DROPPED_TOOL_EXECUTION_KEYS)
-    assert ToolExecution.from_dict({"tool_name": "t"}).created_at > 0
+
+
+def test_new_tool_executions_and_requirements_store_no_timing() -> None:
+    stored = RunRequirement(ToolExecution(tool_call_id="c", tool_name="t", tool_args={})).to_dict()
+
+    assert "created_at" not in stored
+    assert {"metrics", "created_at"}.isdisjoint(stored["tool_execution"])
 
 
 def test_run_requirement_round_trips_agno_dict() -> None:
@@ -405,6 +469,9 @@ def test_team_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
     record = TeamRunRecord.from_dict(agno_dict)
 
     assert record.to_dict() == expected
+    # The stored label of the team's members had no reader, so a rewritten row drops it.
+    assert "team_name" in agno_dict
+    assert "team_name" not in record.to_dict()
     assert isinstance(record.member_responses[0], RunRecord)
     assert record.member_responses[0].parent_run_id == "team-run-1"
     # Agno wrote an empty ``member_responses`` list on a team run without members.
@@ -433,10 +500,14 @@ def test_run_requirement_reads_rows_agno_read_leniently() -> None:
     owned = RunRequirement.from_dict(stored)
 
     assert (owned.tool_execution.tool_name, owned.tool_execution.tool_args) == ("unknown", {})
-    assert owned.created_at.tzinfo is not None
     agno_dict, owned_dict = expected_requirement_dict(agno("run_requirement_read_leniently")), owned.to_dict()
+    # Agno's placeholder had no call id; the owned one reads with an id, the same on every read.
+    assert agno_dict["tool_execution"]["tool_call_id"] is None
+    assert owned_dict["tool_execution"]["tool_call_id"] == owned.tool_execution.tool_call_id
+    assert owned.tool_execution.tool_call_id
+    assert RunRequirement.from_dict(stored).tool_execution.tool_call_id == owned.tool_execution.tool_call_id
     for result in (agno_dict, owned_dict):
-        del result["created_at"], result["tool_execution"]["created_at"]
+        del result["tool_execution"]["tool_call_id"]
     assert owned_dict == agno_dict
 
 
@@ -447,7 +518,13 @@ DECISIONS_ON_THE_REQUIREMENT: dict[str, dict[str, Any]] = {
     "external-result": {"external_execution_result": "done"},
     "explicit-tool-decision-wins": {
         "confirmation": False,
-        "tool_execution": {"tool_name": "t", "requires_confirmation": True, "confirmed": True, "created_at": 3},
+        "tool_execution": {
+            "tool_call_id": "call-1",
+            "tool_name": "t",
+            "requires_confirmation": True,
+            "confirmed": True,
+            "created_at": 3,
+        },
     },
 }
 
@@ -457,13 +534,16 @@ def test_run_requirement_moves_a_decision_on_the_requirement_onto_its_tool_execu
     data = {
         "id": "req-1",
         "created_at": "2026-01-02T03:04:05+00:00",
-        "tool_execution": {"tool_name": "t", "requires_confirmation": True, "created_at": 3},
+        "tool_execution": {"tool_call_id": "call-1", "tool_name": "t", "requires_confirmation": True, "created_at": 3},
         **DECISIONS_ON_THE_REQUIREMENT[case],
     }
 
     owned = RunRequirement.from_dict(data).to_dict()
 
-    assert owned == expected_requirement_dict(agno("run_requirement_decision_moved")[case])
+    # Agno's goldens were recorded for these entries without a call id.
+    expected = expected_requirement_dict(agno("run_requirement_decision_moved")[case])
+    expected["tool_execution"]["tool_call_id"] = "call-1"
+    assert owned == expected
 
 
 @pytest.mark.parametrize(
@@ -498,7 +578,6 @@ FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[
     "message_metrics": (MessageMetrics.from_dict, dict),
     "run_metrics": (RunMetrics.from_dict, dict),
     "model_metrics": (ModelMetrics.from_dict, dict),
-    "tool_call_metrics": (ToolCallMetrics.from_dict, dict),
     "session_metrics": (SessionMetrics.from_dict, dict),
 }
 
@@ -542,7 +621,9 @@ def test_stored_metrics_keep_agno_key_order_at_every_level(fixture: str) -> None
     stored = list(json.loads((FIXTURE_RUNS / f"{fixture}.json").read_text()).values())
     for key, value in AGNO.items():
         if key.startswith(fixture):
-            stored.extend(value if isinstance(value, list) else [value])
+            stored.extend(
+                without(item, DROPPED_METRICS_KEYS) for item in (value if isinstance(value, list) else [value])
+            )
 
     for value in stored:
         assert json.dumps(_METRIC_CODECS[fixture](value).to_dict()) == json.dumps(value)
@@ -600,7 +681,7 @@ def test_session_metrics_count_token_counters_as_agno_accumulated_them() -> None
         owned.count_run(RunMetrics.from_dict(case), replacing=None)
 
         assert owned.to_dict() == _counted_totals(agno_totals)
-    assert SessionMetrics.from_dict(totals[-1]).to_dict() == totals[-1]
+    assert SessionMetrics.from_dict(totals[-1]).to_dict() == without(totals[-1], DROPPED_METRICS_KEYS)
 
 
 def test_session_metrics_count_token_counters_only() -> None:
@@ -611,7 +692,6 @@ def test_session_metrics_count_token_counters_only() -> None:
         cost=1.5,
         duration=3.0,
         details={"model": [ModelMetrics(tokens=counters, cost=1.5, id="m", provider="P", provider_metrics={"x": 1})]},
-        additional_metrics={"y": 1},
     )
     totals = SessionMetrics()
 

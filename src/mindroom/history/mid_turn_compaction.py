@@ -20,7 +20,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
 from mindroom.history.policy import context_budget_after_reserve
-from mindroom.history.prompt_tokens import tool_definitions
+from mindroom.history.prompt_tokens import tool_definition_tokens
 from mindroom.history.replay import HistorySummaryBudgetError, estimate_request_messages_tokens
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
@@ -46,7 +46,8 @@ from mindroom.native_compaction import checkpoint_items, native_replay_messages
 from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_text_tokens
+from mindroom.tool_system.runtime_context import current_requester_id
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
 
 if TYPE_CHECKING:
@@ -178,6 +179,14 @@ def without_fold_records(metadata: dict[str, Any] | None) -> dict[str, Any] | No
 
 
 @dataclass(frozen=True)
+class _Fold:
+    """A fold's summary message and the estimated size of the request it rewrote."""
+
+    summary_message: Message
+    rewritten_tokens: int
+
+
+@dataclass(frozen=True)
 class _Policy:
     """The resolved compaction plan and request limit for one model request."""
 
@@ -214,8 +223,17 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
     if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
         # Nothing but an earlier summary would fold, so compacting again cannot shrink the request.
         return
-    summary_message = await _summarize(compaction, policy, layout, messages, state.record, scope_fold, request_tokens)
-    if summary_message is None:
+    fold = await _summarize(
+        compaction,
+        policy,
+        layout,
+        messages,
+        state.record,
+        scope_fold,
+        request_tokens,
+        partial(_estimated_request_tokens, compaction, policy, messages, state.tools),
+    )
+    if fold is None:
         compaction.stopped = True
         return
     if policy.native_route is not None:
@@ -227,9 +245,8 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         # The fold replaced the checkpoints the provider's compaction replayed, so the loop's later requests carry no
         # native settings: each route sends them as plain requests, and this hook sizes and compacts them as text.
         state.request_template = replace(state.request_template, native_compaction=None)
-    rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, compaction, policy, messages, state.tools)
-    _require_fit(policy, rewritten_tokens, summary_message)
-    if rewritten_tokens > policy.limit:
+    _require_fit(policy, fold.rewritten_tokens, fold.summary_message)
+    if fold.rewritten_tokens > policy.limit:
         # What stays (system prompt, tools, summary, prompt) exceeds the replay window on its own; compacting again
         # would only summarize each new tool result before the model ever saw it.
         logger.warning(
@@ -247,10 +264,13 @@ async def _summarize(
     record: AnyRunRecord,
     scope_fold: tuple[ConversationStore, ConversationSession, HistoryScope] | None,
     request_tokens: int,
-) -> Message | None:
+    size_request: Callable[[], int],
+) -> _Fold | None:
     """Fold the history and every exchange of the turn into a summary and rewrite the request.
 
-    Returns the summary message, or None when compaction failed and the request is unchanged.
+    ``request_tokens`` sized the request before the fold and ``size_request`` estimates ``messages`` as they stand.
+    Returns the summary message with the rewritten request's estimate, or None when compaction failed and the request
+    is unchanged.
     """
     # Replay limits trim history; the running turn's own tool results must all reach the summary.
     settings = replace(policy.inputs.history_settings, max_tool_calls_from_history=None)
@@ -259,7 +279,8 @@ async def _summarize(
         if scope_fold is None:
             summary_message = await _summarize_run_locally(compaction, inputs, layout, record)
             _finish(messages, layout, summary_message, record)
-            return summary_message
+            # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
+            return _Fold(summary_message, await asyncio.to_thread(size_request))
         store, session, scope = scope_fold
         return await _compact_scope(
             compaction,
@@ -268,6 +289,7 @@ async def _summarize(
             messages,
             record,
             request_tokens,
+            size_request,
             store=store,
             session=session,
             scope=scope,
@@ -289,11 +311,12 @@ async def _compact_scope(
     messages: list[Message],
     record: AnyRunRecord,
     request_tokens: int,
+    size_request: Callable[[], int],
     *,
     store: ConversationStore,
     session: ConversationSession,
     scope: HistoryScope,
-) -> Message | None:
+) -> _Fold | None:
     """Append one summary row to ``scope`` covering its stored runs after the latest row and this run's exchanges.
 
     The append stores the run's folded part with the row and leaves the turn's session as the store holds it, and
@@ -330,8 +353,12 @@ async def _compact_scope(
         runtime_paths=compaction.runtime_paths,
         compaction_lifecycle=compaction.lifecycle,
         on_commit=on_commit,
+        # The request ``on_commit`` rewrote, estimated from what it holds, since no response has reported its size.
+        rewritten_request_tokens=size_request,
     )
-    return summary_messages[0] if outcome is not None and summary_messages else None
+    if outcome is None or not summary_messages:
+        return None
+    return _Fold(summary_messages[0], outcome.after_tokens)
 
 
 def _fold(record: AnyRunRecord, layout: _Layout) -> Fold:
@@ -404,7 +431,7 @@ def _request_tokens(
         return (
             estimate_request_messages_tokens(
                 messages,
-                replay_model=compaction.model.replay_estimator,
+                replay_estimator=compaction.model.replay_estimator,
                 native_route=policy.native_route,
             )
             # Thinking before the latest checkpoint is part of that checkpoint, not of the request.
@@ -432,7 +459,7 @@ def _request_tokens(
             newer = messages[anchor:]
             return (
                 reported
-                + estimate_request_messages_tokens(newer, replay_model=compaction.model.replay_estimator)
+                + estimate_request_messages_tokens(newer, replay_estimator=compaction.model.replay_estimator)
                 + _thinking_tokens(newer)
             )
     return _estimated_request_tokens(compaction, policy, messages, tools)
@@ -445,7 +472,7 @@ def _estimated_request_tokens(
     tools: Sequence[ToolSpec],
 ) -> int:
     return (
-        estimate_request_messages_tokens(messages, replay_model=compaction.model.replay_estimator)
+        estimate_request_messages_tokens(messages, replay_estimator=compaction.model.replay_estimator)
         + _thinking_tokens(messages)
         + _tool_tokens(tools, messages, policy.deferred_tool_names)
     )
@@ -459,11 +486,7 @@ def _tool_tokens(tools: Sequence[ToolSpec], messages: Sequence[Message], deferre
     """
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
-    # TODO(simplify): this sizes each definition inside a Chat ``function`` envelope while the static estimate
-    # (``prompt_tokens.py``) sizes the bare fields, so one tool costs two amounts. Size both without the envelope.
-    # Operators would see compaction trigger, and models see replay trimmed, a few tokens per tool differently.
-    payloads = [{"type": "function", "function": definition} for definition in tool_definitions(tools, deferred)]
-    return estimate_text_tokens(stable_serialize(payloads))
+    return tool_definition_tokens(tools, deferred)
 
 
 def _thinking_tokens(messages: Sequence[Message]) -> int:
@@ -477,7 +500,7 @@ def _thinking_tokens(messages: Sequence[Message]) -> int:
         if not is_own_model_message(message):
             continue
         text = estimate_text_tokens((message.reasoning_content or "") + (message.redacted_reasoning_content or ""))
-        visible = estimate_request_messages_tokens([message], replay_model=None)
+        visible = estimate_request_messages_tokens([message], replay_estimator=None)
         total += max(text, message.metrics.tokens.output_tokens - visible, 0)
     return total
 
@@ -626,7 +649,11 @@ def _summary_usage_recorder(
     compaction: _MidTurnCompaction,
     record: AnyRunRecord,
 ) -> Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None:
-    """Record each summary response under the reply's usage owner, else in the run's own session storage."""
+    """Record each summary response under the reply's usage owner, else in the run's own session storage.
+
+    The usage is recorded under the current request's requester, as a compaction before the reply records its own.
+    """
+    requester_id = current_requester_id()
     owner = get_helper_usage_owner()
     if owner is not None:
 
@@ -636,7 +663,7 @@ def _summary_usage_recorder(
                 partial(
                     save_compaction_usage,
                     session_id=owner.session_id,
-                    requester_id=record.user_id,
+                    requester_id=requester_id,
                     model=model,
                     usage=usage,
                     initial_session=owner.initial_session,
@@ -652,7 +679,7 @@ def _summary_usage_recorder(
         record_summary_usage,
         storage=storage,
         session_id=record.session_id,
-        requester_id=record.user_id,
+        requester_id=requester_id,
         # The run's own session row may not exist yet while its first turn is still running.
         initial_session=new_scope_session(
             session_id=record.session_id,

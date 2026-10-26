@@ -25,13 +25,13 @@ from mindroom.budgets.pricing import model_prices
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
-    child_execution_identity,
     child_tool_runtime_context,
     delegation_grant,
     note_child_run_id,
     observe_child_event,
     observe_child_record,
 )
+from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import persist_interrupted_replay, split_interrupted_tool_trace
@@ -50,7 +50,7 @@ from mindroom.hooks import (
     render_transient_context,
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
-from mindroom.llm.events import RequestCompleted, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -103,9 +103,8 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
-    complete_pending_tool_block,
     format_tool_combined,
-    stable_call_id,
+    format_tool_completed_event,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -128,7 +127,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
-    from mindroom.llm.usage import MessageMetrics, RunMetrics
+    from mindroom.llm.usage import RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import (
         EmptyRunDiscard,
@@ -137,8 +136,8 @@ if TYPE_CHECKING:
         StandaloneReplaySnapshot,
         TurnRunState,
     )
-    from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -271,11 +270,8 @@ _render_system_enrichment_context = timed("system_prompt_assembly.system_enrichm
 @dataclass
 class _StreamingAttemptState:
     assistant_text: str = ""
-    full_response: str = ""
-    tool_count: int = 0
     observed_tool_calls: int = 0
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
-    latest_request_usage: MessageMetrics | None = None
     terminal: TerminalRecord[RunRecord] = field(default_factory=partial(TerminalRecord, RunRecord))
     finished: bool = False
     first_token_logged: bool = False
@@ -461,9 +457,8 @@ def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool) ->
     if show_tool_calls and record.tools:
         tool_sections: list[str] = []
         for tool_index, tool in enumerate(record.tools, start=1):
-            tool_name = tool.tool_name or "tool"
             tool_args = tool.tool_args or {}
-            combined, _ = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
+            combined, _ = format_tool_combined(tool.tool_name, tool_args, tool.result, tool_index=tool_index)
             tool_sections.append(combined.strip())
         if tool_sections:
             response_parts.append("\n\n".join(tool_sections))
@@ -473,16 +468,7 @@ def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool) ->
 
 def _extract_tool_trace(record: AnyRunRecord) -> list[ToolTraceEntry]:
     """Extract structured tool-trace metadata from a run record."""
-    if not record.tools:
-        return []
-
-    trace: list[ToolTraceEntry] = []
-    for tool in record.tools:
-        tool_name = tool.tool_name or "tool"
-        tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-        _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
-        trace.append(trace_entry)
-    return trace
+    return [format_tool_completed_event(tool.call) for tool in record.tools or ()]
 
 
 def _attach_blocking_pause_presentation(
@@ -497,29 +483,19 @@ def _attach_blocking_pause_presentation(
         track_hidden_tools=True,
     )
     presentation.append_text(_extract_response_content(record, show_tool_calls=False))
-    pending_by_id: dict[str, ToolExecution] = {}
-    for tool in paused.tools:
-        call_id = stable_call_id(tool.call)
-        if call_id is None or call_id in pending_by_id:
-            msg = "Paused approval tool is missing its exact identity"
-            raise RuntimeError(msg)
-        pending_by_id[call_id] = tool
-
-    # A delegation still waits for its child, or for its turn after a sibling's, until the driver answers it.
+    # A paused call stays started: a call waiting for approval, or a delegation that still waits for its child,
+    # or for its turn after a sibling's, until the driver answers it.
     answered = answered_delegation_calls(record)
     seen_ids: set[str] = set()
     for tool in (*tuple(record.tools or ()), *paused.tools):
         call = tool.call
-        call_id = stable_call_id(call)
-        if call_id is None:
-            msg = "Blocking approval output has a tool without stable identity"
-            raise RuntimeError(msg)
+        call_id = call.tool_call_id
         if call_id in seen_ids:
             continue
         seen_ids.add(call_id)
         presentation.start_tool(call)
         # An agent's own calls name no member.
-        if call_id not in pending_by_id and (not tool.is_paused or (None, call_id) in answered):
+        if not tool.is_paused or (None, call_id) in answered:
             presentation.complete_tool(call)
 
     return replace(
@@ -540,8 +516,8 @@ def _own_assistant_text(record: AnyRunRecord | None) -> str:
     return next((part for answer in reversed(own_answers(record)) if (part := answer.strip())), "")
 
 
-def _reported_tokens(usage: RunMetrics | MessageMetrics | None) -> TokenCounts:
-    """Return the token counters a run or a request reported, all zero when it reported none."""
+def _reported_tokens(usage: RunMetrics | None) -> TokenCounts:
+    """Return the token counters a run reported, all zero when it reported none."""
     return usage.tokens if usage is not None else TokenCounts()
 
 
@@ -555,15 +531,13 @@ def agent_run_metadata_content(
     session_id: str,
     status: RunStatus,
     prepared_history: PreparedHistoryState | None,
-    last_request: MessageMetrics | None = None,
 ) -> dict[str, Any]:
     """Return the run metadata an agent reply or approval resume publishes for its run ``record``.
 
     ``prepared_history`` is the history the run was prepared with, None for an approval resume, which prepares none.
-    A streamed reply also passes its last request's usage, whose counts describe the context. The tool calls counted
-    are the ones the record holds: a run that reported a tool call hands over its record however it ends.
+    The tool calls counted are the ones the record holds: a run that reported a tool call hands over its record
+    however it ends.
     """
-    metrics = record.metrics if record is not None else None
     return build_ai_run_metadata_content(
         config=config,
         prices=model_prices(config, runtime_paths),
@@ -573,12 +547,8 @@ def agent_run_metadata_content(
         status=status,
         model=record.model if record is not None else None,
         model_provider=record.model_provider if record is not None else None,
-        metrics=metrics,
-        context_metrics=metrics,
-        context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
-        context_raw_input_tokens=_reported_tokens(last_request).input_tokens or None,
-        context_cache_read_tokens=_reported_tokens(last_request).cache_read_tokens or None,
-        context_cache_write_tokens=_reported_tokens(last_request).cache_write_tokens or None,
+        metrics=record.metrics if record is not None else None,
+        context_run=record,
         tool_count=len(record.tools or ()) if record is not None else 0,
         prepared_history=prepared_history,
     )
@@ -591,7 +561,6 @@ def _attempt_run_metadata(
     status: RunStatus,
     *,
     run_id: str,
-    last_request: MessageMetrics | None = None,
 ) -> dict[str, Any] | None:
     """Return the run metadata one attempt publishes, or None when its caller collects none."""
     if collector is None:
@@ -606,66 +575,29 @@ def _attempt_run_metadata(
         session_id=run_context.session_id,
         status=status,
         prepared_history=prepared.prepared_history,
-        last_request=last_request,
     )
 
 
-def _track_stream_tool_started(state: _StreamingAttemptState, event: ToolStarted, *, show_tool_calls: bool) -> bool:
-    """Track started tool-call metadata for streaming output."""
-    display_tool_index = state.tool_count + 1 if show_tool_calls else None
-    tool_msg, trace_entry = state.tool_tracker.start(event.call, tool_index=display_tool_index, origin=event.origin)
+def _track_stream_tool_started(state: _StreamingAttemptState, event: ToolStarted) -> bool:
+    """Record a started tool call's trace; return False for a call the stream already announced."""
+    _, trace_entry = state.tool_tracker.start(event.call, origin=event.origin)
     if trace_entry is None:
         return False
     state.observed_tool_calls += 1
-    if not show_tool_calls or display_tool_index is None:
-        return True
-
-    state.tool_count = display_tool_index
-    if tool_msg:
-        state.full_response += tool_msg
     return True
 
 
 def _materialize_paused_agent_tool_events(
     state: _StreamingAttemptState,
     tools: Sequence[ToolExecution],
-    *,
-    show_tool_calls: bool,
 ) -> tuple[ToolStarted, ...]:
     """Return the tool-start events of paused calls the stream has not announced yet."""
     events = (ToolStarted(tool.call) for tool in tools)
-    return tuple(event for event in events if _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls))
-
-
-def _track_stream_tool_completed(
-    state: _StreamingAttemptState,
-    event: ToolCompleted,
-    *,
-    show_tool_calls: bool,
-    agent_name: str,
-) -> None:
-    """Track completed tool-call metadata for streaming output."""
-    tool_name, result, pending_tool, _ = state.tool_tracker.complete(event.call, origin=event.origin)
-    if not show_tool_calls:
-        return
-
-    if pending_tool is None or pending_tool.visible_tool_index is None:
-        logger.warning(
-            "Missing pending tool start in AI stream; skipping completion marker",
-            tool_name=tool_name,
-            agent=agent_name,
-        )
-        return
-    state.full_response, _ = complete_pending_tool_block(
-        state.full_response,
-        tool_name,
-        result,
-        tool_index=pending_tool.visible_tool_index,
-    )
+    return tuple(event for event in events if _track_stream_tool_started(state, event))
 
 
 def _stream_completed_without_visible_output(state: _StreamingAttemptState, record: AnyRunRecord) -> bool:
-    visible_text = state.full_response.strip() or (record.content or "").strip()
+    visible_text = state.assistant_text.strip() or (record.content or "").strip()
     return not visible_text and state.observed_tool_calls == 0
 
 
@@ -757,7 +689,6 @@ async def _start_agent_run(
     *,
     storage: RunStorage,
     terminal: TerminalRecord[RunRecord],
-    stream: bool,
 ) -> AsyncIterator[RunEvent]:
     """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
 
@@ -804,7 +735,8 @@ async def _start_agent_run(
         ctx=run,
         hooks=hooks,
         persist=persist_into(terminal, storage),
-        request_template=replace(run_context.request_template, stream=stream),
+        request_template=run_context.request_template,
+        metadata=run.metadata,
     )
     driven = drive_delegation_stream(
         events,
@@ -882,7 +814,7 @@ async def _run_blocking_agent_attempt(
         on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
-    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
+    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal)
     async with closing_async_stream(events):
         async for event in events:
             terminal.collect(event)
@@ -976,10 +908,11 @@ def _memory_conversation(
     ):
         return None
     entity = config.resolve_entity(ctx.entity_label)
+    settings = entity.history_settings
     if (
         entity.memory_backend != "file"
-        or not entity.history_settings.replays_whole_history
-        or not (entity.has_authored_compaction_config and entity.compaction_config.enabled)
+        or not settings.replays_whole_history
+        or not (settings.has_authored_compaction_config and settings.compaction_config.enabled)
     ):
         return None
     session = scope_context.session
@@ -1045,24 +978,24 @@ async def _prepare_agent_and_prompt(
     prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    scope_context: ScopeSessionContext | None = None,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    knowledge: AgentKnowledge | None = None,
-    include_interactive_questions: bool = True,
-    tool_function_filter: Callable[[Function], bool] | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    delegation_depth: int = 0,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    include_openai_compat_guidance: bool = False,
-    model_prompt: str | None = None,
-    current_timestamp_ms: float | None = None,
-    current_event_id: str | None = None,
-    current_prompt_is_structured: bool = False,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-    eager_deferred_tools: bool = False,
-    supports_native_tool_approval: bool = False,
-    reusable_build: AgentBuild | None = None,
+    scope_context: ScopeSessionContext | None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    knowledge: AgentKnowledge | None,
+    include_interactive_questions: bool,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_lifecycle: CompactionLifecycle | None,
+    delegation_depth: int,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    include_openai_compat_guidance: bool,
+    model_prompt: str | None,
+    current_timestamp_ms: float | None,
+    current_event_id: str | None,
+    current_prompt_is_structured: bool,
+    pipeline_timing: DispatchPipelineTiming | None,
+    eager_deferred_tools: bool,
+    supports_native_tool_approval: bool,
+    reusable_build: AgentBuild | None,
 ) -> _PreparedAgentRun:
     """Prepare the agent build, this turn's system message, and its request input.
 
@@ -1267,7 +1200,7 @@ async def _prepare_agent_run_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     knowledge: AgentKnowledge | None,
     include_interactive_questions: bool,
-    tool_function_filter: Callable[[Function], bool] | None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
     include_openai_compat_guidance: bool,
     execution_identity: ToolExecutionIdentity | None,
     compaction_lifecycle: CompactionLifecycle | None,
@@ -1275,9 +1208,9 @@ async def _prepare_agent_run_context(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     turn_recorder: TurnRecorder | None,
     pipeline_timing: DispatchPipelineTiming | None,
-    eager_deferred_tools: bool = False,
-    supports_native_tool_approval: bool = False,
-    reusable_build: AgentBuild | None = None,
+    eager_deferred_tools: bool,
+    supports_native_tool_approval: bool,
+    reusable_build: AgentBuild | None,
 ) -> _AgentRunContext:
     """Prepare one attempt of an agent response, as its ``continuation`` state asks, through metadata assembly."""
     if continuation.active_model_name is not None:
@@ -1462,7 +1395,7 @@ async def ai_response(  # noqa: C901
     knowledge: AgentKnowledge | None = None,
     on_attempt_start: Callable[[str, str], None] | None = None,
     include_interactive_questions: bool = True,
-    tool_function_filter: Callable[[Function], bool] | None = None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
@@ -1709,7 +1642,6 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     if pipeline_timing is not None:
                         pipeline_timing.mark("model_first_token")
                 state.assistant_text += event.text
-                state.full_response += event.text
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1721,10 +1653,10 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     phase="tool_call_started",
                     agent_name=agent_name,
                     tool_name=event.call.tool_name,
-                    tool_call_id=stable_call_id(event.call),
+                    tool_call_id=event.call.tool_call_id,
                     show_tool_calls=show_tool_calls,
                 )
-                _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls)
+                _track_stream_tool_started(state, event)
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1736,17 +1668,13 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     phase="tool_call_completed",
                     agent_name=agent_name,
                     tool_name=event.call.tool_name,
-                    tool_call_id=stable_call_id(event.call),
+                    tool_call_id=event.call.tool_call_id,
                     show_tool_calls=show_tool_calls,
                 )
-                _track_stream_tool_completed(state, event, show_tool_calls=show_tool_calls, agent_name=agent_name)
+                state.tool_tracker.complete(event.call, origin=event.origin)
                 if state_updated is not None:
                     state_updated()
                 yield event
-                continue
-
-            if isinstance(event, RequestCompleted):
-                state.latest_request_usage = event.usage
                 continue
 
             if isinstance(event, RunFinished):
@@ -1785,7 +1713,7 @@ async def _stream_agent_attempt_chunks(
         with bind_llm_request_log_context(**request_context):
             if pipeline_timing is not None:
                 pipeline_timing.mark_model_request()
-            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal, stream=True)
+            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal)
         events = stream_with_llm_request_log_context(run_events, request_context=request_context)
         chunks = _process_stream_events(
             events,
@@ -1817,7 +1745,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     knowledge: AgentKnowledge | None = None,
     on_attempt_start: Callable[[str, str], None] | None = None,
     include_interactive_questions: bool = True,
-    tool_function_filter: Callable[[Function], bool] | None = None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
@@ -2005,7 +1933,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                             record,
                             RunStatus.error,
                             run_id=attempt.run_id,
-                            last_request=state.latest_request_usage,
                         ),
                     ),
                 )
@@ -2030,11 +1957,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             if paused_attempt is None:
                 raise pause_without_approval_error(record, entity_label="agent")
-            for tool_event in _materialize_paused_agent_tool_events(
-                state,
-                paused_attempt.tools,
-                show_tool_calls=show_tool_calls,
-            ):
+            for tool_event in _materialize_paused_agent_tool_events(state, paused_attempt.tools):
                 _sync_live_turn_recorder()
                 yield tool_event
             yield AttemptResolved(
@@ -2073,7 +1996,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     record,
                     final_status,
                     run_id=record.run_id,
-                    last_request=state.latest_request_usage,
                 ),
             ),
         )

@@ -24,14 +24,14 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_message import is_scope_summary, mark_summary_follows
 from mindroom.history.summary_rows import Fold
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
-from tests.history_helpers import compact_runs, log_of, stored_run_ids
+from tests.history_helpers import compact_runs, log_of, replay_settings, stored_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _TEAM_SCOPE = HistoryScope(kind="team", scope_id="crew")
-_ALL_HISTORY = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+_ALL_HISTORY = replay_settings()
 
 
 @pytest.fixture
@@ -499,5 +499,10 @@ def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: 
     assert is_scope_summary(built[0])
     assert built[1].content == "Task B"
     assert [message.content for message in built[-3:]] == ["Task A", "A done", "Task C"]
-    planned = estimate_prompt_visible_history_tokens(session=session, scope=_SCOPE, history_settings=_ALL_HISTORY)
-    assert estimate_request_messages_tokens([m for m in built if m.from_history], replay_model=None) == planned
+    planned = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=_SCOPE,
+        history_settings=_ALL_HISTORY,
+        replay_estimator=None,
+    )
+    assert estimate_request_messages_tokens([m for m in built if m.from_history], replay_estimator=None) == planned

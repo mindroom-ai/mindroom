@@ -59,6 +59,7 @@ from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.config.personal_agents import personal_agent_data
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.credentials.sync import sync_env_to_credentials
 from mindroom.embeddings.embedder_health import get_embedder_failure
@@ -72,6 +73,7 @@ from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
 from mindroom.origins import allowed_client_origins
+from mindroom.personal_agents import read_personal_agent_user_ids
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
@@ -222,6 +224,18 @@ class RawConfigSourceRequest(BaseModel):
     """Payload for raw config source recovery edits."""
 
     source: str
+
+
+class PersonalAgentResponse(BaseModel):
+    """One roster entry's generated agent, which the authored config the dashboard edits leaves out."""
+
+    template: str
+    user_id: str
+    agent_name: str
+    matrix_user_id: str
+    display_name: str | None
+    pending: bool
+    template_exists: bool
 
 
 def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
@@ -922,6 +936,34 @@ async def get_agent_policies(
 async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all agents."""
     return config_lifecycle.read_committed_config(request, lambda config_data: _list_entities(config_data, "agents"))
+
+
+@app.get("/api/config/personal-agents")
+async def get_personal_agents(
+    request: Request,
+    _user: Annotated[dict, Depends(verify_user)],
+) -> list[PersonalAgentResponse]:
+    """List every generated personal agent, including pending ones and those whose template was removed."""
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    roster = await asyncio.to_thread(read_personal_agent_user_ids, runtime_paths)
+    # The roster can be newer than the loaded config, so names render from the template, not config.agents.
+    templates = {key: template.model_dump() for key, template in config.personal_agents.items()}
+    return [
+        PersonalAgentResponse(
+            template=entry.template,
+            user_id=entry.user_id,
+            agent_name=entry.agent_name,
+            matrix_user_id=matrix_user_id,
+            display_name=(
+                personal_agent_data(templates[entry.template], entry).get("display_name")
+                if entry.template in templates
+                else None
+            ),
+            pending=entry.pending,
+            template_exists=entry.template in templates,
+        )
+        for entry, matrix_user_id in roster
+    ]
 
 
 @app.put("/api/config/agents/{agent_id}")

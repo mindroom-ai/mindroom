@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history.manual import request_compaction_before_next_reply
@@ -230,6 +230,8 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_pa
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
+        active_model_name=None,
+        room_id=None,
     )
 
     persisted = storage.load_session("session-1", "agent")
@@ -481,6 +483,36 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
     assert outcome.to_notice_metadata()["window_tokens"] == 0
     assert "history budget" not in outcome.format_notice()
     assert "/ 0 " not in outcome.format_notice()
+
+
+@pytest.mark.asyncio
+async def test_compact_context_follows_the_agents_own_compaction_config(tmp_path: Path) -> None:
+    """An agent's own compaction model makes manual compaction available where the defaults leave no window."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    compaction=CompactionOverrideConfig(model="summary-model"),
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(provider="openai", id="test-model", context_window=None),
+                "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=32_000),
+            },
+        ),
+        runtime_paths,
+    )
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_execution_identity(),
+    )
+
+    assert await tool.compact_context() == COMPACT_CONTEXT_SUCCESS
 
 
 @pytest.mark.asyncio
@@ -809,6 +841,8 @@ async def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_af
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
+        active_model_name=None,
+        room_id=None,
     )
     assert result == COMPACT_CONTEXT_SUCCESS
     team_scope = HistoryScope(kind="team", scope_id="squad")

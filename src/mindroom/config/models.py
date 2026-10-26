@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import (
-    drop_retired_fields,
-    drop_retired_model_settings,
-    drop_retired_tool_overrides,
-    reject_legacy_defaults_fields,
-)
+from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
@@ -28,6 +24,7 @@ from mindroom.credentials.manager import validate_service_name
 from mindroom.credentials.policy import credential_service_policy
 from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
+from mindroom.providers.names import PROVIDER_ROUTES, provider_route
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 
@@ -231,12 +228,6 @@ class ToolConfigEntry(BaseModel):
             msg = "Tool name must not be empty"
             raise ValueError(msg)
         return stripped
-
-    @field_validator("overrides")
-    @classmethod
-    def drop_retired_fields(cls, value: dict[str, object], info: ValidationInfo) -> dict[str, object]:
-        """Ignore retired overrides that older configs still set, with a warning."""
-        return drop_retired_tool_overrides(info.data["name"], value) if "name" in info.data else value
 
     @model_validator(mode="after")
     def validate_lazy_flags(self) -> Self:
@@ -569,8 +560,8 @@ class DefaultsConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
-        """Ignore retired fields with a warning, then reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_defaults_fields(drop_retired_fields(data))
+        """Reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_defaults_fields(data)
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -748,7 +739,7 @@ class ModelConfig(BaseModel):
     )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="Additional provider-specific parameters passed directly to the model; may include api_key",
+        description="Additional provider-specific parameters the model's provider accepts; config load rejects any other key; may include api_key",
         json_schema_extra=dashboard_hint(secret=True),
     )
     context_window: int | None = Field(
@@ -777,6 +768,15 @@ class ModelConfig(BaseModel):
         description="Provider prices in USD per million tokens, used to measure spend against budgets",
     )
 
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        """Reject a provider no route serves, so a misspelling fails config load instead of the model's first build."""
+        if provider_route(value) not in PROVIDER_ROUTES:
+            msg = f"Unknown provider '{value}': use one of {', '.join(sorted(PROVIDER_ROUTES))}"
+            raise ValueError(msg)
+        return value
+
     @field_validator("display_name")
     @classmethod
     def _normalize_display_name(cls, value: str | None) -> str | None:
@@ -801,11 +801,24 @@ class ModelConfig(BaseModel):
 
     @field_validator("extra_kwargs")
     @classmethod
-    def drop_retired_fields(cls, value: dict[str, Any] | None, info: ValidationInfo) -> dict[str, Any] | None:
-        """Ignore Agno model fields that older configs still set in ``extra_kwargs``, with a warning."""
-        if value is None or "provider" not in info.data:
-            return value
-        return drop_retired_model_settings(info.data["provider"], value)
+    def _validate_client_settings(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Reject a ``client_params`` that is not a mapping, or a ``base_url`` or ``client_params.base_url`` that is not a string.
+
+        The providers that accept these keys pass ``client_params`` to their API client, and the OpenAI-family
+        routes read their endpoint, and the ``openai`` route its API, from the two ``base_url`` keys.
+        """
+        client_params = (value or {}).get("client_params")
+        if client_params is not None and not isinstance(client_params, Mapping):
+            msg = f"extra_kwargs.client_params must be a mapping, not {type(client_params).__name__}"
+            raise ValueError(msg)
+        for key, endpoint in (
+            ("client_params.base_url", (client_params or {}).get("base_url")),
+            ("base_url", (value or {}).get("base_url")),
+        ):
+            if endpoint is not None and not isinstance(endpoint, str):
+                msg = f"extra_kwargs.{key} must be a string, not {type(endpoint).__name__}"
+                raise ValueError(msg)
+        return value
 
     @field_validator("icon")
     @classmethod

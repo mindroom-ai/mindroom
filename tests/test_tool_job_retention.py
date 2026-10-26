@@ -136,6 +136,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
             thread_id=owner.thread_id,
             requester_id=owner.requester_id,
             origin=message_origin(sender_id=owner.requester_id),
+            execution_identity=owner,
             response_event_id="$response",
             sources=ResponseSources(("$later",), ("$later",)),
             calls=(ApprovalCall("call", "tool", "general", 2**62, decision=ApprovalDecision.APPROVED),),

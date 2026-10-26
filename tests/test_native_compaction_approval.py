@@ -173,7 +173,15 @@ async def _resume(
     )
     install_model_providers(monkeypatch, {"default": model})
     store = create_session_storage("general", config, paths, identity)
-    build = agents.create_agent("general", config, paths, identity, history_storage=store)
+    build = agents.create_agent(
+        "general",
+        config,
+        paths,
+        identity,
+        history_storage=store,
+        knowledge=None,
+        active_model_name=None,
+    )
     session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
     for run in (*history, paused):
         store.save_run(session, run, record_usage=False)

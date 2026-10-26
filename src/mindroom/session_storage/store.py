@@ -594,7 +594,7 @@ def ensure_session_row(
             session.kind,
             session.owner_id,
             session_data,
-            # No metadata is stored as the JSON text ``null``, never SQL NULL, kept as main behaves.
+            # No metadata is stored as the JSON text ``null``, never SQL NULL.
             json.dumps(session.metadata),
             session.created_at,
             session.created_at,

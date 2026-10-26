@@ -15,7 +15,8 @@ class Embedder(Protocol):
     """Embed texts for one purpose.
 
     Implementations return exactly one non-empty vector per text, in input order, and raise
-    ``EmbedderRequestError`` instead of returning an empty or partial result.
+    ``EmbedderRequestError`` instead of returning an empty or partial result; a provider failure's error comes from
+    ``embedder_request_error``, so it says whether a retry may succeed.
     """
 
     @property

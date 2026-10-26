@@ -17,8 +17,7 @@
       "id": "claude-sonnet-5-5",
       "provider": "anthropic"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "description": "Structured output for routing decisions.",
         "properties": {
@@ -40,17 +39,15 @@
         "title": "_RoutingSuggestion",
         "type": "object"
       },
-      "model": "mindroom.routing:_RoutingSuggestion",
-      "type": "pydantic"
+      "model": "mindroom.routing:_RoutingSuggestion"
     },
-    "stream": false,
+    "portable_replay": null,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-      "from_history": false,
       "provider_data": {
         "content_blocks": [
           {
@@ -65,8 +62,7 @@
         "mindroom_native_compaction": null,
         "stop_reason": "end_turn"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -80,7 +76,7 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": "end_turn"
+    "stop_reason": "end"
   },
   "request": {
     "body": {
@@ -137,7 +133,8 @@
             "ttl": "1h"
           }
         }
-      ]
+      ],
+      "stream": true
     },
     "headers": {
       "accept": "application/json",
@@ -150,28 +147,79 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "content": [
-        {
-          "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-          "type": "text"
-        }
-      ],
-      "id": "msg_parity",
-      "model": "claude-sonnet-5-5",
-      "role": "assistant",
-      "stop_reason": "end_turn",
-      "stop_sequence": null,
-      "type": "message",
-      "usage": {
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-        "input_tokens": 42,
-        "output_tokens": 12
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output"

@@ -80,9 +80,9 @@ def _config(
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         models={
-            "default": ModelConfig(provider="test", id="default-model"),
-            "haiku": ModelConfig(provider="test", id="haiku-model"),
-            "sonnet": ModelConfig(provider="test", id="sonnet-model"),
+            "default": ModelConfig(provider="openai", id="default-model"),
+            "haiku": ModelConfig(provider="openai", id="haiku-model"),
+            "sonnet": ModelConfig(provider="openai", id="sonnet-model"),
         },
     )
 
@@ -303,7 +303,11 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
     config = _config()
     paths = _runtime_paths(tmp_path)
     member_identity = replace(_identity(), agent_name="child")
-    tool = ToolExecution(tool_name="run_subagent", tool_args={"task": "Check", "system_prompt": "Member prompt"})
+    tool = ToolExecution(
+        tool_call_id="call-run_subagent",
+        tool_name="run_subagent",
+        tool_args={"task": "Check", "system_prompt": "Member prompt"},
+    )
 
     target = await _resolve_delegation_target(
         tool,
@@ -315,6 +319,7 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
     )
     refused = await _resolve_delegation_target(
         ToolExecution(
+            tool_call_id="call-run_subagent",
             tool_name="run_subagent",
             tool_args={"task": "Check", "agent_name": "leader", "system_prompt": "Member prompt"},
         ),
@@ -485,7 +490,11 @@ async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path
 
     with tool_runtime_context(context):
         target = await _resolve_delegation_target(
-            ToolExecution(tool_name="run_subagent", tool_args={"task": "Read.", "system_prompt": "Q"}),
+            ToolExecution(
+                tool_call_id="call-run_subagent",
+                tool_name="run_subagent",
+                tool_args={"task": "Read.", "system_prompt": "Q"},
+            ),
             None,
             caller_identity=identity,
             config=config,
@@ -521,6 +530,7 @@ async def test_native_authoring_after_the_caller_is_removed_is_refused(
     with tool_runtime_context(_delegate_runtime_context(without_caller, paths, execution_identity=identity)):
         result = await _resolve_delegation_target(
             ToolExecution(
+                tool_call_id="call-run_subagent",
                 tool_name="run_subagent",
                 tool_args={"task": "Read.", "system_prompt": "Q", **arguments},
             ),
@@ -551,11 +561,15 @@ async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> Non
         depth=0,
         budget_monitor=None,
         persona=SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",)),
+        model=None,
+        agent_mode="standard",
+        previous=None,
     )
     await reserve_subagent_turn(child, owner=identity, runtime_paths=paths)
     child.status = "completed"
     await update_subagent_turn(child, paths)
     follow_up = ToolExecution(
+        tool_call_id="call-continue_subagent",
         tool_name="continue_subagent",
         tool_args={"subagent_id": child.subagent_id, "message": "Again"},
     )
@@ -698,7 +712,11 @@ def _native_resolver(
     async def resolve(context: ToolRuntimeContext, **arguments: object) -> _DelegationTarget | str:
         with tool_runtime_context(context):
             return await _resolve_delegation_target(
-                ToolExecution(tool_name="run_subagent", tool_args={"task": "Read.", "system_prompt": "Q", **arguments}),
+                ToolExecution(
+                    tool_call_id="call-run_subagent",
+                    tool_name="run_subagent",
+                    tool_args={"task": "Read.", "system_prompt": "Q", **arguments},
+                ),
                 None,
                 caller_identity=identity,
                 config=config,

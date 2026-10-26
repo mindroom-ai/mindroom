@@ -107,7 +107,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["crawl4ai"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/crawl4ai",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#crawl4ai",
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     function_names=("crawl",),
 )

@@ -183,7 +183,7 @@ class Message:
         # Agno-backed runtime may hold ``audio_output``, ``image_output``, ``video_output``, ``file_output``,
         # ``citations``, ``references``, ``checkpoint_status``, ``checkpoint_created_at``, ``temporary``, and media
         # ``media_reference``/``external`` entries.
-        # Last legacy release: v2026.10.498; replacement: unreleased.
+        # Last legacy release: v2026.10.498; replacement: v2026.10.499.
         # Handling: the keys are ignored on read and never written again; every key MindRoom reads survives.
         # Coverage: tests/llm/test_codecs.py::test_message_from_dict_ignores_agno_only_keys,
         #   tests/llm/test_codecs.py::test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads
@@ -216,20 +216,50 @@ class Message:
         )
 
 
-def split_thinking(content: str) -> tuple[str | None, str]:
-    """Split ``<think>`` reasoning from a reply that arrived whole.
+_NO_ERROR_TEXT = "The tool call failed without an error message."
 
-    A missing opening tag means the reasoning starts the reply. Without a closing tag, or when the reasoning is
-    empty, the reply comes back unchanged with no reasoning, so an empty ``<think></think>`` block stays in the text.
+
+@dataclass(frozen=True, slots=True)
+class ToolResultView:
+    """What a wire encodes of a tool message: the call it answers, the tool's name, its content, and whether it failed.
+
+    A result stored without content answers with empty content, so no wire leaves its call unanswered, and a failed
+    result without error text says that it failed, since Claude rejects a failed result with empty content.
     """
-    end = content.find("</think>")
-    if end == -1:
-        return None, content
-    start = content.find("<think>")
-    reasoning = (content[:end] if start == -1 else content[start + len("<think>") : end]).strip()
-    if not reasoning:
-        return None, content
-    return reasoning, content[end + len("</think>") :].strip()
+
+    call_id: str | None
+    name: str | None
+    content: str | list[Any]
+    is_error: bool
+
+
+# LEGACY_COMPAT: Tool messages stored without content.
+# Legacy format: a stored ``tool`` message whose ``content`` is null. The Agno runtime's result writer
+# (``create_function_call_result``) stored a call's output, or a failed call's error text, as content that could be
+# missing.
+# Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
+# content.
+# Handling: the view gives such a result empty content, so every wire still answers its call when the row replays.
+# Coverage: tests/providers/test_provider_families.py::test_every_family_encodes_a_tool_result_with_its_call_name_content_and_failure
+# LEGACY_COMPAT: Failed tool results stored without error text.
+# Legacy format: a stored ``tool`` message with ``tool_call_error`` true and null or empty ``content``. The Agno
+# runtime stored a failed call's error text as content that could be missing, and the owned executor stored
+# ``str(error)``, which is empty for exceptions such as ``TimeoutError`` or ``httpx.ReadTimeout``.
+# Last legacy release: v2026.10.512; replacement: v2026.10.513, whose executor stores the exception's type name when
+# its text is empty.
+# Handling: the view gives such a result ``_NO_ERROR_TEXT``, so Claude, which rejects a failed result with empty
+# content, can still answer a thread that replays it, and every other wire says the call failed.
+# Coverage: tests/providers/test_provider_families.py::test_every_family_encodes_a_tool_result_with_its_call_name_content_and_failure
+def tool_result_view(message: Message) -> ToolResultView:
+    """Return the tool result a ``tool`` message carries, as every wire encodes it."""
+    is_error = message.tool_call_error is True
+    content = "" if message.content is None else message.content
+    return ToolResultView(
+        call_id=message.tool_call_id,
+        name=message.tool_name,
+        content=_NO_ERROR_TEXT if is_error and not content else content,
+        is_error=is_error,
+    )
 
 
 __all__ = [
@@ -237,8 +267,9 @@ __all__ = [
     "MODEL_PROVENANCE_KEY",
     "Message",
     "ModelProvenance",
+    "ToolResultView",
     "is_own_model_message",
     "model_provenance",
     "read_model_provenance",
-    "split_thinking",
+    "tool_result_view",
 ]

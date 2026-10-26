@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import threading
 import time
@@ -15,8 +16,8 @@ import nio
 import pytest
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
@@ -46,6 +47,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -55,7 +57,8 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_hooks import BackgroundToolApprovalDenied, build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.agent_tool_helpers import tool_policy
 from tests.authorization_helpers import (
@@ -81,7 +84,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.execution_authority import JobTool
-    from mindroom.tool_system.invocation import ToolOutcome
 
 _SESSION_ID = "!room:localhost:$resolved-thread"
 
@@ -285,6 +287,8 @@ async def _run_echo_through_middleware(toolkit: Toolkit, registry: HookRegistry)
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
+        config=None,
+        runtime_paths=None,
     )
     return await execute_tool_call(
         adapt_function(_first_function(toolkit)),
@@ -502,6 +506,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["error_type"] == "ValueError"
     assert isinstance(records[0]["timing"]["result_ready_ms"], float)
     assert isinstance(records[0]["timing"]["tool_body_ms"], float)
+    assert records[0]["duration_ms"] == records[0]["timing"]["result_ready_ms"]
     assert records[0]["arguments"] == {
         "api_key": "***redacted***",
         "nested": [{"refresh_token": "***redacted***"}],
@@ -641,7 +646,13 @@ async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
 @pytest.mark.asyncio
 async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
     """A Stop that commits while the start record is written stops a synchronous tool the cancellation cannot reach."""
-    middleware = build_tool_hook_middleware(HookRegistry.empty(), agent_name="code")
+    middleware = build_tool_hook_middleware(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=None,
+        config=None,
+        runtime_paths=None,
+    )
     ran: list[str] = []
 
     class _StoppedRecorder:
@@ -827,6 +838,49 @@ async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_call_s_record_and_after_hooks_read_one_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored row's duration and ready time and the after-call hooks' duration are the time the result was ready."""
+    durations: list[float] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def allow(_ctx: ToolBeforeCallContext) -> None:
+        return None
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def observe(ctx: ToolAfterCallContext) -> None:
+        durations.append(ctx.duration_ms)
+
+    # Each clock reading is one second after the last, so every measured phase is a whole number of seconds.
+    ticks = itertools.count()
+    monkeypatch.setattr(tool_hooks, "time", SimpleNamespace(perf_counter=lambda: float(next(ticks))))
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [allow, observe])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+
+    async def next_func(**kwargs: object) -> str:
+        return str(kwargs["path"])
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        assert await bridge("read_file", next_func, {"path": "notes.txt"}) == "notes.txt"
+
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    timing = record["timing"]
+    assert set(timing) == {"before_hooks_ms", "tool_body_ms", "result_ready_ms"}
+    assert 0 < timing["before_hooks_ms"] < timing["result_ready_ms"]
+    assert 0 < timing["tool_body_ms"] < timing["result_ready_ms"]
+    assert durations == [record["duration_ms"]] == [timing["result_ready_ms"]]
+
+
+@pytest.mark.asyncio
 async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Path) -> None:
     """Debug logging failures should not turn successful tools into failed calls."""
     seen: list[object] = []
@@ -857,6 +911,58 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 
     assert result == {"echo": "notes.txt"}
     assert seen == [{"echo": "notes.txt"}]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_as_its_text(tmp_path: Path) -> None:
+    """The caller receives the failed outcome, so the call fails; the observers read its text, as a declined call's.
+
+    The after-call hooks and the tool-call log receive the text, as they did when the tool returned it as an ordinary
+    value. The reply's record of the call receives the outcome itself, so it keeps that the call failed.
+    """
+    seen: list[tuple[object, BaseException | None, bool]] = []
+    finished: list[object] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after_call(ctx: ToolAfterCallContext) -> None:
+        seen.append((ctx.result, ctx.error, ctx.blocked))
+
+    class _Recorder:
+        async def started(self, tool_name: str, _args: Mapping[str, object]) -> str:
+            return tool_name
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: Mapping[str, object], result: object) -> None:
+            finished.append(result)
+
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [after_call])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    refusal = ToolOutcome(
+        content="❌ Scheduled call `task-1` did not run: its approval was already used.",
+        is_error=True,
+    )
+
+    async def next_func(**_kwargs: object) -> ToolOutcome:
+        return refusal
+
+    with (
+        tool_runtime_context(runtime_context),
+        tool_execution_identity(_execution_identity()),
+        recording_tool_calls(_Recorder()),
+    ):
+        result = await bridge("run_scheduled_call", next_func, {"task_id": "task-1"})
+
+    assert result is refusal
+    assert seen == [(refusal.content, None, False)]
+    assert finished == [refusal]
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert record["result"] == refusal.content
 
 
 @pytest.mark.asyncio
@@ -1591,7 +1697,7 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_ru
 
 @pytest.mark.asyncio
 async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> None:
-    """A declined before-call hook should return a synthetic result and not call the real tool."""
+    """A declined call answers with a failed outcome and never runs; the after-call hooks receive its text."""
     after_seen: list[tuple[bool, object | None, BaseException | None]] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -1614,14 +1720,60 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
     with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
         result = await bridge("read_file", next_func, {"path": "secret.txt"})
 
-    assert next_func.await_count == 0
-    assert result == (
+    declined = (
         "[TOOL CALL DECLINED]\n"
         "Tool: read_file\n"
         "Reason: secret paths are blocked\n\n"
         "Adjust your approach — try a different tool or different arguments."
     )
-    assert after_seen == [(True, result, None)]
+    assert next_func.await_count == 0
+    assert result == ToolOutcome(content=declined, is_error=True)
+    assert after_seen == [(True, declined, None)]
+
+
+@pytest.mark.asyncio
+async def test_a_denied_background_script_call_reaches_the_after_call_hooks_as_a_declined_call(tmp_path: Path) -> None:
+    """The script gets the typed denial; the after-call hooks receive the decline text a plugin's decline gives."""
+    after_seen: list[tuple[bool, object | None, BaseException | None]] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        after_seen.append((ctx.blocked, ctx.result, ctx.error))
+
+    async def deny(_origin: object, _tool_name: str, _arguments: dict[str, object]) -> ToolApprovalDecision:
+        return ToolApprovalDecision(approved=False, reason="Not tonight.")
+
+    origin = BackgroundScriptToolOrigin(
+        run_id="run-1",
+        call_id="call-1",
+        requester_id="@alice:localhost",
+        toolkit_name="files",
+        function_name="read_file",
+    )
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [after])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        origin=origin,
+        approval_gate=deny,
+    )
+
+    next_func = AsyncMock(return_value="should not run")
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert next_func.await_count == 0
+    assert result == BackgroundToolApprovalDenied(reason="Not tonight.")
+    assert after_seen == [
+        (
+            True,
+            "[TOOL CALL DECLINED]\n"
+            "Tool: read_file\n"
+            "Reason: Not tonight.\n\n"
+            "Adjust your approach — try a different tool or different arguments.",
+            None,
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1806,8 +1958,10 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             runtime_paths_for(config),
             execution_identity=execution_identity,
             hook_registry=bot.hook_registry,
+            knowledge=None,
+            active_model_name=None,
         )
-        echo = prepare_run_tools(build.spec).functions["echo"]
+        echo = build.spec.functions["echo"]
 
         with tool_runtime_context(tool_context), tool_execution_identity(execution_identity):
             result = await execute_tool_call(
@@ -2042,9 +2196,11 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             runtime_paths_for(config),
             execution_identity=None,
             hook_registry=registry,
+            knowledge=None,
+            active_model_name=None,
         )
 
-        echo = prepare_run_tools(build.spec).functions["echo"]
+        echo = build.spec.functions["echo"]
         outcome = await execute_tool_call(
             echo,
             {"text": "hello"},

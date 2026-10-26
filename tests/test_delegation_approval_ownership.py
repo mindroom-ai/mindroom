@@ -12,9 +12,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.calculator import CalculatorTools
-from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.recovery import read_child_run
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.llm.runs import RunRecord, RunRequirement, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt

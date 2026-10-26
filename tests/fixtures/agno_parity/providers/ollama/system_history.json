@@ -9,12 +9,10 @@
       },
       {
         "content": "What should I pack for Paris tomorrow?",
-        "from_history": true,
         "role": "user"
       },
       {
         "content": "Pack a light rain jacket and comfortable shoes.",
-        "from_history": true,
         "metrics": {
           "input_tokens": 42,
           "output_tokens": 12,
@@ -32,8 +30,7 @@
             "provider": "Ollama"
           }
         },
-        "role": "assistant",
-        "stop_after_tool_call": false
+        "role": "assistant"
       },
       {
         "content": "And for the evening?",
@@ -45,24 +42,21 @@
       "id": "qwen3.8:27b",
       "provider": "ollama"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
-    "stream": true,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "Add a warm layer.",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "qwen3.8:27b",
           "provider": "Ollama"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
@@ -75,7 +69,7 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {

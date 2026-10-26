@@ -141,7 +141,7 @@ def mock_config() -> Config:
             teams={
                 "ops": TeamConfig(display_name="Ops Team", role="Operations team", agents=["research", "analyst"]),
             },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
     )
     persist_entity_accounts(
@@ -300,6 +300,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("research"), _mid("email_assistant")],
+            timezone="UTC",
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -329,6 +330,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -352,6 +354,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("finance")],
+            timezone="UTC",
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -364,8 +367,8 @@ class TestParseWorkflowSchedule:
         monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
     ) -> None:
-        """The parse prompt must carry the user's timezone and local wall-clock time."""
-        mock_config.timezone = "America/Los_Angeles"
+        """The parse prompt must carry the requesting agent's timezone and local wall-clock time, not the global one."""
+        mock_config.timezone = "UTC"
         model = _parser_model(
             ScheduledWorkflow(
                 schedule_type="once",
@@ -382,6 +385,7 @@ class TestParseWorkflowSchedule:
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
             current_time=datetime(2026, 7, 3, 16, 0, tzinfo=UTC),
+            timezone="America/Los_Angeles",
         )
 
         prompt = _parse_prompt(model)
@@ -411,6 +415,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         prompt = _parse_prompt(model)
@@ -442,6 +447,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         assert isinstance(result, _WorkflowParseError)
@@ -467,6 +473,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         assert isinstance(result, _WorkflowParseError)
@@ -485,6 +492,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         assert isinstance(result, _WorkflowParseError)
@@ -504,6 +512,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         assert result == _WorkflowParseError(
@@ -522,6 +531,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[],
+            timezone="UTC",
         )
 
         assert isinstance(result, _WorkflowParseError)
@@ -555,6 +565,7 @@ class TestParseWorkflowSchedule:
                 _mid("finance"),
                 _mid("analyst"),
             ],
+            timezone="UTC",
         )
 
         prompt = _parse_prompt(model)
@@ -583,6 +594,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -603,7 +615,7 @@ class TestExecuteScheduledWorkflow:
                     "research": AgentConfig(display_name="Research"),
                     "analyst": AgentConfig(display_name="Analyst"),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         )
         persist_entity_accounts(
@@ -664,7 +676,7 @@ class TestExecuteScheduledWorkflow:
                     "research": AgentConfig(display_name="Research"),
                     "analyst": AgentConfig(display_name="Analyst"),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         )
         persist_entity_accounts(

@@ -19,7 +19,7 @@ from mindroom.constants import llm_request_log_dir
 from mindroom.llm.provider import ReportedUsage, TurnCompleted
 from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
-from mindroom.model_usage import context_input_tokens_from_counts
+from mindroom.model_usage import metrics_context_tokens
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -28,20 +28,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.models import DebugConfig
-    from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
+    from mindroom.llm.provider import ModelProvider, ModelRequest, StopReason, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
 __all__ = ["RequestLog", "logged_stream"]
 
 logger = get_logger(__name__)
 
-# Message fields the request record leaves out.
-# TODO(simplify): the record leaves out `reasoning_content`, which the DeepSeek wire sends back and the Claude wire
-# replays as a signed thinking block, so their records omit part of the request. Keep it in the record. Operators
-# reading the request log would notice.
-_NON_API_MESSAGE_FIELDS = frozenset(
-    {"id", "reasoning_content", "tool_name", "tool_args", "tool_call_error", "stop_after_tool_call", "from_history"},
-)
+# Message fields the request record leaves out: none of them reaches any wire.
+_NON_API_MESSAGE_FIELDS = frozenset({"id", "tool_args", "stop_after_tool_call", "from_history"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -125,6 +120,7 @@ def _log_usage(
     log: RequestLog,
     usage: MessageMetrics | None,
     served_provider: str | None,
+    stop_reason: StopReason | None,
     context: Mapping[str, Any],
 ) -> None:
     identity = inner.identity
@@ -136,26 +132,28 @@ def _log_usage(
     }
     if served_provider is not None:
         payload["served_provider"] = served_provider
+    if stop_reason is not None:
+        payload["stop_reason"] = stop_reason
     payload |= _attribution(context)
     if usage is not None:
         counts = usage.tokens
-        context_tokens = context_input_tokens_from_counts(
-            input_tokens=counts.input_tokens,
-            cache_read_tokens=counts.cache_read_tokens,
-            cache_write_tokens=counts.cache_write_tokens,
+        # The context fields describe what the request held, which after a Claude native compaction is only the final
+        # iteration; the counters bill every iteration.
+        held = metrics_context_tokens(
+            usage,
             provider=identity.provider,
             configured_provider=log.configured_provider,
             model_id=identity.id,
         )
         payload |= {
             "input_tokens": counts.input_tokens,
-            "context_input_tokens": context_tokens,
+            "context_input_tokens": held.tokens if held is not None else None,
             "output_tokens": counts.output_tokens,
             "reasoning_tokens": counts.reasoning_tokens,
             "cache_read_tokens": counts.cache_read_tokens,
             "cache_write_tokens": counts.cache_write_tokens,
-            "uncached_input_tokens": context_tokens - counts.cache_read_tokens if context_tokens is not None else None,
-            "cache_read_ratio": round(counts.cache_read_tokens / context_tokens, 6) if context_tokens else 0.0,
+            "uncached_input_tokens": held.uncached_input_tokens if held is not None else None,
+            "cache_read_ratio": round(held.cache_read_input_tokens / held.tokens, 6) if held is not None else 0.0,
         }
     logger.info("LLM usage", **payload)
 
@@ -190,6 +188,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
             log_path = None
     reported = ReportedUsage()
     served_provider: str | None = None
+    stop_reason: StopReason | None = None
     try:
         events = inner.stream(request)
         async with closing_async_stream(events):
@@ -197,11 +196,12 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                 reported.observe(event)
                 if isinstance(event, TurnCompleted):
                     served_provider = _served_provider(event.message.provider_data)
+                    stop_reason = event.stop_reason
                 yield event
     finally:
         usage = reported.received
         try:
-            _log_usage(inner, log, usage, served_provider, context)
+            _log_usage(inner, log, usage, served_provider, stop_reason, context)
             if log_path is not None and usage is not None:
                 response: dict[str, Any] = {
                     "timestamp": datetime.now().astimezone().isoformat(),

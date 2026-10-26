@@ -14,11 +14,10 @@ from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.session import CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
-from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test
 from tests.minimal_agent_fixtures import cli_window, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _toolkit
 
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.tool_system.tool_access import ToolKey
 
 # The commands here never dial the CLI routes; they call the owner directly.
@@ -36,9 +36,18 @@ async def _run_shell_command(command: str) -> str:
     return f"ran {command}"
 
 
-def _function(name: str, *, requires_confirmation: bool | None = None) -> ToolFunction:
+def _function(
+    name: str,
+    toolkit: str,
+    *,
+    authored: str | None = None,
+    requires_confirmation: bool | None = None,
+) -> ToolFunction:
+    """Return a function of the registered tool ``toolkit``, which ``authored`` brings in when given."""
     return ToolFunction(
         name=name,
+        toolkit=authored or toolkit,
+        registered_toolkit=toolkit,
         description=None,
         parameters={"type": "object", "properties": {}, "required": []},
         requires_confirmation=requires_confirmation,
@@ -46,23 +55,29 @@ def _function(name: str, *, requires_confirmation: bool | None = None) -> ToolFu
     )
 
 
-def _toolkits(*, requires_confirmation: bool | None = None) -> tuple[AdaptedToolkit, ...]:
+def _toolkits(
+    *,
+    requires_confirmation: bool | None = None,
+    shell_owner: str = "shell",
+    authored: str | None = None,
+) -> tuple[AdaptedToolkit, ...]:
+    shell = _function("run_shell_command", shell_owner, authored=authored, requires_confirmation=requires_confirmation)
     return (
-        AdaptedToolkit(name="calculator", functions=(_function("add"),), instructions=None),
-        AdaptedToolkit(
-            name="shell",
-            functions=(_function("run_shell_command", requires_confirmation=requires_confirmation),),
-            instructions=None,
-        ),
+        AdaptedToolkit(name="calculator", functions=(_function("add", "calculator"),), instructions=None),
+        AdaptedToolkit(name="shell", functions=(shell,), instructions=None),
     )
 
 
 @pytest.mark.asyncio
-async def test_only_the_shell_command_is_windowed_and_runs_as_before_without_a_cli() -> None:
-    """The offered shell command gets the window wrapper, which calls the command directly outside a CLI."""
-    toolkits = _toolkits()
+@pytest.mark.parametrize("authored", [None, "openclaw_compat"], ids=["shell", "preset-shell"])
+async def test_only_the_shell_command_is_windowed_and_runs_as_before_without_a_cli(authored: str | None) -> None:
+    """The offered shell command gets the window wrapper, which calls the command directly outside a CLI.
 
-    windowed = wrap_native_shell_window(toolkits, {"add": "calculator", "run_shell_command": "shell"})
+    The shell tool's command is windowed whether the agent lists `shell` or a preset brings it in.
+    """
+    toolkits = _toolkits(authored=authored)
+
+    windowed = wrap_native_shell_window(toolkits)
 
     assert windowed is not None
     assert windowed[0] == toolkits[0]
@@ -74,9 +89,9 @@ async def test_only_the_shell_command_is_windowed_and_runs_as_before_without_a_c
 
 def test_a_gated_or_foreign_shell_command_stays_unwindowed() -> None:
     """An approved command resumes without this response's CLI, and only the shell tool's own command is windowed."""
-    assert wrap_native_shell_window(_toolkits(requires_confirmation=True), {"run_shell_command": "shell"}) is None
-    assert wrap_native_shell_window(_toolkits(), {"run_shell_command": "plugin"}) is None
-    assert wrap_native_shell_window(_toolkits()[:1], {"add": "calculator"}) is None
+    assert wrap_native_shell_window(_toolkits(requires_confirmation=True)) is None
+    assert wrap_native_shell_window(_toolkits(shell_owner="plugin")) is None
+    assert wrap_native_shell_window(_toolkits()[:1]) is None
 
 
 async def _allow(_key: ToolKey, _arguments: dict[str, object]) -> None:
@@ -88,11 +103,11 @@ async def _windowed_shell(
     run_shell_command: Callable[..., Awaitable[str]],
 ) -> tuple[ToolFunction, LiveTurnTools]:
     """Return the windowed shell command and a response CLI owner whose catalog offers that command."""
-    windowed = wrap_native_shell_window((_toolkit("shell", run_shell_command),), {"run_shell_command": "shell"})
+    windowed = wrap_native_shell_window((_toolkit("shell", run_shell_command),))
     assert windowed is not None
     catalog = await _catalog(tmp_path, windowed)
     catalog.store = create_state_storage("helper", tmp_path)
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=_allow,

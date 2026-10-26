@@ -7,6 +7,7 @@ import gzip
 import inspect
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -189,6 +190,63 @@ def test_export_tools_metadata_json() -> None:
         for field in required_fields:
             assert field in first_tool, f"Missing required field: {field}"
         assert "managed_init_args" not in first_tool
+
+
+_DOCS_ROOT = Path(__file__).parent.parent / "docs"
+
+
+def _docs_page(url_path: str) -> Path:
+    """Return the Markdown page the docs site serves at ``url_path``."""
+    route = url_path.strip("/")
+    page = _DOCS_ROOT / f"{route}.md"
+    return page if route and page.is_file() else _DOCS_ROOT / route / "index.md"
+
+
+def _heading_anchors(page: Path) -> set[str]:
+    """Return the anchors the docs site gives a page's headings: an explicit ``{#id}``, else the slugged text."""
+    anchors: set[str] = set()
+    in_fence = False
+    for line in page.read_text(encoding="utf-8").splitlines():
+        if line.startswith(("```", "~~~")):
+            in_fence = not in_fence
+        if in_fence or (heading := re.match(r"#{1,6} (.+)", line)) is None:
+            continue
+        text = heading.group(1)
+        if (explicit := re.search(r"\{#([\w-]+)\}\s*$", text)) is not None:
+            anchors.add(explicit.group(1))
+            continue
+        # An inline link keeps its text; the slug keeps word characters, spaces, and hyphens.
+        text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+        anchors.add(re.sub(r"[-\s]+", "-", re.sub(r"[^\w\s-]", "", text).strip().lower()))
+    return anchors
+
+
+def test_every_builtin_tool_links_an_existing_heading_of_mindroom_docs() -> None:
+    """Every built-in tool's dashboard docs button opens MindRoom's docs, on a page and heading the docs have."""
+    _restore_builtin_tool_metadata_state()
+    tools = export_tools_metadata()
+
+    assert tools
+    unlinked = sorted(tool["name"] for tool in tools if not tool.get("docs_url"))
+    assert not unlinked, f"Built-in tools without a MindRoom docs link: {unlinked}"
+    for name, link in sorted((tool["name"], urlsplit(tool["docs_url"])) for tool in tools):
+        assert link.netloc == "docs.mindroom.chat", f"{name} links to {link.geturl()}, outside MindRoom's docs"
+        page = _docs_page(link.path)
+        assert page.is_file(), f"{name} links to {link.geturl()}, which has no page"
+        if link.fragment:
+            assert link.fragment in _heading_anchors(page), f"{name} links to {link.geturl()}, which has no heading"
+
+
+def test_heading_anchors_follow_the_docs_slugs(tmp_path: Path) -> None:
+    """Anchors match the docs site's: code and links keep their text, spaces become hyphens, fences hold none."""
+    page = tmp_path / "page.md"
+    page.write_text(
+        "# [`shell`]\n\n## MindRoom Update Awareness\n\n### Anything at all {#custom-id}\n\n"
+        "```bash\n# Not a heading\n```\n\n#### [`google_drive`](https://example.com) setup\n",
+        encoding="utf-8",
+    )
+
+    assert _heading_anchors(page) == {"shell", "mindroom-update-awareness", "custom-id", "google_drive-setup"}
 
 
 def test_oauth_connections_requires_live_room_context() -> None:

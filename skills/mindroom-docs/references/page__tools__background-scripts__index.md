@@ -108,6 +108,7 @@ print(result, flush=True)
 ```
 
 `MindRoomTools.call(toolkit_name, function_name, **arguments)` blocks until the call finishes and returns a JSON-compatible value.
+A tool that produces media such as an image returns an object with its text under `content` and an `attachments` list that gives each medium's `kind`, `mime_type`, and `url` when it has one, without the media's bytes.
 Arguments must have an unambiguous strict-JSON representation.
 A result larger than about 64 KiB fails the call with kind `result_too_large`.
 Calls within one run execute one at a time, in order.
@@ -115,6 +116,7 @@ The SDK retries transient failures automatically without repeating the side effe
 
 Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
 A denied approval raises a non-retryable error with kind `approval_denied`.
+A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
 
 ## Complete Watcher Example

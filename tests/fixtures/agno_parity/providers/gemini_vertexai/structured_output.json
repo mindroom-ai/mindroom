@@ -21,8 +21,7 @@
       "id": "gemini-3.8-flash",
       "provider": "google"
     },
-    "portable_replay": null,
-    "response_format": {
+    "output_schema": {
       "json_schema": {
         "description": "Structured output for routing decisions.",
         "properties": {
@@ -44,32 +43,29 @@
         "title": "_RoutingSuggestion",
         "type": "object"
       },
-      "model": "mindroom.routing:_RoutingSuggestion",
-      "type": "pydantic"
+      "model": "mindroom.routing:_RoutingSuggestion"
     },
-    "stream": false,
+    "portable_replay": null,
     "tool_choice": null,
     "tools": []
   },
   "parsed": {
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-      "from_history": false,
       "provider_data": {
         "mindroom_model": {
           "id": "gemini-3.8-flash",
           "provider": "Google"
         }
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
@@ -125,38 +121,42 @@
       "content-type": "application/json"
     },
     "method": "POST",
-    "url": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/us-central1/publishers/google/models/gemini-3.8-flash:generateContent"
+    "url": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/us-central1/publishers/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "candidates": [
-        {
-          "content": {
-            "parts": [
-              {
-                "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The"
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The"
+                  },
+                  {
+                    "text": " message asks about packing for a trip.\"}"
+                  }
+                ],
+                "role": "model"
               },
-              {
-                "text": " message asks about packing for a trip.\"}"
-              }
-            ],
-            "role": "model"
-          },
-          "finishReason": "STOP",
-          "index": 0
+              "finishReason": "STOP",
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 12,
+            "promptTokenCount": 42,
+            "totalTokenCount": 54
+          }
         }
-      ],
-      "modelVersion": "gemini-3.8-flash",
-      "responseId": "parity-response",
-      "usageMetadata": {
-        "candidatesTokenCount": 12,
-        "promptTokenCount": 42,
-        "totalTokenCount": 54
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output"

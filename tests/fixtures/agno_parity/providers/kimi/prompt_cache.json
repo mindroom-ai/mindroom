@@ -20,12 +20,12 @@
       "id": "k3",
       "provider": "kimi"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -49,9 +49,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -71,14 +73,14 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -87,8 +89,7 @@
         },
         "system_fingerprint": "fp_parity"
       },
-      "role": "assistant",
-      "stop_after_tool_call": false
+      "role": "assistant"
     },
     "metrics": {
       "cache_read_tokens": 30,
@@ -97,10 +98,12 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "end"
   },
   "request": {
     "body": {
+      "model": "k3",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -111,9 +114,7 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "k3",
       "prompt_cache_key": "parity-cache-key",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

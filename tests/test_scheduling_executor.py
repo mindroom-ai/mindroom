@@ -52,7 +52,7 @@ def _agent_config(tmp_path: Path) -> Config:
     config = bind_runtime_paths(
         Config(
             agents={"research": AgentConfig(display_name="Research")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         test_runtime_paths(tmp_path),
     )
@@ -343,14 +343,19 @@ async def test_typed_delivery_failure_yields_failure_and_notice(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_delivery_exception_yields_failure_without_raising(tmp_path: Path) -> None:
-    """Send errors, including a failing notice send, never escape the executor."""
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [(RuntimeError("boom"), "boom"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
+)
+async def test_delivery_exception_yields_failure_without_raising(tmp_path: Path, error: Exception, text: str) -> None:
+    """Send errors, including a failing notice send, never escape the executor; a failure without text names its type."""
     config = _config(tmp_path)
     workflow = _workflow("Check the queue depth")
 
     with patch(
         "mindroom.matrix.client_delivery.send_message_outcome",
-        new=AsyncMock(side_effect=RuntimeError("boom")),
+        new=AsyncMock(side_effect=error),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
             AsyncMock(),
@@ -360,8 +365,7 @@ async def test_delivery_exception_yields_failure_without_raising(tmp_path: Path)
             _conversation_reader(latest_thread_event_id="$latest"),
         )
 
-    assert outcome.status == "failed"
-    assert outcome.failure_reason == "boom"
+    assert (outcome.status, outcome.failure_reason) == ("failed", text)
     assert mock_send.await_count == 2  # original send plus the (also failing) notice
 
 

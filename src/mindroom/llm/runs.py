@@ -7,22 +7,27 @@ decode without migration; keys the records do not model are ignored on read.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
-from datetime import UTC, datetime
 from enum import StrEnum
 from time import time
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from mindroom.llm.events import ReportedCall
 from mindroom.llm.messages import Message
-from mindroom.llm.usage import RunMetrics, ToolCallMetrics
+from mindroom.llm.usage import RunMetrics
 from mindroom.redaction import redact_sensitive_text
 
 
 def _new_id() -> str:
     return str(uuid4())
+
+
+def _stored_call_id(stored: Mapping[str, Any]) -> str:
+    """Return the call id of an entry stored without one, derived from what it stores so every read agrees."""
+    return str(uuid5(NAMESPACE_URL, json.dumps(["mindroom-stored-tool-call", dict(stored)], sort_keys=True)))
 
 
 def _now() -> int:
@@ -54,18 +59,13 @@ _STORED_TOOL_KEYS = {"is_error": "tool_call_error", "stop_after_call": "stop_aft
 class ToolExecution:
     """One tool call the model requested, with its outcome or pause state."""
 
-    # TODO(simplify): The call's id and name are optional though every writer sets them, so readers guard both. Make
-    # them required, the legacy requirement reader supplying values. Stored data would notice: a tool execution read
-    # without an id, such as that reader's placeholder, writes an id back instead of null.
-    tool_call_id: str | None = None
-    tool_name: str | None = None
+    tool_call_id: str
+    tool_name: str
     tool_args: dict[str, Any] | None = None
     is_error: bool | None = None
     result: str | None = None
-    metrics: ToolCallMetrics | None = None
     child_run_id: str | None = None
     stop_after_call: bool = False
-    created_at: int = field(default_factory=_now)
     requires_confirmation: bool | None = None
     confirmed: bool | None = None
     confirmation_note: str | None = None
@@ -84,17 +84,44 @@ class ToolExecution:
         return ReportedCall(self.tool_call_id, self.tool_name, self.tool_args, self.result, self.is_error)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: every field, None included, under its stored key, kept as main writes it."""
-        values = asdict(self)
-        values["metrics"] = self.metrics.to_dict() if self.metrics is not None else None
-        return {_STORED_TOOL_KEYS.get(name, name): value for name, value in values.items()}
+        """Return the stored dict: every field, None included, under its stored key."""
+        # TODO(simplify): every field is stored, None defaults included. Store only the fields that hold a value,
+        # with the storage redesign (#3107, #3095). Stored data would change: new rows would omit unset fields.
+        return {_STORED_TOOL_KEYS.get(name, name): value for name, value in asdict(self).items()}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
-        """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default."""
+        """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default.
+
+        A call stored without an id reads with one derived from what it stores, the same on every read.
+        """
+        # LEGACY_COMPAT: Tool executions and run requirements carry Agno's per-call timing and timestamps.
+        # Legacy format: stored tool executions hold ``metrics`` (``start_time``, ``end_time``, ``duration``) and
+        # ``created_at``, and stored requirements hold an ISO 8601 ``created_at``, in run rows, summary-row segments,
+        # delegation state, and CLI approval payloads; no MindRoom code read them.
+        # Last legacy release: v2026.10.542, which wrote them as every earlier release did; replacement: v2026.10.543,
+        # whose tool executions and requirements store neither.
+        # Handling: the keys are ignored on read and never written again, so a rewritten row drops them.
+        # Coverage: tests/llm/test_codecs.py::test_tool_execution_round_trips_agno_dict_minus_dropped_keys,
+        #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
         values = {_TOOL_FIELDS[key]: value for key, value in data.items() if key in _TOOL_FIELDS}
-        metrics = values.pop("metrics", None)
-        return cls(**values, metrics=ToolCallMetrics.from_dict(metrics) if metrics else None)
+        # LEGACY_COMPAT: Tool executions stored without a call id.
+        # Legacy format: a stored tool execution whose ``tool_call_id`` is null, empty, or absent. Agno 2.4.7 stored
+        # Ollama's calls so, since Ollama sends no call ids; the ``unknown`` placeholder that ``RunRequirement``
+        # reads for a requirement stored without its tool execution was written back so too.
+        # Last legacy release: v2026.4.35, the last release on Agno 2.4.7; v2026.4.36 moved to Agno 2.5.13, which
+        # gives an id-less call a uuid4 id. For the ``unknown`` placeholder, v2026.10.513, whose typed model wrote it
+        # back with a null id; the next release writes its derived id. The requirements it stands in for, stored
+        # without a tool execution, are unversioned external input.
+        # Handling: the execution reads with an id derived from its stored keys and values, so every read of its
+        # row gives the same id and its readers need no missing-id case; two entries storing exactly the same keys
+        # and values share it. A row written back stores that id, and every other key reads as stored.
+        # Coverage: tests/llm/test_codecs.py::test_a_tool_execution_stored_without_a_call_id_reads_with_the_same_id,
+        #   tests/llm/test_codecs.py::test_a_run_whose_tool_executions_have_no_call_ids_still_loads,
+        #   tests/llm/test_codecs.py::test_run_requirement_reads_rows_agno_read_leniently
+        if not values.get("tool_call_id"):
+            values["tool_call_id"] = _stored_call_id(data)
+        return cls(**values)
 
 
 # Each tool-execution field by its stored key.
@@ -114,7 +141,6 @@ class RunRequirement:
 
     tool_execution: ToolExecution
     id: str = field(default_factory=_new_id, kw_only=True)
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC), kw_only=True)
     confirmation: bool | None = field(default=None, kw_only=True)
     confirmation_note: str | None = field(default=None, kw_only=True)
     external_execution_result: str | None = field(default=None, kw_only=True)
@@ -176,10 +202,9 @@ class RunRequirement:
         self.tool_execution.result = result
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict; ``created_at`` is ISO 8601 and None values are dropped."""
+        """Return the stored dict; None values are dropped."""
         values = {
             "id": self.id,
-            "created_at": self.created_at.isoformat(),
             "confirmation": self.confirmation,
             "confirmation_note": self.confirmation_note,
             "external_execution_result": self.external_execution_result,
@@ -194,24 +219,24 @@ class RunRequirement:
     def from_dict(cls, data: Mapping[str, Any]) -> RunRequirement:
         """Rebuild from a stored dict, ignoring keys this type does not model, such as older rows' user-input keys.
 
-        A missing tool execution becomes an ``unknown`` placeholder, an unreadable ``created_at`` becomes now, and a
+        A missing tool execution becomes an ``unknown`` placeholder with a call id derived from the entry, and a
         decision recorded only on the requirement reaches its tool execution, which is what a resume runs from.
         """
-        # LEGACY_COMPAT: Run requirements stored without a tool execution or with an unreadable timestamp.
-        # Legacy format: ``requirements`` entries lacking ``tool_execution``, or whose ``created_at`` is not
-        # ISO 8601, which Agno's reader accepted as legacy data.
+        # LEGACY_COMPAT: Run requirements stored without a tool execution.
+        # Legacy format: ``requirements`` entries lacking ``tool_execution``, which Agno's reader accepted as legacy
+        # data.
         # Last legacy release: unversioned external input; no MindRoom release is known to write them, and
-        # agno 3.0.9 always wrote both.
-        # Handling: the entry reads with an ``unknown`` placeholder tool execution and the current time, as
-        # Agno's reader did, so one such entry never fails the load of its session.
+        # agno 3.0.9 always wrote one.
+        # Handling: the entry reads with an ``unknown`` placeholder tool execution, under a call id derived from the
+        # entry's stored keys, as Agno's reader did apart from the id, so one such entry never fails the load of its
+        # session and every read gives its placeholder the same id.
         # Coverage: tests/llm/test_codecs.py::test_run_requirement_reads_rows_agno_read_leniently
         tool_data = data.get("tool_execution")
         requirement = cls(
             ToolExecution.from_dict(tool_data)
             if isinstance(tool_data, Mapping)
-            else ToolExecution(tool_name="unknown", tool_args={}),
+            else ToolExecution(tool_call_id=_stored_call_id(data), tool_name="unknown", tool_args={}),
             id=identifier if isinstance(identifier := data.get("id"), str) else _new_id(),
-            created_at=_datetime_or_now(data.get("created_at")),
             confirmation=data.get("confirmation"),
             confirmation_note=data.get("confirmation_note"),
             external_execution_result=data.get("external_execution_result"),
@@ -227,15 +252,6 @@ class RunRequirement:
         if requirement.external_execution_result is not None and execution.result is None:
             execution.result = requirement.external_execution_result
         return requirement
-
-
-def _datetime_or_now(value: object) -> datetime:
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            pass
-    return datetime.now(UTC)
 
 
 @dataclass(kw_only=True)
@@ -384,14 +400,13 @@ class TeamRunRecord(_RunRecordCommon):
     """
 
     team_id: str | None
-    team_name: str | None = None
     member_responses: list[RunRecord] = field(default_factory=list)
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored ``run_data`` dict, keys in stored order; ``member_responses`` is always present."""
         return {
-            **self._scalars_dict({"team_id": self.team_id, "team_name": self.team_name}),
+            **self._scalars_dict({"team_id": self.team_id}),
             **self._metrics_dict(),
             "status": self.status.value,
             **self._history_dict(),
@@ -403,9 +418,16 @@ class TeamRunRecord(_RunRecordCommon):
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> TeamRunRecord:
         """Rebuild from a stored ``run_data`` dict, ignoring keys this record does not model."""
+        # LEGACY_COMPAT: Team run dicts carry the ``team_name`` label of their members.
+        # Legacy format: team ``run_data`` rows hold ``team_name``, ``Team-`` followed by the requested member names
+        # joined by ``-``; no MindRoom code read it.
+        # Last legacy release: v2026.10.506, which wrote it as every earlier release did; replacement: v2026.10.507,
+        # whose team runs store no ``team_name``.
+        # Handling: the key is ignored on read and never written again, so a rewritten row drops it.
+        # Coverage: tests/llm/test_codecs.py::test_team_run_record_round_trips_agno_dict_minus_dropped_keys,
+        #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
         return cls(
             team_id=data.get("team_id"),
-            team_name=data.get("team_name"),
             member_responses=[RunRecord.from_dict(member) for member in data.get("member_responses") or []],
             **_common_from_dict(data),
         )

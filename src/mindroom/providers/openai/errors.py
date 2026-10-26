@@ -9,24 +9,25 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
-import httpx
-
+from mindroom.failure_text import failure_text
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.providers.errors import classify_provider_error, provider_failure
 
 __all__ = [
-    "error_body_error",
     "missing_api_key_error",
     "provider_error",
     "sdk_failures",
 ]
 
 
-def sdk_failures() -> tuple[type[Exception], ...]:
-    """Return the exception types adapters map with ``provider_error``; resolved late to keep the SDK unloaded."""
+def sdk_failures() -> type[Exception]:
+    """Return the exception type adapters map with ``provider_error``; resolved late to keep the SDK unloaded.
+
+    The SDK raises every failure as its own error, a transport failure in a request or a stream included.
+    """
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
-    return (openai.OpenAIError, httpx.TransportError)
+    return openai.OpenAIError
 
 
 def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
@@ -55,14 +56,9 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
         return classify_provider_error(message, provider=provider, status_code=error.status_code, code=code)
     if isinstance(error, openai.APIError):
         # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.
-        return error_body_error(error.body, provider=provider, default_message=error.message)
-    return ProviderError(str(error) or type(error).__name__, provider=provider)
-
-
-def error_body_error(body: object, *, provider: str, default_message: str) -> ProviderError:
-    """Return the normalized error for an ``error`` object a server sent in place of its reply, after an HTTP 200."""
-    message, code, error_type = _error_fields(body)
-    return classify_provider_error(message or default_message, provider=provider, code=code, error_type=error_type)
+        message, code, error_type = _error_fields(error.body)
+        return classify_provider_error(message or error.message, provider=provider, code=code, error_type=error_type)
+    return ProviderError(failure_text(error), provider=provider)
 
 
 def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:

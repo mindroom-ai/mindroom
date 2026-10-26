@@ -24,6 +24,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger, setup_subprocess_logging
 from mindroom.matrix_rtc.audio_protocol import AudioProtocolError, decode_key, encode_frame, read_frame
 from mindroom.matrix_rtc.focus import SfuGrant
@@ -104,7 +105,7 @@ class _AudioChild:
             try:
                 await operation
             except Exception as error:
-                self._send({"type": "Error", "id": request_id, "message": str(error) or type(error).__name__})
+                self._send({"type": "Error", "id": request_id, "message": failure_text(error)})
             else:
                 self._send({"type": "Ok", "id": request_id})
 

@@ -88,6 +88,9 @@ async def test_history_sizing_allows_loop_progress(
             runtime_paths=paths,
             config=config,
             scope_context=ScopeSessionContext(scope, storage, session, "session"),
+            compaction_lifecycle=None,
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
 
     prepared = await prepare()
@@ -151,7 +154,7 @@ async def test_history_sizing_allows_loop_progress(
                 threshold_tokens=1000,
                 progress=None,
                 complete=_reported,
-                replay_model=model,
+                replay_estimator=model,
             )
             assert outcome is not None
         await heartbeat
@@ -215,7 +218,7 @@ async def test_history_storage_work_allows_loop_progress(
             threshold_tokens=1000,
             progress=None,
             complete=_reported,
-            replay_model=model,
+            replay_estimator=model,
         )
         assert outcome is not None
         await heartbeat
@@ -262,6 +265,8 @@ async def test_forced_compaction_reuses_canonical_history_count(
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, storage, session, "session"),
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
     assert counted_history == [["Hello"]]
     assert prepared.compaction_reply_outcome == "success"
@@ -335,7 +340,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
                 resolved_inputs=resolved,
                 history_budget=1000,
                 before_tokens=11,
-                replay_model=model,
+                replay_estimator=model,
                 config=config,
                 runtime_paths=paths,
             ),
@@ -391,6 +396,9 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, storage, session, "session"),
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
@@ -528,6 +536,9 @@ async def test_cancelling_preparation_sizing_preserves_input(
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, storage, session, "session"),
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
     task = asyncio.create_task(operation)
     try:

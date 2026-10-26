@@ -98,9 +98,14 @@ class AgentReplyMembershipIndex:
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._snapshot = _AgentReplyMembershipSnapshot()
+        # Set and replaced by each publication, so a waiter wakes for the first one after it began waiting.
+        self._published = asyncio.Event()
         self._desired_signature: _AgentReplyMembershipPolicySignature | None = None
+        # Invalidations and unready marks advance this, so a refresh that queried Matrix before one never publishes.
         self._epoch = 0
         self._refresh_lock = asyncio.Lock()
+        # Live transitions seen while a refresh queries Matrix, which it replays onto its answers before publishing.
+        self._refresh_transitions: list[_LiveTransition] | None = None
         # (room ID, requester) to when a denial first waited for the router's view of that join.
         self._join_lag_started: dict[tuple[str, str], float] = {}
         self._clock = clock
@@ -109,6 +114,16 @@ class AgentReplyMembershipIndex:
     def snapshot(self) -> _AgentReplyMembershipSnapshot:
         """Return the current immutable snapshot."""
         return self._snapshot
+
+    def _publish(self, snapshot: _AgentReplyMembershipSnapshot) -> None:
+        """Replace the snapshot and wake every check waiting for the next one."""
+        self._snapshot = snapshot
+        self._published.set()
+        self._published = asyncio.Event()
+
+    async def wait_for_publication(self) -> None:
+        """Wait until the next snapshot is published."""
+        await self._published.wait()
 
     def needs_refresh(self, config: Config) -> bool:
         """Return whether room-backed grants need an authoritative rebuild."""
@@ -249,10 +264,12 @@ class AgentReplyMembershipIndex:
             if requires_current_rooms
             else ()
         )
-        self._snapshot = _AgentReplyMembershipSnapshot(
-            policy_signature=signature,
-            rooms=(*grant_rooms, *current_rooms),
-            refresh_required=bool(room_keys) or requires_current_rooms,
+        self._publish(
+            _AgentReplyMembershipSnapshot(
+                policy_signature=signature,
+                rooms=(*grant_rooms, *current_rooms),
+                refresh_required=bool(room_keys) or requires_current_rooms,
+            ),
         )
         logger.info(
             "agent_reply_memberships_invalidated",
@@ -300,14 +317,16 @@ class AgentReplyMembershipIndex:
         ]
         if not matching_rooms:
             updated_rooms.append(_GrantRoomMembership(room_key=None, room_id=room_id, ready=False))
-        self._snapshot = replace(
-            self._snapshot,
-            rooms=tuple(updated_rooms),
-            refresh_required=True,
-            possible_joined_room_ids=(
-                None
-                if self._snapshot.possible_joined_room_ids is None
-                else self._snapshot.possible_joined_room_ids | {room_id}
+        self._publish(
+            replace(
+                self._snapshot,
+                rooms=tuple(updated_rooms),
+                refresh_required=True,
+                possible_joined_room_ids=(
+                    None
+                    if self._snapshot.possible_joined_room_ids is None
+                    else self._snapshot.possible_joined_room_ids | {room_id}
+                ),
             ),
         )
         logged_rooms = matching_rooms or (updated_rooms[-1],)
@@ -342,21 +361,34 @@ class AgentReplyMembershipIndex:
                 and any(not room.ready for room in self._snapshot.rooms)
                 else ()
             )
-            candidate = await _build_authoritative_snapshot(
-                config,
-                runtime_paths,
-                client,
-                signature=signature,
-                previous_rooms=previous_rooms,
-            )
+            self._refresh_transitions = transitions = []
+            try:
+                candidate = await _build_authoritative_snapshot(
+                    config,
+                    runtime_paths,
+                    client,
+                    signature=signature,
+                    previous_rooms=previous_rooms,
+                )
+            finally:
+                self._refresh_transitions = None
             if self._desired_signature != signature or self._epoch != expected_epoch:
                 return
-            self._snapshot = candidate
+            candidate = _replay_refresh_transitions(candidate, self._snapshot, config, transitions)
+            self._publish(candidate)
+            for room in candidate.rooms:
+                if room.ready and room.room_key is not None:
+                    logger.info(
+                        "agent_reply_grant_room_ready",
+                        room_key=room.room_key,
+                        room_id=room.room_id,
+                        readiness="ready",
+                        member_count=len(room.raw_joined_user_ids),
+                    )
 
     def apply_member_event(
         self,
         config: Config,
-        runtime_paths: RuntimePaths,
         room_id: str,
         event: nio.RoomMemberEvent,
         *,
@@ -366,60 +398,20 @@ class AgentReplyMembershipIndex:
         signature = _agent_reply_membership_policy_signature(config)
         if self._desired_signature != signature:
             return False
+        transition = _LiveTransition(room_id=room_id, event=event, control_user_id=control_user_id)
+        if self._refresh_transitions is not None:
+            # The refresh in flight replays this onto its answers instead of
+            # being voided by it, so room setup's own joins cannot discard it.
+            self._refresh_transitions.append(transition)
 
         snapshot = self._snapshot
         if snapshot.policy_signature != signature:
             return False
-
-        matching_rooms = tuple(room for room in snapshot.rooms if room.room_id == room_id)
-        if not matching_rooms:
-            state = matrix_state_for_runtime(runtime_paths)
-            matching_rooms = tuple(
-                room
-                for room in snapshot.rooms
-                if room.room_key is not None
-                and (managed_room := state.rooms.get(room.room_key)) is not None
-                and managed_room.room_id == room_id
-            )
-        if not matching_rooms and not _requires_current_room_memberships(config):
+        applied = _snapshot_after_transition(snapshot, config, transition)
+        if applied is None:
             return False
-
-        # A newly configured room can still lack an ID in the fail-closed
-        # snapshot. Its persisted managed-room identity nevertheless proves
-        # that a live transition must fence any older query in flight.
-        self._epoch += 1
-
-        updated_rooms = [
-            _apply_transition_to_room(
-                replace(room, room_id=room_id) if room in matching_rooms else room,
-                room_id=room_id,
-                event=event,
-                control_user_id=control_user_id,
-            )
-            for room in snapshot.rooms
-        ]
-        if not matching_rooms:
-            updated_rooms.append(_GrantRoomMembership(room_key=None, room_id=room_id, ready=False))
-        updated_rooms_tuple = tuple(updated_rooms)
-        changed_room_keys = [
-            previous.room_key
-            for previous, updated in zip(snapshot.rooms, updated_rooms_tuple, strict=False)
-            if previous != updated
-        ]
-        if len(updated_rooms_tuple) > len(snapshot.rooms):
-            changed_room_keys.append(None)
-
-        possible_joined_room_ids = (
-            None if snapshot.possible_joined_room_ids is None else snapshot.possible_joined_room_ids | {room_id}
-        )
-        if not changed_room_keys and possible_joined_room_ids == snapshot.possible_joined_room_ids:
-            return False
-        self._snapshot = replace(
-            snapshot,
-            rooms=updated_rooms_tuple,
-            refresh_required=any(not room.ready for room in updated_rooms_tuple),
-            possible_joined_room_ids=possible_joined_room_ids,
-        )
+        snapshot, changed_room_keys = applied
+        self._publish(snapshot)
         for room_key in changed_room_keys:
             logger.info(
                 "agent_reply_grant_room_membership_transition",
@@ -430,6 +422,106 @@ class AgentReplyMembershipIndex:
                 authorization_source="joined_room",
             )
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveTransition:
+    """One membership event from the router's live sync."""
+
+    room_id: str
+    event: nio.RoomMemberEvent
+    control_user_id: str
+
+
+def _snapshot_after_transition(
+    snapshot: _AgentReplyMembershipSnapshot,
+    config: Config,
+    transition: _LiveTransition,
+) -> tuple[_AgentReplyMembershipSnapshot, list[str | None]] | None:
+    """Return the snapshot after one transition and the room keys it changed, or None when it changes nothing."""
+    room_id = transition.room_id
+    # A row without a room ID is an unready room no transition can grant in;
+    # the refresh that resolves it reads Matrix after this transition or replays it.
+    matching_rooms = tuple(room for room in snapshot.rooms if room.room_id == room_id)
+    if not matching_rooms and not _requires_current_room_memberships(config):
+        return None
+
+    updated_rooms = [
+        _apply_transition_to_room(
+            room,
+            room_id=room_id,
+            event=transition.event,
+            control_user_id=transition.control_user_id,
+        )
+        for room in snapshot.rooms
+    ]
+    if not matching_rooms:
+        updated_rooms.append(_GrantRoomMembership(room_key=None, room_id=room_id, ready=False))
+    updated_rooms_tuple = tuple(updated_rooms)
+    changed_room_keys = [
+        previous.room_key
+        for previous, updated in zip(snapshot.rooms, updated_rooms_tuple, strict=False)
+        if previous != updated
+    ]
+    if len(updated_rooms_tuple) > len(snapshot.rooms):
+        changed_room_keys.append(None)
+
+    possible_joined_room_ids = (
+        None if snapshot.possible_joined_room_ids is None else snapshot.possible_joined_room_ids | {room_id}
+    )
+    if not changed_room_keys and possible_joined_room_ids == snapshot.possible_joined_room_ids:
+        return None
+    updated_snapshot = replace(
+        snapshot,
+        rooms=updated_rooms_tuple,
+        refresh_required=any(not room.ready for room in updated_rooms_tuple),
+        possible_joined_room_ids=possible_joined_room_ids,
+    )
+    return updated_snapshot, changed_room_keys
+
+
+def _replay_refresh_transitions(
+    candidate: _AgentReplyMembershipSnapshot,
+    published: _AgentReplyMembershipSnapshot,
+    config: Config,
+    transitions: list[_LiveTransition],
+) -> _AgentReplyMembershipSnapshot:
+    """Return a refreshed candidate after the live transitions recorded while it queried Matrix."""
+    answered = {(room.room_key, room.room_id): room for room in candidate.rooms}
+    for transition in transitions:
+        applied = _snapshot_after_transition(candidate, config, transition)
+        if applied is not None:
+            candidate = applied[0]
+    # Nothing orders a recorded transition against Matrix's answer for its
+    # room. A departure only denies, so it always applies. A join of someone
+    # the answer lacks may predate a kick the answer already holds and the
+    # router has not seen yet, so it must not grant on its own: that room
+    # keeps its published row instead. A ready published row is the router's
+    # own view, which every ready room relies on between refreshes and which
+    # already holds every recorded transition; without one the room stays
+    # unready until the next refresh answers it.
+    published_ready_rooms = {(room.room_key, room.room_id): room for room in published.rooms if room.ready}
+    rooms: list[_GrantRoomMembership] = []
+    for room in candidate.rooms:
+        key = (room.room_key, room.room_id)
+        answer = answered.get(key)
+        if answer is None or not answer.ready:
+            # Replay never makes a row ready, so a row Matrix did not answer ready stays as it is.
+            rooms.append(room)
+        elif not room.ready:
+            # Only the control client's own departure makes an answered row unready.
+            rooms.append(_unready_room(room.room_key, room.room_id, reason="control_client_departed"))
+        elif room.raw_joined_user_ids <= answer.raw_joined_user_ids:
+            rooms.append(room)
+        elif key in published_ready_rooms:
+            rooms.append(published_ready_rooms[key])
+        else:
+            rooms.append(_unready_room(room.room_key, room.room_id, reason="live_join_unconfirmed"))
+    return replace(
+        candidate,
+        rooms=tuple(rooms),
+        refresh_required=candidate.refresh_required or any(not room.ready for room in rooms),
+    )
 
 
 def _apply_transition_to_room(
@@ -541,13 +633,6 @@ async def _build_grant_room_membership(
     raw_joined_user_ids = memberships_by_room_id[room_id]
     if raw_joined_user_ids is None:
         return _unready_room(room_key, room_id, reason="joined_members_unavailable")
-    logger.info(
-        "agent_reply_grant_room_ready",
-        room_key=room_key,
-        room_id=room_id,
-        readiness="ready",
-        member_count=len(raw_joined_user_ids),
-    )
     return _GrantRoomMembership(
         room_key=room_key,
         room_id=room_id,

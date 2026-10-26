@@ -20,11 +20,12 @@ from mindroom.history.storage import (
     read_scope_seen_event_ids,
     run_folded_tool_call_ids,
 )
-from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings, ResolvedReplayPlan
+from mindroom.history.types import ResolvedReplayPlan
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.usage.storage import quote_identifier
+from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
 
-_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+_SETTINGS = replay_settings()
 _PLAN = ResolvedReplayPlan(mode="configured", estimated_tokens=0, add_history_to_context=True)
 _PROBE_ID = "probe"
 

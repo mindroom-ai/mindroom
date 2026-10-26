@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
+from mindroom.llm.runs import RunStatus
 from mindroom.message_target import MessageTarget
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import (
@@ -879,9 +880,10 @@ def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path, display_nam
         model_name=prepared_model_name,
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="default-model",
         model_provider="openai",
+        tool_count=0,
     )
 
     assert metadata[AI_RUN_METADATA_KEY]["model"] == {
@@ -918,9 +920,10 @@ def test_ai_run_metadata_optional_model_display_name(
         model_name=model_name,
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="default-model",
         model_provider="openai",
+        tool_count=0,
     )
 
     model = metadata[AI_RUN_METADATA_KEY]["model"]

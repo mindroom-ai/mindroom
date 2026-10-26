@@ -128,6 +128,8 @@ def test_transport_error_uses_fixed_message_without_host() -> None:
     """Transport failures never leak the configured host."""
     request = httpx.Request("POST", "http://embeddings.internal.example/v1/embeddings")
     exc = APIConnectionError(request=request)
+    # The SDK raises its connection error from the transport failure.
+    exc.__cause__ = httpx.ConnectError("connection refused", request=request)
     detail = describe_embedder_error(exc)
     assert detail == "embedder endpoint unreachable"
     assert "embeddings.internal.example" not in detail
@@ -252,7 +254,7 @@ def test_probe_returns_none_on_non_empty_vector(tmp_path: Path, monkeypatch: pyt
     """A successful embedding round-trip reports healthy."""
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
-        lambda *_args: _HealthyEmbedder(),
+        lambda *_args, **_kwargs: _HealthyEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None
 
@@ -261,7 +263,7 @@ def test_probe_reports_auth_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     """A 401 during the probe surfaces the canonical auth detail."""
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
-        lambda *_args: _AuthFailingEmbedder(),
+        lambda *_args, **_kwargs: _AuthFailingEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) == EMBEDDER_AUTH_FAILED_DETAIL
 
@@ -270,9 +272,28 @@ def test_probe_rejects_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     """An empty vector is a failure, never a silent success."""
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
-        lambda *_args: _EmptyVectorEmbedder(),
+        lambda *_args, **_kwargs: _EmptyVectorEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) == "embedder returned an empty vector"
+
+
+def test_probe_builds_its_embedder_with_the_callers_health_recorder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe builds its embedder with the health recorder its caller passes, and with none when it passes none."""
+    recorders: list[EmbedderHealthRecorder | None] = []
+
+    def create(*_args: object, health_recorder: EmbedderHealthRecorder | None) -> _HealthyEmbedder:
+        recorders.append(health_recorder)
+        return _HealthyEmbedder()
+
+    monkeypatch.setattr("mindroom.embeddings.factory.create_configured_embedder", create)
+    retired = EmbedderHealthRecorder(generation=-1)
+
+    assert probe_embedder(_config(), _runtime_paths(tmp_path), retired) is None
+    assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None
+    assert recorders == [retired, None]
 
 
 def test_factory_gives_the_openai_embedder_its_health_recorder(tmp_path: Path) -> None:
@@ -307,7 +328,7 @@ def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.
     )
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
-        lambda *_args: embedder,
+        lambda *_args, **_kwargs: embedder,
     )
 
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None

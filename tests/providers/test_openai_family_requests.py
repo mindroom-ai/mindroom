@@ -4,43 +4,59 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
-from openai.types.chat import ChatCompletion
-from openai.types.responses import Response, ResponseUsage
+from openai.types.chat import ChatCompletionChunk
+from openai.types.responses import Response, ResponseStreamEvent, ResponseUsage
 from openai.types.responses.response_input_item_param import ResponseInputItemParam
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.approval.receipt import approval_receipt_hook, messages_with_approval_receipt
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.attachments.media import attachment_records_to_media
 from mindroom.attachments.storage import AttachmentRecord
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides
+from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.openai.chat_wire import chat_request_kwargs, parse_chat_completion
+from mindroom.providers.openai.chat_wire import ChatStream, chat_request_kwargs
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
-from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
-    parse_response,
+    ResponsesStream,
     responses_input,
     responses_replay,
     responses_request_kwargs,
+    system_text_digest,
 )
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
-from tests.providers.openai_family_support import provider_runtime, responses_adapter
+from tests.agent_loop.helpers import collect, context
+from tests.providers.golden_support import responses_events, streamed_reply
+from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    import httpx
+
+    from mindroom.llm.provider import NativeCompactionReplay
+    from mindroom.llm.usage import MessageMetrics
+    from mindroom.providers.openai.responses_wire import ResponsesTurnParts
 
 _CHECKPOINT = {"type": "compaction", "id": "cmp_latest", "encrypted_content": "opaque-checkpoint"}
 _ANSWER = {
@@ -59,10 +75,10 @@ _CALL = {
     "arguments": "{}",
     "status": "completed",
 }
+# Hosted search items as the provider writes them: a server-executed search has no ``call_id``.
 _SEARCH_CALL = {
-    "id": "ts_1",
+    "id": "tsc_1",
     "type": "tool_search_call",
-    "call_id": "tsc_1",
     "arguments": {"queries": ["weather"]},
     "execution": "server",
     "status": "completed",
@@ -70,7 +86,6 @@ _SEARCH_CALL = {
 _SEARCH_OUTPUT = {
     "id": "tso_1",
     "type": "tool_search_output",
-    "call_id": "tsc_1",
     "execution": "server",
     "status": "completed",
     "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}],
@@ -102,19 +117,40 @@ def _response(output: list[dict[str, Any]], *, status: str = "completed") -> Res
     )
 
 
+_STREAM_EVENT = TypeAdapter(ResponseStreamEvent)
+
+
+def _streamed(
+    response: Response,
+    *,
+    store: bool | None,
+    portable_replay: bool = False,
+    native_compaction: NativeCompactionReplay | None = None,
+) -> ResponsesTurnParts:
+    """Return the finished turn of ``response`` streamed as the API streams it (``responses_events``)."""
+    stream = ResponsesStream(
+        provider="OpenAI Responses",
+        store=store,
+        portable_replay=portable_replay,
+        native_compaction=native_compaction,
+        system_digest=system_text_digest([]),
+    )
+    for event in responses_events(response.model_dump(mode="json", exclude_none=True)):
+        stream.add(_STREAM_EVENT.validate_python(event))
+    assert stream.ended
+    return stream.finish()
+
+
 def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: Any) -> Message:  # noqa: ANN401
     """Return the stored assistant message of one response, parsed as the route parses it without native replay."""
-    parts = parse_response(
+    parts = _streamed(
         _response(output),
-        provider=adapter.identity.provider_name,
         store=adapter.wire.store,
-        portable_replay=False,
         native_compaction=adapter.native_compaction_settings(
             threshold=1024,
             history_generation="",
             allow_authored=False,
         ),
-        text_as_reasoning=False,
     )
     fields = {"content": parts.content, "tool_calls": parts.tool_calls or None, "provider_data": parts.provider_data}
     return Message(role="assistant", **{**fields, **message})
@@ -325,20 +361,6 @@ def test_legacy_responses_replay_rebuilds_calls_without_reasoning(
     assert [message.to_dict() for message in messages] == original
 
 
-def test_the_legacy_span_repair_keeps_only_the_calls_without_their_item_ids() -> None:
-    """A tool turn keeps its function calls minus their provider item ids; a text turn keeps its message item."""
-    message = Message(role="assistant", tool_calls=[_call("first")])
-    span = [
-        {"type": "function_call", "id": "fc_first", "call_id": "call_first", "name": "lookup", "arguments": "{}"},
-        {"type": "reasoning", "id": "rs_tail"},
-    ]
-
-    assert repair_legacy_responses_span(message, span) == [
-        {"type": "function_call", "call_id": "call_first", "name": "lookup", "arguments": "{}"},
-    ]
-    assert repair_legacy_responses_span(Message(role="assistant", content="Hi"), span) == span[:1]
-
-
 @pytest.mark.parametrize("retain_call", [False, True])
 @pytest.mark.parametrize(
     ("content", "expected"),
@@ -391,8 +413,16 @@ def test_reconstructed_assistant_content_is_valid_responses_input(
 # --- Hosted tool-search items ---------------------------------------------------------------------------------
 
 
+def _without_item_id(item: dict[str, Any]) -> dict[str, Any]:
+    """Return a search item as a replay without its reasoning sends it: the provider rejects its ID alone."""
+    return {key: value for key, value in item.items() if key != "id"}
+
+
 def test_search_items_replay_ahead_of_the_discovered_function_call() -> None:
-    """Captured search items go back immediately ahead of the message's replayed function calls."""
+    """Captured search items go back immediately ahead of the message's replayed function calls.
+
+    The message recorded no reasoning, so the items and the call go without their item IDs.
+    """
     assistant = Message(
         role="assistant",
         content="",
@@ -414,8 +444,8 @@ def test_search_items_replay_ahead_of_the_discovered_function_call() -> None:
 
     assert _input(messages) == [
         {"role": "user", "content": "weather?"},
-        _SEARCH_CALL,
-        _SEARCH_OUTPUT,
+        _without_item_id(_SEARCH_CALL),
+        _without_item_id(_SEARCH_OUTPUT),
         {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}", "status": "completed"},
         {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
     ]
@@ -435,7 +465,7 @@ def test_search_replay_anchors_on_its_own_turn_not_an_identical_earlier_one() ->
         {"role": "user", "content": "q1"},
         {"role": "assistant", "content": "same text"},
         {"role": "user", "content": "q2"},
-        _SEARCH_CALL,
+        _without_item_id(_SEARCH_CALL),
         {"role": "assistant", "content": "same text"},
     ]
 
@@ -465,13 +495,18 @@ def _request(adapter: ResponsesAdapter, messages: list[Message], **request: Any)
     return {**kwargs.pop("extra_body", {}), **kwargs}
 
 
+def _stored_response(response_id: str, prompt: list[Message] | None = None) -> dict[str, Any]:
+    """Return the provider data of a stored response whose request sent ``prompt``'s system text."""
+    return {"response_id": response_id, "mindroom_system_sha256": system_text_digest(prompt or [])}
+
+
 def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) -> None:
     """Continuation does not depend on the model name, so aliases and non-reasoning models continue too."""
     adapter = responses_adapter(tmp_path, model_id="custom-alias", store=True)
     assistant = Message(
         role="assistant",
         tool_calls=[_call("status", "call_1")],
-        provider_data={"response_id": "resp_1"},
+        provider_data=_stored_response("resp_1"),
     )
     messages = [assistant, Message(role="tool", content="ready", tool_call_id="fc_status")]
 
@@ -479,6 +514,221 @@ def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) ->
 
     assert (request["store"], request["previous_response_id"]) == (True, "resp_1")
     assert request["input"] == [{"type": "function_call_output", "call_id": "call_1", "output": "ready"}]
+
+
+def _stored_reply_route(
+    root: Path,
+    *first_outputs: list[dict[str, Any]],
+) -> tuple[ResponsesAdapter, list[dict[str, Any]]]:
+    """Return a stored-response route answering with ``first_outputs`` in turn, then text replies, and its bodies."""
+    sent: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        index = len(sent) - 1
+        output = first_outputs[index] if index < len(first_outputs) else [{**_ANSWER, "id": f"msg_{len(sent)}"}]
+        reply = _response(output).model_dump(mode="json")
+        return streamed_reply({**reply, "id": f"resp_{len(sent)}"})
+
+    config = {"provider": "openai", "id": "gpt-6-astra", "api": "responses", "api_key": "test-key"}
+    adapter = openai_family_adapter(config, root, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    return adapter, sent
+
+
+async def _reply(adapter: ResponsesAdapter, messages: list[Message]) -> Message:
+    """Send one request and return the assistant message the route stores for it."""
+    events = [event async for event in adapter.stream(ModelRequest(messages=messages))]
+    return next(event.message for event in events if isinstance(event, TurnCompleted))
+
+
+def _dated_prompt(day: str) -> Message:
+    return Message(role="system", content="You are Parity.\n" + render_session_context(f"Today is {day}."))
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_an_unchanged_prompt_continues_the_stored_chain(tmp_path: Path) -> None:
+    """A stored chain holds the prompt it started with, so the same prompt sends only what follows the stored reply."""
+    adapter, sent = _stored_reply_route(tmp_path)
+    question = Message(role="user", content="Plan my day.")
+    reply = await _reply(adapter, [_dated_prompt("Monday"), question])
+
+    await _reply(adapter, [_dated_prompt("Monday"), question, reply, Message(role="user", content="And tomorrow?")])
+
+    assert (sent[1]["previous_response_id"], sent[1]["input"]) == (
+        "resp_1",
+        [{"role": "user", "content": "And tomorrow?"}],
+    )
+
+
+def _next_day(history: list[Message]) -> list[Message]:
+    return [_dated_prompt("Tuesday"), *history[1:]]
+
+
+def _with_receipt(history: list[Message]) -> list[Message]:
+    return messages_with_approval_receipt(history, "trusted approval receipt")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change_prompt", "sent_system_text"),
+    [
+        pytest.param(_next_day, "Today is Tuesday.", id="next day"),
+        pytest.param(_with_receipt, "trusted approval receipt", id="approval receipt"),
+    ],
+)
+async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(
+    tmp_path: Path,
+    change_prompt: Callable[[list[Message]], list[Message]],
+    sent_system_text: str,
+) -> None:
+    """A stored chain holds the prompt it started with, so a changed prompt replays the history instead of chaining."""
+    adapter, sent = _stored_reply_route(tmp_path)
+    question = Message(role="user", content="Plan my day.")
+    reply = await _reply(adapter, [_dated_prompt("Monday"), question])
+    follow_up = Message(role="user", content="And tomorrow?")
+
+    await _reply(adapter, change_prompt([_dated_prompt("Monday"), question, reply, follow_up]))
+
+    assert "previous_response_id" not in sent[1]
+    assert [item["role"] for item in sent[1]["input"]] == ["developer", "developer", "user", "assistant", "user"]
+    assert sent_system_text in sent[1]["input"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_on_a_stored_chain_replays_its_tool_loop(tmp_path: Path) -> None:
+    """The receipt changes the prompt mid tool loop, so the resumed request replays the loop, still stored.
+
+    The route recorded no reasoning for the stored call, so the replayed call drops the item ID its reasoning owns.
+    """
+    adapter, sent = _stored_reply_route(tmp_path, [{"type": "reasoning", "id": "rs_first", "summary": []}, _CALL])
+    prompt = _dated_prompt("Monday")
+    question = Message(role="user", content="Look it up.")
+    call = await _reply(adapter, [prompt, question])
+    result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
+
+    await _reply(adapter, _with_receipt([prompt, question, call, result]))
+
+    assert sent[1]["store"] is True
+    assert "previous_response_id" not in sent[1]
+    assert "trusted approval receipt" in sent[1]["input"][1]["content"]
+    assert sent[1]["input"][2:] == [
+        {"role": "user", "content": "Look it up."},
+        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+    ]
+
+
+def _lookup(order: str) -> dict[str, Any]:
+    return {
+        "id": f"fc_{order}",
+        "call_id": f"call_{order}",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": json.dumps({"order": order})},
+    }
+
+
+def _decided(call_id: str, decision: ApprovalDecision) -> ApprovalCall:
+    return ApprovalCall(
+        tool_call_id=call_id,
+        tool_name="lookup",
+        invoking_agent="code",
+        expires_at_ns=1,
+        decision=decision,
+        human_approval_required=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_its_request_sends_it(
+    tmp_path: Path,
+) -> None:
+    """The receipt names each call by the ``call_id`` the replayed call and its result keep, not its item id.
+
+    Two calls of one tool are told apart only by their ids, and the replay drops each call's ``fc_`` item id.
+    """
+    adapter, sent = _stored_reply_route(tmp_path)
+    prompt = Message(role="system", content="You are Code.")
+    calls = Message(
+        role="assistant",
+        tool_calls=[_lookup("first"), _lookup("second")],
+        provider_data=_stored_response("resp_1", [prompt]),
+    )
+    history = [
+        Message(role="user", content="Look up both orders."),
+        calls,
+        Message(role="tool", tool_call_id="fc_first", content="Found the first"),
+        Message(role="tool", tool_call_id="fc_second", content="Declined"),
+    ]
+    decided = (_decided("fc_first", ApprovalDecision.APPROVED), _decided("fc_second", ApprovalDecision.DENIED))
+    spec = AgentSpec(id="code", name="Code", model=adapter, system_message=prompt, toolkits=())
+
+    with approval_receipt_context(decided, run_id="run-1"):
+        await collect(
+            run_agent(
+                spec,
+                history,
+                ctx=context(run_id="run-1"),
+                persist=None,
+                request_template=ModelRequest(messages=()),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
+            ),
+        )
+
+    [request] = sent
+    assert "previous_response_id" not in request
+    receipt_ids = re.findall(r"tool call id `([^`]+)`", request["input"][0]["content"])
+    assert receipt_ids == ["call_first", "call_second"]
+    for item_type in ("function_call", "function_call_output"):
+        assert [item["call_id"] for item in request["input"] if item.get("type") == item_type] == receipt_ids
+    assert "fc_" not in json.dumps(request["input"])
+
+
+@pytest.mark.asyncio
+async def test_a_replay_after_the_prompt_changes_sends_hosted_search_items_without_their_item_ids(
+    tmp_path: Path,
+) -> None:
+    """A stored reply records no reasoning, so its replayed search items and call drop the IDs that reasoning owns.
+
+    The provider rejects a search item's ID sent without the reasoning item that preceded it, stored or not.
+    """
+    output = [_REASONING, _SEARCH_CALL, _SEARCH_OUTPUT, {**_REASONING, "id": "rs_second"}, _CALL]
+    adapter, sent = _stored_reply_route(tmp_path, output)
+    question = Message(role="user", content="Look it up.")
+    call = await _reply(adapter, [_dated_prompt("Monday"), question])
+    result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
+
+    await _reply(adapter, _next_day([_dated_prompt("Monday"), question, call, result]))
+
+    assert sent[1]["store"] is True
+    assert "previous_response_id" not in sent[1]
+    assert sent[1]["input"][2:] == [
+        {"role": "user", "content": "Look it up."},
+        _without_item_id(_SEARCH_CALL),
+        _without_item_id(_SEARCH_OUTPUT),
+        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_stored_without_a_system_digest_replays_once(tmp_path: Path) -> None:
+    """A reply an older release stored replays its history once, then the route continues the reply it stores."""
+    adapter, sent = _stored_reply_route(tmp_path)
+    older = Message(
+        role="assistant",
+        content="Pack a jacket.",
+        provider_data={"response_id": "resp_older", "mindroom_response_stored": True},
+    )
+    history = [_dated_prompt("Monday"), Message(role="user", content="What should I pack?"), older]
+    follow_up = Message(role="user", content="And shoes?")
+
+    reply = await _reply(adapter, [*history, follow_up])
+    await _reply(adapter, [*history, follow_up, reply, Message(role="user", content="Thanks.")])
+
+    assert "previous_response_id" not in sent[0]
+    assert [item["role"] for item in sent[0]["input"]] == ["developer", "developer", "user", "assistant", "user"]
+    assert (sent[1]["previous_response_id"], sent[1]["input"]) == ("resp_1", [{"role": "user", "content": "Thanks."}])
 
 
 @pytest.mark.parametrize("storage", [{"store": False}, {"request_params": {"store": False}}])
@@ -529,17 +779,9 @@ def test_an_authored_replay_policy_turns_native_compaction_off(tmp_path: Path, k
 
 @pytest.mark.parametrize("portable", [False, True])
 @pytest.mark.parametrize("status", ["completed", "incomplete"])
-def test_only_a_completed_response_records_its_replay_policy(tmp_path: Path, *, portable: bool, status: str) -> None:
+def test_only_a_completed_response_records_its_replay_policy(*, portable: bool, status: str) -> None:
     """An approval rebuild trusts the replay policy only from a response that completed."""
-    adapter = responses_adapter(tmp_path, store=True)
-    parts = parse_response(
-        _response([_ANSWER], status=status),
-        provider=adapter.identity.provider_name,
-        store=True,
-        portable_replay=portable,
-        native_compaction=None,
-        text_as_reasoning=False,
-    )
+    parts = _streamed(_response([_ANSWER], status=status), store=True, portable_replay=portable)
 
     if status == "completed":
         assert parts.provider_data["mindroom_portable_replay"] is portable
@@ -637,9 +879,10 @@ def test_only_the_initial_text_system_message_is_split() -> None:
 
 def test_a_stored_continuation_does_not_resend_the_instructions() -> None:
     """Chaining to a stored response sends only what follows it."""
+    prompt = _messages("Monday")
     messages = [
-        *_messages("Monday"),
-        Message(role="assistant", content="Introduction.", provider_data={"response_id": "resp_previous"}),
+        *prompt,
+        Message(role="assistant", content="Introduction.", provider_data=_stored_response("resp_previous", prompt)),
         Message(role="user", content="Continue."),
     ]
 
@@ -652,6 +895,11 @@ def test_a_stored_continuation_does_not_resend_the_instructions() -> None:
 @pytest.mark.parametrize(
     ("filename", "declared_mime", "expected_mime"),
     [
+        ("notes.txt", "application/octet-stream", "text/plain"),
+        ("data.csv", "application/octet-stream", "text/csv"),
+        ("report.pdf", "application/octet-stream", "application/pdf"),
+        ("notes.md", "text/markdown; charset=utf-8", "text/markdown"),
+        ("script.sh", "text/x-sh", "text/x-sh"),
         ("report.pdf", None, "application/pdf"),
         ("report.docx", None, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         ("report.pptx", None, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
@@ -746,6 +994,16 @@ def test_the_strict_schema_keeps_closed_objects_and_open_maps() -> None:
 # --- Usage ----------------------------------------------------------------------------------------------------
 
 
+def _chat_usage(adapter: ChatAdapter, usage: dict[str, Any]) -> MessageMetrics | None:
+    """Return the usage a Chat stream reports in its usage chunk, where Groq streams it in its own extension."""
+    report = {"x_groq": {"usage": usage}} if adapter.wire.dialect == "groq" else {"usage": usage}
+    chunk = {"id": "chatcmpl_test", "object": "chat.completion.chunk", "created": 1, "model": "m", "choices": []}
+    stream = ChatStream(adapter.wire)
+    stream.add(ChatCompletionChunk.model_validate({**chunk, **report}))
+    stream.finish()
+    return stream.parts.usage
+
+
 @pytest.mark.parametrize("include_cache_write", [True, False], ids=["current", "older"])
 @pytest.mark.parametrize("route", ["responses", "chat"])
 def test_usage_keeps_every_input_counter_the_sdk_reports(
@@ -765,25 +1023,16 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
             provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
         )
         assert isinstance(adapter, ChatAdapter)
-        completion = ChatCompletion.model_validate(
+        usage = _chat_usage(
+            adapter,
             {
-                "id": "chatcmpl_test",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "gpt-6-astra",
-                "choices": [
-                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Ready"}},
-                ],
-                "usage": {
-                    "prompt_tokens": 15_000,
-                    "completion_tokens": 50,
-                    "total_tokens": 15_050,
-                    "prompt_tokens_details": input_details,
-                    "completion_tokens_details": {"audio_tokens": 13, "reasoning_tokens": 7},
-                },
+                "prompt_tokens": 15_000,
+                "completion_tokens": 50,
+                "total_tokens": 15_050,
+                "prompt_tokens_details": input_details,
+                "completion_tokens_details": {"audio_tokens": 13, "reasoning_tokens": 7},
             },
         )
-        usage = parse_chat_completion(completion, adapter.wire, provider=adapter.identity.provider_name).usage
     else:
         response = _response([]).model_copy(
             update={
@@ -798,15 +1047,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
                 ),
             },
         )
-        adapter = responses_adapter(tmp_path)
-        usage = parse_response(
-            response,
-            provider=adapter.identity.provider_name,
-            store=None,
-            portable_replay=False,
-            native_compaction=None,
-            text_as_reasoning=False,
-        ).usage
+        usage = _streamed(response, store=None).usage
 
     assert usage is not None
     assert (usage.tokens.input_tokens, usage.tokens.output_tokens, usage.tokens.total_tokens) == (15_000, 50, 15_050)
@@ -825,24 +1066,17 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
         provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
     )
     assert isinstance(adapter, ChatAdapter)
-    completion = ChatCompletion.model_validate(
+
+    usage = _chat_usage(
+        adapter,
         {
-            "id": "chatcmpl_test",
-            "object": "chat.completion",
-            "created": 1,
-            "model": "gpt-oss-120b",
-            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Ready"}}],
-            "usage": {
-                "prompt_tokens": 5000,
-                "completion_tokens": 300,
-                "total_tokens": 5300,
-                "prompt_tokens_details": {"cached_tokens": 4608},
-                "completion_tokens_details": {"reasoning_tokens": 120},
-            },
+            "prompt_tokens": 5000,
+            "completion_tokens": 300,
+            "total_tokens": 5300,
+            "prompt_tokens_details": {"cached_tokens": 4608},
+            "completion_tokens_details": {"reasoning_tokens": 120},
         },
     )
-
-    usage = parse_chat_completion(completion, adapter.wire, provider=adapter.identity.provider_name).usage
 
     assert usage is not None
     assert (usage.tokens.input_tokens, usage.tokens.output_tokens, usage.tokens.total_tokens) == (5000, 300, 5300)
@@ -910,7 +1144,6 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
         tool_choice=None,
         output_schema=None,
         structured_output=adapter.capabilities.structured_output,
-        stream=True,
         settings=adapter.settings,
         wire=adapter.wire,
     )

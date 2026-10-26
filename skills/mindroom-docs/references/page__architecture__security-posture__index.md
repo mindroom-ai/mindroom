@@ -269,6 +269,8 @@ Do not report or "fix" these; they are deliberate.
   Over plain HTTP on a local address, the session cookie and the OAuth flow cross that network unencrypted, as the rest of a plain-HTTP stack does, and because cookies ignore ports, every other web service on that host receives the session cookie too.
   On a homeserver that does not bind tokens to one deployment, a backend that Chat opens could replay a user's token to another deployment on the same homeserver until it expires; [audience binding](https://docs.mindroom.chat/connections-portal/#token-binding) closes that where the homeserver supports it.
   The `/connections` page shell is served without authentication, while every API stays protected.
+- With `personal_rooms.agent` naming a `personal_agents` template, every human member of an onboarding room gets a Matrix account and a running agent; membership of that room is the only gate, so its join policy and invitations control who gets one.
+- A `personal_agents` template whose `access` admits other people exposes each owner's agent, including its memory, files, and shared credentials, to them and to their own agents acting for them; owner-only access is the default.
 - The MCP gateway runs an agent's tools without its instructions, so it withholds agents whose worker scope is `shared` or unset unless `mcp_gateway_shared_credentials` opts one in; an opted-in agent's users can call its tools directly with its shared accounts and worker, and the shared workspace and browser profiles of a non-private `user` or `user_agent` agent stay reachable through the gateway as they are in chat.
 
 ## Reviewing security findings

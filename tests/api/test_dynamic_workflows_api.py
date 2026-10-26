@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +18,8 @@ from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers, u
 
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
+
+    from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 
 
 def _workflow_spec() -> dict[str, object]:
@@ -38,6 +41,11 @@ def _workflow_spec() -> dict[str, object]:
     }
 
 
+def _run(service: DynamicWorkflowService, **options: object) -> DynamicWorkflowRun:
+    """Run one workflow to its end, as the workflow tool runs it."""
+    return asyncio.run(service.run_workflow(**options))
+
+
 def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client: TestClient) -> None:
     """Private report URLs should serve Dynamic Workflow HTML artifacts."""
     runtime_paths = main._app_runtime_paths(test_client.app)
@@ -50,7 +58,8 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -92,7 +101,8 @@ def test_private_dynamic_workflow_report_rejects_standalone_user_for_matrix_requ
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -129,7 +139,8 @@ def test_private_dynamic_workflow_report_accepts_standalone_owner_matrix_user(te
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -174,7 +185,8 @@ def test_private_dynamic_workflow_report_rejects_other_trusted_upstream_user(tes
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -207,7 +219,8 @@ def test_private_dynamic_workflow_report_rejects_access_token_for_other_hosted_u
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -241,7 +254,8 @@ def test_private_dynamic_workflow_report_accepts_matching_trusted_upstream_user(
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -286,7 +300,8 @@ def test_private_dynamic_workflow_report_accepts_derived_trusted_upstream_matrix
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -317,7 +332,8 @@ def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -354,7 +370,8 @@ def test_private_dynamic_workflow_report_accepts_matching_platform_user(test_cli
         created_by="general",
         reason="initial design",
     )
-    run = service.run_workflow(
+    run = _run(
+        service,
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",

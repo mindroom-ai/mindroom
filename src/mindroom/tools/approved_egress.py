@@ -180,7 +180,15 @@ def _canonical_hostnames(hostnames: list[str]) -> list[str]:
     if len(hostnames) > _MAX_HOSTNAMES_PER_REQUEST:
         msg = f"request at most {_MAX_HOSTNAMES_PER_REQUEST} hostnames per call"
         raise ValueError(msg)
-    return list(dict.fromkeys(canonical_hostname(hostname) for hostname in hostnames))
+    hosts: list[str] = []
+    for hostname in hostnames:
+        host = canonical_hostname(hostname)
+        # The approval card shows hostnames as written, so a Unicode look-alike must not be granted as its xn-- name.
+        if not hostname.isascii():
+            msg = f"hostname {hostname!r} must be written in ASCII; request {host!r} so the approval shows the granted name"
+            raise ValueError(msg)
+        hosts.append(host)
+    return list(dict.fromkeys(hosts))
 
 
 def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
@@ -376,6 +384,7 @@ class _ApprovedEgressTools(Toolkit):
     file_access=ToolFileAccess.NONE,
     display_name="Network Access Requests",
     description="Request approval for temporary access to a blocked website or service",
+    docs_url="https://docs.mindroom.chat/deployment/approved-egress/",
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.SPECIAL,

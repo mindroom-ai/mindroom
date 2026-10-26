@@ -20,6 +20,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.background_after import validate_wait_seconds
 from mindroom.tool_jobs.control import (
@@ -134,7 +135,7 @@ def _parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
     msg = f"Invalid tool job snapshot {saved.job_id!r}."
     try:
         payload = json.loads(saved.job_json)
-        payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
+        payload["owner"] = parse_tool_execution_identity_payload(payload["owner"])
         job = BackgroundJob(**payload)
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(msg) from error
@@ -591,7 +592,7 @@ class ToolJobRuntime:
                         returned = True
                         await finalize_queued_notice_response_turn_async(notice)
             except Exception as error:
-                outcome = BackgroundOutcome("failed", str(error))
+                outcome = BackgroundOutcome("failed", failure_text(error))
             except asyncio.CancelledError:
                 if (task := asyncio.current_task()) is not None and task.cancelling():
                     raise  # Requested cancellation: runtime-owned, or external teardown.
@@ -822,7 +823,7 @@ class ToolJobRuntime:
         except Exception as error:
             return BackgroundOutcome(
                 "failed",
-                f"Job cleanup failed; external side effects may still be active: {error}",
+                f"Job cleanup failed; external side effects may still be active: {failure_text(error)}",
             )
         return outcome
 

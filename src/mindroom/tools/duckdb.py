@@ -60,7 +60,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["duckdb"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/duckdb",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#duckdb",
     function_names=(
         "create_fts_index",
         "create_table_from_path",

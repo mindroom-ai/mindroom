@@ -42,7 +42,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["docker"],
-    docs_url="https://docs.agno.com/tools/toolkits/local/docker",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#docker",
     helper_text=(
         "Docker is privileged. Use a dedicated worker sandbox, or explicitly opt in to unsafe local execution "
         "before exposing host Docker access."

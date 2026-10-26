@@ -371,7 +371,7 @@ def test_a_paused_team_runs_embedded_members_become_its_member_rows(tmp_path: Pa
     assert [run.run_id for run in team.member_responses] == ["m0"]
 
     database = _agno_database(tmp_path / "created", (_SESSION, "team", "squad"))
-    tool = ToolExecution(tool_call_id="call", tool_name="dangerous", requires_confirmation=True, created_at=100)
+    tool = ToolExecution(tool_call_id="call", tool_name="dangerous", requires_confirmation=True)
     embedded = _run("member", status=RunStatus.paused, parent_run_id="team", tools=[tool])
     team_run = TeamRunRecord(
         run_id="team",
@@ -634,7 +634,7 @@ def test_converted_call_ids_are_text_or_none_so_folded_calls_read(
     live = _run("live", status=RunStatus.paused).to_dict()
     live["messages"].append(odd_message)
     _insert_run(database, live, run_index=0)
-    tools = [{"tool_call_id": odd_id}, {"tool_call_id": "m.c0"}]
+    tools = [{"tool_call_id": odd_id, "tool_name": "probe"}, {"tool_call_id": "m.c0", "tool_name": "probe"}]
     member = _run("member", parent_run_id="live").to_dict() | {"tools": tools}
     _insert_run(database, member, run_index=1)
     result = Message(role="tool", content="result", id="live.t0", tool_call_id="c0", created_at=100)
@@ -850,7 +850,7 @@ def test_messages_convert_under_the_saves_rule(tmp_path: Path) -> None:
 def test_converted_runs_drop_their_stored_tool_schemas(tmp_path: Path) -> None:
     """Older releases stored every tool schema in run metadata, a paused team run's embedded members included."""
     database = _agno_database(tmp_path, (_SESSION, "team", "squad"))
-    tool = ToolExecution(tool_call_id="call", tool_name="shell", requires_confirmation=True, created_at=100)
+    tool = ToolExecution(tool_call_id="call", tool_name="shell", requires_confirmation=True)
     member = _run("m1", status=RunStatus.paused, parent_run_id="t1")
     member.metadata = {"tools_schema": [{}], "room_id": "!r"}
     team = TeamRunRecord(

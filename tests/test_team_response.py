@@ -24,6 +24,7 @@ from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.execution_preparation import render_prepared_messages_text
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
@@ -57,7 +58,6 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.history_helpers import _completed_team_run, _team_session
 from tests.providers.anthropic_family_support import (
     isolated_provider_environment,
-    json_reply,
     route_provider,
     sse_reply,
 )
@@ -274,10 +274,10 @@ async def test_a_leader_on_a_claude_route_answers_with_its_reply_on_either_path(
     *,
     stream: bool,
 ) -> None:
-    """The Claude adapter's answer becomes the consensus whether the leader's reply streams or arrives whole."""
+    """The Claude adapter's answer becomes the consensus whether the team's reply streams or not."""
     blocks = [{"type": "text", "text": "Leader synthesis"}]
     team = _team(tmp_path, monkeypatch)
-    leader = route_provider("anthropic", tmp_path / "claude", Wire(sse_reply(blocks) if stream else json_reply(blocks)))
+    leader = route_provider("anthropic", tmp_path / "claude", Wire(sse_reply(blocks)))
     install_model_providers(monkeypatch, {**team.models, "default": leader})
 
     with isolated_provider_environment():
@@ -547,14 +547,14 @@ async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_r
         (True, "Five is prime.Five is odd."),
     ],
 )
-async def test_a_collaborate_leader_reads_its_members_results_as_agno_s_delegation_gave_them_on_each_path(
+async def test_a_collaborate_leader_reads_its_members_results_labeled_only_from_a_blocking_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
     expected: str,
 ) -> None:
-    """A blocking reply labels each member's result with its name, as Agno's non-stream broadcast did."""
+    """A blocking reply labels each member's result with its name; a streamed reply joins the results as they are."""
     team = _team(
         tmp_path,
         monkeypatch,
@@ -907,7 +907,14 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     """A caller that prepares the turn itself, as the OpenAI-compatible API does, recovers the live notice too."""
     team = _team(tmp_path, monkeypatch)
     _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
-    members = materialize_team_members(list(team.member_names), team.orchestrator, team.identity)
+    members = materialize_team_members(
+        list(team.member_names),
+        team.orchestrator,
+        team.identity,
+        configured_team_name=None,
+        reason_prefix="Team request",
+        active_model_names=dict.fromkeys(team.member_names, "default"),
+    )
 
     scope_context = load_bound_scope_session(
         member_names=team.member_names,
@@ -926,6 +933,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         execution_identity=team.identity,
         model_name="default",
         configured_team_name=None,
+        timezone="UTC",
     )
     await prepare_materialized_team_execution(
         team.ctx(),
@@ -950,7 +958,14 @@ def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one
 ) -> None:
     """Every agent build renders a role, so a build without one is a broken invariant, not a member with no role."""
     team = _team(tmp_path, monkeypatch)
-    members = materialize_team_members(list(team.member_names), team.orchestrator, team.identity)
+    members = materialize_team_members(
+        list(team.member_names),
+        team.orchestrator,
+        team.identity,
+        configured_team_name=None,
+        reason_prefix="Team request",
+        active_model_names=dict.fromkeys(team.member_names, "default"),
+    )
     [build] = members.builds
     roleless = replace(members, builds=[replace(build, prompt=replace(build.prompt, role=None))])
 
@@ -964,6 +979,7 @@ def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one
             execution_identity=team.identity,
             model_name="default",
             configured_team_name=None,
+            timezone="UTC",
         )
 
 
@@ -1337,6 +1353,31 @@ async def test_a_resume_shows_the_saved_document_first_then_each_change_and_coll
 
 
 @pytest.mark.asyncio
+async def test_a_resume_whose_reply_hides_tool_calls_collects_no_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """A resumed team run whose reply hides tool calls hands its caller no tool trace."""
+    team, paused = await _pause_on_general(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("Done.")])
+    team.models["general-model"] = ScriptedModel([answer("After approval.")])
+    trace: list[Any] = []
+
+    result = await team.resume(
+        paused,
+        approved=True,
+        approvals=(_approval("call-touch", "dangerous"),),
+        show_tool_calls=False,
+        tool_trace_collector=trace,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert probe.calls == ["dangerous"]
+    assert trace == []
+
+
+@pytest.mark.asyncio
 async def test_a_denied_resume_shows_the_saved_document_before_the_member_answers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1364,6 +1405,30 @@ async def test_a_denied_resume_shows_the_saved_document_before_the_member_answer
     assert published[0] == (0, paused.response_text)
     assert published[-1][1] == result.response_text
     assert "I did not touch it." in result.response_text
+
+
+@pytest.mark.asyncio
+async def test_a_team_request_logs_the_messages_its_leader_was_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team request's logged full prompt is the text of the leader's messages as sent."""
+    logged: list[object] = []
+
+    async def log_full_prompt() -> None:
+        logged.append(current_llm_request_log_context().get("full_prompt"))
+
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[answer("First answer."), [Await(log_full_prompt), *answer("Second answer.")]],
+    )
+    await team.respond(message="First question")
+    await team.respond(message="Second question")
+
+    sent = [message for message in team.models["default"].requests[-1].messages if message.role != "system"]
+    assert "assistant" in {message.role for message in sent}
+    assert logged == [render_prepared_messages_text(sent)]
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from itertools import chain, repeat
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 import pytest
 from structlog.testing import capture_logs
 
@@ -19,6 +20,7 @@ from mindroom.llm.errors import ModelOutputLimitError
 from mindroom.llm.messages import Message
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
+from tests.providers.golden_support import httpx2_transport
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -171,13 +173,13 @@ def _fake_claude(monkeypatch: pytest.MonkeyPatch, responses: list[dict[str, Any]
     bodies: list[dict[str, Any]] = []
     pending = chain(responses, repeat(responses[-1]))
 
-    def handle(request: httpx.Request) -> httpx.Response:
+    def handle(request: httpx2.Request) -> httpx.Response:
         body = json.loads(request.content)
         bodies.append(body)
         message = next(pending) if "tools" in body else _answer("The agent started writing big.py in one call.")
         return _http_response(body, message)
 
-    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx.AsyncClient(transport=httpx.MockTransport(handle)).send)
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx2.AsyncClient(transport=httpx2_transport(handle)).send)
     return bodies
 
 
@@ -308,8 +310,10 @@ def test_each_run_gets_its_own_cut_off_retries() -> None:
     first, second = output_limit_policy(), output_limit_policy()
     for _ in range(2):
         [result] = first(_cut_off_call(), "output_limit") or []
-        assert (result.tool_call_id, result.content, result.tool_call_error) == (
+        assert (result.role, result.tool_call_id, result.tool_name, result.content, result.tool_call_error) == (
+            "tool",
             "toolu_cut",
+            "save_file",
             CUT_OFF_TOOL_CALL_RESULT,
             True,
         )

@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 
 # The dashboard's configSchema.ts understands exactly this hint vocabulary.
 HINT_KEY = "x-mindroom"
-_HINT_FIELDS = {"reference", "key_reference", "secret", "multiline"}
-_REFERENCE_KINDS = {"model", "agent", "room", "tool"}
+_HINT_FIELDS = {"reference", "key_reference", "key_placeholder", "secret", "multiline"}
+_REFERENCE_KINDS = {"model", "agent", "personal_room_agent", "room", "tool"}
 
 
 def _nested_models(annotation: object) -> list[type[BaseModel]]:
@@ -107,6 +107,7 @@ def test_dashboard_hint_omits_unset_fields() -> None:
     }
     assert dashboard_hint(secret=True) == {HINT_KEY: {"secret": True}}
     assert dashboard_hint(multiline=True) == {HINT_KEY: {"multiline": True}}
+    assert dashboard_hint(key_placeholder="mind") == {HINT_KEY: {"key_placeholder": "mind"}}
 
 
 def test_reference_fields_are_annotated() -> None:
@@ -115,7 +116,7 @@ def test_reference_fields_are_annotated() -> None:
     defs = schema["$defs"]
     assert defs["RouterConfig"]["properties"]["model"][HINT_KEY] == {"reference": "model"}
     assert defs["LLMJudgmentConfig"]["properties"]["model"][HINT_KEY] == {"reference": "model"}
-    assert defs["PersonalRoomsConfig"]["properties"]["agent"][HINT_KEY] == {"reference": "agent"}
+    assert defs["PersonalRoomsConfig"]["properties"]["agent"][HINT_KEY] == {"reference": "personal_room_agent"}
     assert defs["PersonalRoomsConfig"]["properties"]["onboarding_rooms"][HINT_KEY] == {"reference": "room"}
     assert defs["DefaultsConfig"]["properties"]["tools"][HINT_KEY] == {"reference": "tool"}
     assert schema["properties"]["room_thread_summary_models"][HINT_KEY] == {

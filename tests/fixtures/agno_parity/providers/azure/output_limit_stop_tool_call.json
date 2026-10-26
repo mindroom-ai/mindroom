@@ -21,12 +21,12 @@
       "id": "gpt-6-astra",
       "provider": "azure"
     },
+    "output_schema": null,
     "portable_replay": null,
-    "response_format": null,
-    "stream": true,
     "tool_choice": null,
     "tools": [
       {
+        "approval_type": null,
         "description": "Return the forecast for one city.",
         "external_execution": false,
         "name": "get_weather",
@@ -50,9 +50,11 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       },
       {
+        "approval_type": null,
         "description": "Search the user's travel notes.",
         "external_execution": false,
         "name": "search_notes",
@@ -72,14 +74,14 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false
+        "requires_confirmation": false,
+        "strict": null
       }
     ]
   },
   "parsed": {
     "message": {
       "content": "Checking the forecast. ",
-      "from_history": false,
       "provider_data": {
         "id": "chatcmpl-parity",
         "mindroom_model": {
@@ -89,7 +91,6 @@
         "system_fingerprint": "fp_parity"
       },
       "role": "assistant",
-      "stop_after_tool_call": false,
       "tool_calls": [
         {
           "function": {
@@ -106,10 +107,12 @@
       "output_tokens": 12,
       "total_tokens": 54
     },
-    "stop_reason": null
+    "stop_reason": "output_limit"
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -120,8 +123,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-6-astra",
-      "stream": true,
       "stream_options": {
         "include_usage": true
       },

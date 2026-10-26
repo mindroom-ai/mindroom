@@ -20,11 +20,13 @@ from mindroom import helper_usage
 from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.replay import configured_replay_plan, estimate_request_messages_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
@@ -48,12 +50,16 @@ from mindroom.llm.provider import (
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
-from mindroom.model_usage import response_context_tokens
+from mindroom.model_usage import message_context_tokens
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    detached_requester_context,
+    tool_runtime_context,
+)
 from mindroom.usage.storage import project_usage, quote_identifier
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
@@ -196,9 +202,9 @@ async def _run(
     agent: _Agent,
     prompt: Sequence[Message] | str,
     *,
-    stream: bool = False,
     session_id: str = "session-1",
     metadata: dict[str, Any] | None = None,
+    user_id: str | None = None,
 ) -> RunRecord:
     turn = _turn(prompt)
     store = agent.store
@@ -251,10 +257,11 @@ async def _run(
             turn=turn,
             media=MediaInputs(),
         ),
-        ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), metadata=metadata),
+        ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), user_id=user_id, metadata=metadata),
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),
         persist=persist,
-        request_template=ModelRequest(messages=(), stream=stream, native_compaction=agent.native_compaction),
+        request_template=ModelRequest(messages=(), native_compaction=agent.native_compaction),
+        metadata=metadata,
     )
     finished = [event async for event in events][-1]
     assert isinstance(finished, RunFinished)
@@ -290,6 +297,18 @@ def _usage_rows(storage: ConversationStore) -> list[tuple[str, dict[str, Any]]]:
     return [(session_id, json.loads(data)) for session_id, data in rows]
 
 
+def _api_requester(config: Config, paths: RuntimePaths) -> DetachedRequesterContext:
+    """Return the authority of an OpenAI-compatible request, whose requester has no Matrix conversation."""
+    return DetachedRequesterContext(
+        requester_id="@api:localhost",
+        config=config,
+        runtime_paths=paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        config_provider=lambda: config,
+        budget_monitor=None,
+    )
+
+
 def _summary_usage(storage: ConversationStore) -> list[tuple[str, dict[str, Any]]]:
     return [
         (session_id, usage) for session_id, usage in _usage_rows(storage) if usage.get("kind") == "compaction_summary"
@@ -297,17 +316,14 @@ def _summary_usage(storage: ConversationStore) -> list[tuple[str, dict[str, Any]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_run_local_tool_loop_compacts_and_finishes(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    *,
-    stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
 
-    output = await _run(_agent(model, config, paths), [Message(role="user", content="Do the task")], stream=stream)
+    output = await _run(_agent(model, config, paths), [Message(role="user", content="Do the task")])
 
     assert str(output.content).endswith("done")
     assert summary_calls.inputs
@@ -323,17 +339,14 @@ async def test_run_local_tool_loop_compacts_and_finishes(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_repeated_run_local_compaction_keeps_a_string_prompt(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    *,
-    stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=12)
 
-    output = await _run(_agent(model, config, paths), "Do the task", stream=stream)
+    output = await _run(_agent(model, config, paths), "Do the task")
 
     assert str(output.content).endswith("done")
     assert len(summary_calls.inputs) >= 2
@@ -468,7 +481,7 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     pdf = File(content=b"%PDF-1.7\n" + b"x" * 300_000, mime_type="application/pdf", filename="report.pdf")
     message = Message(role="user", content="Summarize the attached report.", files=[pdf])
 
-    tokens = estimate_request_messages_tokens([message], replay_model=model)
+    tokens = estimate_request_messages_tokens([message], replay_estimator=model)
 
     assert tokens < 10_000
 
@@ -492,6 +505,22 @@ def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
     assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) > 0
 
 
+def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None:
+    """One tool definition costs one amount, whether a running turn's request or the static prompt estimate sizes it."""
+    lookup = ToolSpec(
+        name="lookup",
+        description="Look up a value.",
+        parameters={"type": "object", "properties": {"key": {"type": "string"}}},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
+    static = build_static_token_estimator(Message(role="system", content=""), [lookup], frozenset())
+
+    assert mid_turn_compaction._tool_tokens([lookup], [], frozenset()) == static.estimate("")
+
+
 @pytest.mark.parametrize("provider", ["openai", "claude"])
 def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_them(
     tmp_path: Path,
@@ -503,7 +532,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     replays only references that the provider expands.
     """
     if provider == "openai":
-        replay_model = responses_adapter(tmp_path, "gpt-6-luna", store=False)
+        replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
         provider_data: dict[str, Any] = {
             "tool_search_items": [
                 {
@@ -527,7 +556,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
             ],
         }
     else:
-        replay_model = None
+        replay_estimator = None
         provider_data = {
             "server_tool_blocks": [
                 {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
@@ -546,7 +575,10 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
         Message(role="assistant", provider_data=provider_data),
     ]
 
-    total = estimate_request_messages_tokens(searched, replay_model=replay_model) + mid_turn_compaction._tool_tokens(
+    total = estimate_request_messages_tokens(
+        searched,
+        replay_estimator=replay_estimator,
+    ) + mid_turn_compaction._tool_tokens(
         [BIG_TOOL],
         searched,
         frozenset({"big_tool"}),
@@ -565,7 +597,7 @@ def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
     )
 
     assert (
-        response_context_tokens(message, provider="openai", configured_provider="openai", model_id="gpt-6-luna") is None
+        message_context_tokens(message, provider="openai", configured_provider="openai", model_id="gpt-6-luna") is None
     )
 
 
@@ -637,13 +669,18 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    *,
+    scoped: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
-    agent = _agent(model, config, paths)
+    agent = (
+        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _agent(model, config, paths)
+    )
 
     with pytest.raises(
         mid_turn_compaction.HistorySummaryBudgetError,
@@ -656,14 +693,20 @@ async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_within_the_model_window_is_sent(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    *,
+    scoped: bool,
 ) -> None:
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     model = ToolLoopModel(tool_rounds=5)
+    agent = (
+        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _agent(model, config, paths)
+    )
 
-    output = await _run(_agent(model, config, paths), [Message(role="user", content="p" * 16_000)])
+    output = await _run(agent, [Message(role="user", content="p" * 16_000)])
 
     assert str(output.content).endswith("done")
     # The prompt alone exceeds the replay window, so compacting again would only summarize every new tool result.
@@ -671,13 +714,10 @@ async def test_rewritten_request_within_the_model_window_is_sent(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
     tmp_path: Path,
     summary_calls: SummaryCalls,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     # A Claude summarizer sizes its input by bytes, more conservatively than request estimates.
     install_model_providers(monkeypatch, {"summary": summary_model(model_id="claude-haiku-5-5", claude=True)})
@@ -689,7 +729,7 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
         """Return one tool result carrying a distinct fact."""
         return f"FACT-{next(facts):02d} " + "r" * 4_000
 
-    output = await _run(_agent(model, config, paths, tools=[probe]), "Do the task", stream=stream)
+    output = await _run(_agent(model, config, paths, tools=[probe]), "Do the task")
 
     assert str(output.content).endswith("done")
     compacted = _first_compacted(model)
@@ -981,6 +1021,21 @@ async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls
 
 
 @pytest.mark.asyncio
+async def test_run_local_summary_usage_counts_toward_the_requester(tmp_path: Path, summary_calls: SummaryCalls) -> None:
+    """A run-local summary is charged to the request's requester, as a compaction before the reply is."""
+    config, paths = _config(tmp_path)
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+
+    with detached_requester_context(_api_requester(config, paths)):
+        agent = _agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage)
+        await _run(agent, "Do the task", user_id="@api:localhost")
+
+    summaries = _summary_usage(storage)
+    assert len(summaries) == len(summary_calls.inputs) >= 1
+    assert {usage["user_id"] for _session_id, usage in summaries} == {"@api:localhost"}
+
+
+@pytest.mark.asyncio
 async def test_scoped_summary_usage_is_recorded_in_the_scope_storage(
     tmp_path: Path,
     summary_calls: SummaryCalls,
@@ -1008,13 +1063,14 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     token = helper_usage._HELPER_USAGE_OWNER.set(owner)
     try:
         # A team member keeps no storage of its own; the reply's owner records its summary usage.
-        await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
+        with detached_requester_context(_api_requester(config, paths)):
+            await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task", user_id="@api:localhost")
     finally:
         helper_usage._HELPER_USAGE_OWNER.reset(token)
 
     summaries = _summary_usage(owner_storage)
     assert len(summaries) == len(summary_calls.inputs) >= 1
-    assert {session_id for session_id, _ in summaries} == {"owner-session"}
+    assert {(session_id, usage["user_id"]) for session_id, usage in summaries} == {("owner-session", "@api:localhost")}
 
 
 @pytest.mark.asyncio
@@ -1037,18 +1093,15 @@ async def test_the_loop_caps_a_request_before_compacting_it(tmp_path: Path, summ
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
-@pytest.mark.parametrize("stream", [False, True])
 async def test_long_single_turn_compacts_mid_turn_and_continues(
     tmp_path: Path,
-    *,
-    stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     model = ToolLoopModel(tool_rounds=5)
     agent = _scoped_agent(model, config, paths, storage)
 
-    output = await _run(agent, "Do the task", stream=stream)
+    output = await _run(agent, "Do the task")
 
     assert str(output.content).endswith("done")
     compacted = _first_compacted(model)
@@ -1368,6 +1421,56 @@ async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: 
     # Two earlier runs and the running turn, however many exchanges the turn folded.
     outcome = next(event for event in lifecycle.events if isinstance(event, CompactionOutcome))
     assert outcome.compacted_run_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_its_fold(tmp_path: Path) -> None:
+    """The notice's after size is the size of the request the fold left, which is smaller than its before size."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    lifecycle = RecordingCompactionLifecycle()
+    model = ToolLoopModel(tool_rounds=5)
+
+    await _run(_scoped_agent(model, config, paths, storage, lifecycle=lifecycle), "Do the task")
+
+    outcome = next(event for event in lifecycle.events if isinstance(event, CompactionOutcome))
+    # The first request after the fold carries its summary.
+    rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
+    rewritten_tokens = (
+        estimate_request_messages_tokens(rewritten.messages, replay_estimator=None)
+        + mid_turn_compaction._thinking_tokens(rewritten.messages)
+        + mid_turn_compaction._tool_tokens(rewritten.request.tools, rewritten.messages, frozenset())
+    )
+    assert outcome.after_tokens == rewritten_tokens
+    assert outcome.after_tokens < outcome.before_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scoped fold estimates the request it rewrote once."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
+    sized: list[tuple[str | None, ...]] = []
+    estimated = mid_turn_compaction._estimated_request_tokens
+
+    def recording(
+        compaction: mid_turn_compaction._MidTurnCompaction,
+        policy: mid_turn_compaction._Policy,
+        messages: list[Message],
+        tools: Sequence[ToolSpec],
+    ) -> int:
+        sized.append(tuple(message.id for message in messages))
+        return estimated(compaction, policy, messages, tools)
+
+    monkeypatch.setattr(mid_turn_compaction, "_estimated_request_tokens", recording)
+
+    await _run(_scoped_agent(model, config, paths, storage), "Do the task")
+
+    rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
+    assert sized.count(tuple(message.id for message in rewritten.messages)) == 1
 
 
 @pytest.mark.asyncio

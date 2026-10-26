@@ -19,6 +19,7 @@ from mindroom.delegation.audit import (
     finish_child_record,
     observe_child_event,
     record_child_response,
+    start_child_record,
 )
 from mindroom.delegation.lifecycle import settle_child_response, start_child_turn
 from mindroom.delegation.records import DelegationRecordLimitError, DelegationRecordLocator, DelegationRecordOwner
@@ -48,7 +49,7 @@ def _config() -> Config:
             "leader": AgentConfig(display_name="Leader"),
             "child": AgentConfig(display_name="Child"),
         },
-        models={"default": ModelConfig(provider="test", id="test-model")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
 
@@ -104,6 +105,8 @@ async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: 
         RunRecord(run_id=child.run_id, session_id=child.session_id, status=status, content="retained outcome"),
         config=config,
         runtime_paths=paths,
+        decisions=None,
+        denial_reasons=None,
     )
     assert asdict(child) == before_child
     assert handle_path.read_bytes() == before_handle
@@ -144,6 +147,31 @@ async def test_start_child_record_persists_restart_locator_and_source_scope(tmp_
     assert run["source_room_id"] == "!room:localhost"
     assert run["source_thread_id"] == "$thread"
     assert run["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "identity",
+    [_identity("leader", "child-session"), _identity("child", "parent-session")],
+    ids=["other-agent", "other-session"],
+)
+async def test_start_child_record_refuses_an_identity_of_another_child(
+    tmp_path: Path,
+    identity: ToolExecutionIdentity,
+) -> None:
+    """An audit record starts only for a child whose retained identity names its own agent and session."""
+    child = replace(_child(), execution_identity=serialize_tool_execution_identity(identity))
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    with pytest.raises(RuntimeError, match=r"^Delegation child execution identity does not match its retained wait$"):
+        await start_child_record(
+            child,
+            parent_run_id="parent-run",
+            config=_config(),
+            runtime_paths=runtime_paths,
+            caller_execution_identity=_identity("leader", "parent-session"),
+            parent_delegation_id=None,
+        )
 
 
 @pytest.mark.asyncio

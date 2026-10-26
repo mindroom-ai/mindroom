@@ -190,7 +190,7 @@ def test_a_built_in_is_listed_once() -> None:
 
 def test_an_automation_model_must_be_a_configured_model() -> None:
     """A model override names a key of models, both on an agent and in the defaults."""
-    models = {"large": ModelConfig(provider="test", id="test-large")}
+    models = {"large": ModelConfig(provider="openai", id="test-large")}
     entry = {"name": "prompt_curation", "model": "large"}
     (automation,) = (
         Config(agents={"mind": _mind(automations=[entry])}, models=models).resolve_entity("mind").automations

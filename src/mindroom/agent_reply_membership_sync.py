@@ -142,7 +142,6 @@ class AgentReplyMembershipSync:
     async def apply_live_transition(
         self,
         config: Config,
-        runtime_paths: RuntimePaths,
         room_id: str,
         event: nio.RoomMemberEvent,
         *,
@@ -153,7 +152,6 @@ class AgentReplyMembershipSync:
         async with self._live_transition_lock:
             changed = self._memberships.apply_member_event(
                 config,
-                runtime_paths,
                 room_id,
                 event,
                 control_user_id=control_user_id,

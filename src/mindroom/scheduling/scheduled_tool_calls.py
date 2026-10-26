@@ -25,11 +25,12 @@ from mindroom.approval.tool_approval import (
     scheduled_call,
 )
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
-from mindroom.tool_system.tool_function import InjectedValue
+from mindroom.tool_system.tool_function import InjectedValue, ToolOutcome
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -71,24 +72,28 @@ _ASK_INSTEAD: frozenset[ScheduledCallRefusal] = frozenset({"not_approved", "not_
 
 @dataclass(frozen=True, slots=True)
 class LiveFunction:
-    """One of a live agent's functions that a scheduled call can run."""
+    """One of a live agent's functions that a scheduled call can run, which names the toolkit it is offered from."""
 
-    toolkit_name: str
     function: ToolFunction
     # A tool that asks for its own confirmation is approved only for the exact call the requester saw.
     authored_confirmation: bool
 
+    @property
+    def toolkit_name(self) -> str:
+        """Return the authored toolkit the run offers the function from."""
+        assert self.function.toolkit is not None, "a scheduled call runs only a function of a configured toolkit"
+        return self.function.toolkit
+
 
 @dataclass(frozen=True, slots=True)
 class _LiveTools:
-    """The functions one agent's run offers, their authored toolkits, and how the run calls them.
+    """The functions one agent's run offers and how the run calls them.
 
     ``middleware`` is the run's tool-call policy, and ``context`` is the run's context for the call that is
     running, so a stored call runs exactly as the model's own call of it would.
     """
 
     functions: Mapping[str, ToolFunction]
-    owners: Mapping[str, str]
     middleware: tuple[ToolMiddleware, ...]
     context: ToolCallContext
 
@@ -98,21 +103,20 @@ _LIVE_TOOLS: ContextVar[_LiveTools | None] = ContextVar("mindroom_scheduled_call
 
 def bind_live_tools(
     functions: Mapping[str, ToolFunction],
-    owners: Mapping[str, str],
     middleware: Sequence[ToolMiddleware],
 ) -> tuple[ToolMiddleware, ...]:
     """Return ``middleware`` behind a first step that shows each call the run's functions, for scheduled calls.
 
-    ``functions`` are the ones the run offers, by name, and ``owners`` maps each to its authored toolkit; a generated
-    function has none, so no stored call can name it; a stored call runs under the returned policy, this step
-    included. A run that offers no scheduler function reading them gets ``middleware`` as it is.
+    ``functions`` are the ones the run offers, by name; a generated function names no toolkit, so no stored call can
+    name it; a stored call runs under the returned policy, this step included. A run that offers no scheduler
+    function reading them gets ``middleware`` as it is.
     """
     if _LIVE_FUNCTION_READERS.isdisjoint(functions):
         return tuple(middleware)
     policy: tuple[ToolMiddleware, ...]
 
     async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
-        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, owners=owners, middleware=policy, context=call.context))
+        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=policy, context=call.context))
         try:
             return await call_next(call.arguments)
         finally:
@@ -147,10 +151,9 @@ def _resolve_live_function(
 ) -> LiveFunction | str:
     """Find the function a scheduled call can run, the one the run offers by that name, or return why it cannot."""
     function = None if live is None else live.functions.get(tool_name)
-    owner = None if live is None else live.owners.get(tool_name)
-    if function is None or owner is None or owner == _SCHEDULER_TOOLKIT:
+    if function is None or function.toolkit in {None, _SCHEDULER_TOOLKIT}:
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
-    if toolkit_name is not None and owner != toolkit_name:
+    if toolkit_name is not None and function.toolkit != toolkit_name:
         return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
     # A tool that takes the run's media gets None for it in a live call too, but scheduling it stays refused, as it
     # was when live runs carried media that a stored call lacked.
@@ -160,7 +163,6 @@ def _resolve_live_function(
     if function.external_execution or function.stop_after_call or takes_media:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
-        toolkit_name=owner,
         function=function,
         authored_confirmation=function.requires_confirmation is True
         and function.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -186,7 +188,10 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
     task_id: str,
     arguments_json: str | None,
 ) -> object:
-    """Spend a scheduled task's approval once and run its stored call in this turn."""
+    """Spend a scheduled task's approval once and run its stored call in this turn.
+
+    Returns the stored call's own result, or a failed outcome saying why it did not run or how it failed.
+    """
     live = _LIVE_TOOLS.get()
     if live is None or context.agent_name not in context.config.agents:
         return _refused(task_id, "scheduled calls run only in their agent's own conversation turn")
@@ -203,9 +208,11 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
     if isinstance(claimed, str):
         if claimed in _ASK_INSTEAD and time.time_ns() >= call.execute_at_ns:
             # Once its time has come, the call can still go ahead the ordinary way, with an approval card now.
-            return (
-                f"{_refused(task_id, _REFUSALS[claimed])} To ask the requester to approve it now, call "
-                f"`{call.tool_name}` with these arguments: {call.arguments_json}"
+            return _refused(
+                task_id,
+                _REFUSALS[claimed],
+                advice=f" To ask the requester to approve it now, call `{call.tool_name}` with these arguments: "
+                f"{call.arguments_json}",
             )
         if claimed in _ASK_INSTEAD:
             return _refused(task_id, f"{_REFUSALS[claimed]}; it runs when its task fires")
@@ -215,8 +222,11 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
         result = await _execute(live, function, json.loads(arguments_text), call_id=f"scheduled-{task_id}")
     except Exception as error:
         await record_scheduled_call_outcome(task_id, "failed")
-        return f"❌ Scheduled call `{task_id}` failed: {str(error) or 'the tool raised an error'}"
-    await record_scheduled_call_outcome(task_id, "completed")
+        return ToolOutcome(content=f"❌ Scheduled call `{task_id}` failed: {failure_text(error)}", is_error=True)
+    # The policy answers a call a plugin hook declined with a failed outcome: the call never ran, and this runner's own
+    # call fails with the decline.
+    declined = isinstance(result, ToolOutcome) and result.is_error
+    await record_scheduled_call_outcome(task_id, "failed" if declined else "completed")
     return result
 
 
@@ -291,8 +301,9 @@ async def _execute(live: _LiveTools, function: ToolFunction, arguments: dict[str
         await wait_for_future_until_complete(asyncio.create_task(settle(), name="scheduled-tool-call-cleanup"))
 
 
-def _refused(task_id: str, reason: str) -> str:
-    return f"❌ Scheduled call `{task_id}` did not run: {reason}."
+def _refused(task_id: str, reason: str, *, advice: str = "") -> ToolOutcome:
+    """Answer a scheduled call that did not run as a failed call, which Claude and Gemini read as a failure."""
+    return ToolOutcome(content=f"❌ Scheduled call `{task_id}` did not run: {reason}.{advice}", is_error=True)
 
 
 def _sentence(reason: str) -> str:

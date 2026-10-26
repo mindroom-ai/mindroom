@@ -1,7 +1,7 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Assemble model requests from a scope's stored runs, its compaction summary, and the current turn.
 
-The replay limits select what main selected (kept as main behaves).
+The replay limits keep the newest runs, messages, and tool results of a scope's stored history.
 """
 
 from __future__ import annotations

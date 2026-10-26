@@ -240,7 +240,7 @@ async def test_locked_database_does_not_freeze_parent_and_timeout_reaps_child(
     processes.clear()  # The lock owner is not a read worker.
 
     async def prepare_request() -> ReadRequest:
-        return ReadRequest(str(published_index), "published")
+        return ReadRequest(str(published_index), "published", [1.0, 0.0])
 
     task = asyncio.create_task(read_process.read_chroma_async(prepare_request, timeout=1.5))
     intervals: list[float] = []

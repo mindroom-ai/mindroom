@@ -27,6 +27,7 @@ from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.test_dynamic_workflows import _make_context, _workflow_spec
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    always_owned,
     call_job_tool,
     cancel_settled,
     job_actor,
@@ -97,7 +98,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                assert json.loads(toolkit.create_workflow(spec))["status"] == "ok"
+                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
                 outcome = await call_job_tool(
                     caller,
                     "run_workflow",
@@ -154,7 +155,7 @@ async def test_workflow_participant_tools_run_under_their_own_grants(
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                assert json.loads(toolkit.create_workflow(spec))["status"] == "ok"
+                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
                 await call_job_tool(
                     caller,
                     "run_workflow",
@@ -219,7 +220,7 @@ async def test_cancel_composite_job_drains_all_sync_children(
     model = ScriptedModel([calls(tool_call("composite", "outer", background_after=0)), answer("done")])
     actor = job_actor(job_tool(composite), name="general")
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def run() -> str:
         result = await run_job_turn(actor, model, "Start the composite tool.", session_id=context.session_id)
         assert defer_execution_cleanup(cleanup)
@@ -290,7 +291,7 @@ async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorizatio
         await coordinator.sync()
         async with execution_resources():
             with tool_runtime_context(context):
-                assert json.loads(toolkit.create_workflow(spec))["status"] == "ok"
+                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
                 arguments = {"workflow_id": "competitor-research-report", "input": {"topic": "test"}}
                 await call_job_tool(
                     caller,

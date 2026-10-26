@@ -636,9 +636,10 @@ class TestAgentBot(AgentBotTestBase):
             *,
             config: Config,
             runtime_paths: RuntimePaths,
+            timezone: str,
             model_prompt: str | None = None,
         ) -> tuple[str, Sequence[ResolvedVisibleMessage], str | None, Sequence[ResolvedVisibleMessage]]:
-            del config, runtime_paths
+            del config, runtime_paths, timezone
             return prompt, thread_history, model_prompt, thread_history
 
         with (
@@ -2652,7 +2653,7 @@ class TestAgentBot(AgentBotTestBase):
                             rooms=["!test:localhost"],
                         ),
                     },
-                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    models={"default": ModelConfig(provider="openai", id="test-model")},
                 ),
             ),
             tmp_path,

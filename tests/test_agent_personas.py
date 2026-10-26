@@ -11,11 +11,10 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom import agents
 from mindroom.agent_cli.minimal_agent import MinimalTurn, minimal_turn
-from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
-from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -32,6 +31,7 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -101,7 +101,7 @@ def _knowledge() -> AgentKnowledge:
 
 def _function_names(build: AgentBuild) -> list[str]:
     """Return the functions a run of ``build`` offers the model."""
-    return sorted(prepare_run_tools(build.spec).functions)
+    return sorted(build.spec.functions)
 
 
 def _system_prompt(build: AgentBuild) -> str:
@@ -112,7 +112,13 @@ def _system_prompt(build: AgentBuild) -> str:
 
 def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "P", **options: Any) -> AgentBuild:  # noqa: ANN401
     """Build the helper agent as an authored child that names ``tools``."""
-    options = {"execution_identity": None, "persist_runtime_state": False, **options}
+    options = {
+        "execution_identity": None,
+        "persist_runtime_state": False,
+        "knowledge": None,
+        "active_model_name": None,
+        **options,
+    }
     return agents.create_agent(
         "helper",
         runtime.config,
@@ -171,7 +177,15 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "SOUL.md").write_text("Configured personality")
     prompt = "Plain {not_a_var} text"
-    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
+    configured = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
+    )
     assert "Configured personality" in str(configured.prompt.role)
 
     request = await _persona_request(runtime, monkeypatch, inline_persona(prompt, None, None, None), "task")
@@ -215,12 +229,11 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path, monke
 
 def test_persona_with_tools_hides_generated_functions_from_the_agent() -> None:
     """An explicit tool list hides functions with no owning toolkit, which the configured agent offers."""
-    generated = Function(name="generated")
-    owned = Function(name="read_file")
-    owned.owning_toolkit = "file"
+    generated = ToolFunction(name="generated", description=None, parameters={}, entrypoint=lambda: None)
+    owned = ToolFunction(name="read_file", toolkit="file", description=None, parameters={}, entrypoint=lambda: None)
 
-    configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None, frozenset())
-    authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None, frozenset())
+    configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None)
+    authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None)
 
     assert configured_filter is None
     assert authored_filter is not None
@@ -253,6 +266,18 @@ def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: P
         _child(runtime, ["file.read_file", "file.save_file"])
 
 
+def test_persona_names_a_function_its_caller_offers_but_cannot_pause_for(tmp_path: Path) -> None:
+    """A named function only approval hiding removes, for a caller that cannot resume a paused run, stops nothing."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    runtime.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="save_file", action="require_approval")],
+    )
+
+    build = _child(runtime, ["file.read_file", "file.save_file"], supports_native_tool_approval=False)
+
+    assert _function_names(build) == ["read_file"]
+
+
 @pytest.mark.parametrize(
     ("tools", "missing"),
     [(["file.read_file", "file.save_file"], r"'file\.save_file'"), (["file", "calculator"], "'calculator'")],
@@ -261,8 +286,8 @@ def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: li
     """A named function or toolkit the caller's own function filter hides, such as during a call, stops construction."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"])
 
-    def caller_filter(function: Function) -> bool:
-        return function.name != "save_file" and function.owning_toolkit != "calculator"
+    def caller_filter(function: ToolFunction) -> bool:
+        return function.name != "save_file" and function.toolkit != "calculator"
 
     with pytest.raises(PersonaError, match=f"{missing} is not available to you"):
         _child(runtime, tools, tool_function_filter=caller_filter)
@@ -277,8 +302,9 @@ def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> No
     assert build.surface.mode == "minimal"
     assert build.surface.deferred == ()
     # The catalog behind Bash holds every function the build owns, whichever ones its spec offers the model.
-    assert "run_shell_command" in build.tool_owners
-    assert "read_file" not in build.tool_owners
+    owned = {name for _agent, name in tool_owners_by_agent(build)}
+    assert "run_shell_command" in owned
+    assert "read_file" not in owned
 
 
 def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
@@ -290,7 +316,14 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
         extra_kwargs={"api_key": "test-key"},
     )
 
-    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, execution_identity=None)
+    configured = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     persona = _child(runtime, ["file"])
 
     # Only the configured agent defers its toolkit; the persona's requests defer nothing.
@@ -351,6 +384,7 @@ def test_persona_with_tools_searches_the_knowledge_it_names(tmp_path: Path) -> N
         persist_runtime_state=False,
         persona=inline_persona("P", ["file"], None, ["docs"]),
         knowledge=_knowledge(),
+        active_model_name=None,
     )
 
     assert "search_knowledge_base" in _function_names(build)
@@ -368,10 +402,16 @@ def test_persona_inherits_its_callers_skills_without_the_authoring_note(tmp_path
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
     identity = build_execution_identity_from_runtime_context(runtime)
     _write_skills(runtime, "scripted")
-    options = {"persist_runtime_state": False}
-
     configured = _system_prompt(
-        agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity, **options),
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            identity,
+            persist_runtime_state=False,
+            knowledge=None,
+            active_model_name=None,
+        ),
     )
     authored = _system_prompt(_child(runtime, None, execution_identity=identity))
 
@@ -389,10 +429,16 @@ def test_only_the_configured_agent_learns_which_workspace_skills_did_not_load(tm
     broken = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / "broken"
     broken.mkdir()
     (broken / "SKILL.md").write_text("---\nname: broken\ndescription: Use when: it breaks\n---\n\nbody\n")
-    options = {"persist_runtime_state": False}
-
     configured = _system_prompt(
-        agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity, **options),
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            identity,
+            persist_runtime_state=False,
+            knowledge=None,
+            active_model_name=None,
+        ),
     )
     authored = _system_prompt(_child(runtime, None, execution_identity=identity))
 
@@ -418,6 +464,8 @@ def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str
         identity,
         persist_runtime_state=False,
         persona=inline_persona("P", None, skills, None),
+        knowledge=None,
+        active_model_name=None,
     )
     prompt = _system_prompt(build)
 
@@ -440,6 +488,8 @@ def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Pa
         identity,
         persist_runtime_state=False,
         persona=persona,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert build.prompt.skills_block is None
@@ -458,6 +508,8 @@ def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: P
         identity,
         persist_runtime_state=False,
         persona=inline_persona("P", ["file"], ["removed"], None),
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert build.prompt.skills_block is None
@@ -478,6 +530,8 @@ def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
             identity,
             persist_runtime_state=False,
             persona=inline_persona("P", ["file"], ["scripted"], None),
+            knowledge=None,
+            active_model_name=None,
         ),
     )
 
@@ -499,6 +553,8 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
         persist_runtime_state=False,
         agent_mode="minimal",
         persona=inline_persona("P", ["shell"], ["scripted"], None),
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert build.surface.mode == "minimal"
@@ -601,6 +657,8 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
             None,
             persist_runtime_state=False,
             persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None, None),
+            knowledge=None,
+            active_model_name=None,
         )
 
 
@@ -669,6 +727,8 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         None,
         persist_runtime_state=False,
         persona=None,
+        knowledge=None,
+        active_model_name=None,
     )
     minimal = agents.create_agent(
         "helper",
@@ -678,6 +738,8 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         persist_runtime_state=False,
         agent_mode="minimal",
         persona=None,
+        knowledge=None,
+        active_model_name=None,
     )
     assert standard.spec.system_message is None
     assert standard.prompt.persona is None
@@ -701,11 +763,11 @@ def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) -> None:
     assert "write_file" not in functions
 
 
-def test_persona_loads_named_member_of_deferred_preset(tmp_path: Path) -> None:
-    """A deferred preset member that a persona names is present from the child's first request."""
-    runtime = _runtime(tmp_path, tools=[{"openclaw_compat": {"defer": True}}])
-    build = _child(runtime, ["shell"])
-    assert "run_shell_command" in _function_names(build)
+def test_persona_loads_named_member_of_a_deferred_tool(tmp_path: Path) -> None:
+    """A toolkit a deferred tool brings in, which a persona names, is present from the child's first request."""
+    runtime = _runtime(tmp_path, tools=[{"matrix_message": {"defer": True}}])
+    build = _child(runtime, ["attachments"])
+    assert "list_attachments" in _function_names(build)
 
 
 def test_persona_may_name_the_matrix_room_runtime_tool(tmp_path: Path) -> None:
@@ -729,7 +791,7 @@ async def test_persona_delegate_tool_keeps_its_cap_without_runtime_context(tmp_p
     """An authored child's delegate tool enforces its own tools even without a Matrix tool context."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"], delegate_to=["helper"])
     build = _child(runtime, ["delegate", "file"])
-    run_subagent = prepare_run_tools(build.spec).functions["run_subagent"].entrypoint
+    run_subagent = build.spec.functions["run_subagent"].entrypoint
 
     unauthored = await run_subagent(task="Plain copy.")
     widened = await run_subagent(task="Add.", system_prompt="Q", tools=["calculator"])

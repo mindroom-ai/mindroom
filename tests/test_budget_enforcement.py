@@ -44,7 +44,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
-from tests.team_runtime.squad import built_team, team_spec
+from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
 from tests.test_dynamic_workflow_subagents import _config as _subagent_workflow_config
@@ -173,6 +173,10 @@ def test_delegated_child_model_follows_the_owners_budget(tmp_path: Path, spend: 
         runtime_paths=runtime_paths,
         depth=0,
         budget_monitor=_spent(runtime_paths, spend),
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     assert child.model_name == expected
@@ -191,6 +195,10 @@ def test_delegated_follow_up_returns_to_the_requested_model_under_budget(tmp_pat
         runtime_paths=runtime_paths,
         depth=0,
         budget_monitor=_spent(runtime_paths, 12.0),
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     follow_up = prepare_child_turn(
@@ -203,6 +211,9 @@ def test_delegated_follow_up_returns_to_the_requested_model_under_budget(tmp_pat
         depth=0,
         budget_monitor=_spent(runtime_paths, 3.0),
         previous=first,
+        model=None,
+        agent_mode="standard",
+        persona=None,
     )
 
     assert (first.model_name, first.requested_model_name) == ("luna", "default")
@@ -223,6 +234,10 @@ def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: 
         runtime_paths=runtime_paths,
         depth=0,
         budget_monitor=_spent(runtime_paths, 0.0),
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
     )
 
     note_child_run_id(child, "after-switch", runtime_paths, model_name="alternate")
@@ -236,6 +251,9 @@ def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: 
         depth=0,
         budget_monitor=_spent(runtime_paths, 0.0),
         previous=child,
+        model=None,
+        agent_mode="standard",
+        persona=None,
     )
 
     assert (follow_up.model_name, follow_up.requested_model_name) == ("alternate", "alternate")
@@ -255,6 +273,10 @@ def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path
             runtime_paths=runtime_paths,
             depth=0,
             budget_monitor=_spent(runtime_paths, 0.0),
+            model=None,
+            agent_mode="standard",
+            previous=None,
+            persona=None,
         ),
         requested_model_name=None,
     )
@@ -269,6 +291,9 @@ def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path
         depth=0,
         budget_monitor=_spent(runtime_paths, 12.0),
         previous=saved,
+        model=None,
+        agent_mode="standard",
+        persona=None,
     )
 
     assert (follow_up.model_name, follow_up.requested_model_name) == ("luna", "default")
@@ -426,7 +451,7 @@ async def test_dynamic_workflow_room_agent_participant_uses_fallback(
     _budget_context_config(context.config)
     _model, loaded = _room_agent_model(monkeypatch, answer("done"))
 
-    await dynamic_workflow_module._aexecute_room_agent_participant(
+    await dynamic_workflow_module._execute_room_agent_participant(
         context,
         {"id": "writer", "kind": "room_agent", "agent": "specialist"},
         "Write a report.",
@@ -484,9 +509,9 @@ async def _run_workflow_as(workflow: _SubagentWorkflow, active_model_name: str) 
         active_model_name=active_model_name,
     )
     with tool_runtime_context(context):
-        created = json.loads(await workflow.tools.acreate_workflow(spec))
+        created = json.loads(await workflow.tools.create_workflow(spec))
         assert created["status"] == "ok", created
-        return json.loads(await workflow.tools.arun_workflow(workflow_id="review", input={}))
+        return json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
 
 
 @pytest.mark.asyncio
@@ -506,7 +531,8 @@ async def test_over_budget_caller_runs_saved_workflows_on_the_fallback(
     assert workflow.models_loaded == ["luna"]
 
 
-def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
     context = _make_context(tmp_path)
     _budget_context_config(context.config)
     context.config.models["opus"] = ModelConfig(
@@ -519,7 +545,7 @@ def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) ->
     spec["participants"][0]["model"] = "claude-opus-5"  # type: ignore[index]
 
     with tool_runtime_context(context):
-        payload = json.loads(DynamicWorkflowTools().create_workflow(spec))
+        payload = json.loads(await DynamicWorkflowTools().create_workflow(spec))
 
     assert payload["status"] == "error"
     assert "not allowed by permissions.models" in payload["message"]

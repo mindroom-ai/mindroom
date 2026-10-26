@@ -233,6 +233,17 @@ def _attachment_provenance_line(record: AttachmentRecord) -> str:
     return f"- {record.attachment_id} ({', '.join(details)})"
 
 
+# The model-visible text that names attachments: the current message's provenance block and an earlier
+# message's inline annotation.
+_CURRENT_ATTACHMENTS_HEADING = "Attachments sent with the current message"
+_ATTACHMENT_ANNOTATION_PREFIX = "[attachments:"
+
+
+def mentions_attachments(text: str) -> bool:
+    """Return whether ``text`` names attachments the way model input renders them, which plain text cannot show."""
+    return _ATTACHMENT_ANNOTATION_PREFIX in text or _CURRENT_ATTACHMENTS_HEADING in text
+
+
 def format_attachments_prompt(current_records: list[AttachmentRecord]) -> str | None:
     """Render provenance for attachments sent with the current message.
 
@@ -241,7 +252,7 @@ def format_attachments_prompt(current_records: list[AttachmentRecord]) -> str | 
     """
     if not current_records:
         return None
-    lines = ["Attachments sent with the current message (use tool calls to inspect or process them by ID):"]
+    lines = [f"{_CURRENT_ATTACHMENTS_HEADING} (use tool calls to inspect or process them by ID):"]
     lines.extend(_attachment_provenance_line(record) for record in current_records)
     return "\n".join(lines)
 
@@ -274,7 +285,7 @@ def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> 
         else f"{record.attachment_id} ({record.kind})"
         for record in attachment_records
     ]
-    return f"[attachments: {', '.join(parts)}]"
+    return f"{_ATTACHMENT_ANNOTATION_PREFIX} {', '.join(parts)}]"
 
 
 def _attachments_dir(storage_path: Path) -> Path:

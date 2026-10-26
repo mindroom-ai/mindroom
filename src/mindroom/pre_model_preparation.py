@@ -18,11 +18,11 @@ if TYPE_CHECKING:
     from mindroom.memory import MemoryPromptParts
     from mindroom.timing import DispatchPipelineTiming
 
-# Keep extraction behavior-neutral for per-logger routing and emitted logger fields.
+# Agent preparation logs under the logger of the agent turns it serves.
 logger = get_logger("mindroom.ai")
 
-type _AgentBuilder = Callable[[], tuple[ResolvedRuntimeModel, AgentBuild]]
 type _BuiltAgent = tuple[ResolvedRuntimeModel, AgentBuild]
+type _AgentBuilder = Callable[[], _BuiltAgent]
 
 # Agent construction is synchronous and must stay off the event loop, but the
 # default executor is shared with hundreds of unrelated offloads.  Keeping the
@@ -50,6 +50,12 @@ def _log_secondary_agent_error(agent_name: str, error: Exception) -> None:
 def _run_agent_build_in_context(context: contextvars.Context, build_agent: _AgentBuilder) -> _BuiltAgent:
     """Run one synchronous agent build inside its captured dispatch context."""
     return context.run(build_agent)
+
+
+def _start_agent_build(build_agent: _AgentBuilder) -> tuple[Future[_BuiltAgent], asyncio.Future[_BuiltAgent]]:
+    """Submit one agent build in a copy of the caller's context: its raw future, and the awaitable that mirrors it."""
+    build_call = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, contextvars.copy_context(), build_agent)
+    return build_call, asyncio.wrap_future(build_call)
 
 
 async def _drain_unreturned_agent_build(
@@ -89,9 +95,7 @@ async def _drain_unreturned_agent_build(
 
 async def build_agent_off_loop(build_agent: _AgentBuilder, *, agent_name: str) -> _BuiltAgent:
     """Build one agent off-loop, letting a cancelled build finish before the cancellation propagates."""
-    context = contextvars.copy_context()
-    build_call: Future[_BuiltAgent] = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, context, build_agent)
-    build_future: asyncio.Future[_BuiltAgent] = asyncio.wrap_future(build_call)
+    build_call, build_future = _start_agent_build(build_agent)
     try:
         return await asyncio.shield(build_future)
     except asyncio.CancelledError:
@@ -99,14 +103,14 @@ async def build_agent_off_loop(build_agent: _AgentBuilder, *, agent_name: str) -
         raise
 
 
-async def _prepare_prompt_branches(
+async def prepare_prompt_branches(
     *,
     prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
     build_agent: _AgentBuilder,
     agent_name: str,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, AgentBuild]:
-    """Overlap memory preparation with agent construction and join both safely."""
+    """Overlap memory preparation with agent construction and join both, letting a cancelled build finish first."""
 
     async def _memory_branch() -> MemoryPromptParts | Exception:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
@@ -117,52 +121,34 @@ async def _prepare_prompt_branches(
         finally:
             _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
 
-    context = contextvars.copy_context()
-    _mark_pipeline_timing(pipeline_timing, "agent_build_start")
-    build_call: Future[_BuiltAgent] = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, context, build_agent)
-    build_future: asyncio.Future[_BuiltAgent] = asyncio.wrap_future(build_call)
-    build_future.add_done_callback(
-        lambda _future: _mark_pipeline_timing(pipeline_timing, "agent_build_ready"),
-    )
-
-    async def _agent_branch() -> _BuiltAgent | Exception:
-        try:
-            return await asyncio.shield(build_future)
-        except Exception as error:
-            return error
-
-    try:
-        async with asyncio.TaskGroup() as task_group:
-            agent_task = task_group.create_task(_agent_branch(), name=f"agent_prepare:{agent_name}")
-            memory_task = task_group.create_task(_memory_branch(), name=f"memory_prepare:{agent_name}")
-    except BaseException:
-        await _drain_unreturned_agent_build(build_future, build_call, agent_name=agent_name)
-        raise
-
-    agent_result = agent_task.result()
-    memory_result = memory_task.result()
-    if isinstance(memory_result, Exception):
-        if isinstance(agent_result, Exception):
-            _log_secondary_agent_error(agent_name, agent_result)
-        raise memory_result
-    if isinstance(agent_result, Exception):
-        raise agent_result
-    runtime_model, build = agent_result
-    return memory_result, runtime_model, build
-
-
-async def prepare_prompt_branches(
-    *,
-    prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
-    build_agent: _AgentBuilder,
-    agent_name: str,
-    pipeline_timing: DispatchPipelineTiming | None,
-) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, AgentBuild]:
-    """Overlap memory preparation with traced, cancellation-safe construction."""
     with response_shutdown_phase(ResponseShutdownPhase.AGENT_PREPARATION):
-        return await _prepare_prompt_branches(
-            prepare_memory=prepare_memory,
-            build_agent=build_agent,
-            agent_name=agent_name,
-            pipeline_timing=pipeline_timing,
+        _mark_pipeline_timing(pipeline_timing, "agent_build_start")
+        build_call, build_future = _start_agent_build(build_agent)
+        build_future.add_done_callback(
+            lambda _future: _mark_pipeline_timing(pipeline_timing, "agent_build_ready"),
         )
+
+        async def _agent_branch() -> _BuiltAgent | Exception:
+            try:
+                return await asyncio.shield(build_future)
+            except Exception as error:
+                return error
+
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                agent_task = task_group.create_task(_agent_branch(), name=f"agent_prepare:{agent_name}")
+                memory_task = task_group.create_task(_memory_branch(), name=f"memory_prepare:{agent_name}")
+        except BaseException:
+            await _drain_unreturned_agent_build(build_future, build_call, agent_name=agent_name)
+            raise
+
+        agent_result = agent_task.result()
+        memory_result = memory_task.result()
+        if isinstance(memory_result, Exception):
+            if isinstance(agent_result, Exception):
+                _log_secondary_agent_error(agent_name, agent_result)
+            raise memory_result
+        if isinstance(agent_result, Exception):
+            raise agent_result
+        runtime_model, build = agent_result
+        return memory_result, runtime_model, build

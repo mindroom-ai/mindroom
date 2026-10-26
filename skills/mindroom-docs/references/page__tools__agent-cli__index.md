@@ -90,6 +90,7 @@ mindroom-agent context read NAME --offset 0 --limit 8000
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
+A toolkit keeps its own tool name when a preset or another tool brings it in, so with `matrix_message` or `openclaw_compat` configured, attachments are listed with `attachments.list_attachments`.
 Discovery and calls use the current agent's permissions and requester context.
 Use command-specific `--help` for arguments and options.
 

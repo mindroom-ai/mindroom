@@ -63,7 +63,9 @@ _GET_SKILL_REFERENCE_DESCRIPTION = (
 _GET_SKILL_SCRIPT_DESCRIPTION = (
     "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
 )
-# The fixed header of the skills section, kept as main renders it; get_skill_script only reads scripts.
+# TODO(simplify): the fixed header of the system prompt's skills section is Agno's text, which calls scripts
+# "Executable code templates" though get_skill_script only reads them. Write MindRoom's own skills prompt (#3105).
+# Models would notice.
 _PROMPT_HEADER = (
     "<skills_system>",
     "",
@@ -135,11 +137,10 @@ class _SkillsLoader:
     runtime_paths: RuntimePaths
     credential_keys: set[str]
     allowlist: Sequence[str] | None = None
-    env_vars: Mapping[str, str] | None = None
 
     def load(self) -> list[Skill]:
         """Return the eligible skills for the configured roots and allowlist."""
-        env_vars = runtime_env_values(self.runtime_paths) if self.env_vars is None else self.env_vars
+        env_vars = runtime_env_values(self.runtime_paths)
         config_data = self.config.model_dump()
         allowlist_set = set(self.allowlist or [])
 
@@ -398,7 +399,8 @@ def _unlisted_file_error(
 
 
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-# Configured skill roots read files by path; the paths they accept are kept as main behaves.
+# Configured skill roots read files by path, so a reference or script path resolves only inside its skill folder, and
+# its segments lose trailing dots and spaces and may not hold control characters, a drive, or a Windows device name.
 _WINDOWS_RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)", re.IGNORECASE)
 _WINDOWS_PATH_PREFIX = re.compile(r"^([A-Za-z]:|\\\\)")
 
@@ -452,43 +454,36 @@ def build_skills_toolkit(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    skill_roots: Sequence[Path] | None = None,
-    workspace_root: Path | None = None,
-    env_vars: Mapping[str, str] | None = None,
-    credential_keys: set[str] | None = None,
+    workspace_root: Path | None,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: Collection[str] | None = None,
     refused: list[RefusedWorkspaceSkill] | None = None,
 ) -> SkillsToolkit | None:
     """Build one agent's skills toolkit, narrowed to the skill names in ``only`` when set.
 
-    Workspace skills win over the default roots on a name conflict; explicit ``skill_roots`` win over the workspace.
-    ``refused`` collects the workspace skills that did not load, also when no skill loads.
+    Workspace skills win over the default roots on a name conflict. ``refused`` collects the workspace skills that did
+    not load, also when no skill loads.
     """
     if only is not None and not only:
         return None
     agent_config = config.get_agent(agent_name)
-    resolved_credential_keys = (
-        credential_keys if credential_keys is not None else _collect_credential_keys(runtime_paths)
-    )
+    credential_keys = _collect_credential_keys(runtime_paths)
 
     configured_loader = None
     if agent_config.skills:
         configured_loader = _SkillsLoader(
-            roots=_unique_paths(skill_roots if skill_roots is not None else _get_default_skill_roots()),
+            roots=_get_default_skill_roots(),
             config=config,
             runtime_paths=runtime_paths,
             allowlist=agent_config.skills,
-            env_vars=env_vars,
-            credential_keys=resolved_credential_keys,
+            credential_keys=credential_keys,
         )
 
     workspace_loader = _WorkspaceSkillsLoader(
         roots=(),
         config=config,
         runtime_paths=runtime_paths,
-        env_vars=env_vars,
-        credential_keys=resolved_credential_keys,
+        credential_keys=credential_keys,
         workspace_root=(
             workspace_root
             if workspace_root is not None
@@ -496,8 +491,7 @@ def build_skills_toolkit(
         ),
     )
 
-    ordered = (configured_loader, workspace_loader) if skill_roots is None else (workspace_loader, configured_loader)
-    loaders = [loader for loader in ordered if loader is not None]
+    loaders = [loader for loader in (configured_loader, workspace_loader) if loader is not None]
     skills, workspace_roots = _load_skills(loaders, None if only is None else frozenset(only))
     if refused is not None:
         refused.extend(workspace_loader.refused)
@@ -791,7 +785,9 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
-# Operator skill roots load leniently, kept as main behaves.
+# TODO(simplify): Operator skill roots load leniently: frontmatter that is not YAML reads as ``key: value`` lines, and
+# a folder that fails to load is skipped with a warning, while workspace skills load strictly and report each refusal.
+# Load both with the strict loader (#3105). Operators would notice: a malformed operator skill would be refused.
 def _read_skill_root(root: Path) -> list[Skill]:
     """Read one skill folder, or every skill folder directly below ``root``, in directory order."""
     return [skill for folder in _skill_folders(root) if (skill := _read_skill_folder(folder)) is not None]

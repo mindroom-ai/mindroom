@@ -19,6 +19,7 @@ A client starts with `search_tools` and `{}` (or a query such as `{"query": "cal
 It passes a returned `agent` and `toolkit` to another `search_tools` call to list functions, then calls `get_tool` with the returned `agent`, `toolkit`, and `function`, and finally `invoke_tool` with the same selectors and an `arguments` object.
 Clients must copy identifiers from these results; display names and agent directories such as `list_agents` do not show which agents the gateway exposes.
 MCP initialization instructions name the personal agent from `MINDROOM_CONNECTIONS_AGENT`, when set, and the instance's `/connections` URL, but the personal agent is usable only when it appears in discovery.
+When a function that `invoke_tool` runs also produces media such as an image, the call's `result` holds the function's text under `content` and an `attachments` list that gives each medium's `kind`, `mime_type`, and `url` when it has one, without the media's bytes.
 
 When a service needs authorization, the result contains `error.code: connection_required` and a `connection_url` pointing to `/connections`.
 The user connects that service in the browser and the client retries.
@@ -325,6 +326,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `approval_required` | The tool needs confirmation or a configured approval and cannot run through the gateway |
 | `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
+| `tool_declined` | A MindRoom plugin declined the call, so it did not run; `message` gives the plugin's reason |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
 | `duplicate_request` | A call with the same request ID is already running |

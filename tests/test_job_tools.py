@@ -6,6 +6,7 @@ import asyncio
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
+from unittest.mock import patch
 
 import pytest
 
@@ -34,6 +35,7 @@ from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
+    always_owned,
     call_job_tool,
     completed_delegation_job,
     job_actor,
@@ -71,21 +73,57 @@ _NO_SUCH_JOB = (
 
 
 @pytest.mark.asyncio
-async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path) -> None:
-    """A configured tool with its own `job` function would shadow the job controls, so the agent refuses it."""
+@pytest.mark.parametrize("filtered", [False, True])
+async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, filtered: bool) -> None:
+    """A configured tool offering its own `job` function would shadow the job controls, so the agent refuses it.
+
+    A `job` function the caller's function filter leaves out is not offered, so it reserves nothing.
+    """
     paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader", tools=["calculator"])},
+        models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        memory={"backend": "none"},
+        defaults={"tools": []},
+    )
+    bind_runtime_paths(config, runtime_paths=paths)
+    owner = build_execution_identity_from_runtime_context(_delegate_runtime_context(config, paths))
     runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
 
     def job() -> str:
         return "a plugin's job"
 
+    def plugin_toolkit(_tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name="ci", tools=[job, lookup])
+
     try:
-        with pytest.raises(ValueError, match="reserved"):
-            JobTools.build([Toolkit(name="ci", tools=[job])], paths, owner, depth=0, enabled=True)
+        with patch("mindroom.agents.build_agent_toolkit", side_effect=plugin_toolkit):
+            if filtered:
+                build = create_agent(
+                    "leader",
+                    config,
+                    paths,
+                    execution_identity=owner,
+                    persist_runtime_state=False,
+                    tool_function_filter=lambda function: function.name != "job",
+                    knowledge=None,
+                    active_model_name=None,
+                )
+                assert build.spec.functions["job"].toolkit == "job"
+            else:
+                with pytest.raises(ValueError, match="reserved"):
+                    create_agent(
+                        "leader",
+                        config,
+                        paths,
+                        execution_identity=owner,
+                        persist_runtime_state=False,
+                        knowledge=None,
+                        active_model_name=None,
+                    )
     finally:
         await runtime.shutdown()
 
@@ -148,7 +186,15 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     try:
-        build = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
+        build = create_agent(
+            "leader",
+            config,
+            paths,
+            execution_identity=owner,
+            persist_runtime_state=False,
+            knowledge=None,
+            active_model_name=None,
+        )
         names = [function.name for toolkit in build.spec.toolkits for function in toolkit.functions]
         assert names.count("job") == 1
         assert build.tool_jobs is not None
@@ -302,7 +348,7 @@ async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
         await runtime.release_wait("ordinary", waited.claim)
         model = ScriptedModel([calls(tool_call("job", "wait", action="wait", job_id="ordinary")), answer("done")])
 
-        @owned_tool_execution()
+        @owned_tool_execution(enabled=always_owned)
         async def run() -> RunRecord:
             set_consumption_storage(storage_factory)
             return await run_job_turn(
@@ -320,6 +366,41 @@ async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
         assert tool.is_error is (status == "failed")
         assert tool.result == expected_result
         assert (await lookup(runtime, "ordinary", owner=owner, depth=0)).consumed
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [None, ToolResultPayload(value=None, error="")],
+    ids=["runtime_failure", "call_failure"],
+)
+async def test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed(
+    tmp_path: Path,
+    payload: ToolResultPayload | None,
+) -> None:
+    """A failed job that older releases saved without error text still reads as a failure that says so."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    # Releases through v2026.10.512 saved the empty text of an exception such as TimeoutError: the runtime as the job's
+    # result alone, and the job executor in its payload's error too.
+    encoded = None if payload is None else encode_result_payload(payload)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("failed", "", result_payload=encoded)
+
+    tools = JobTools(paths, owner)
+    try:
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        with tool_runtime_context(context), pytest.raises(RuntimeError) as raised:
+            await tools.job("wait", "ordinary", wait_timeout=None)
+        assert str(raised.value) == "Background tool job failed."
     finally:
         await runtime.shutdown()
 
@@ -583,7 +664,7 @@ async def _collect_in_a_run(
     tools = JobTools(paths, owner)
     actor = job_actor(*toolkit_job_tools(tools, authored_name="job").values())
 
-    @owned_tool_execution()
+    @owned_tool_execution(enabled=always_owned)
     async def run() -> RunRecord:
         set_consumption_storage(storage_factory)
         return await run_job_turn(actor, model, "collect", session_id=context.session_id, store=storage)
@@ -617,6 +698,27 @@ async def test_collect_returns_every_ended_job_once(tmp_path: Path) -> None:
             assert (await lookup(runtime, job_id, owner=owner, depth=0)).consumed
         with tool_runtime_context(context):
             assert await tools.job("collect") == "No ended background jobs."
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_collect_reads_a_job_saved_failed_without_error_text_as_failed(tmp_path: Path) -> None:
+    """Collect reports a failed job that older releases saved without error text as a failure that says so."""
+    # Both shapes releases through v2026.10.512 saved: the runtime's empty result alone, and the executor's payload.
+    call_failure = encode_result_payload(ToolResultPayload(value=None, error=""))
+    response, runtime, _tools, _owner, _rest = await _collect_in_a_run(
+        tmp_path,
+        {
+            "runtime_failure": BackgroundOutcome("failed", ""),
+            "call_failure": BackgroundOutcome("failed", "", result_payload=call_failure),
+        },
+    )
+    try:
+        assert set(str(response.tools[0].result).split("\n\n")) == {
+            "`runtime_failure` (tool_runtime_failure) failed:\nBackground tool job failed.",
+            "`call_failure` (tool_call_failure) failed:\nBackground tool job failed.",
+        }
     finally:
         await runtime.shutdown()
 

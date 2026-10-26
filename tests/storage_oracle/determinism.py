@@ -89,7 +89,7 @@ _TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, summary
 # Modules that call ``time.time()`` on the imported module.
 _TIME_MODULE_MODULES: tuple[ModuleType, ...] = (agent_storage, legacy_compaction_state, legacy_agno2_runs)
 # Modules that call ``datetime.now``.
-_DATETIME_MODULES: tuple[ModuleType, ...] = (runs, history_storage)
+_DATETIME_MODULES: tuple[ModuleType, ...] = (history_storage,)
 
 
 def _without_fsync(connect: Callable[..., sqlite3.Connection]) -> Callable[..., sqlite3.Connection]:

@@ -59,7 +59,7 @@ def test_identify_approval_tools_keeps_team_member_owner(member_agent_id: str) -
         default_agent_name="research-team",
     )
 
-    assert identified == ((tool, "call-1", "dangerous", "Researcher_A"),)
+    assert identified == ((tool, "Researcher_A"),)
 
 
 @pytest.fixture
@@ -136,7 +136,7 @@ def test_identify_approval_tools_keeps_simple_member_owner(member_pause: PausedA
 
     identified = identify_approval_tools(member_pause, default_agent_name="test-team")
 
-    assert identified[0][1:] == ("call-1", "dangerous", "other")
+    assert identified[0][1] == "other"
 
 
 @pytest.mark.parametrize("member_agent_id", ["test_agent", "test-agent"])
@@ -495,7 +495,7 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
     if owner is None:
         with pytest.raises(RuntimeError, match="toolkit origin"):
             await plan_approval_calls(
-                ((tool, "call-1", "add", "general"),),
+                ((tool, "general"),),
                 config=coordinator.config(),
                 runtime_paths=coordinator.runtime_paths,
                 requester_id="@user:localhost",
@@ -505,7 +505,7 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
             )
     else:
         plan = await plan_approval_calls(
-            ((tool, "call-1", "add", "general"),),
+            ((tool, "general"),),
             config=coordinator.config(),
             runtime_paths=coordinator.runtime_paths,
             requester_id="@user:localhost",

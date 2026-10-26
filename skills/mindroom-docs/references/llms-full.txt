@@ -1016,6 +1016,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Tools** - configured tools (green badge) and tools that need no setup
 - **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
+- **Personal agents** - a read-only list of the agents generated from [`personal_agents`](https://docs.mindroom.chat/personal-agents/) templates, with each owner, Matrix ID, template, and status; edit the templates under Settings → Personal rooms
 
 ### Teams
 
@@ -1151,6 +1152,7 @@ The dashboard uses the backend REST API under `/api/`, with the same authenticat
 | PUT | `/api/config/raw` | Replace raw `config.yaml` text |
 | GET | `/api/config/schema` | Configuration JSON schema used by Settings and More settings |
 | GET | `/api/config/agents` | List agents |
+| GET | `/api/config/personal-agents` | List generated personal agents |
 | POST | `/api/config/agents` | Create agent |
 | PUT | `/api/config/agents/{id}` | Update agent |
 | DELETE | `/api/config/agents/{id}` | Delete agent |
@@ -1436,12 +1438,13 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `room_models` | Map of managed room name to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
-| `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/) |
+| `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
 | `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](https://docs.mindroom.chat/personal-rooms/#personal-rooms) |
+| `personal_agents` | Templates that give each onboarded user their own agent | [Personal Agents](https://docs.mindroom.chat/personal-agents/#personal-agents) |
 | `budgets` | Default monthly spending cap per user and the fallback model | [Budgets](https://docs.mindroom.chat/budgets/) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync) |
@@ -1713,6 +1716,7 @@ agents:
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
+| `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
@@ -1765,6 +1769,7 @@ agents:
 
 Here every user gets their own `mind_data/` root, seeded from `./mind_template/` (for example `SOUL.md`, `USER.md`, `MEMORY.md`, and a `memory/` folder), while `company_docs` stays shared by everyone.
 Private roots live at `<storage>/private_instances/<requester scope>/<agent>/<private.root>/`, not next to `config.yaml`, and dedicated workers mount only that root.
+A private agent is still one Matrix account, so use [personal agents](https://docs.mindroom.chat/personal-agents/) when each person needs an agent of their own that others can mention or add to a team.
 
 How a private agent behaves:
 
@@ -1891,6 +1896,9 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `zai` - Z.ai GLM models
 - `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
+Letter case, surrounding spaces, and `-` versus `_` do not matter, so `Llama-CPP` means `llama_cpp`.
+A `provider` value that does not match one of these fails config load with an error that names the model and lists these values, even when no agent uses that model.
+
 To generate a starter config for one provider, use `mindroom config init --provider <preset>` (see [Getting Started](https://docs.mindroom.chat/getting-started/)).
 The [macOS app's local model setup](https://docs.mindroom.chat/installation/macos-app/#local-ai-models) downloads and runs models with one click, with hardware recommendations including Qwen3.8 27B when memory permits.
 
@@ -2009,6 +2017,10 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
+Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
+An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
+
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
 Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
@@ -2028,7 +2040,7 @@ With adaptive thinking, the notes these models write between tool calls are hidd
 Provider credentials come from environment variables, stored credentials, CLI logins, or a model-specific key.
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
-A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key, although the provider SDK may still read `ANTHROPIC_API_KEY` or `AZURE_OPENAI_API_KEY` from the process environment.
+A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
@@ -2318,14 +2330,13 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
 Each provider accepts only the keys in the table below.
-A model with any other key fails to load with an `Unsupported extra_kwargs` error that names the unknown keys and lists the accepted ones.
-Retired Agno model settings that older configs still set, such as `retries`, load with a warning and are ignored.
+A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
 
-- `base_url` sends requests to a custom endpoint, such as an OpenAI-compatible server.
+- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
 - `request_params` holds request body fields that MindRoom merges over its own.
 - `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).
-- `client_params` passes options to the provider's API client.
+- `client_params`, a mapping, passes options to the provider's API client; its `base_url`, when set, must be a string.
 
 | Provider | Accepted keys |
 |----------|---------------|
@@ -2345,7 +2356,7 @@ Retired Agno model settings that older configs still set, such as `retries`, loa
 | `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
 | `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
-When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
+When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
 Some models reject sampling controls:
 
@@ -2428,7 +2439,7 @@ MindRoom ends a streamed request when the provider sends no event for `stream_id
 If nothing was streamed yet, MindRoom sends the request once more, unless a provider-hosted tool such as web search or code execution had started, since resending would run that tool again.
 A second silent attempt, or a stall after text appeared or such a tool started, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 The limit measures the gap between provider events, so long replies and slow tool calls are unaffected.
-It applies only to streamed responses (`defaults.enable_streaming: true`, the default).
+It applies to every model request, also when `defaults.enable_streaming` is off, except compaction summaries, which their own [`timeout_seconds`](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) bounds.
 
 By default the limit is 300 seconds for hosted providers on their built-in endpoint.
 Local servers can stay silent for minutes while a request waits in a queue or a model loads, so `ollama`, `llama_cpp`, and any model with a configured endpoint get no limit unless you set one.
@@ -2605,7 +2616,7 @@ MindRoom forms a team without any `teams:` entry when:
 Tagging exactly one agent gets a reply from that agent alone.
 Threads where two or more people have posted never form a team from earlier thread context; tag the agents again in the current message (see [Multi-Human Thread Protection](https://docs.mindroom.chat/configuration/threads/#multi-human-thread-protection)).
 
-If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available in this room.`
+If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available to you in this room.`
 For teams formed from thread context or a DM room, unavailable agents are left out, and if only one remains it answers alone.
 
 The `default` model picks the mode for each ad hoc team from the request: `coordinate` when the agents have different subtasks, `collaborate` for opinions or brainstorming, and `collaborate` when the choice fails.
@@ -2947,7 +2958,7 @@ With `defer_reaction` set, each message that can wait gets that reaction once.
 
 When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
 If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
-A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
+A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the agent starts sending its reply, leaves the original text as the one answered.
 Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
 While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
 Edits by agents never trigger regeneration, and an agent's message edited while it still waits is answered with its original text.
@@ -2971,7 +2982,7 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
-The retired `compress_tool_results` field is ignored with a warning, and tool results replay unchanged.
+Tool results replay unchanged; the retired `compress_tool_results` field fails validation with `Unknown key`, so remove it.
 
 ## Context Window
 
@@ -3155,6 +3166,7 @@ A `file` member of a team that uses Mem0 does not see that team's memory in its 
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory.
+The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder
 
@@ -3460,7 +3472,7 @@ Save from the Memory page to write the changes to `config.yaml`.
 
 ## Agno Learning
 
-Agno Learning is retired: configs that still set `learning` or `learning_mode` load with a warning and the values are ignored.
+Agno Learning is retired: a config that sets `learning` or `learning_mode` on an agent or in `defaults` fails validation with `Unknown key`, so remove them.
 Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.
 
 # Knowledge Bases
@@ -3562,10 +3574,11 @@ Agents search the last successfully published index, and a missing, stale, or fa
 A successful refresh replaces the published index; a failed refresh keeps the previous one and shows the error in the base's status.
 
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
+A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
 Changing `chunk_size`, `chunk_overlap`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, HTTP 408, 429, and 5xx) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, 500, 502, 503, 504, and 529) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
 
 Knowledge base configuration hot-reloads.
 After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
@@ -3917,8 +3930,9 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 ## Storage
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
+They use Chroma, whose `chromadb` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[chromadb]`.
 For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
-Files-mode bases need no vector database.
+Files-mode bases build no vector index, but refreshing them still loads the `chromadb` extra.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 ## Search Limits
@@ -4512,11 +4526,22 @@ Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 
-The top-level `timezone` setting (default `UTC`) controls how MindRoom interprets times in requests and displays scheduled times.
+The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
+An unknown timezone name fails config validation.
 
 ```yaml
 timezone: America/Los_Angeles
+agents:
+  atlas:
+    display_name: Atlas
+    timezone: Europe/Amsterdam
 ```
+
+A schedule keeps the timezone it was created in: when `atlas` schedules "tomorrow at 9" with its `scheduler` tool, the task runs at 09:00 in Amsterdam, and later chat edits and listings use Amsterdam time too.
+The dashboard's Schedules page shows dates and times in the top-level timezone, while every recurring schedule's description names the timezone it is written in, such as `At 09:00 (Europe/Amsterdam)`.
+Schedules created before agents had their own timezone keep following the top-level setting.
 
 Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
 Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
@@ -4581,7 +4606,7 @@ agents:
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
-- `cron` is a five-field expression in the configured [timezone](#timezone).
+- `cron` is a five-field expression in the agent's [timezone](#timezone).
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
@@ -5414,7 +5439,7 @@ When a provider rejects a request containing inline media (images, audio, video,
 The retry adds `[Inline media unavailable for this model]` to the message that carried the media and tells the agent the content was not inspected, so the agent can still open the file through the [`attachments` tool](https://docs.mindroom.chat/attachments/#the-attachments-tool) or explain the limitation.
 If the provider error says the model does not support that kind of input, such as `does not support image input` or `is not a multimodal model`, later requests to the same model leave that media kind out from the start until MindRoom restarts.
 Other rejections, such as an image the provider could not decode, drop the media from that one request only.
-Once a streamed reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals are never retried without media.
+Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals are never retried without media.
 
 # Attachments
 
@@ -5440,6 +5465,7 @@ Models without that support can still work with the file through the [`attachmen
 When a provider rejects inline media, MindRoom retries without it and tells the agent the content was not inspected; see [Media Fallback](https://docs.mindroom.chat/images/#media-fallback).
 Some provider integrations never send certain media kinds, so MindRoom leaves those out from the start with the same note.
 Only models using the `google` provider receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
+Models using the `google` provider read documents only as PDF or text; other file types, such as Office files and archives, reach them as a note naming the file.
 
 ## Attachment IDs
 
@@ -6381,6 +6407,7 @@ Spend is the cost of the user's [recorded token usage](https://docs.mindroom.cha
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 `claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
+Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID that uses Chat Completions, such as one with `api: chat_completions`.
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
@@ -6762,6 +6789,7 @@ personal_rooms:
 ```
 
 The router watches the onboarding rooms, so the selected agent does not need to join them.
+To give each user their own agent instead of one shared agent, see [Personal Agents](https://docs.mindroom.chat/personal-agents/).
 The human must still be allowed to use the agent under its access rules; listing the onboarding rooms in `access.members_of_rooms`, as above, grants that (see [Responder access](https://docs.mindroom.chat/authorization/#responder-access)).
 
 ## Configuration
@@ -6770,7 +6798,7 @@ The human must still be allowed to use the agent under its access rules; listing
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `agent` | string | Required | Configured agent that owns and answers in personal rooms. |
+| `agent` | string | Required | Configured agent, or a [`personal_agents`](https://docs.mindroom.chat/personal-agents/) template, that owns and answers in personal rooms; a template gives each user their own agent. |
 | `onboarding_rooms` | list of strings | Required | Nonempty list of configured rooms whose human joins trigger onboarding. |
 | `commands` | list of strings | `[]` | Exact self-onboarding commands accepted in onboarding rooms; each starts with `!` and contains no whitespace or arguments. |
 | `alias_prefix` | string | `"personal"` | Room alias prefix matching `[a-z0-9_-]{1,40}`, followed by a hash of the user ID and the installation namespace. |
@@ -6859,6 +6887,147 @@ For a room with shared history and one existing guest, a record looks like this:
 If the room's history setting stops matching the record, or anyone other than a MindRoom agent it does not list joins, is invited, or knocks, onboarding for that human fails with one of the log messages above until someone fixes the room.
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
+
+# Personal Agents
+
+A [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) agent keeps one copy of its state for each requester, but everyone still talks to a single Matrix account, so nobody can address "Bob's agent", add it to a team, or delegate to it.
+The optional `personal_agents` section gives each person onboarded through [`personal_rooms`](https://docs.mindroom.chat/personal-rooms/) their own agent with its own Matrix account, all built from one template whose defaults you control.
+Use `private` when one shared agent with separate state per requester is enough, and `personal_agents` when each person needs an agent others can mention or put in a team.
+A generated agent is a personal agent in the sense of the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) and [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) pages only when its worker scope, from the template's `agent` or `defaults.worker_scope`, is `user` or `user_agent`.
+
+## Setup
+
+```yaml
+rooms:
+  lobby: {}
+personal_agents:
+  mind:
+    name: "{username}_mind"
+    matrix_username: "{username}.mind"
+    agent:
+      display_name: "{user_display_name}'s Mind"
+      role: Personal assistant for {user}.
+      model: sonnet
+      memory_backend: file
+    users:
+      "@alice:example.org":
+        model: opus
+personal_rooms:
+  agent: mind
+  onboarding_rooms: [lobby]
+```
+
+`mind` is the template key, never an agent itself, and `personal_rooms.agent: mind` gives each user's personal room that user's own agent.
+Because `access` is omitted, only the owner and platform administrators may use each generated agent.
+
+## Configuration
+
+`personal_agents` maps template keys to objects.
+A key follows the [agent naming rules](https://docs.mindroom.chat/configuration/agents/#naming-rules) and does not equal an agent or team key.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | `"<template key>_{username}"` | Agent key pattern; it contains `{username}` exactly once and renders to letters, digits, and underscores. |
+| `matrix_username` | string | `mindroom_<agent key>` | Matrix localpart pattern; it contains `{username}` exactly once plus at least one other character, so no agent takes a person's bare localpart, and renders to `[a-z0-9._=/-]`. `_<MINDROOM_NAMESPACE>` is appended when a namespace is set, and the default account carries the same suffix. |
+| `agent` | object | Required | Any [agent](https://docs.mindroom.chat/configuration/agents/#configuration-options) fields; the defaults for every user's agent. |
+| `users` | object | `{}` | Per-user overrides keyed by concrete Matrix user ID, with no patterns. Each override is an agent field that replaces the template's value whole, so a list or object is not merged. |
+
+Placeholders are replaced as exact tokens, so other braces in prompts stay literal and a replaced value is never replaced again.
+
+| Placeholder | Value | Where |
+| --- | --- | --- |
+| `{user}` | The user's full Matrix ID. | `display_name`, `role`, and each `instructions` item |
+| `{username}` | The localpart lowercased, every character outside `[a-z0-9_]` replaced by `_`, cut to 40 characters, or `user` when empty. | `display_name`, `role`, each `instructions` item, `name`, and `matrix_username`; in the last two it is the only placeholder |
+| `{user_display_name}` | The user's Matrix display name at onboarding, without control characters, cut to 100 characters, or the localpart when unset. | `display_name`, `role`, and each `instructions` item |
+
+If the rendered `name` or Matrix account is already taken, `{username}` becomes the slug plus `_` and the first 6 hex characters of the SHA-256 of the user ID, for example `alice_86f01a` for `@alice:example.org`.
+Taken means an authored agent, team, or template key, including one saved but not yet reloaded, `router`, `user`, `_shared`, another generated agent, or an account MindRoom already manages.
+A user on another server than MindRoom's always gets this hashed form, so nobody elsewhere can take a local person's plain name.
+A second clash fails that user's onboarding.
+
+Every generated agent also gets these settings, whatever the template says:
+
+- The owner is added to `access.users` and `credential_managers` when missing.
+- `access.members_of_rooms` is `[]` when missing or null, so membership of the agent's rooms grants nothing unless you list rooms yourself.
+- `allow_self_config` is `false`, even when `defaults.allow_self_config` is true, because `self_config` edits `agents.<name>`, which a generated agent does not have.
+
+Config validation rejects `private` and `allow_self_config: true` in the template's `agent` and in any `users` override, because a personal agent already belongs to one user.
+A template or override that would produce an invalid agent fails validation as soon as you save or load it, even before anyone has onboarded, with `personal_agents would generate an invalid agent for a new user:` and the reason.
+
+## Generated Agents
+
+Generated agents are ordinary agents in the running config, and workers receive them too.
+They never appear in the saved config file, and the dashboard and `config_manager` edit only what you authored.
+
+- Editing the template changes every user's agent at the next reload.
+  The name, Matrix account, and `{user_display_name}` stay fixed at what onboarding stored.
+- An authored agent or team that uses a generated agent's name fails validation with an error such as `agents.mind_alice collides with the agent generated from personal_agents.mind for @alice:example.org`.
+  The same error rejects a dashboard or `config_manager` save that edits a generated agent in place, so use `personal_agents.<key>.users` for per-user changes.
+- A team member or `delegate_to` entry can name a generated agent only once it exists, because validation rejects an unknown agent name before then.
+- Removing a template stops its agents but keeps their roster entries and Matrix accounts, and bringing the template back with the same key starts them again.
+
+## Letting Agents Talk to Each Other
+
+By default nobody except the owner and administrators can use a generated agent, so agents do not reach each other.
+To let them, set `access` under the template's `agent:`, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
+With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onboarded user can use every other user's agent.
+
+> [!WARNING]
+> **Whoever `access` admits works with the owner's agent.**
+> Anyone the template's `access` admits can work with the owner's agent, including its memory, its files, and its shared credentials.
+> That includes the admitted person's own agent acting for them, because an agent mentioned in a reply acts for the person who requested that reply (see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents)).
+> Admit only people you would trust with everything an owner gives their agent.
+
+## Onboarding Behavior
+
+The router handles a join, a `commands` entry, or a `backfill` hit in an onboarding room like any [personal-room](https://docs.mindroom.chat/personal-rooms/#onboarding-behavior) trigger, with these differences:
+
+1. MindRoom registers the agent's Matrix account and starts the agent without a restart; a failed registration leaves no agent behind.
+2. The usual personal-room flow runs with that user's own agent once the agent has finished its first sync.
+   Until then the trigger is pending, which does not hold up the onboarding room for anyone else, and the router logs `Personal agent is starting`.
+3. The user keeps the agent, its account, and its room when they leave the onboarding room or are banned, and MindRoom has no command that removes them.
+
+A [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) onboards onto its person's agent, which gives the alias account its own personal room.
+A Matrix ID containing a space, `*`, `?`, `[`, or `]` gets no agent, because access settings cannot name it exactly.
+
+The roster of generated agents is `tracking/personal_agents.json` in the storage directory; back it up with the storage, because an agent's name and Matrix account never change once recorded there.
+Stop MindRoom before editing it by hand; a file MindRoom cannot read fails config loading with `Personal agent roster <path> is invalid:` and the reason.
+
+> [!WARNING]
+> **Everyone who joins an onboarding room gets an agent on your model keys.**
+> Every human who joins an onboarding room, sends one of its `commands`, or is picked up by `backfill` gets a Matrix account and a running agent, and nothing caps how many.
+> The only gate is membership of the onboarding room, so control it through that room's [`join_policy`](https://docs.mindroom.chat/rooms/#room-policy) and invitations.
+> An open or federated lobby gives an agent to anyone who joins it, and `backfill: true` creates agents for every current member at once.
+> Bridged puppet accounts count as people unless you list them in [`bot_accounts`](https://docs.mindroom.chat/authorization/#bot-accounts).
+
+MindRoom's own accounts and the internal `mindroom_user` never get an agent.
+
+The dashboard's Settings page edits `personal_agents` next to Personal rooms.
+Its `personal_rooms.agent` dropdown lists the configured agents and the `personal_agents` templates.
+The Agents page lists every generated agent, read-only, with its owner, Matrix ID, template, and whether it is active, pending, or stopped because its template was removed.
+
+## Switching From a Single Personal-Room Agent
+
+When `personal_rooms.agent` changes from an agent to a template, existing personal rooms stay with the old agent, and a user's new agent cannot take over a room the old agent created.
+Set a new `personal_rooms.alias_prefix` at the same time so that each user gets a new personal room with their own agent; otherwise their onboarding fails with `Personal-room alias ... which this agent does not own`.
+The old agent's `access` no longer limits who gets an agent: everyone in an onboarding room gets one.
+
+## Troubleshooting Personal Agents
+
+A failure affects only that user's onboarding.
+Failed onboarding retries after 30 seconds, then at doubling intervals up to one hour, and a config reload retries it immediately.
+
+| Log message | Meaning |
+| --- | --- |
+| `Personal agent is starting` | Normal: the user's agent was just created or has not finished its first sync, and the trigger is retried when it has. |
+| `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, `No free personal agent name for <user>` when the plain and the hashed names are both taken, or `<user> cannot own a personal agent` for an unsupported Matrix ID. |
+| `Personal-room reconciliation failed` | A retry failed, with the attempt number and the delay before the next try. |
+| `Personal agent roster unavailable` | The roster file cannot be read, and the pass is retried. |
+
+- A refused registration usually means the localpart is already held by another account, or, with `MATRIX_MANAGED_ACCOUNT_AUTH=appservice`, that a custom `matrix_username` is outside the application service's exclusive user namespace (see [Agent Users](https://docs.mindroom.chat/matrix/#agent-users)).
+  Make the namespace cover the rendered name, including the `_<MINDROOM_NAMESPACE>` suffix, or change the pattern.
+- Each user adds a Matrix account, a sync loop, and an encryption device.
+  That is fine for dozens of users and heavy for hundreds.
 
 # Bridges
 
@@ -7685,6 +7854,7 @@ mindroom-agent context read NAME --offset 0 --limit 8000
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
+A toolkit keeps its own tool name when a preset or another tool brings it in, so with `matrix_message` or `openclaw_compat` configured, attachments are listed with `attachments.list_attachments`.
 Discovery and calls use the current agent's permissions and requester context.
 Use command-specific `--help` for arguments and options.
 
@@ -7896,6 +8066,7 @@ print(result, flush=True)
 ```
 
 `MindRoomTools.call(toolkit_name, function_name, **arguments)` blocks until the call finishes and returns a JSON-compatible value.
+A tool that produces media such as an image returns an object with its text under `content` and an `attachments` list that gives each medium's `kind`, `mime_type`, and `url` when it has one, without the media's bytes.
 Arguments must have an unambiguous strict-JSON representation.
 A result larger than about 64 KiB fails the call with kind `result_too_large`.
 Calls within one run execute one at a time, in order.
@@ -7903,6 +8074,7 @@ The SDK retries transient failures automatically without repeating the side effe
 
 Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
 A denied approval raises a non-retryable error with kind `approval_denied`.
+A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
 
 ## Complete Watcher Example
@@ -10068,6 +10240,7 @@ WebRTC cannot send UDP from these browsers.
 
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
 Pages larger than 2 MiB fail, as do pages a server sends compressed.
+An entry that sets the retired `website.knowledge` option fails config load until you remove it.
 
 ```yaml
 agents:
@@ -15489,6 +15662,8 @@ Do not report or "fix" these; they are deliberate.
   Over plain HTTP on a local address, the session cookie and the OAuth flow cross that network unencrypted, as the rest of a plain-HTTP stack does, and because cookies ignore ports, every other web service on that host receives the session cookie too.
   On a homeserver that does not bind tokens to one deployment, a backend that Chat opens could replay a user's token to another deployment on the same homeserver until it expires; [audience binding](https://docs.mindroom.chat/connections-portal/#token-binding) closes that where the homeserver supports it.
   The `/connections` page shell is served without authentication, while every API stays protected.
+- With `personal_rooms.agent` naming a `personal_agents` template, every human member of an onboarding room gets a Matrix account and a running agent; membership of that room is the only gate, so its join policy and invitations control who gets one.
+- A `personal_agents` template whose `access` admits other people exposes each owner's agent, including its memory, files, and shared credentials, to them and to their own agents acting for them; owner-only access is the default.
 - The MCP gateway runs an agent's tools without its instructions, so it withholds agents whose worker scope is `shared` or unset unless `mcp_gateway_shared_credentials` opts one in; an opted-in agent's users can call its tools directly with its shared accounts and worker, and the shared workspace and browser profiles of a non-private `user` or `user_agent` agent stay reachable through the gateway as they are in chat.
 
 ## Reviewing security findings
@@ -16121,7 +16296,7 @@ context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
 ```
 
-`resolve_worker_target()` raises `ValueError` in team and router dispatches, which have no single agent scope; catch it if the tool can run inside a team.
+A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
 
 ## OAuth providers
 
@@ -16713,7 +16888,7 @@ async def block_secret_reads(ctx):
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None | 5000 |
 | `session:started` | Observer | `SessionHookContext` | Once when a response creates a new persisted session | None | 5000 |
 | `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved | None | 15000 |
-| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary | None | 5000 |
+| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary; the counts size the conversation history before and after a compaction that runs before a reply, and the whole model request before and after one that runs during a reply | None | 5000 |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
 | `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router, after a human joins a room | None | 3000 |
@@ -17590,6 +17765,7 @@ A client starts with `search_tools` and `{}` (or a query such as `{"query": "cal
 It passes a returned `agent` and `toolkit` to another `search_tools` call to list functions, then calls `get_tool` with the returned `agent`, `toolkit`, and `function`, and finally `invoke_tool` with the same selectors and an `arguments` object.
 Clients must copy identifiers from these results; display names and agent directories such as `list_agents` do not show which agents the gateway exposes.
 MCP initialization instructions name the personal agent from `MINDROOM_CONNECTIONS_AGENT`, when set, and the instance's `/connections` URL, but the personal agent is usable only when it appears in discovery.
+When a function that `invoke_tool` runs also produces media such as an image, the call's `result` holds the function's text under `content` and an `attachments` list that gives each medium's `kind`, `mime_type`, and `url` when it has one, without the media's bytes.
 
 When a service needs authorization, the result contains `error.code: connection_required` and a `connection_url` pointing to `/connections`.
 The user connects that service in the browser and the client retries.
@@ -17896,6 +18072,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `approval_required` | The tool needs confirmation or a configured approval and cannot run through the gateway |
 | `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
+| `tool_declined` | A MindRoom plugin declined the call, so it did not run; `message` gives the plugin's reason |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
 | `duplicate_request` | A call with the same request ID is already running |
@@ -18328,6 +18505,7 @@ See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-pr
 
 With `workers.backend: kubernetes`, the primary runtime creates a worker Deployment and Service per worker on demand and routes tool calls to it.
 Idle workers scale to zero, keeping agent data and worker caches.
+The default image includes the `kubernetes` package this needs; a custom image built without all extras must install `mindroom[kubernetes]` in the primary runtime.
 Each worker keeps its own caches and virtualenvs under `workers.kubernetes.storageSubpathPrefix`.
 [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) describes which workspaces each worker mounts, and [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) describes how tool settings reach workers.
 `google_vertex_adc` tools must run in the primary runtime, because workers receive no Google application default credentials.
@@ -19875,6 +20053,7 @@ MindRoom keeps the allowlist it started with until its own pod restarts, so a re
 
 Agents call `request_network_access(hostnames, ttl_minutes, reason)` with every blocked external hostname the task needs, up to 20 per call, and one Matrix approval covers the whole batch.
 Hostnames must be exact external DNS names; schemes, ports, paths, wildcards, IP literals, single-label names, `localhost`, cluster-local names, and cloud metadata hostnames are rejected, and one invalid hostname rejects the whole request.
+Internationalized hostnames must be written in their `xn--` form, so the approval card shows the name the grant covers.
 Hostnames already on the static allowlist are skipped, and when every requested hostname is allowlisted the tool replies that no grant is needed without asking for approval.
 The granted TTL is the requested `ttl_minutes`, capped at the deployment maximum, and the reply says when the cap applied.
 
@@ -20590,12 +20769,13 @@ notify    at most once per hour
 ```
 
 Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
+Each call to a tool the run does not offer logs a `tool_not_offered` warning, and each call whose arguments cannot be decoded logs an `invalid_tool_arguments` warning with `reason` `decode` or `not_object`; both carry `entity` and `tool_name`, never the arguments.
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
 
 ## Debug Logging
 
-Every completed model request logs an `LLM usage` event with provider and model identifiers and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
+When a request to a model under `models` ends, completed or not, MindRoom logs an `LLM usage` event with provider and model identifiers, the `stop_reason` of a reply that finished (`output_limit` or `content_filter` for one the provider cut off), and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
 
 To record full provider requests, enable `debug.log_llm_requests`:
 
@@ -20660,6 +20840,12 @@ An older release started on converted databases without restoring the backups mo
 Upgrading again converts each restored database again and writes a new backup.
 
 Once you are sure you will not downgrade, delete the `.pre-storage-v2` backups.
+
+## Upgrading to OpenAI SDK 3
+
+OpenAI-compatible and Claude model requests, and the other OpenAI SDK requests [Model Configuration](https://docs.mindroom.chat/configuration/models/#configuration-examples) lists, now verify certificates against the operating system's trust store instead of certifi's bundle.
+The published images include system CA certificates.
+On a host without them, install them (for example the `ca-certificates` package) before upgrading, or point `SSL_CERT_FILE` at a complete CA bundle, such as certifi's `cacert.pem` with any private CA appended.
 
 ## Upgrading to durable reply records
 
@@ -20786,10 +20972,15 @@ Smaller changes that need operator action:
   In a sandbox runner, set every proxy variable, or only `all_proxy`, to the same HTTP(S) proxy, or the browser does not start.
   See [Egress Proxy for Browsers](https://docs.mindroom.chat/tools/web-scraping-and-browser/#egress-proxy-for-browsers) for the full rules.
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
+- **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode` (see [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning)), `compress_tool_results` (see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings)), and the `website` tool's `knowledge` option (see [`website`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#website)) from `config.yaml`.
+  Configs created by older `mindroom config init` runs set `learning: false` on the `mind` agent.
+  Also delete every `extra_kwargs` key a model's provider does not accept, such as the retired Agno setting `retries` or a misspelled key, on every model, including models no agent uses; [Extra Kwargs](https://docs.mindroom.chat/configuration/models/#extra-kwargs) lists the accepted keys.
+- **Model providers**: a model whose `provider` is not one of the [supported providers](https://docs.mindroom.chat/configuration/models/#supported-providers) fails config load, even when no agent uses it, so `mindroom run` and the dashboard do not start until you fix or delete that model in `config.yaml`; this includes models saved earlier with Together, Mistral, Perplexity, Cohere, or xAI.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
 - **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
+- **Retired prompt overrides**: a [`prompts`](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
 
 ### Compaction History
 
@@ -21009,7 +21200,7 @@ mindroom run --log-level DEBUG
 To debug MindRoom alone, keep the global level at `INFO` and set per-logger overrides with [`MINDROOM_LOGGER_LEVELS`](https://docs.mindroom.chat/configuration/#environment-variables):
 
 ```bash
-LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
+LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpx2:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
 ```
 
 Matrix decrypt warnings from `nio.crypto` are hidden by default; add `nio.crypto:WARNING` to `MINDROOM_LOGGER_LEVELS` to see them while debugging encryption.

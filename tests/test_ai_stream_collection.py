@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.ai import ai_response, collect_streamed_response_content
+from mindroom.ai import (
+    _materialize_paused_agent_tool_events,
+    _process_stream_events,
+    _StreamingAttemptState,
+    ai_response,
+    collect_streamed_response_content,
+)
 from mindroom.config.main import Config
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
@@ -25,11 +31,16 @@ async def test_collect_streamed_response_preserves_tool_marker_order() -> None:
     async def stream() -> AsyncGenerator[object, None]:
         yield TextDelta("Before tool.\n")
         yield ToolStarted(
-            call=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "git status"}).call,
+            call=ToolExecution(
+                tool_call_id="call-run_shell_command",
+                tool_name="run_shell_command",
+                tool_args={"cmd": "git status"},
+            ).call,
         )
         yield TextDelta("\nAfter tool.")
         yield ToolCompleted(
             call=ToolExecution(
+                tool_call_id="call-run_shell_command",
                 tool_name="run_shell_command",
                 tool_args={"cmd": "git status"},
                 result="clean",
@@ -58,9 +69,20 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
 
     async def stream() -> AsyncGenerator[object, None]:
         yield TextDelta("Before.")
-        yield ToolStarted(call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}).call)
+        yield ToolStarted(
+            call=ToolExecution(
+                tool_call_id="call-read_file",
+                tool_name="read_file",
+                tool_args={"path": "README.md"},
+            ).call,
+        )
         yield ToolCompleted(
-            call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content").call,
+            call=ToolExecution(
+                tool_call_id="call-read_file",
+                tool_name="read_file",
+                tool_args={"path": "README.md"},
+                result="content",
+            ).call,
         )
         yield TextDelta(" After.")
 
@@ -170,6 +192,24 @@ async def test_collect_streamed_response_ignores_repeated_start_for_restored_cal
 
 
 @pytest.mark.asyncio
+async def test_a_paused_call_the_stream_already_announced_is_not_announced_again() -> None:
+    """A paused run's calls are announced once: those its stream started already are skipped, and each counts once."""
+    announced = ToolExecution(tool_call_id="call-announced", tool_name="save_file", tool_args={"file": "a.py"})
+    unannounced = ToolExecution(tool_call_id="call-unannounced", tool_name="send_message", tool_args={"text": "hi"})
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield ToolStarted(call=announced.call)
+
+    state = _StreamingAttemptState()
+    _ = [chunk async for chunk in _process_stream_events(stream(), state=state, show_tool_calls=True, agent_name="a")]
+    events = _materialize_paused_agent_tool_events(state, [announced, unannounced])
+
+    assert [event.call.tool_call_id for event in events] == ["call-unannounced"]
+    assert state.observed_tool_calls == 2
+    assert [pending.tool_call_id for pending in state.pending_tools] == ["call-announced", "call-unannounced"]
+
+
+@pytest.mark.asyncio
 async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -180,9 +220,20 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
     async def fake_stream_agent_response(_ctx: object, **kwargs: object) -> AsyncGenerator[object, None]:
         seen_kwargs.update(kwargs)
         yield TextDelta("Before.")
-        yield ToolStarted(call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}).call)
+        yield ToolStarted(
+            call=ToolExecution(
+                tool_call_id="call-read_file",
+                tool_name="read_file",
+                tool_args={"path": "README.md"},
+            ).call,
+        )
         yield ToolCompleted(
-            call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content").call,
+            call=ToolExecution(
+                tool_call_id="call-read_file",
+                tool_name="read_file",
+                tool_args={"path": "README.md"},
+                result="content",
+            ).call,
         )
         yield TextDelta(" After.")
 

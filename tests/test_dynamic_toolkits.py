@@ -11,8 +11,7 @@ from agno.tools.function import Function
 
 from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import PreparedTools, toolkit_instructions
 from mindroom.agents import (
     _context_hidden_toolkits,
     create_agent,
@@ -23,6 +22,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import update_awareness
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
+from mindroom.delegation.state import SubagentPersona
 from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
@@ -31,7 +31,7 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, offered_refusal
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     defer_toolkit,
@@ -40,7 +40,6 @@ from mindroom.tool_system.dynamic_toolkits import (
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit
-from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -531,6 +530,8 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
         config,
         runtime_paths,
         execution_identity=alice_identity,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert "calculator" in _toolkit_names(alice_agent)
@@ -597,6 +598,8 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         config,
         runtime_paths,
         execution_identity=identity,
+        knowledge=None,
+        active_model_name=None,
     )
     unpaired_desktop = cast("Any", source_toolkit(offered_function(unpaired, "desktop")))
     result = await unpaired_desktop.desktop("status")
@@ -618,6 +621,8 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         config,
         runtime_paths,
         execution_identity=identity,
+        knowledge=None,
+        active_model_name=None,
     )
     paired_desktop = cast("Any", source_toolkit(offered_function(paired, "desktop")))
     paired_configuration = paired_desktop._current_configuration()
@@ -646,7 +651,14 @@ async def test_deferred_egress_credentials_is_discoverable_only_while_the_broker
     ]
     config = _validated_config(tmp_path, raw, **env)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path, **env), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path, **env),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     searched = await _search(agent, "egress")
     assert ({match["toolkit"] for match in searched["matches"]} == {"egress_credentials"}) is broker_on
@@ -661,7 +673,14 @@ def test_a_lone_deferred_egress_credentials_tool_gives_no_dynamic_tools_while_th
     raw["agents"]["code"]["tools"] = [{"egress_credentials": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert "dynamic_tools" not in _toolkit_names(agent)
     assert _portable_deferred_names(agent) == frozenset()
@@ -692,6 +711,8 @@ def test_deferred_prompt_names_egress_credentials_only_while_the_broker_is_on(
         config,
         _runtime_paths(tmp_path, **env),
         execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
     )
 
     prompt = _build_prompt(agent)
@@ -716,6 +737,8 @@ def test_an_eager_egress_credentials_tool_is_attached_only_while_the_broker_is_o
         config,
         _runtime_paths(tmp_path, **env),
         execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
     )
 
     assert ("egress_credentials" in _toolkit_names(agent)) is broker_on
@@ -805,7 +828,14 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_portable_tool_s
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     function_names = _function_names(agent)
     assert "sleep" in function_names
@@ -838,7 +868,14 @@ def test_native_tool_search_prompt_lists_deferred_capability_domains(
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     discovery_block = next(
         block for block in agent.prompt.instructions if block.startswith("## Deferred Tool Discovery")
@@ -908,7 +945,7 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
 
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
 
-    agent = create_agent("code", config, runtime_paths, execution_identity=None)
+    agent = create_agent("code", config, runtime_paths, execution_identity=None, knowledge=None, active_model_name=None)
 
     expected_deferred_names = frozenset() if collide_all else frozenset({"demo_call_tool", "demo_connection_status"})
     assert _native_deferred_names(agent) == expected_deferred_names
@@ -963,7 +1000,7 @@ async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
 
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
 
-    agent = create_agent("code", config, runtime_paths, execution_identity=None)
+    agent = create_agent("code", config, runtime_paths, execution_identity=None, knowledge=None, active_model_name=None)
 
     assert _portable_deferred_names(agent) == frozenset({"demo_call_tool", "demo_connection_status"})
     listed = (await _search(agent, ""))["functions"]
@@ -983,7 +1020,14 @@ def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     raw["agents"]["code"]["tools"] = [{"update_awareness": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert _toolkit(agent, "update_awareness").instructions is None
     assert instruction_marker not in _build_prompt(agent)
@@ -1003,12 +1047,18 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
         add_instructions=True,
     )
     toolkit = Toolkit(name="deferred", tools=[function])
-    deferral = defer_toolkit("deferred", "", toolkit)
+    adapted = adapt_toolkit(toolkit)
+    deferral, deferred = defer_toolkit("deferred", "", adapted)
 
-    assert toolkit.functions["deferred_tool"].add_instructions is False
     assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
-    # Adapting refuses a function that still asks for prompt instructions.
-    adapt_toolkit(toolkit)
+    # An agent offers the deferred toolkit, whose function instructions travel with tool search, and refuses it eager.
+    assert offered_refusal(deferred) is None
+    assert offered_refusal(adapted) == (
+        "Tool function 'deferred_tool' sets instructions for Agno to add to the system prompt, which MindRoom adds only"
+        " per toolkit; set them on the toolkit instead"
+    )
+    # The built toolkit is left as it was built.
+    assert toolkit.functions["deferred_tool"].add_instructions is True
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -1039,20 +1089,9 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
         add_instructions=True,
     )
-    defer_toolkit("deferred", "", deferred_toolkit)
+    _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit))
 
-    assert active_toolkit.add_instructions is True
-    assert active_toolkit.functions["shared_tool"].add_instructions is True
-    assert deferred_toolkit.add_instructions is False
-    assert deferred_toolkit.functions["shared_tool"].add_instructions is False
-    spec = AgentSpec(
-        id="code",
-        name="code",
-        model=ScriptedModel([]),
-        system_message=None,
-        toolkits=(adapt_toolkit(active_toolkit), adapt_toolkit(deferred_toolkit)),
-    )
-    assert prepare_run_tools(spec).instructions == (active_toolkit_marker,)
+    assert toolkit_instructions((adapt_toolkit(active_toolkit), deferred)) == (active_toolkit_marker,)
 
 
 def test_native_tool_search_keeps_initial_toolkit_instructions(
@@ -1069,7 +1108,14 @@ def test_native_tool_search_keeps_initial_toolkit_instructions(
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     instructions = _toolkit(agent, "update_awareness").instructions
 
     assert instructions is not None
@@ -1092,7 +1138,14 @@ def test_native_tool_search_drops_toolkit_emptied_by_include_filter(
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert "update_awareness" not in _toolkit_names(agent)
     assert instruction_marker not in _build_prompt(agent)
@@ -1110,7 +1163,14 @@ async def test_portable_tool_search_returns_rendered_toolkit_instructions(
     raw["agents"]["code"]["tools"] = [{"update_awareness": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert instruction_marker not in _build_prompt(agent)
     payload = await _search(agent, "update_awareness")
@@ -1138,7 +1198,14 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     raw["agents"]["code"]["tools"] = [tool_entry]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     prompt = _build_prompt(agent)
 
     assert "chat_ui shows parts of MindRoom Chat to the user." in prompt
@@ -1167,7 +1234,14 @@ def test_chat_ui_names_the_canvas_library_source_only_for_an_agent_with_canvases
     raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     prompt = _build_prompt(agent)
 
     assert ("https://cdn.jsdelivr.net/npm/" in prompt) is named
@@ -1179,7 +1253,14 @@ def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path)
     raw["agents"]["code"]["tools"] = [{"chat_ui": {"exclude_tools": ["show_canvas"]}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert sorted(function.name for function in _toolkit(agent, "chat_ui").functions) == [
         "open_panel",
@@ -1205,7 +1286,14 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
     raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     instructions = _toolkit(agent, "chat_ui").instructions
     description = offered_function(agent, available).description
 
@@ -1215,6 +1303,50 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
         assert f"{name}(" not in instructions
         assert f"{name}(" not in description
     assert f"- {available}(" in _build_prompt(agent)
+
+
+@pytest.mark.parametrize("narrowed_by", ["function_filter", "persona", "approval"])
+def test_chat_ui_instructions_name_only_the_functions_a_narrowed_agent_is_offered(
+    tmp_path: Path,
+    narrowed_by: str,
+) -> None:
+    """The persona list, the function filter, and approval hiding narrow the chat_ui map as include_tools does."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["chat_ui"]  # type: ignore[index]
+    if narrowed_by == "approval":
+        raw["tool_approval"] = {
+            "rules": [{"match": name, "action": "require_approval"} for name in ("open_panel", "show_computer")],
+        }
+    config = _validated_config(tmp_path, raw)
+    narrowing: dict[str, Any] = {
+        "function_filter": {"tool_function_filter": lambda function: function.name == "open_settings"},
+        "persona": {
+            "persona": SubagentPersona(
+                source_kind="inline",
+                source_name="",
+                system_prompt="You open settings.",
+                tools=("chat_ui.open_settings",),
+            ),
+        },
+        "approval": {},
+    }[narrowed_by]
+
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+        **narrowing,
+    )
+    chat_ui = _toolkit(agent, "chat_ui")
+
+    assert [function.name for function in chat_ui.functions] == ["open_settings"]
+    for text in (_build_prompt(agent), chat_ui.guidance or ""):
+        assert "- open_settings(" in text
+        assert "show_computer(" not in text
+        assert "open_panel(" not in text
 
 
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
@@ -1233,7 +1365,14 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_portable
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     function_names = _function_names(agent)
     assert "sleep" in function_names
@@ -1265,7 +1404,14 @@ def test_explicit_openai_api_uses_portable_tool_search_when_native_is_unavailabl
     raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert _portable_deferred_names(agent) == frozenset({"sleep"})
 
@@ -1278,7 +1424,14 @@ def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) 
     raw["agents"]["code"]["tools"] = [{"browser": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     function_names = _function_names(agent)
     assert "browser_control" in function_names
@@ -1301,6 +1454,8 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
         _runtime_paths(tmp_path),
         execution_identity=None,
         eager_deferred_tools=True,
+        knowledge=None,
+        active_model_name=None,
     )
 
     function_names = _function_names(agent)
@@ -1324,6 +1479,8 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         execution_identity=None,
         eager_deferred_tools=True,
         tool_function_filter=lambda _function: False,
+        knowledge=None,
+        active_model_name=None,
     )
 
     function_names = _function_names(agent)
@@ -1356,7 +1513,14 @@ def test_unsupported_models_use_portable_tool_search(
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     function_names = _function_names(agent)
     assert {"sleep", "add", "tool_search", "call_tool"} <= function_names
@@ -1380,7 +1544,14 @@ async def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Pa
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     catalog = next(block for block in agent.prompt.instructions if block.startswith("## Deferred Tools\n"))
     assert "chat_ui.open_panel(panel='computer')" in catalog
@@ -1419,8 +1590,8 @@ class _WeatherTools(Toolkit):
 
 def _deferred(toolkit: Toolkit, description: str, domain_name: str | None = None) -> DeferredToolkit:
     """Defer ``toolkit`` and adapt it, as agent construction does, offering every function of it."""
-    deferral = defer_toolkit(domain_name or toolkit.name, description, toolkit)
-    return DeferredToolkit(deferral, adapt_toolkit(toolkit).functions)
+    deferral, deferred = defer_toolkit(domain_name or toolkit.name, description, adapt_toolkit(toolkit))
+    return DeferredToolkit(deferral, deferred.functions)
 
 
 def _search_toolkit(*deferred: DeferredToolkit) -> DynamicToolsToolkit:
@@ -1629,8 +1800,8 @@ class _DualTools(Toolkit):
         return str(account_id)
 
 
-def test_tool_search_describes_the_async_implementation_agno_runs() -> None:
-    """Agno prefers async implementations in async runs, so search must describe that one."""
+def test_tool_search_describes_the_async_implementation_the_loop_runs() -> None:
+    """The loop runs a toolkit's async implementation when it has one, so search must describe that one."""
     toolkit = _search_toolkit(_deferred(_DualTools(), "Dual"))
 
     match = _tool_payload(toolkit.tool_search("lookup"))["matches"][0]
@@ -1656,7 +1827,6 @@ def test_tool_search_returns_function_instructions_kept_out_of_the_prompt() -> N
     match = _tool_payload(toolkit.tool_search("ping"))["matches"][0]
 
     assert match["instructions"] == "Only ping hosts the user named."
-    assert pings.functions["ping"].add_instructions is False
 
 
 class _GithubTools(Toolkit):
@@ -1710,7 +1880,14 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     raw["agents"]["code"]["tools"] = tools[::-1] if deferred_first else tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert ("read_file" in agent.request_template.deferred_tools.names) is deferred_first
     if "tool_search" in _function_names(agent):
@@ -1727,7 +1904,14 @@ def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewri
     raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True}}, "dynamic_tools"]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     function_names = _function_names(agent)
     assert "call_tool" not in function_names
@@ -1750,10 +1934,17 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
         raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
         raw["agents"]["code"]["tools"] = tools  # type: ignore[index]
         config = _validated_config(tmp_path, raw)
-        agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+        agent = create_agent(
+            "code",
+            config,
+            _runtime_paths(tmp_path),
+            execution_identity=None,
+            knowledge=None,
+            active_model_name=None,
+        )
         return build_static_token_estimator(
             prompt_for_turn(agent),
-            prepare_run_tools(agent.spec).specs(),
+            PreparedTools(functions=agent.spec.functions).specs(),
             agent.request_template.deferred_tools.names,
         ).non_prompt_tokens()
 
@@ -1824,7 +2015,14 @@ def test_search_toolkit_construction_failure_does_not_stop_the_agent(
     raw["agents"]["code"]["tools"] = ["sleep", {"calculator": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert "sleep" in _toolkit_names(agent)
     assert "dynamic_tools" not in _toolkit_names(agent)
@@ -1864,7 +2062,14 @@ def test_search_toolkit_results_are_never_redirected_to_output_files(
     raw["agents"]["code"]["tools"] = ["sleep", {"calculator": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
 
     assert "dynamic_tools" in _toolkit_names(agent)
     assert "dynamic_tools" not in wrapped

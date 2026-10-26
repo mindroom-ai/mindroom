@@ -68,7 +68,7 @@ if TYPE_CHECKING:
         "google-auth-httplib2",
         "google-auth-oauthlib",
     ],
-    docs_url="https://developers.google.com/workspace/docs/api/reference/rest",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_docs",
     function_names=(
         "google_docs_create_document",
         "google_docs_get_document",

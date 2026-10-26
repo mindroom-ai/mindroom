@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Oxylabs",
     description="Powerful web scraping capabilities including SERP, Amazon product data, and universal web scraping",
-    category=ToolCategory.RESEARCH,  # web_scrape maps to RESEARCH
+    category=ToolCategory.RESEARCH,
     status=ToolStatus.REQUIRES_CONFIG,  # requires username and password
     setup_type=SetupType.API_KEY,  # uses username/password credentials
     icon="FaGlobe",
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["oxylabs"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/oxylabs",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#oxylabs",
     function_names=("get_amazon_product", "scrape_website", "search_amazon_products", "search_google"),
 )
 def oxylabs_tools() -> type[OxylabsTools]:

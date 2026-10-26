@@ -106,7 +106,7 @@ if TYPE_CHECKING:
         "google-auth-httplib2",
         "google-auth-oauthlib",
     ],
-    docs_url="https://cloud.google.com/bigquery/docs/reference/rest",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_bigquery",
     helper_text="Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
     function_names=("describe_table", "list_tables", "run_sql_query"),
 )

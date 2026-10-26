@@ -2,7 +2,7 @@
 
 The formatter echoes a stored assistant turn's ``content_blocks`` verbatim, because the API signs thinking
 blocks and verifies the sequence on replay; everything else is rebuilt from the message fields. The parser
-is the single place a finished response becomes an assistant ``Message``, whether it arrived streamed or not.
+is the single place a finished response becomes an assistant ``Message``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from anthropic.types import RedactedThinkingBlock, TextBlock, ThinkingBlock, ToolUseBlock, Usage
 from anthropic.types.beta import (
     BetaMessage,
@@ -27,7 +27,7 @@ from anthropic.types.beta import (
 )
 
 from mindroom.llm.media import canonical_mime_type, image_format
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, ToolResultView, tool_result_view
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
@@ -180,7 +180,7 @@ def format_claude_messages(
             if not content:
                 continue
         elif message.role == "tool":
-            content = [_tool_result_block(message)]
+            content = [_tool_result_block(tool_result_view(message))]
         else:
             msg = f"Claude requests cannot carry a message with role {message.role!r}"
             raise ValueError(msg)
@@ -239,18 +239,18 @@ def _url_document_stays_remote(file: File) -> bool:
     return file.url is not None and file.mime_type in {None, "application/pdf"}
 
 
-async def _fetched(url: str, http_client: httpx.AsyncClient) -> tuple[bytes, str | None] | None:
+async def _fetched(url: str, http_client: httpx2.AsyncClient) -> tuple[bytes, str | None] | None:
     """Return the bytes and media type behind ``url``, or None with a warning when it cannot be read."""
     try:
         response = await http_client.get(url)
         response.raise_for_status()
-    except (httpx.HTTPError, httpx.InvalidURL) as error:
+    except (httpx2.HTTPError, httpx2.InvalidURL) as error:
         logger.warning("claude_url_media_dropped", url=url, error=str(error))
         return None
     return response.content, canonical_mime_type(response.headers.get("content-type"))
 
 
-async def _inlined_images(images: Sequence[Image] | None, http_client: httpx.AsyncClient) -> list[Image]:
+async def _inlined_images(images: Sequence[Image] | None, http_client: httpx2.AsyncClient) -> list[Image]:
     """Return the images with every URL-backed one fetched into ``content``, minus those that failed."""
     inlined: list[Image] = []
     for image in images or ():
@@ -274,7 +274,7 @@ async def _inlined_images(images: Sequence[Image] | None, http_client: httpx.Asy
     return inlined
 
 
-async def _inlined_files(files: Sequence[File] | None, http_client: httpx.AsyncClient) -> list[File]:
+async def _inlined_files(files: Sequence[File] | None, http_client: httpx2.AsyncClient) -> list[File]:
     """Return the documents with every URL Claude would not read itself fetched into ``content``."""
     inlined: list[File] = []
     for file in files or ():
@@ -287,7 +287,7 @@ async def _inlined_files(files: Sequence[File] | None, http_client: httpx.AsyncC
     return inlined
 
 
-async def inline_url_media(messages: Sequence[Message], http_client: httpx.AsyncClient) -> list[Message]:
+async def inline_url_media(messages: Sequence[Message], http_client: httpx2.AsyncClient) -> list[Message]:
     """Fetch URL-backed images and URL documents Claude would not read itself, so they are sent inline.
 
     A URL that cannot be read drops its media with a warning instead of failing the request, because the
@@ -427,17 +427,25 @@ def _assistant_blocks(message: Message) -> list[Any]:
     return blocks
 
 
-def _tool_result_block(message: Message) -> dict[str, Any]:
-    content = message.content
-    payload: str | list[Any]
-    if isinstance(content, list):
+def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
+    """Return the ``tool_result`` block of one result; a failed call is marked ``is_error``, as the API documents."""
+    payload: str | list[Any] = result.content
+    # LEGACY_COMPAT: Tool results stored as a list of content blocks.
+    # Legacy format: a stored ``tool`` message whose ``content`` is a list, which only the Agno runtime's result
+    # writer produced.
+    # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
+    # content.
+    # Handling: each block is sent as stored, and any other item as a text block.
+    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks
+    if isinstance(result.content, list):
         payload = [
             block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
-            for item in content
+            for item in result.content
         ]
-    else:
-        payload = "" if content is None else str(content)
-    return {"type": "tool_result", "tool_use_id": message.tool_call_id, "content": payload}
+    tool_result: dict[str, Any] = {"type": "tool_result", "tool_use_id": result.call_id, "content": payload}
+    if result.is_error:
+        tool_result["is_error"] = True
+    return tool_result
 
 
 def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
@@ -486,6 +494,8 @@ def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> l
         for key in ("$defs", "definitions"):
             if key in parameters:
                 input_schema[key] = parameters[key]
+        # TODO(simplify): a tool without a description sends an empty one, as on Gemini. Leave it out, as Chat,
+        # Responses, and Ollama do (#3113). Models would notice: Claude tool definitions change for such tools.
         definition: dict[str, Any] = {
             "name": tool.name,
             "description": tool.description or "",
@@ -547,15 +557,14 @@ def assistant_message_from_response(
     response: AnthropicMessage | BetaMessage,
     *,
     record_context_management: bool,
-    streamed: bool,
 ) -> Message:
     """Build the assistant message of one finished response.
 
-    A ``streamed`` response joins its thinking blocks and its redacted thinking blocks, and a non-streamed one
-    keeps only the last block of each. ``provider_data`` keeps ``content_blocks`` (the response blocks in order,
-    as the API produced them), ``server_tool_blocks`` (every other block, including types the SDK does not know),
-    the thinking ``signature``, the raw ``stop_reason``, and ``context_management`` when the model was configured
-    with one. Every tool use becomes a tool call, including the calls of a response the output limit cut off.
+    Its reasoning joins the response's thinking blocks, and its redacted reasoning its redacted thinking blocks.
+    ``provider_data`` keeps ``content_blocks`` (the response blocks in order, as the API produced them),
+    ``server_tool_blocks`` (every other block, including types the SDK does not know), the thinking ``signature``,
+    the raw ``stop_reason``, and ``context_management`` when the model was configured with one. Every tool use
+    becomes a tool call, including the calls of a response the output limit cut off.
     """
     texts: list[str] = []
     thinking: list[str] = []
@@ -592,20 +601,12 @@ def assistant_message_from_response(
     return Message(
         role="assistant",
         content="".join(texts) or None,
-        reasoning_content=_stored_reasoning(thinking, streamed=streamed),
-        redacted_reasoning_content=_stored_reasoning(redacted, streamed=streamed),
+        reasoning_content="".join(thinking) if thinking else None,
+        redacted_reasoning_content="".join(redacted) if redacted else None,
         tool_calls=tool_calls or None,
         provider_data=provider_data,
         metrics=parse_claude_usage(response.usage),
     )
-
-
-def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
-    # TODO(simplify): A non-streamed reply stores only its last thinking and redacted-thinking block while a streamed
-    # one joins them all. Join them in both modes. Stored runs would notice.
-    if not blocks:
-        return None
-    return "".join(blocks) if streamed else blocks[-1]
 
 
 __all__ = [

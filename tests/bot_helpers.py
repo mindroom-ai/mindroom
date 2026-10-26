@@ -49,6 +49,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
@@ -209,33 +210,31 @@ async def _run_orchestrator_start_until_ready(
 ) -> None:
     """Run start() until readiness, then explicitly shut the runtime down."""
     ready = asyncio.Event()
+    start_sync_task = orchestrator._start_sync_task
 
     def mark_ready() -> None:
         ready.set()
 
-    with patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready):
+    def start_sync_task_and_publish_router_readiness(entity_name: str, bot: object) -> None:
+        # Stand in for the router's first sync, which publishes its reply memberships.
+        start_sync_task(entity_name, bot)
+        if entity_name == ROUTER_AGENT_NAME:
+            orchestrator._router_reply_memberships_live_sync_ready.set()
+
+    with (
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
+        patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task_and_publish_router_readiness),
+    ):
         runtime_task = asyncio.create_task(orchestrator.start())
-
-        async def publish_router_membership_readiness() -> None:
-            while ROUTER_AGENT_NAME not in orchestrator._sync_tasks and not runtime_task.done():  # noqa: ASYNC110
-                await asyncio.sleep(0)
-            if not runtime_task.done():
-                orchestrator._router_reply_memberships_live_sync_ready.set()
-
-        router_ready_task = asyncio.create_task(publish_router_membership_readiness())
         try:
-            await asyncio.wait_for(ready.wait(), timeout=1.0)
+            await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             if wait_for_startup_maintenance:
                 maintenance_task = orchestrator._startup_maintenance.task
                 assert maintenance_task is not None
                 await maintenance_task
             await orchestrator.stop()
-            await asyncio.wait_for(runtime_task, timeout=1.0)
+            await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
-            if not router_ready_task.done():
-                router_ready_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await router_ready_task
             if not runtime_task.done():
                 runtime_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -524,7 +523,7 @@ def _configured_team_test_config(runtime_root: Path) -> Config:
                         rooms=["!test:localhost"],
                     ),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         ),
         runtime_root,
@@ -574,7 +573,7 @@ def _approval_reload_config(tmp_path: Path, *, include_code: bool) -> Config:
     return _runtime_bound_config(
         Config(
             agents=agents,
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
@@ -878,7 +877,7 @@ class AgentBotTestBase:
                         "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
                     },
                     teams={},
-                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    models={"default": ModelConfig(provider="openai", id="test-model")},
                 ),
             ),
             runtime_root,

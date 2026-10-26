@@ -17,12 +17,13 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_loop.tools import (
     PlannedCall,
     dispatch_tool_calls,
+    failed_answer,
     media_follow_up,
     plan_tool_batch,
     tool_result_message,
 )
 from mindroom.llm.errors import incomplete_stream_error
-from mindroom.llm.events import RequestCompleted, ToolCompleted, ToolStarted
+from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
@@ -137,7 +138,7 @@ class LoopEnded:
     paused: bool
 
 
-type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | LoopEnded
+type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | LoopEnded
 
 
 @dataclass
@@ -211,7 +212,6 @@ async def run_model_loop(
         assert turn is not None
         message = turn.message
         _accept_turn(message, state, progress, identity)
-        yield RequestCompleted(message.metrics)
         if not message.tool_calls:
             break
         async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn):
@@ -229,10 +229,9 @@ async def _before_request(
 ) -> Sequence[Message] | None:
     """Apply the request cap, then the pre-request hooks; return the messages to send, or None to end the loop."""
     if max_requests is not None and state.request_index >= max_requests:
-        record = state.record
         logger.warning(
             "tool_call_limit_reached",
-            entity=record.agent_id if isinstance(record, RunRecord) else record.team_id,
+            entity=_entity(state.record),
             budget=max_requests - _EXTRA_MODEL_REQUESTS,
             model_requests=state.request_index,
         )
@@ -256,9 +255,8 @@ def _accept_turn(
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
     The provider stamped the message with the model that answered it. A request that answers without content, as the
-    adapters report a streamed turn without text, leaves the content as it was, so a resumed run keeps its paused text
-    until the model says something new. Empty content, which a reply that does not stream can carry, is blank text;
-    its member results tell blank text from none.
+    adapters report a turn without text, leaves the content as it was, so a resumed run keeps its paused text until the
+    model says something new.
     """
     metrics = state.record.metrics
     assert metrics is not None
@@ -295,6 +293,7 @@ async def _run_tool_batch(
         state.messages,
         calls_so_far=progress.calls_so_far,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
+        entity=_entity(state.record),
     )
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
@@ -328,7 +327,6 @@ async def _answer_resumed(
     for requirement in decided:
         execution = requirement.tool_execution
         if requirement.confirmation is True:
-            assert execution.tool_name is not None
             function = state.offered.functions[execution.tool_name]
             # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
             execution.requires_confirmation = False
@@ -339,7 +337,15 @@ async def _answer_resumed(
         elif requirement.confirmation is False:
             execution.is_error = True
             execution.requires_confirmation = False
-            results.append(_rejection_message(requirement))
+            results.append(
+                failed_answer(
+                    execution.tool_call_id,
+                    execution.tool_name,
+                    requirement.denial_note,
+                    tool_args=execution.tool_args,
+                    stop_after_tool_call=execution.stop_after_call,
+                ),
+            )
         if requirement.external_execution_result is not None:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
@@ -347,18 +353,9 @@ async def _answer_resumed(
     progress.paused = _waits_for_decision(state.record)
 
 
-def _rejection_message(requirement: RunRequirement) -> Message:
-    """Return the tool message that answers a denied call with its denial note."""
-    execution = requirement.tool_execution
-    return Message(
-        role="tool",
-        content=requirement.denial_note,
-        tool_call_id=execution.tool_call_id,
-        tool_name=execution.tool_name,
-        tool_args=execution.tool_args,
-        tool_call_error=True,
-        stop_after_tool_call=execution.stop_after_call,
-    )
+def _entity(record: AnyRunRecord) -> str | None:
+    """Return the agent or team the run belongs to, which its loop's warnings name."""
+    return record.agent_id if isinstance(record, RunRecord) else record.team_id
 
 
 def _waits_for_decision(record: AnyRunRecord) -> bool:
@@ -442,8 +439,14 @@ async def _stream_turn(
             billed = turn.message.metrics if turn is not None else reported.received
             if billed is not None and billed.to_dict():
                 provider_data = model_provenance(identity.id, identity.provider_name)
-                if turn is not None and (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True:
-                    # The turn's usage sums retried attempts, which must not read as one request's.
+                # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
+                sums_attempts = (
+                    (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+                    if turn is not None
+                    else reported.sums_attempts
+                )
+                if sums_attempts:
+                    # Usage that sums retried attempts must not read as one request's.
                     provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
                 messages.append(Message(role="assistant", metrics=billed, provider_data=provider_data))
                 _count_request(metrics, billed, identity)

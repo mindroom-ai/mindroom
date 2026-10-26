@@ -47,7 +47,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
-from tests.conftest import install_model_providers
+from tests.conftest import install_model_providers, prepare_agent_and_prompt_for_test
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     ScriptedProvider,
@@ -128,8 +128,25 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
     )
     runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     persist_entity_accounts(config, runtime)
-    standard = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False)
-    minimal = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False, agent_mode="minimal")
+    standard = agents.create_agent(
+        "helper",
+        config,
+        runtime,
+        None,
+        persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
+    )
+    minimal = agents.create_agent(
+        "helper",
+        config,
+        runtime,
+        None,
+        persist_runtime_state=False,
+        agent_mode="minimal",
+        knowledge=None,
+        active_model_name=None,
+    )
     assert standard.surface.mode == "standard"
     assert standard.surface.minimal_instructions == ()
     turn = _turn(minimal)
@@ -151,7 +168,16 @@ def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Pat
     )
     runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     persist_entity_accounts(config, runtime)
-    minimal = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False, agent_mode="minimal")
+    minimal = agents.create_agent(
+        "helper",
+        config,
+        runtime,
+        None,
+        persist_runtime_state=False,
+        agent_mode="minimal",
+        knowledge=None,
+        active_model_name=None,
+    )
 
     functions = {function.name: function for toolkit in minimal.spec.toolkits for function in toolkit.functions}
     assert "run_shell_command" in functions
@@ -160,13 +186,18 @@ def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Pat
 
 @pytest.mark.parametrize("delegation_depth", [0, 1])
 @pytest.mark.parametrize(
-    "failure",
-    [ImportError("No module named 'praw'"), ValueError("Tool requires a separate service.")],
+    ("failure", "reason"),
+    [
+        (ImportError("No module named 'praw'"), "No module named 'praw'"),
+        (ValueError("Tool requires a separate service."), "Tool requires a separate service"),
+        (TimeoutError(), "TimeoutError"),
+    ],
 )
 def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
     tmp_path,
     monkeypatch,
     failure,
+    reason,
     delegation_depth,
 ) -> None:
     runtime = _runtime_context(tmp_path)
@@ -193,10 +224,12 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
             agent_mode="minimal",
             persist_runtime_state=False,
             delegation_depth=delegation_depth,
+            knowledge=None,
+            active_model_name=None,
         )
 
     message = get_user_friendly_error_message(raised.value, "helper")
-    assert str(failure) in message
+    assert f"Error: {reason}. " in message
     # A minimal subagent's caller starts a standard child; a conversation switches mode.
     assert ("Start a new subagent without minimal." if delegation_depth else "!mode helper standard") in message
     assert raised.value.__cause__ is failure
@@ -207,6 +240,8 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
         runtime.runtime_paths,
         identity,
         persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
     )
     functions = _function_names(standard)
     assert "run_shell_command" in functions
@@ -240,7 +275,16 @@ def test_context_files_remain_complete_and_notes_untouched(
     config.defaults.max_preload_chars = 1000
     runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     persist_entity_accounts(config, runtime)
-    minimal = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False, agent_mode="minimal")
+    minimal = agents.create_agent(
+        "helper",
+        config,
+        runtime,
+        None,
+        persist_runtime_state=False,
+        agent_mode="minimal",
+        knowledge=None,
+        active_model_name=None,
+    )
     turn = _turn(minimal)
     system = turn.system_message.get_content_string()
     policy = minimal.surface.output_file_policy
@@ -317,6 +361,8 @@ async def test_minimal_attempt_requires_managed_owner(tmp_path: Path) -> None:
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         persist_runtime_state=False,
+        knowledge=None,
+        active_model_name=None,
     )
     with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="response owner"):
         await _attempt(build, runtime, _session(runtime))
@@ -366,6 +412,8 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
         agent_mode="minimal",
+        knowledge=None,
+        active_model_name=None,
     )
     with tool_runtime_context(context):
         async with response_cli_lifetime() as lifetime:
@@ -439,6 +487,8 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             runtime.runtime_paths,
             identity,
             agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
+            knowledge=None,
+            active_model_name=None,
         )
 
     def stored_runs(build):
@@ -510,6 +560,8 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
         runtime.runtime_paths,
         identity,
         agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
+        knowledge=None,
+        active_model_name=None,
     )
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
@@ -548,7 +600,7 @@ async def test_prepared_minimal_prompt_moves_optional_enrichment_to_context(
         ),
         system_enrichment_items=(EnrichmentItem(key="system_plugin", text="optional system " * 100),),
     )
-    prepared = await ai._prepare_agent_and_prompt(
+    prepared = await prepare_agent_and_prompt_for_test(
         ctx,
         prompt="actual current user request",
         runtime_paths=runtime.runtime_paths,
@@ -598,6 +650,8 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
+        knowledge=None,
+        active_model_name=None,
     )
     session = _session(runtime)
     with tool_runtime_context(runtime):
@@ -615,7 +669,7 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
             metadata = catalog.metadata()
             assert any(item["toolkit"] == "calculator" and item.get("deferred") for item in metadata)
             binding = await catalog.bind(ToolKey("calculator", "add"))
-            assert binding.catalog.agent_name == "helper"
+            assert binding.catalog.runtime_context.agent_name == "helper"
             assert binding.function.name == "add"
             assert any(item["toolkit"] == "duckduckgo" and item.get("deferred") for item in catalog.metadata())
         finally:
@@ -746,6 +800,70 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize(
+    ("tools", "roster"),
+    [
+        (
+            ["openclaw_compat"],
+            "attachments, browser, coding, duckduckgo, matrix_message, matrix_room, scheduler, shell, website",
+        ),
+        (["shell", "matrix_message"], "attachments, matrix_message, matrix_room, shell"),
+    ],
+    ids=["preset", "implied"],
+)
+async def test_every_cli_toolkit_answers_to_its_own_tool_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    roster: str,
+) -> None:
+    """Bash runs the shell a preset brings in, and the prompt lists each toolkit by the name the CLI calls it."""
+    runtime = _runtime_context(tmp_path)
+    runtime.config.agents["helper"] = AgentConfig(display_name="Helper", tools=tools, memory_backend="file")
+    registry = TurnToolRegistry()
+    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
+    persist_entity_accounts(runtime.config, runtime.runtime_paths)
+    offered: set[str] = set()
+
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
+        owner = shell_cli_owner(registry)
+        offered.update(str(item["toolkit"]) for item in owner.catalog.metadata())
+        call_id = uuid4()
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(
+                operation="tools.call",
+                toolkit="attachments",
+                function="list_attachments",
+                arguments={},
+                call_id=call_id,
+            ),
+        )
+        receipt = await settled_receipt(owner, str(call_id))
+        assert receipt["status"] == "completed", receipt
+        return "listed"
+
+    provider = ScriptedProvider(steps=[[("bash", {"command": "list my attachments"})]])
+    provider.install(monkeypatch)
+    install_scripted_shell(monkeypatch, run_shell_command)
+    with tool_runtime_context(runtime):
+        result = await ai.ai_response(
+            replace(_turn_context(), agent_mode="minimal", run_id=None),
+            prompt="list my attachments",
+            runtime_paths=runtime.runtime_paths,
+            config=runtime.config,
+            execution_identity=build_execution_identity_from_runtime_context(runtime),
+        )
+    assert "done" in str(result)
+    assert offered_tools(provider.requests[0]) == ["bash"]
+    assert f"Toolkits callable through mindroom-agent: {roster}\n" in str(provider.requests[0].messages[0].content)
+    assert set(roster.split(", ")) <= offered
+    # A preset offers no functions of its own.
+    assert "openclaw_compat" not in offered
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pure(tmp_path: Path) -> None:
     """A worker shell gets the API origin it can reach, and sizing a request never prepares or grants."""
     runtime = _runtime_context(tmp_path)
@@ -773,6 +891,8 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
+        knowledge=None,
+        active_model_name=None,
     )
     assert _function_names(presented_build(build)) == ["bash"]
     with tool_runtime_context(runtime):

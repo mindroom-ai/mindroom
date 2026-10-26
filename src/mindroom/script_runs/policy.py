@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
@@ -42,11 +43,13 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 
 def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
     """Resolve the stable registered function surface captured when a script launches."""
-    toolkits = _build_script_toolkits(context, context.config, _visible_script_tool_entries(context, context.config))
+    entries = _visible_script_tool_entries(context, context.config)
+    toolkits = _build_script_toolkits(context, context.config, entries)
     return tuple(
-        ScriptToolGrant(toolkit_name, function_name)
-        for toolkit_name, toolkit in toolkits.items()
-        for function_name in _visible_function_names(context, toolkit)
+        ScriptToolGrant(entry.name, function_name)
+        for entry in entries
+        if (toolkit := toolkits.get(entry.name)) is not None
+        for function_name in _visible_function_names(context, entry, toolkit)
     )
 
 
@@ -74,7 +77,7 @@ def resolve_current_script_tool(
     toolkit = _build_script_toolkits(context, config, (tool_entry,)).get(grant.toolkit_name)
     if toolkit is None:
         return None
-    if grant.function_name not in _visible_function_names(context, toolkit):
+    if grant.function_name not in _visible_function_names(context, tool_entry, toolkit):
         if rejected_toolkit_cleanup is not None:
             rejected_toolkit_cleanup(toolkit)
         return None
@@ -142,8 +145,20 @@ def _build_script_toolkits(
     return toolkits
 
 
-def _visible_function_names(context: ToolRuntimeContext, toolkit: Toolkit) -> tuple[str, ...]:
-    functions = {**toolkit.functions, **toolkit.async_functions}
+def _visible_function_names(
+    context: ToolRuntimeContext,
+    tool_entry: EffectiveToolConfig,
+    toolkit: Toolkit,
+) -> tuple[str, ...]:
+    # One function per name, the one an agent's run offers.
     if context.tool_function_filter is None:
-        return tuple(functions)
-    return tuple(name for name, function in functions.items() if context.tool_function_filter(function))
+        return tuple(toolkit.get_async_functions())
+    # Each function carries the toolkit names the agent's build gives it: the authored toolkit it is offered from,
+    # which for an implied or preset tool is the tool that brings it in, and the registered tool it comes from, so the
+    # run's filter judges the same function the agent sees.
+    functions = adapt_toolkit(
+        toolkit,
+        key=tool_entry.authored_name or tool_entry.name,
+        registered=tool_entry.name,
+    ).functions
+    return tuple(function.name for function in functions if context.tool_function_filter(function))

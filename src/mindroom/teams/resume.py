@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom import ai_runtime
@@ -21,7 +22,7 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import member_delegation_card, pending_call_slot
+from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
@@ -122,7 +123,7 @@ def _route_decisions(
     alone, and a call id two members share is refused rather than guessed at; a delegation's result names its member
     and call, which the resume checks against the calls the team waits for.
     """
-    waiting: dict[str | None, list[RunRequirement]] = {}
+    waiting: dict[str, list[RunRequirement]] = {}
     for requirement in persisted.requirements or ():
         if not requirement.is_resolved():
             waiting.setdefault(requirement.tool_execution.tool_call_id, []).append(requirement)
@@ -162,8 +163,7 @@ class TeamResume:
 
     ``built`` is the team the run resumes as. ``plan`` selects the stored history the leader's resume request
     replays: the turn's own plan within a turn, the configured policy for a saved approval. ``model_name`` is the
-    turn's model within a turn, which the resumed run's tool calls carry; a saved approval's resume has none, so its
-    calls keep the model of the tool context it runs in.
+    configured model the team run uses, which the resumed run's tool calls carry.
     """
 
     built: BuiltTeam
@@ -174,7 +174,7 @@ class TeamResume:
     plan: ResolvedReplayPlan | None
     user_id: str | None
     toolkit_owners: Mapping[tuple[str, str], str]
-    model_name: str | None = None
+    model_name: str
 
     def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[TeamRunEvent]:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
@@ -188,7 +188,10 @@ class TeamResume:
         for requirement in paused.requirements or ():
             key = (requirement.member_agent_id, requirement.tool_execution.tool_call_id)
             if requirement.member_run_id is not None and key in decided:
-                add_approval_receipt_reader(requirement.member_run_id)
+                add_approval_receipt_reader(
+                    requirement.member_run_id,
+                    partial(member_call_id, requirement.member_agent_id),
+                )
         session = self.storage.session
         # The leader's resume request: its stored system message, the summary and history ``plan`` replays, the rest.
         history, summary = replayed_history(session, self.storage.scope, self.built.history_settings, self.plan)
@@ -274,7 +277,7 @@ def drive_team_delegations(
     return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
-def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str | None]:
+def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str]:
     """Return the slot that shows the call ``requirement`` waits on and the call's id there, by ``pending_call_slot``."""
     member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
     if member_id is None:
@@ -355,13 +358,13 @@ async def continue_paused_team_run(
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    member_model_names: Mapping[str, str] | None = None,
-    approval_calls: Sequence[ApprovalCall] = (),
-    history_scope: HistoryScope | None = None,
-    prior_tool_trace: Sequence[ToolTraceEntry] = (),
-    prior_presentation_state: Mapping[str, object] | None = None,
-    show_tool_calls: bool = True,
-    tool_trace_collector: list[ToolTraceEntry] | None = None,
+    member_model_names: Mapping[str, str] | None,
+    approval_calls: Sequence[ApprovalCall],
+    history_scope: HistoryScope | None,
+    prior_tool_trace: Sequence[ToolTraceEntry],
+    prior_presentation_state: Mapping[str, object] | None,
+    show_tool_calls: bool,
+    tool_trace_collector: list[ToolTraceEntry],
     progress: ProgressPublisher | None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
@@ -375,7 +378,7 @@ async def continue_paused_team_run(
         msg = "The paused team approval names no members"
         raise RuntimeError(msg)
     # None for an ad hoc team, which compacts and stores as no configured entity.
-    team_name = configured_team_name if configured_team_name in config.teams else None
+    team_name = config.configured_team_name(configured_team_name)
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
@@ -428,9 +431,10 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             model_name=model_name,
             configured_team_name=team_name,
+            timezone=config.get_entity_timezone(configured_team_name),
         )
         toolkit_owners = tool_owners_by_agent(*members.builds)
-        native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
+        native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)
         presentation = TeamStreamPresentation.restore(
             config_names=member_names,
             show_tool_calls=show_tool_calls,
@@ -448,8 +452,6 @@ async def continue_paused_team_run(
             prepared_history=None,
         )
         plan = configured_replay_plan(history_settings=built.history_settings, estimated_tokens=0)
-        # TODO(simplify): like ResumeRunner.events (approval/resume.py), this resume names no model, so its tools see
-        # the tool context's. Pass model_name. Tools that follow the reply's model, such as claude_agent, would notice.
         resume = TeamResume(
             built=built,
             storage=storage,
@@ -470,6 +472,7 @@ async def continue_paused_team_run(
             plan=plan,
             user_id=user_id,
             toolkit_owners=toolkit_owners,
+            model_name=model_name,
         )
         # A run the delegation driver owns resumes through it with the decisions on its children's calls; any
         # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses
@@ -508,7 +511,7 @@ async def continue_paused_team_run(
             return continued_team_pause(presentation, paused)
         if continued.status is not RunStatus.completed:
             raise RuntimeError(continued.handover_content or "Team continuation did not complete")
-        if tool_trace_collector is not None and show_tool_calls:
+        if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
         # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
         # note. The document already holds what each run handed over beyond what it carried over, so rendering the

@@ -137,7 +137,7 @@ async def capture_bash_batch(
     record = catalog.record or RunRecord(
         run_id=catalog.run.run_id,
         session_id=catalog.run.session_id,
-        agent_id=catalog.agent_name,
+        agent_id=catalog.runtime_context.agent_name,
     )
     planned = [
         PlannedCall(
@@ -148,7 +148,7 @@ async def capture_bash_batch(
     ]
     state = LoopState(
         messages=[*history, assistant],
-        offered=PreparedTools(functions={}, instructions=()),
+        offered=PreparedTools(functions={}),
         tools=(),
         run=catalog.run,
         record=record,
@@ -172,8 +172,8 @@ async def run_bash_batch(owner: LiveTurnTools, *commands: str) -> RunRecord:
         ],
     )
     spec = AgentSpec(
-        id=catalog.agent_name,
-        name=catalog.agent_name,
+        id=catalog.runtime_context.agent_name,
+        name=catalog.runtime_context.agent_name,
         model=model,
         system_message=None,
         toolkits=(minimal_bash_toolkit(execute=owner.execute_bash),),

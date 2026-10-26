@@ -41,6 +41,7 @@ from mindroom.tool_system.runtime_context import (
     resolve_tool_runtime_hook_bindings,
 )
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -206,13 +207,13 @@ class _ResolvedToolContext:
     def record_kwargs(self) -> dict[str, Any]:
         return {
             "agent_name": self.agent_name or None,
+            "channel": self.channel,
             "room_id": self.room_id,
             "thread_id": self.thread_id,
             "reply_to_event_id": self.reply_to_event_id,
             "requester_id": self.requester_id,
             "session_id": self.session_id,
             "correlation_id": self.correlation_id,
-            "execution_identity": self.execution_identity,
             "runtime_paths": self.runtime_paths,
             "origin": self.origin,
         }
@@ -355,6 +356,16 @@ async def _call_tool(
     return await func(**args)
 
 
+def _observed(result: _ToolHookResult) -> _ToolHookResult:
+    """Return what a call's observers read for ``result``: a failed outcome's text, as for a call a hook declined.
+
+    A tool that answers its own failure with a failed ``ToolOutcome``, as ``run_scheduled_call`` does, fails its call,
+    while the after-call hooks and the tool-call log read the text it answered with. The reply's record takes the
+    outcome itself, so it keeps that the call failed.
+    """
+    return result.content if isinstance(result, ToolOutcome) and result.is_error else result
+
+
 async def _call_recorded_tool(
     func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
@@ -437,23 +448,17 @@ class _ToolBridgeTiming:
     started_at: float
     before_hooks_ms: float | None = None
     tool_body_ms: float | None = None
-    result_ready_ms: float | None = None
     after_hooks_ms: float | None = None
 
-    def record_timing(self) -> ToolCallTiming:
-        """Return phases persisted to tool_calls.jsonl; after hooks stay debug-event only."""
+    def result_ready(self) -> ToolCallTiming:
+        """Return the timing tool_calls.jsonl stores once the result is ready; after hooks stay debug-event only."""
         return ToolCallTiming(
+            result_ready_ms=elapsed_ms_since(self.started_at, clock=time.perf_counter, ndigits=2),
             before_hooks_ms=self.before_hooks_ms,
             tool_body_ms=self.tool_body_ms,
-            result_ready_ms=self.result_ready_ms,
         )
 
-    def mark_result_ready(self) -> float:
-        duration_ms = elapsed_ms_since(self.started_at, clock=time.perf_counter, ndigits=2)
-        self.result_ready_ms = duration_ms
-        return duration_ms
-
-    def emit_finish(self, *, tool_name: str, agent_name: str | None, outcome: str) -> None:
+    def emit_finish(self, ready: ToolCallTiming, *, tool_name: str, agent_name: str | None, outcome: str) -> None:
         emit_timing_event(
             "Tool hook dispatch timing",
             phase="bridge_finish",
@@ -462,7 +467,7 @@ class _ToolBridgeTiming:
             outcome=outcome,
             before_hooks_ms=self.before_hooks_ms,
             tool_body_ms=self.tool_body_ms,
-            result_ready_ms=self.result_ready_ms,
+            result_ready_ms=ready.result_ready_ms,
             after_hooks_ms=self.after_hooks_ms,
             total_bridge_ms=elapsed_ms_since(self.started_at, clock=time.perf_counter, ndigits=2),
         )
@@ -472,8 +477,7 @@ def _record_success(
     tool_name: str,
     args: dict[str, Any],
     result: _ToolHookResult,
-    duration_ms: float,
-    timing: _ToolBridgeTiming,
+    timing: ToolCallTiming,
     resolved_context: _ResolvedToolContext,
 ) -> None:
     """Record a successful call durably when the config logs LLM requests."""
@@ -483,8 +487,7 @@ def _record_success(
         tool_name=tool_name,
         arguments=args,
         result=result,
-        duration_ms=duration_ms,
-        timing=timing.record_timing(),
+        timing=timing,
         **resolved_context.record_kwargs(),
     )
 
@@ -493,8 +496,7 @@ def _record_failure(
     tool_name: str,
     args: dict[str, Any],
     error: BaseException,
-    duration_ms: float,
-    timing: _ToolBridgeTiming,
+    timing: ToolCallTiming,
     resolved_context: _ResolvedToolContext,
 ) -> None:
     """Record and log a failed call; a record that cannot be written never masks the tool's own error."""
@@ -503,8 +505,7 @@ def _record_failure(
             tool_name=tool_name,
             arguments=args,
             error=error,
-            duration_ms=duration_ms,
-            timing=timing.record_timing(),
+            timing=timing,
             **resolved_context.record_kwargs(),
         )
     except Exception:
@@ -564,8 +565,8 @@ async def _execute_bridge(  # noqa: C901
 
     async def finish(
         outcome: str,
+        ready: ToolCallTiming,
         *,
-        duration_ms: float,
         result: _ToolHookResult = None,
         error: BaseException | None = None,
         blocked: bool = False,
@@ -580,15 +581,15 @@ async def _execute_bridge(  # noqa: C901
                 result=result,
                 error=error,
                 blocked=blocked,
-                duration_ms=duration_ms,
+                duration_ms=ready.result_ready_ms,
             )
             timing.after_hooks_ms = elapsed_ms_since(after_hooks_started_at, clock=time.perf_counter, ndigits=2)
-        timing.emit_finish(tool_name=tool_name, agent_name=resolved_agent_name, outcome=outcome)
+        timing.emit_finish(ready, tool_name=tool_name, agent_name=resolved_agent_name, outcome=outcome)
 
     async def succeed(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
-        duration_ms = timing.mark_result_ready()
-        _record_success(tool_name, args, result, duration_ms, timing, resolved_context)
-        await finish(outcome, duration_ms=duration_ms, result=result)
+        ready = timing.result_ready()
+        _record_success(tool_name, args, _observed(result), ready, resolved_context)
+        await finish(outcome, ready, result=_observed(result))
         return result
 
     if has_before_hooks:
@@ -601,17 +602,16 @@ async def _execute_bridge(  # noqa: C901
         )
         timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
         if declined_result is not None:
-            duration_ms = timing.mark_result_ready()
-            await finish("blocked_before_hooks", duration_ms=duration_ms, result=declined_result, blocked=True)
-            return declined_result
+            await finish("blocked_before_hooks", timing.result_ready(), result=declined_result, blocked=True)
+            # The call answers as failed, so the model reads the decline as one.
+            return ToolOutcome(content=declined_result, is_error=True)
 
     if origin is not None and approval_gate is not None:
         decision = await approval_gate(origin, tool_name, deepcopy(args))
         if not decision.approved:
             reason = denial_note_for(decision.reason)
             declined_result = _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
-            duration_ms = timing.mark_result_ready()
-            await finish("blocked_approval", duration_ms=duration_ms, result=declined_result, blocked=True)
+            await finish("blocked_approval", timing.result_ready(), result=declined_result, blocked=True)
             return BackgroundToolApprovalDenied(reason=reason)
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
@@ -619,7 +619,7 @@ async def _execute_bridge(  # noqa: C901
         job_checkpoint()
         check_current_execution_authority(arguments=args)
     except BaseException as stopped:
-        await finish("blocked_before_body", duration_ms=timing.mark_result_ready(), error=stopped, blocked=True)
+        await finish("blocked_before_body", timing.result_ready(), error=stopped, blocked=True)
         raise
 
     tool_body_started_at = time.perf_counter()
@@ -630,9 +630,9 @@ async def _execute_bridge(  # noqa: C901
         return await succeed(oauth_connection_required_payload(exc), "oauth_connection_required")
     except BaseException as error:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
-        duration_ms = timing.mark_result_ready()
-        _record_failure(tool_name, args, error, duration_ms, timing, resolved_context)
-        await finish("error", duration_ms=duration_ms, error=error)
+        ready = timing.result_ready()
+        _record_failure(tool_name, args, error, ready, resolved_context)
+        await finish("error", ready, error=error)
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
     return await succeed(result, "success")
@@ -694,18 +694,19 @@ async def dispatch_external_tool_hooks(
 def build_tool_hook_middleware(
     hook_registry: HookRegistry,
     agent_name: str | None,
-    dispatch_context: ToolDispatchContext | None = None,
-    config: Config | None = None,
-    runtime_paths: RuntimePaths | None = None,
+    dispatch_context: ToolDispatchContext | None,
+    config: Config | None,
+    runtime_paths: RuntimePaths | None,
     origin: BackgroundScriptToolOrigin | None = None,
     approval_gate: _ToolApprovalGate | None = None,
 ) -> ToolMiddleware:
     """Return the tool-call policy as the middleware around every tool call, in the loop and outside it.
 
     The call reaches its entrypoint only through ``call_next``, so a plugin before-hook that declines it, a
-    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running. A background
-    script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a declined call then
-    returns ``BackgroundToolApprovalDenied`` without running.
+    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a declined call
+    returns a failed ``ToolOutcome`` with the decline's text. A background script's call passes its ``origin`` and the
+    ``approval_gate`` that asks its requester; a call its requester denied returns ``BackgroundToolApprovalDenied``
+    without running.
     """
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)

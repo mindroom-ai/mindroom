@@ -28,6 +28,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 from agno.tools import Toolkit
+from agno.tools.function import Function
 from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 
@@ -97,6 +98,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     FakeCredentialsManager,
+    call_proxy_sync_for_test,
     make_conversation_reader_mock,
     make_relation_lookup,
     requires_linux,
@@ -946,6 +948,54 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
         assert marker in (tmp_path / "runner/result.json").read_text(encoding="utf-8")
         assert marker not in str(proxy_result)
         assert proxy_result["mindroom_tool_output"]["status"] == "saved_to_file"
+    finally:
+        restore_tool_registry_snapshot(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_runner_runs_the_function_a_primary_run_offers(tmp_path: Path) -> None:
+    """A toolkit that registers a sync and an async function of one name runs its async one, as the primary offers it."""
+    tool_name = "test_runner_one_function_per_name"
+
+    class _DualToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name=tool_name, tools=[self.lookup])
+            self.async_functions["lookup"] = Function(name="lookup", entrypoint=self.alookup)
+
+        def lookup(self) -> str:
+            return "sync"
+
+        async def alookup(self) -> str:
+            return "async"
+
+    snapshot = capture_tool_registry_snapshot()
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        file_access=ToolFileAccess.NONE,
+        display_name="One Function Per Name",
+        description="Test-only toolkit registering both variants of one function.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def _dual_factory() -> type[_DualToolkit]:
+        return _DualToolkit
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    try:
+        toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+            runtime_paths=runtime_paths,
+            config=Config(agents={}, models={}),
+            tool_name=tool_name,
+            function_name="lookup",
+        )
+        [offered] = adapt_toolkit(toolkit).functions
+
+        assert await offered.entrypoint() == "async"
+        assert await sandbox_runner_module._call_entrypoint(entrypoint, [], {}) == "async"
     finally:
         restore_tool_registry_snapshot(snapshot)
 
@@ -3508,7 +3558,7 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
         ),
     )
 
-    result = sandbox_proxy_module._call_proxy_sync(
+    result = call_proxy_sync_for_test(
         runtime_paths=runtime_paths,
         tool_name="calculator",
         function_name="add",
@@ -3612,7 +3662,7 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
     )
 
     with pytest.raises(RuntimeError, match="boom"):
-        sandbox_proxy_module._call_proxy_sync(
+        call_proxy_sync_for_test(
             runtime_paths=runtime_paths,
             tool_name="calculator",
             function_name="add",
@@ -5681,7 +5731,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
     )
 
     with tool_runtime_context(runtime_context):
-        result = sandbox_proxy_module._call_proxy_sync(
+        result = call_proxy_sync_for_test(
             runtime_paths=runtime_paths,
             tool_name="calculator",
             function_name="add",
@@ -5724,7 +5774,7 @@ def _live_primary_config(runtime_paths: RuntimePaths) -> Config:
                     "provider": "openai",
                     "id": "gpt-6-astra",
                     "api_key": "sk-live-model-key",
-                    "extra_kwargs": {"aws_secret_access_key": "live-model-extra-kwarg-secret"},
+                    "extra_kwargs": {"default_headers": {"X-Upstream-Key": "live-model-extra-kwarg-secret"}},
                 },
             },
             "router": {"model": "default"},
@@ -5826,7 +5876,7 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
 
     with tool_runtime_context(_mind_tool_runtime_context(runtime_paths, live_config)):
-        sandbox_proxy_module._call_proxy_sync(
+        call_proxy_sync_for_test(
             runtime_paths=runtime_paths,
             tool_name="calculator",
             function_name="add",
@@ -7884,7 +7934,7 @@ def test_proxy_composition_decodes_typed_media_for_every_tool(
     monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", lambda **_kwargs: envelope)
 
     def call() -> object:
-        return sandbox_proxy_module._call_proxy_sync(
+        return call_proxy_sync_for_test(
             runtime_paths=paths,
             tool_name=tool_name,
             function_name="browser_take_screenshot",

@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING, Any
 from mindroom.tool_system.invocation import ToolCallContext
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.history.types import HistoryScope
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider
     from mindroom.session_storage.types import ConversationSession
-    from mindroom.tool_system.tool_function import AdaptedToolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -20,8 +22,10 @@ class AgentSpec:
     """One configured agent as the loop runs it.
 
     ``id`` and ``name`` are stored on every run as ``agent_id`` and ``agent_name``. ``system_message`` is the
-    rendered prompt the loop sends first, or None for an agent without one. ``max_tool_calls_per_turn`` bounds the
-    tool calls of one run, and with it the model requests.
+    rendered prompt the loop sends first, or None for an agent without one. ``toolkits`` offer each function name
+    once, as the agent's build resolved them (``offered_toolkits``), and ``functions`` holds those functions by
+    name in offer order. ``max_tool_calls_per_turn`` bounds the tool calls of one run, and with it the model
+    requests.
     """
 
     id: str
@@ -30,6 +34,18 @@ class AgentSpec:
     system_message: Message | None
     toolkits: tuple[AdaptedToolkit, ...]
     max_tool_calls_per_turn: int | None = None
+    functions: Mapping[str, ToolFunction] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Index the functions the toolkits offer by name, refusing a name two of them offer."""
+        functions: dict[str, ToolFunction] = {}
+        for toolkit in self.toolkits:
+            for function in toolkit.functions:
+                if function.name in functions:
+                    msg = f"Agent {self.id!r} is offered two functions named {function.name!r}"
+                    raise ValueError(msg)
+                functions[function.name] = function
+        object.__setattr__(self, "functions", functions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,10 +67,12 @@ class RunContext:
     ``session`` is the session the run belongs to, whose id the run's record and tool calls carry and whose
     ``session_state`` every tool call of the run shares and may change in place: the stored session, which the store
     writes back, or an ``UnstoredSession`` for a run no store keeps. ``parent_run_id`` names the run that started
-    this one, as a team run starts its member runs. ``metadata`` is stored on the run record. ``history_scope`` is the
-    stored conversation a team run and its member runs belong to, which tools that address history by scope read;
-    None for an agent's own run, whose scope is its agent's. ``model_name`` is the configured model the run resolved,
-    which its tool calls carry; a team's member runs carry the leader's.
+    this one, as a team run starts its member runs. ``metadata`` is the turn's run metadata, which the run's tool calls
+    read; a team run stores it on its record, and an agent run stores only what ``run_agent`` is given, so a member
+    run stores none of its team's. ``history_scope`` is the stored conversation a team run and its member runs belong
+    to, which tools that address history by scope read; None for an agent's own run, whose scope is its agent's.
+    ``model_name`` is the configured model the run resolved, which its tool calls carry; a team's member runs carry
+    the leader's.
     """
 
     run_id: str
@@ -75,7 +93,7 @@ class RunContext:
         """Return the state the run's tool calls share, its session's."""
         return self.session.session_state
 
-    def call_context(self, call_id: str | None) -> ToolCallContext:
+    def call_context(self, call_id: str) -> ToolCallContext:
         """Return the context of the call ``call_id`` this run makes, sharing the run's state and scope."""
         return ToolCallContext(
             run_id=self.run_id,

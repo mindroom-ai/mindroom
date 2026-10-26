@@ -18,6 +18,8 @@ import nio
 import pytest
 
 from mindroom import bot_room_lifecycle, thread_summary
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -275,6 +277,7 @@ def _live_router_invite_scenario(
         storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        agent_reply_membership_sync=AgentReplyMembershipSync(AgentReplyMembershipIndex()),
     )
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -652,6 +655,7 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
     session.wait_for_membership_idle = AsyncMock()
     session.next_batch = AsyncMock(return_value=None)
     session.change_membership = AsyncMock(return_value=True)
+    session.wait_for_room_ready = AsyncMock(return_value=True)
     bot.journal_principal = MagicMock(return_value=principal)
     bot._ingestion_session = session
     bot._room_lifecycle.deps = replace(
@@ -669,6 +673,7 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
     session.wait_for_membership_idle.assert_awaited_once_with()
     principal.ingestion_membership_position.assert_awaited_once_with(room_id)
     session.change_membership.assert_not_awaited()
+    session.wait_for_room_ready.assert_awaited_once_with(room_id)
     bot.client.join.assert_not_awaited()
 
 

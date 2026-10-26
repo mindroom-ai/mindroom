@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope
@@ -20,14 +21,22 @@ from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
+from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.response_runner import (
+    PostLockRequestPreparationError,
+    ResponseRequest,
+    ResponseRunner,
+    _mid_turn_for_request,
+)
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnStore
@@ -463,7 +472,7 @@ async def test_streamed_team_answer_completes_its_reply(tmp_path: Path) -> None:
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED]
 
 
-def _regeneration(*, answer_event_id: str, edit_event_id: str = "$edit") -> ResponseRequest:
+def _regeneration(*, answer_event_id: str | None, edit_event_id: str = "$edit") -> ResponseRequest:
     """Return the request an edit of ``$event`` drives, regenerating the answer its turn record names."""
     target = _target()
     return replace(
@@ -628,6 +637,65 @@ async def test_an_edit_regenerates_in_place_the_streaming_answer_it_stopped(tmp_
     assert reply.state is rl.ReplyState.COMPLETED
     assert _sent_bodies(bot)[-1] == "Edited answer."
     assert not await bot._reply_runtime.store.is_pending("$edit")
+
+
+async def test_an_edit_before_the_create_is_acknowledged_regenerates_the_event_it_creates(tmp_path: Path) -> None:
+    """An edit stops a reply whose placeholder Matrix has not acknowledged yet; its regeneration rewrites that event."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    sending = asyncio.Event()
+    acknowledged = asyncio.Event()
+
+    async def slow_homeserver(*args: object, **kwargs: object) -> object:
+        sending.set()
+        await acknowledged.wait()
+        return await send_message_outcome(*args, **kwargs)
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Original answer."
+        await asyncio.Event().wait()
+        yield "never"
+
+    with (
+        patch("mindroom.delivery_gateway.send_message_outcome", new=slow_homeserver),
+        patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        await asyncio.wait_for(sending.wait(), timeout=5)
+        creating = await _reply(bot)
+        assert creating.event_id is None
+        assert creating.possibly_shown is not None
+        # The edit stops it through the bot's own wiring, which needs no event to find the reply.
+        await bot._edit_regenerator.deps.stop_reply(creating, 7)
+        acknowledged.set()
+        await asyncio.wait_for(response, timeout=5)
+    await _admit_edit(bot)
+
+    assert await _answer(bot, _regeneration(answer_event_id=None), AsyncMock(return_value="Edited answer.")) == "$sent1"
+
+    reply = await _reply(bot)
+    assert reply.reply_id == creating.reply_id
+    assert reply.state is rl.ReplyState.COMPLETED
+    spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
+    assert [(span.kind, span.outcome) for span in spans] == [
+        (rl.SpanKind.TURN, rl.SpanOutcome.CANCELLED),
+        (rl.SpanKind.REGENERATION, rl.SpanOutcome.COMPLETED),
+    ]
+    assert _sent_bodies(bot) == ["Thinking...", "**[Response cancelled by user]**", "Edited answer."]
+    assert not await bot._reply_runtime.store.is_pending("$edit")
+
+
+async def test_an_eventless_regeneration_tells_the_mid_turn_judge_its_answer_may_show() -> None:
+    """A regeneration whose reply's create is unacknowledged replaces what may show, not an empty reply."""
+    gate = MidTurnGate(active_text=None, evaluate=AsyncMock())
+    with patch("mindroom.response_runner.create_mid_turn_gate", return_value=gate):
+        _mid_turn_for_request(_regeneration(answer_event_id=None), MagicMock(), MagicMock(), on_defer=AsyncMock())
+
+    assert gate.visible_response_text is None
 
 
 async def test_an_interrupted_regeneration_leaves_the_answer_it_replaced_shown(tmp_path: Path) -> None:
@@ -1097,15 +1165,17 @@ async def test_a_stop_reaction_reaches_a_running_reply_only_in_its_room(tmp_path
             "@user:localhost",
         )
         here = MagicMock(room_id=_target().room_id)
-        assert await dispatcher._maybe_handle_stop_reaction(
-            here,
-            _stop_reaction(reply.event_id),
-            None,
-            "@user:localhost",
-        )
+        with capture_logs() as logs:
+            assert await dispatcher._maybe_handle_stop_reaction(
+                here,
+                _stop_reaction(reply.event_id),
+                None,
+                "@user:localhost",
+            )
 
     await asyncio.wait_for(response, timeout=5)
     assert (await _reply(bot)).state is rl.ReplyState.CANCELLED
+    assert [entry["room_id"] for entry in logs if entry["event"] == "Stop requested for message"] == [reply.room_id]
 
 
 async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_path: Path) -> None:
@@ -1335,6 +1405,37 @@ async def test_each_tool_call_of_a_reply_is_recorded_on_its_span_before_it_runs(
     assert (started.type, started.tool_name) == ("tool_call_started", "counter")
     (finished,) = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
     assert (finished.type, finished.tool_name, finished.result_preview) == ("tool_call_completed", "counter", "1")
+
+
+async def test_a_failed_tool_call_is_recorded_failed_whether_it_raised_or_answered_its_failure(tmp_path: Path) -> None:
+    """A restart's account of the reply's calls says which failed: a call that raised, and one that answered failed."""
+    bot = await _streaming_bot(tmp_path)
+    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
+
+    async def fetch(url: str) -> str:
+        msg = f"HTTP 500 from {url}"
+        raise RuntimeError(msg)
+
+    async def schedule() -> ToolOutcome:
+        return ToolOutcome(content="Scheduled call `nightly` did not run: it was cancelled.", is_error=True)
+
+    async def answer(*_args: object, **_kwargs: object) -> str:
+        with suppress(RuntimeError):
+            await bridge("fetch", fetch, {"url": "https://example.com"})
+        await bridge("schedule", schedule, {})
+        return "Tried."
+
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+
+    reply = await _reply(bot)
+    recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
+    account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
+    assert account.splitlines()[0] == "(turn stopped before completion; 2 tool call(s) had failed)"
+    assert account.splitlines()[-2:] == [
+        '- The `fetch` tool failed with input preview "url=https://example.com" '
+        'and error preview "RuntimeError: HTTP 500 from https://example.com".',
+        '- The `schedule` tool failed with error preview "Scheduled call `nightly` did not run: it was cancelled.".',
+    ]
 
 
 async def test_a_tool_result_stands_when_recording_its_finish_fails(

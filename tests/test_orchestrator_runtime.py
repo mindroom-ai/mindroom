@@ -38,7 +38,6 @@ from mindroom.api import main as api_main
 from mindroom.approval.manager import (
     _ApprovalStartupSweep,
     get_approval_store,
-    initialize_approval_store,
 )
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
@@ -110,6 +109,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     TEST_PASSWORD,
     bind_mock_config_event_journal,
+    initialize_approval_store_for_test,
     make_matrix_client_mock,
     runtime_paths_for,
 )
@@ -5064,7 +5064,7 @@ class TestMultiAgentOrchestrator:
         config = _runtime_bound_config(
             Config(
                 agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
             tmp_path,
         )
@@ -5074,7 +5074,7 @@ class TestMultiAgentOrchestrator:
         router_cards = MagicMock()
         orchestrator.config = config
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(approval_store=router_cards)}
-        store = initialize_approval_store(runtime_paths, cards=old_cards)
+        store = initialize_approval_store_for_test(runtime_paths, cards=old_cards)
 
         try:
             with (
@@ -5278,12 +5278,12 @@ class TestMultiAgentOrchestrator:
 
         current_config = Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             plugins=["./plugins/current"],
         )
         new_config = Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             plugins=["./plugins/updated"],
         )
 
@@ -5379,7 +5379,7 @@ class TestMultiAgentOrchestrator:
         current_config = _runtime_bound_config(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 plugins=[],
             ),
             tmp_path,
@@ -5387,7 +5387,7 @@ class TestMultiAgentOrchestrator:
         new_config = _runtime_bound_config(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 plugins=["./plugins/updated"],
             ),
             tmp_path,
@@ -5451,7 +5451,7 @@ class TestMultiAgentOrchestrator:
         current_config = _runtime_bound_config(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 plugins=[],
             ),
             tmp_path,
@@ -5459,7 +5459,7 @@ class TestMultiAgentOrchestrator:
         new_config = _runtime_bound_config(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 plugins=["./plugins/updated"],
             ),
             tmp_path,
@@ -5539,7 +5539,7 @@ class TestMultiAgentOrchestrator:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -5559,7 +5559,7 @@ class TestMultiAgentOrchestrator:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -5633,7 +5633,7 @@ class TestMultiAgentOrchestrator:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -5653,7 +5653,7 @@ class TestMultiAgentOrchestrator:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )

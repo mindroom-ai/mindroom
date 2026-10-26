@@ -3,7 +3,7 @@
 
 Field names are the keys stored runs, summary-row segments, tool-job payloads, and the worker media envelope hold, so
 they decode without migration. ``content`` travels as base64 text in dicts, except that ``File`` writes UTF-8
-``text/*`` content as text.
+``text/*`` content as text and marks a ``text/*`` file's base64 content with ``content_encoding``.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def _require_one_source(url: str | None, filepath: str | None, content: bytes | 
 
 
 def _decode_base64(text: str) -> bytes:
-    # Text that fails to decode as base64 reads as its UTF-8 bytes, kept as main reads it.
+    # Text that fails to decode as base64 reads as its UTF-8 bytes.
     try:
         return base64.b64decode(text)
     except Exception:
@@ -69,15 +69,18 @@ def _base64_or_none(content: bytes | None, *, include_content: bool) -> str | No
 
 type _Media = Image | Audio | Video | File
 _LAST_KEYS = ("content", "metadata")
+# A ``text/*`` file's stored content reads as UTF-8 text unless this key says it is base64.
+_CONTENT_ENCODING_KEY = "content_encoding"
+_BASE64 = "base64"
 
 
-def _stored_dict(media: _Media, *, content: str | None) -> dict[str, Any]:
+def _stored_dict(media: _Media, *, content: str | None, content_encoding: str | None = None) -> dict[str, Any]:
     """Return the stored dict: every field in declaration order but ``content`` and ``metadata``, which come last.
 
-    None values and an empty ``metadata`` are left out.
+    ``content_encoding``, when given, follows ``content``. None values and an empty ``metadata`` are left out.
     """
     values = {item.name: getattr(media, item.name) for item in fields(media) if item.name not in _LAST_KEYS}
-    values.update(content=content, metadata=media.metadata or None)
+    values.update({"content": content, _CONTENT_ENCODING_KEY: content_encoding, "metadata": media.metadata or None})
     return {key: value for key, value in values.items() if value is not None}
 
 
@@ -243,32 +246,39 @@ class File:
     name: str | None = None
     metadata: dict[str, Any] | None = None
 
-    def _encoded_content(self) -> str | None:
+    def _stored_content(self) -> tuple[str | None, str | None]:
+        """Return the stored ``content`` and its ``content_encoding``, which only a ``text/*`` file's base64 needs."""
         if not self.content:
-            return None
+            return None, None
         if isinstance(self.content, str):
-            return self.content
-        if _is_text(self.mime_type):
-            try:
-                return self.content.decode("utf-8")
-            except UnicodeDecodeError:
-                pass
-        return base64.b64encode(self.content).decode("utf-8")
+            return self.content, None
+        if not _is_text(self.mime_type):
+            return base64.b64encode(self.content).decode("utf-8"), None
+        try:
+            return self.content.decode("utf-8"), None
+        except UnicodeDecodeError:
+            return base64.b64encode(self.content).decode("utf-8"), _BASE64
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
         """Return the stored dict shape; ``text/*`` bytes that are UTF-8 become text, other bytes base64 text."""
-        return _stored_dict(self, content=self._encoded_content() if include_content else None)
+        content, encoding = self._stored_content() if include_content else (None, None)
+        return _stored_dict(self, content=content, content_encoding=encoding)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> File:
-        """Rebuild from a stored dict; ``text/*`` content reads as UTF-8 text, other content as base64."""
+        """Rebuild from a stored dict; ``text/*`` content reads as UTF-8 text unless marked base64, other as base64."""
         raw = data.get("content")
         content: bytes | None = None
         if isinstance(raw, str):
-            # TODO(simplify): ``text/*`` bytes that are not UTF-8 are written as base64 but read back as that base64 text.
-            # Write them so the reader can tell, such as always as base64, so they read back as their bytes.
-            # Users and stored data would notice: such an attachment after an approval resume. (#3075)
-            content = raw.encode("utf-8") if _is_text(data.get("mime_type")) else _decode_base64(raw)
+            # LEGACY_COMPAT: Unmarked base64 content of a text file that is not UTF-8.
+            # Legacy format: Agno and MindRoom stored a `text/*` file whose bytes are not UTF-8 as base64 text without
+            # `content_encoding`, the same shape as a UTF-8 text file's text.
+            # Last legacy release: v2026.10.541; replacement: v2026.10.542 adds `content_encoding: "base64"`.
+            # Handling: Unmarked `text/*` content reads as UTF-8 text, so such an earlier file still reads as its
+            # base64 text; no rule tells it apart from a text file whose text is valid base64.
+            # Coverage: tests/llm/test_codecs.py::test_a_text_file_stored_before_its_encoding_was_recorded_reads_as_before.
+            as_text = _is_text(data.get("mime_type")) and data.get(_CONTENT_ENCODING_KEY) != _BASE64
+            content = raw.encode("utf-8") if as_text else _decode_base64(raw)
         return cls(id=_id_from(data), content=content, **_stored_fields(cls, data))
 
 

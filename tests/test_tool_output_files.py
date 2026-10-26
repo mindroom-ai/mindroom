@@ -43,6 +43,7 @@ from mindroom.tool_system.output_files import (
     wrap_toolkit_for_output_files,
     write_bytes_to_output_path,
 )
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
@@ -489,7 +490,10 @@ def test_media_toolresult_is_rejected_without_writing(tmp_path: Path) -> None:
         call_id="call-1",
     ).execute()
 
-    assert _receipt(result.result)["status"] == "error"
+    assert _receipt(result.result) == {
+        "status": "error",
+        "error": "ToolResult media artifacts cannot be redirected to workspace files.",
+    }
     assert not (tmp_path / "media.txt").exists()
 
 
@@ -504,7 +508,10 @@ def test_bytes_result_is_rejected_without_writing(tmp_path: Path, raw_result: ob
         call_id="call-1",
     ).execute()
 
-    assert _receipt(result.result)["status"] == "error"
+    assert _receipt(result.result) == {
+        "status": "error",
+        "error": "Binary tool outputs cannot be redirected to workspace files.",
+    }
     assert not (tmp_path / "binary.txt").exists()
 
 
@@ -521,7 +528,10 @@ def test_generator_or_stream_result_is_rejected_without_writing(tmp_path: Path) 
         call_id="call-1",
     ).execute()
 
-    assert _receipt(result.result)["status"] == "error"
+    assert _receipt(result.result) == {
+        "status": "error",
+        "error": "Generator or stream tool outputs cannot be redirected to workspace files.",
+    }
     assert not (tmp_path / "stream.txt").exists()
 
 
@@ -1073,7 +1083,15 @@ async def _run_through_hooks(toolkit: Toolkit, registry: HookRegistry, arguments
         adapt_function(_first_function(toolkit)),
         arguments,
         ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
-        middleware=(build_tool_hook_middleware(registry, agent_name="code"),),
+        middleware=(
+            build_tool_hook_middleware(
+                registry,
+                agent_name="code",
+                dispatch_context=None,
+                config=None,
+                runtime_paths=None,
+            ),
+        ),
     )
 
 
@@ -1122,5 +1140,7 @@ async def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_p
     result = await _run_through_hooks(toolkit, registry, {"text": "hi", OUTPUT_PATH_ARGUMENT: "blocked.txt"})
 
     assert not (tmp_path / "blocked.txt").exists()
-    assert seen == [("after", True, result)]
-    assert "[TOOL CALL DECLINED]" in str(result)
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert "[TOOL CALL DECLINED]" in result.content
+    assert seen == [("after", True, result.content)]

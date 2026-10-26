@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -295,7 +296,12 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
         async def asearch(self, query: str, limit: int) -> list[SearchHit]:
             assert query == "semantic memory"
             assert limit == 5
-            return [SearchHit(content="Published semantic memory.", meta_data={"source_path": "memory/2026-06-02.md"})]
+            return [
+                SearchHit(
+                    content="Published semantic memory.",
+                    meta_data={"source_path": "memory/2026-06-02.md", "distances": 0.2},
+                ),
+            ]
 
     access_base_ids: list[str] = []
 
@@ -343,11 +349,54 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
     assert scheduled_base_ids == []
 
 
+@pytest.mark.asyncio
+async def test_semantic_memory_scores_each_hit_by_its_similarity(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A semantic hit scores its similarity, one minus its cosine distance."""
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "notes.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Close note.\nFar note.\n", encoding="utf-8")
+
+    class FakeKnowledge:
+        async def asearch(self, _query: str, _limit: int) -> list[SearchHit]:
+            return [
+                SearchHit(content="Close note.", meta_data={"source_path": "memory/notes.md", "distances": 0.25}),
+                SearchHit(content="Far note.", meta_data={"source_path": "memory/notes.md", "distances": 0.75}),
+            ]
+
+    async def resolve_access(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(knowledge=FakeKnowledge(), availability=KnowledgeAvailability.READY)
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args: [memory_file.resolve()])
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
+
+    results = await semantic_file_search.search_semantic_file_memories(
+        "note",
+        scope_user_id="agent_general",
+        root=root,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        search_config=config.memory.search,
+        limit=5,
+    )
+
+    assert [(result["memory"], result["score"]) for result in results] == [("Close note.", 0.75), ("Far note.", 0.25)]
+
+
 class _FakeSemanticTimingKnowledge:
     async def asearch(self, query: str, limit: int) -> list[SearchHit]:
         assert query == "semantic memory"
         assert limit == 5
-        return [SearchHit(content="Published semantic memory.", meta_data={"source_path": "memory/2026-06-02.md"})]
+        return [
+            SearchHit(
+                content="Published semantic memory.",
+                meta_data={"source_path": "memory/2026-06-02.md", "distances": 0.2},
+            ),
+        ]
 
 
 @pytest.mark.asyncio
@@ -2222,6 +2271,32 @@ async def test_workspace_daily_files_live_in_canonical_scope(storage_path: Path,
     daily_files = list((workspace / "memory").rglob("*.md"))
     assert len(daily_files) == 1
     assert "Daily note" in daily_files[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("agent_timezone", "expected_date"),
+    [("Europe/Amsterdam", "2026-03-21"), (None, "2026-03-20")],
+)
+def test_daily_file_date_follows_the_agent_timezone(
+    storage_path: Path,
+    config: Config,
+    agent_timezone: str | None,
+    expected_date: str,
+) -> None:
+    """The daily file is named by the agent's own date, or by the global timezone's date when it has none."""
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True)
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.timezone = "America/Los_Angeles"
+    config.agents["general"].timezone = agent_timezone
+    instant = datetime(2026, 3, 20, 23, 30, tzinfo=UTC)
+
+    with patch("mindroom.memory._file_backend.datetime") as mock_datetime:
+        mock_datetime.now.side_effect = instant.astimezone
+        append_agent_daily_memory("Daily note", "general", storage_path, config)
+
+    assert [path.name for path in (workspace / "memory").rglob("*.md")] == [f"{expected_date}.md"]
 
 
 @pytest.mark.asyncio

@@ -91,7 +91,7 @@ def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )

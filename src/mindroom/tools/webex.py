@@ -52,7 +52,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["webexpythonsdk"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/webex",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#webex",
     function_names=("list_rooms", "send_message"),
 )
 def webex_tools() -> type[WebexTools]:

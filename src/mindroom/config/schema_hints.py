@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 _MASKED_URL_USERINFO = re.compile(r"://[^/?#\s]*\*\*\*@")
 
 # The dashboard's configSchema.ts mirrors these kinds and the hint key.
-type _ReferenceKind = Literal["model", "agent", "room", "tool"]
+type _ReferenceKind = Literal["model", "agent", "personal_room_agent", "room", "tool"]
 _HINT_KEY = "x-mindroom"
 
 
@@ -25,6 +25,7 @@ def dashboard_hint(
     *,
     reference: _ReferenceKind | None = None,
     key_reference: _ReferenceKind | None = None,
+    key_placeholder: str | None = None,
     secret: bool = False,
     multiline: bool = False,
 ) -> JsonDict:
@@ -32,13 +33,16 @@ def dashboard_hint(
 
     ``reference`` names the configured entity a string (or each list item or
     mapping value) refers to, and ``key_reference`` does the same for mapping
-    keys.
+    keys. ``key_placeholder`` is an example key the dashboard shows in a
+    mapping's new-key input while that input is empty.
     """
     hint: JsonDict = {}
     if reference is not None:
         hint["reference"] = reference
     if key_reference is not None:
         hint["key_reference"] = key_reference
+    if key_placeholder is not None:
+        hint["key_placeholder"] = key_placeholder
     if secret:
         hint["secret"] = True
     if multiline:

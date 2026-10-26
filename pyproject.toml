@@ -18,20 +18,21 @@ dynamic = [ "version" ]
 dependencies = [
   "agno==3.0.9",
   "aiohttp>=3.13.3",
-  "anthropic>=0.120.2",
+  # Claude SDK 2 moves requests to API version 2026-10-21, a migration of its own.
+  "anthropic>=1.17,<2",
   "anyio>=4.10",
   "authlib>=1.6",
   "certifi>=2026.4.22",
-  "chromadb>=1.5.8",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "cryptography>=47",
-  "fastapi[standard]>=0.136.3",
+  "fastapi>=0.136.3",
   "google-auth>=2.40.3",
   "google-genai>=2",
   "h11>=0.16",
   "httpx>=0.27",
-  "httpx2>=2.13",
+  # 2.15.1 stops a long-lived client's TLS handshakes from growing slower on Linux.
+  "httpx2>=2.15.1",
   "humanize>=4.12.3",
   "idna>=3.13",
   "jinja2>=3.1",
@@ -40,11 +41,11 @@ dependencies = [
   "markdown-it-py>=4",
   "mcp[cli]>=2.3,<3",
   "mdit-py-plugins>=0.5",
-  "mem0ai>=0.1.115",
   # Owned to-device transport requires the durable NIO API.
-  "mindroom-nio[e2e]==1.1.5",
+  "mindroom-nio[e2e]==1.2",
   "ollama>=0.6.1",
-  "openai>=2.54",
+  # 3.30 returns a streamed Chat Completions connection to the pool.
+  "openai>=3.30",
   "packaging>=24",
   "pillow>=10.2",
   "pydantic>=2.12.5",
@@ -52,6 +53,7 @@ dependencies = [
   "pygments>=2.20",
   "pyjwt>=2.13",
   "python-dotenv>=1",
+  "python-multipart>=0.0.27",
   "pyyaml>=6",
   "questionary>=2.1.1",
   "referencing>=0.37",
@@ -127,6 +129,9 @@ cartesia = [
   "cartesia",
 ]
 chat_ui = []
+chromadb = [
+  "chromadb>=1.5.8",
+]
 claude_agent = [
   "claude-agent-sdk>=0.2.140",
 ]
@@ -284,6 +289,9 @@ knowledge_graph = [
   "hiredis",
   "psutil",
 ]
+kubernetes = [
+  "kubernetes>=28.1",
+]
 linear = [
   "requests",
 ]
@@ -295,7 +303,8 @@ lumalabs = [
 ]
 matrix_api = []
 matrix_calls = [
-  "livekit-agents[openai]>=1.8.1",
+  # 1.8.9 runs on OpenAI SDK 3 and pins the livekit 1.1.21 audio mixer the call tests cover.
+  "livekit-agents[openai]>=1.8.9",
 ]
 matrix-e2ee = []
 matrix_message = []
@@ -504,7 +513,7 @@ dev = [
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
   "pytest-mock>=3.14.1",
-  "pytest-shm>=0.1",
+  "pytest-shm>=0.1.3",
   "pytest-timeout>=2.4",
   "pytest-xdist>=3.8",
   "requests>=2.32.4",

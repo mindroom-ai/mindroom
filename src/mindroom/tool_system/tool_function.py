@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 
     from mindroom.llm.media import Audio, File, Image, Video
+    from mindroom.llm.provider import MediaKind
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.invocation import ToolMiddleware
 
@@ -27,7 +28,7 @@ class InjectedValue(StrEnum):
 
     ACTOR = "actor"  # The adapted toolkit's agent or team stand-in, ``ToolCallActor``.
     RUN_CONTEXT = "run_context"
-    MEDIA = "media"  # The run's media, which the owned loop never has, so None.
+    MEDIA = "media"  # The run's media, which the agent loop never gives a tool, so None.
     DEFAULT = "default"  # Nothing, so the parameter keeps its default.
 
 
@@ -48,9 +49,18 @@ class ToolFunction:
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
+    ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, and
+    tool jobs name it by; for an implied or preset tool that is the tool that brings it in.
+    ``registered_toolkit`` is the registered tool the function comes from, which the agent CLI reaches it under,
+    eager or deferred; it differs from ``toolkit`` for an implied or preset tool. Both are None for a
+    function generated for the agent, such as the knowledge search, the skill readers, and a team's delegation, and
+    for one adapted by a caller that names its toolkit beside it: the MCP gateway and the script broker adapt the
+    function a call names alone (``adapt_function``), and the gateway's search adapts a selected toolkit whole.
     """
 
     name: str
+    toolkit: str | None = None
+    registered_toolkit: str | None = None
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None = None
@@ -65,8 +75,8 @@ class ToolFunction:
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()
 
-    # TODO(simplify): The definition carries the pause flags only because Chat and Responses send them on the wire,
-    # as main does. Dropping them here and from ``ToolSpec`` leaves name, description, schema, and strict.
+    # TODO(simplify): The definition carries the pause flags only because Chat and Responses send them on the wire.
+    # Dropping them here and from ``ToolSpec`` leaves name, description, schema, and strict.
     # Models would notice: Chat and Responses requests stop sending them for the tools that set them (#3075).
     def definition(self) -> ToolSpec:
         """Return the model-facing definition a provider adapter formats, with the flags the tool never set as None."""
@@ -80,11 +90,11 @@ class ToolFunction:
             approval_type=self.approval_type,
         )
 
-    def planned_execution(self, call_id: str | None, arguments: dict[str, Any] | None) -> ToolExecution:
+    def planned_execution(self, call_id: str, arguments: dict[str, Any] | None) -> ToolExecution:
         """Return the execution a call of this function starts as, before it runs.
 
         The call is paused when the function requires confirmation or external execution, and a paused call carries
-        the function's approval type and silence, as Agno's paused calls did.
+        the function's approval type, which decides how its pause is approved, and its silence flag.
         """
         # Deferred so that these tool values import no pydantic, which run records pull in through redaction.
         from mindroom.llm.runs import ToolExecution  # noqa: PLC0415
@@ -106,6 +116,10 @@ class AdaptedToolkit:
 
     ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
     it describes the toolkit's functions and minimal mode offers as a context document.
+    ``function_instructions`` holds, by function name, the instructions a function asks the prompt to show, which
+    only tool search shows, for a deferred toolkit; an agent refuses an eager toolkit that offers such a function.
+    ``refused`` holds, by function name, why MindRoom refuses a function that sets a field the agent loop cannot
+    honor, such as an Agno hook; an agent refuses a toolkit that still offers such a function.
     ``connect`` is set for a toolkit that holds a connection for one run, which whoever offers its functions to a
     run connects before the run and closes after it; it returns how to close the connection, or None when the run
     owns none because the toolkit was connected before it or connecting failed.
@@ -115,25 +129,9 @@ class AdaptedToolkit:
     functions: tuple[ToolFunction, ...]
     instructions: str | None
     guidance: str | None = None
+    function_instructions: Mapping[str, str] = field(default_factory=dict)
+    refused: Mapping[str, str] = field(default_factory=dict)
     connect: ToolkitConnect | None = None
-
-
-def first_of_each_name[T](
-    pairs: Iterable[tuple[T, ToolFunction]],
-    on_dropped: Callable[[T, ToolFunction], None] | None = None,
-) -> Iterator[tuple[T, ToolFunction]]:
-    """Yield the pairs whose function is the first of its name, in order, the selection a run offers.
-
-    Each later pair of a taken name is dropped, kept as main behaves, and passed to ``on_dropped``.
-    """
-    names: set[str] = set()
-    for source, function in pairs:
-        if function.name in names:
-            if on_dropped is not None:
-                on_dropped(source, function)
-            continue
-        names.add(function.name)
-        yield source, function
 
 
 async def connect_toolkits(toolkits: Iterable[AdaptedToolkit], closes: list[ToolkitClose]) -> None:
@@ -164,3 +162,34 @@ class ToolValue:
     audios: tuple[Audio, ...] = ()
     videos: tuple[Video, ...] = ()
     files: tuple[File, ...] = ()
+
+    def media(self) -> Iterator[tuple[MediaKind, Image | Audio | Video | File]]:
+        """Yield each medium with its kind: the images, then the audio clips, videos, and files."""
+        for kind, items in (
+            ("image", self.images),
+            ("audio", self.audios),
+            ("video", self.videos),
+            ("file", self.files),
+        ):
+            for item in items:
+                yield kind, item
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolOutcome(ToolValue):
+    """What one tool call produced: the text the model reads (the error text on failure) and the tool's media.
+
+    A tool or middleware may answer a call with one: ``stop_after_call`` stops the run after it, and ``is_error``
+    fails it, as the tool-call policy answers a call a plugin hook declined.
+    """
+
+    stop_after_call: bool = False
+    is_error: bool = False
+
+
+def media_reference(kind: MediaKind, medium: Image | Audio | Video | File) -> dict[str, object]:
+    """Return a client's reference to one medium without its bytes: its kind, its MIME type, and its URL if any."""
+    reference: dict[str, object] = {"kind": kind, "mime_type": medium.mime_type}
+    if medium.url:
+        reference["url"] = medium.url
+    return reference

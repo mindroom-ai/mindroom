@@ -75,6 +75,7 @@ from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
     ORDERLY_SHUTDOWN,
+    RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
     SYNC_RESTART_SHUTDOWN,
     SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
     RuntimeShutdownIntent,
@@ -86,6 +87,7 @@ from tests.bot_helpers import make_test_agent_bot
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     install_personal_room_shutdown_mock,
@@ -440,15 +442,15 @@ async def test_sync_watchdog_waits_for_quiesced_source_commit(
     supervisor = asyncio.create_task(sync_forever_with_restart(bot, max_retries=1))
 
     try:
-        await asyncio.wait_for(source_started.wait(), timeout=1)
-        await asyncio.wait_for(watchdog_polled.wait(), timeout=1)
+        await asyncio.wait_for(source_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        await asyncio.wait_for(watchdog_polled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         release_watchdog_poll.set()
         done, _ = await asyncio.wait({supervisor}, timeout=0.05)
         assert not done
         assert not source_cancelled.is_set()
         allow_source_commit.set()
         release_watchdog_poll.set()
-        await asyncio.wait_for(supervisor, timeout=1)
+        await asyncio.wait_for(supervisor, timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         allow_source_commit.set()
         if not supervisor.done():
@@ -650,7 +652,7 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
         recovery_proof_ready=lambda: True,
         room_id="!room:example.org",
     )
-    await asyncio.wait_for(response_started.wait(), timeout=1.0)
+    await asyncio.wait_for(response_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     cancellation_seen_at_coalescing: list[bool] = []
     drain_result = SimpleNamespace(
         completed=True,
@@ -835,9 +837,10 @@ async def test_process_shutdown_preparation_does_not_wait_for_transport_close() 
 
     try:
         with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+            # Below the preparation budget, which would end a stuck preparation on its own.
             await asyncio.wait_for(
                 bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN),
-                timeout=0.2,
+                timeout=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS / 2,
             )
         assert coalescing_drained.is_set()
         assert not close_started.is_set()
@@ -904,7 +907,8 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
         preparation = asyncio.create_task(
             bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN),
         )
-        await asyncio.wait_for(router_cleanup_started.wait(), timeout=0.2)
+        # Below the preparation budget, which would end a stuck preparation on its own.
+        await asyncio.wait_for(router_cleanup_started.wait(), timeout=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS / 2)
         try:
             with pytest.raises(
                 RuntimeError,
@@ -913,7 +917,7 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
                 await client.send("GET", "/_matrix/client/v3/account/whoami")
         finally:
             release_router_cleanup.set()
-            await asyncio.wait_for(preparation, timeout=0.2)
+            await asyncio.wait_for(preparation, timeout=SETTLE_TIMEOUT_SECONDS)
             await client.close()
 
 
@@ -1150,12 +1154,12 @@ async def test_sync_iteration_wait_does_not_block_on_unrelated_sync_cancellation
         watchdog_task=asyncio.create_task(sleeping_watchdog()),
     )
 
-    await asyncio.wait_for(watchdog_started.wait(), timeout=0.1)
+    await asyncio.wait_for(watchdog_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     assert iteration.sync_task is not None
     iteration.sync_task.cancel(msg="external_cancel")
 
     with pytest.raises(asyncio.CancelledError, match="external_cancel"):
-        await asyncio.wait_for(iteration.wait(), timeout=0.05)
+        await asyncio.wait_for(iteration.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     await iteration.cancel()
 
@@ -1793,11 +1797,11 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
         # A pass that raises or reports an incomplete recovery retries through
         # the durable outbox before releasing the owner task.
         await bot._run_sync_response_side_effects(first_sync_response=True)
-        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         # And a delivery refused after every earlier pass completed is still
         # found, because the outbox is asked rather than a flag.
         await bot._run_sync_response_side_effects(first_sync_response=False)
-        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert recover.await_count == len(outcomes)
 
@@ -1817,7 +1821,7 @@ async def test_delivery_recovery_drops_sync_request_context_before_transport(tmp
     try:
         with patch.object(bot, "_delivery_gateway", new=SimpleNamespace(recover_deliveries=recover_deliveries)):
             bot._schedule_delivery_recovery()
-            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+            assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
     finally:
         receive_generation.reset(token)
 
@@ -1858,7 +1862,7 @@ async def test_sync_response_returns_while_delivery_recovery_waits_for_the_next_
         finally:
             next_response_started.set()
             await driver
-            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+            assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
 
 @pytest.mark.asyncio
@@ -1901,7 +1905,7 @@ async def test_delivery_recovery_coalesces_sync_wakes_without_overlapping_passes
 
         allow_first_pass_finish.set()
         await second_pass_started.wait()
-        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert pass_count == 2
     assert max_active_count == 1
@@ -2175,7 +2179,7 @@ def _durable_response_bot(tmp_path: Path) -> AgentBot:
             },
             models={
                 "default": ModelConfig(
-                    provider="test",
+                    provider="openai",
                     id="test-model",
                 ),
             },
@@ -2389,9 +2393,10 @@ async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: py
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
 
     supervisor_task = asyncio.create_task(sync_forever_with_restart(bot), name="supervisor_agent1")
-    await asyncio.wait_for(sync_started.wait(), timeout=1.0)
+    await asyncio.wait_for(sync_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     started_at = time.monotonic()
+    # A measured window, not a hang bound: the test checks that stopping is prompt.
     await asyncio.wait_for(
         stop_entities(
             {"agent1"},
@@ -2510,9 +2515,9 @@ async def test_stop_entities_quiesces_all_sources_concurrently() -> None:
     )
 
     try:
-        await asyncio.wait_for(both_entered.wait(), timeout=2)
+        await asyncio.wait_for(both_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         release.set()
-        await asyncio.wait_for(stopping, timeout=2)
+        await asyncio.wait_for(stopping, timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         release.set()
         if not stopping.done():
@@ -2551,7 +2556,7 @@ async def test_stop_entities_finishes_cleanup_after_cancellation_during_quiesce(
         ),
     )
 
-    await asyncio.wait_for(quiesce_entered.wait(), timeout=2)
+    await asyncio.wait_for(quiesce_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     stopping.cancel()
     await asyncio.sleep(0)
     release_quiesce.set()
@@ -2702,6 +2707,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config.event_journal = MagicMock()
         config.calls = Config().calls
         config.mindroom_user = None
+        config.personal_agent_instance.return_value = None
         config.get_all_configured_rooms.return_value = []
         mock_load_config.return_value = config
 
@@ -2799,13 +2805,16 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
-            await asyncio.wait_for(sync_tasks_started.wait(), timeout=1.0)
+            await asyncio.wait_for(sync_tasks_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert set(orchestrator._sync_tasks) == {"router", "general"}
-            await asyncio.sleep(0)
+            await asyncio.wait_for(orchestrator._runtime_ready_event.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            await asyncio.wait(orchestrator._sync_tasks.values())
+            # Startup is over and the first generation has exited; give an early exit time to show.
+            await asyncio.wait({runtime_task}, timeout=0.1)
             assert not runtime_task.done()
 
             await orchestrator.stop()
-            await asyncio.wait_for(runtime_task, timeout=1.0)
+            await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
             if not runtime_task.done():
                 runtime_task.cancel()
@@ -2893,9 +2902,9 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
-            await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+            await asyncio.wait_for(setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             for started in sync_started_by_entity.values():
-                await asyncio.wait_for(started.wait(), timeout=1.0)
+                await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert not runtime_ready.is_set()
             assert orchestrator._response_admission_gate.closed
             assert not orchestrator._response_admission_gate.close_if_idle()
@@ -2910,7 +2919,7 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
             assert orchestrator._response_admission_gate.closed
 
             await orchestrator.handle_bot_ready(router_bot)
-            await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
+            await asyncio.wait_for(runtime_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             await asyncio.sleep(0)
 
             assert "setup_finished" not in call_order
@@ -2923,7 +2932,7 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
             if not runtime_task.done():
                 runtime_task.cancel()
             with suppress(asyncio.CancelledError):
-                await asyncio.wait_for(runtime_task, timeout=1.0)
+                await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 def _orchestrator_with_membership_startup_bots(
@@ -3010,7 +3019,7 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         reload_task: asyncio.Task[None] | None = None
         try:
-            await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+            await asyncio.wait_for(setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert orchestrator._response_admission_gate.closed
 
             orchestrator.config_reload.request_reload()
@@ -3020,14 +3029,14 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
             assert not reload_started.is_set()
 
             setup_can_finish.set()
-            await asyncio.wait_for(router_sync_started.wait(), timeout=1.0)
+            await asyncio.wait_for(router_sync_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             await orchestrator.handle_bot_ready(router_bot)
-            await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
-            await asyncio.wait_for(reload_started.wait(), timeout=1.0)
+            await asyncio.wait_for(runtime_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(reload_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert not orchestrator._response_admission_gate.closed
 
             reload_can_finish.set()
-            await asyncio.wait_for(reload_task, timeout=1.0)
+            await asyncio.wait_for(reload_task, timeout=SETTLE_TIMEOUT_SECONDS)
             assert not orchestrator._response_admission_gate.closed
         finally:
             setup_can_finish.set()
@@ -3040,7 +3049,7 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
             if not runtime_task.done():
                 runtime_task.cancel()
             with suppress(asyncio.CancelledError):
-                await asyncio.wait_for(runtime_task, timeout=1.0)
+                await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -3082,7 +3091,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     old_maintenance_task = asyncio.create_task(blocked_startup_maintenance())
     try:
         orchestrator._startup_maintenance.task = old_maintenance_task
-        await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
+        await asyncio.wait_for(maintenance_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         def replay_startup_maintenance(bots: list[object], config: object) -> None:
             replayed.append((bots, config))
@@ -3172,12 +3181,12 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
         first_maintenance_task = orchestrator._startup_maintenance.task
         assert first_maintenance_task is not None
         try:
-            await asyncio.wait_for(old_setup_started.wait(), timeout=1.0)
+            await asyncio.wait_for(old_setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             await orchestrator.config_reload._update_config()
             replayed_task = orchestrator._startup_maintenance.task
             assert replayed_task is not None
             assert replayed_task is not first_maintenance_task
-            await asyncio.wait_for(replayed_task, timeout=1.0)
+            await asyncio.wait_for(replayed_task, timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
             await orchestrator._startup_maintenance.cancel()
 
@@ -3335,7 +3344,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         orchestrator.config = old_config
 
@@ -3376,7 +3385,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
                     "rooms": ["lobby", "personal"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         write_config_yaml(new_config, orchestrator.config_path)
 
@@ -3424,7 +3433,7 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
     def agent_config(role: str) -> dict[str, object]:
         return {"display_name": role, "role": role, "model": "default", "rooms": ["lobby"]}
 
-    models = {"default": {"provider": "test", "id": "test-model"}}
+    models = {"default": {"provider": "openai", "id": "test-model"}}
     old_config = Config(agents={"general": agent_config("Old"), "coach": agent_config("Old")}, models=models)
     new_config = Config(agents={"general": agent_config("New"), "coach": agent_config("New")}, models=models)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
@@ -3612,7 +3621,7 @@ async def test_shutdown_step_logs_the_exact_incomplete_phase() -> None:
 
     with patch("mindroom.orchestrator.logger.info") as log_info:
         task = asyncio.create_task(_run_shutdown_step("config_reload", blocked_step()))
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        await asyncio.wait_for(entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         log_info.assert_any_call(
             "orchestrator_shutdown_phase_started",
@@ -3888,7 +3897,7 @@ async def test_ordinary_agent_stop_exposes_real_resource_release_phase() -> None
     failures: list[BaseException] = []
     stopping = asyncio.create_task(AgentBot._release_stopped_resources(bot, failures, shutdown_intent=ORDERLY_SHUTDOWN))
     try:
-        await asyncio.wait_for(dispatcher_started.wait(), timeout=1)
+        await asyncio.wait_for(dispatcher_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         assert bot.deferred_stop_phase == "journal_dispatcher"
     finally:
         release_dispatcher.set()
@@ -3944,8 +3953,8 @@ async def test_deferred_diagnostic_gather_preserves_second_cancellation() -> Non
     await asyncio.sleep(0)
     task.cancel("second")
     try:
-        await asyncio.wait_for(child_cancelled.wait(), timeout=0.1)
-        done, _pending = await asyncio.wait({task}, timeout=0.1)
+        await asyncio.wait_for(child_cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        done, _pending = await asyncio.wait({task}, timeout=SETTLE_TIMEOUT_SECONDS)
         assert task in done
         assert child_cancelled.is_set()
         with pytest.raises(asyncio.CancelledError):
@@ -3978,8 +3987,8 @@ async def test_bot_stop_diagnostic_gather_preserves_second_cancellation() -> Non
     await asyncio.sleep(0)
     task.cancel("second")
     try:
-        await asyncio.wait_for(child_cancelled.wait(), timeout=0.1)
-        done, _pending = await asyncio.wait({task}, timeout=0.1)
+        await asyncio.wait_for(child_cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        done, _pending = await asyncio.wait({task}, timeout=SETTLE_TIMEOUT_SECONDS)
         assert task in done
         assert child_cancelled.is_set()
         with pytest.raises(asyncio.CancelledError):
@@ -4264,7 +4273,7 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
     bot._release_stopped_resources.assert_not_awaited()
 
     release_proof.set()
-    await asyncio.wait_for(finalizing, timeout=0.1)
+    await asyncio.wait_for(finalizing, timeout=SETTLE_TIMEOUT_SECONDS)
 
     bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
     assert not bot.deferred_stop_required
@@ -4360,7 +4369,7 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
         bot._release_stopped_resources.assert_not_awaited()
 
         release_first_proof.set()
-        await asyncio.wait_for(finalizing, timeout=0.1)
+        await asyncio.wait_for(finalizing, timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert proof_calls == 2
     bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
@@ -4476,13 +4485,14 @@ async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -
 
     try:
         with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+            # Below the default finalization budget, so a stop that drops its explicit budget fails.
             await asyncio.wait_for(
                 AgentBot.finish_deferred_stop(
                     bot,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                     timeout_seconds=0.02,
                 ),
-                timeout=0.08,
+                timeout=RESPONSE_FINALIZATION_TIMEOUT_SECONDS / 2,
             )
         assert proof_started.is_set()
         bot._release_stopped_resources.assert_not_awaited()
@@ -4579,7 +4589,7 @@ async def test_orchestrator_stop_finishes_journal_close_after_cancellation(
         orchestrator._open_journal = journal
         stopping = asyncio.create_task(orchestrator.stop())
 
-        await asyncio.wait_for(close_entered.wait(), timeout=2)
+        await asyncio.wait_for(close_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         stopping.cancel()
         await asyncio.sleep(0)
         release_close.set()
@@ -4624,7 +4634,7 @@ async def test_orchestrator_stop_finishes_cleanup_after_cancellation_during_quie
         orchestrator._open_journal = journal
         stopping = asyncio.create_task(orchestrator.stop())
 
-        await asyncio.wait_for(quiesce_entered.wait(), timeout=2)
+        await asyncio.wait_for(quiesce_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         stopping.cancel()
         await asyncio.sleep(0)
         release_quiesce.set()

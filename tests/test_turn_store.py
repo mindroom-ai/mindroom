@@ -23,7 +23,6 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.event_journal.store import TurnRecordStore
-from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.handled_turns import (
     SourceEventMetadata,
     TurnRecord,
@@ -60,6 +59,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    build_unseen_context_messages_for_test,
     make_visible_message,
     request_envelope,
     runtime_paths_for,
@@ -2611,7 +2611,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         context_owner = store.get_turn_record("$user_msg")
         assert context_owner is not None
         registered_before_consumption = "$physical-edit" in (context_owner.revision_replay or {})
-        turn, consumed = _build_unseen_context_messages(
+        turn, consumed = build_unseen_context_messages_for_test(
             "current",
             prepared.thread_history,
             seen_event_ids=set(),

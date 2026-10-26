@@ -16,6 +16,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.failure_text import failure_text
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
     HookRegistry,
@@ -337,7 +338,7 @@ async def execute_scheduled_workflow(
             logger.exception("Failed to execute scheduled workflow")
             outcome = ScheduledWorkflowOutcome(
                 status="retry" if occurrence is not None else "failed",
-                failure_reason=str(error),
+                failure_reason=failure_text(error),
             )
         if outcome.status in {"retry", "held"}:
             logger.warning(

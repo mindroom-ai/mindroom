@@ -33,6 +33,7 @@ from mindroom.history.summary_rows import folded_tool_call_ids
 from mindroom.history.types import CompactionOutcome
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import TurnCompleted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
@@ -41,6 +42,7 @@ from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApprov
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
+from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
@@ -193,6 +195,8 @@ def _resumable(
         execution_identity=None,
         history_storage=store,
         supports_native_tool_approval=True,
+        knowledge=None,
+        active_model_name=None,
     )
     session = store.load_session("session-1", "agent") or new_scope_session(
         session_id="session-1",
@@ -228,7 +232,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
             ),
         ),
         persist=persist_to(agent.store, agent.session),
-        request_template=replace(build.request_template, stream=False),
+        request_template=build.request_template,
     )
     finished = [event async for event in events][-1]
     assert isinstance(finished, RunFinished)
@@ -422,6 +426,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
         ),
         persist=persist_to(agent.store, agent.session),
         request_template=agent.build.request_template,
+        model_name="default",
     )
     record = await forward_resume(events, None, paused=paused)
 
@@ -721,6 +726,82 @@ async def test_team_approval_resume_after_mid_turn_compaction(
     assert stored.summary.text == rows[-1].summary
 
 
+def _answer_made_at(text: str, metrics: MessageMetrics, created_at: int) -> list[ScriptStep]:
+    """Return a turn whose finished message reports ``created_at`` as the time its request was answered."""
+    steps = answer(text, metrics)
+    completed = steps[-1]
+    assert isinstance(completed, TurnCompleted)
+    completed.message.created_at = created_at
+    return steps
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("squad_probe")
+async def test_a_member_run_after_a_team_resume_reports_only_its_own_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    summary_calls: SummaryCalls,
+) -> None:
+    """A member the resumed leader starts after the leader's fold reports its own request, dated as it was made.
+
+    The leader's folded requests are the team run's usage, which its own row reports once.
+    """
+    # 2023-11-14 UTC: the member's request reports a day its run was not created on, so its daily date shows its source.
+    made_at = 1_700_000_000
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            *(_delegation(f"call-{n}", "writer", f"Part {n}", usage(1200 * n, 1)) for n in range(1, 5)),
+            _delegation("call-team", "checker", "Touch it", usage(20, 1)),
+            _delegation("call-after", "writer", "Wrap up", usage(30, 1)),
+            answer("Done", usage(40, 1)),
+        ],
+        writer=[
+            *(answer(f"Part {n} done", usage(7, 1)) for n in range(1, 5)),
+            _answer_made_at("Wrapped up", usage(7, 1), made_at),
+        ],
+        checker=[
+            calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(5, 1)),
+            answer("Touched.", usage(5, 1)),
+        ],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        context_window=4000,
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    assert summary_calls.inputs
+    paused, _members = team.stored_runs()
+    assert paused.metadata is not None
+    assert paused.metadata[COMPACTED_REQUESTS_METADATA_KEY]
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    _record, members = team.stored_runs()
+    assert [member.content for member in members][-1] == "Wrapped up"
+    report = collect_admin_usage(
+        config=team.config,
+        runtime_paths=team.runtime_paths,
+        include_daily=True,
+        include_requests=True,
+    )
+    requests = [(row.created_at, row.totals.total_tokens) for row in report.request_breakdown if row.kind == "run"]
+    # The leader's seven requests, the writer's five, and the checker's two, each once.
+    assert len(requests) == 14
+    assert (made_at, 8) in requests
+    assert sum(row.totals.total_tokens for row in report.request_breakdown) == report.totals.total_tokens == 12149
+    # The members' own agent stores, which a team turn never writes, are unavailable to every breakdown alike.
+    assert report.request_coverage is not None
+    assert report.request_coverage.unavailable_sources == report.model_coverage.unavailable_sources
+    [user] = report.user_breakdown
+    assert ("2023-11-14", 8) in [(day.date, day.totals.total_tokens) for day in user.daily_breakdown or ()]
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("squad_probe")
 async def test_the_team_s_call_budget_caps_a_request_before_compacting_it(
@@ -757,7 +838,10 @@ async def test_team_member_loop_compacts_run_locally(
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: SummaryCalls,
 ) -> None:
-    """A member's own tool loop compacts within its run; the summary is the run's own, not replayed history."""
+    """A member's own tool loop compacts within its run; the summary is the run's own, not replayed history.
+
+    The member's run stores none of the team run's metadata, so its summary input shows none.
+    """
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -773,6 +857,7 @@ async def test_team_member_loop_compacts_run_locally(
 
     assert chunks[-1].content.endswith("The writer dug.")
     assert summary_calls.inputs
+    assert not any("<run_metadata>" in summary_input for summary_input in summary_calls.inputs)
     compacted = _first_compacted(team.models["writer-model"])
     assert [message.from_history for message in _summaries(compacted.messages)] == [False]
     _record, [member] = team.stored_runs()

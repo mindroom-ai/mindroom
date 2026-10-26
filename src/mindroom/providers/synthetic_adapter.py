@@ -11,12 +11,12 @@ import hashlib
 import json
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted
 from mindroom.providers.assistant_turn import finished_assistant_message
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -40,6 +40,8 @@ SHELL_TOOL = "run_shell_command"
 class SyntheticSettings:
     """The ``extra_kwargs`` a synthetic model accepts."""
 
+    # The shared credential flow can give any model a key; a synthetic model sends no request, so it ignores it.
+    api_key: str | None = field(default=None, metadata=SECRET)
     seed: int = 1
     min_response_chars: int = 320
     max_response_chars: int = 960
@@ -112,8 +114,7 @@ class SyntheticProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Stream the planned text at the configured rate, then the shell call if this turn makes one.
 
-        After the shell call's result, the next request streams the rest of the same response. A request with
-        ``stream=False`` waits as long and yields only the finished turn.
+        After the shell call's result, the next request streams the rest of the same response.
         """
         settings = self.settings
         shell_available = request.tool_choice != "none" and any(tool.name == SHELL_TOOL for tool in request.tools)
@@ -134,12 +135,10 @@ class SyntheticProvider:
                 await asyncio.sleep(len(chunk) / settings.chars_per_second)
             if first_text_at is None:
                 first_text_at = time.monotonic()
-            if request.stream:
-                yield TextDelta(chunk)
+            yield TextDelta(chunk)
         tool_calls = [] if continuation or plan.tool_call_id is None else [_shell_call(plan.tool_call_id)]
-        if request.stream:
-            for call in tool_calls:
-                yield ToolCallReady(call)
+        for call in tool_calls:
+            yield ToolCallReady(call)
         message = finished_assistant_message(
             self.identity,
             content=content or None,
@@ -154,11 +153,14 @@ class SyntheticProvider:
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> SyntheticProvider:
     """Build the adapter for a ``synthetic`` model config; a configured API key is ignored."""
     del runtime_paths
-    extra_kwargs = {key: value for key, value in (model_config.extra_kwargs or {}).items() if key != "api_key"}
     return SyntheticProvider(
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
         capabilities=Capabilities(),
-        settings=settings_from_extra_kwargs(SyntheticSettings, extra_kwargs, provider=model_config.provider),
+        settings=settings_from_extra_kwargs(
+            SyntheticSettings,
+            model_config.extra_kwargs,
+            provider=model_config.provider,
+        ),
     )
 
 

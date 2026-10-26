@@ -8,14 +8,18 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.history.message_content import (
     HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS,
     image_content_for_token_estimation,
-    media_payload_snapshot,
-    message_media_entries,
     render_message_content,
 )
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
+from mindroom.history.types import (
+    HistoryPolicy,
+    HistoryScope,
+    ResolvedHistorySettings,
+    ResolvedReplayPlan,
+    replayed_summary_text,
+)
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import (
     checkpoint_estimated_tokens,
@@ -23,7 +27,7 @@ from mindroom.native_compaction import (
     native_checkpoint_id,
     native_replay_messages,
 )
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_char_tokens, estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -53,8 +57,8 @@ def estimate_prompt_visible_history_tokens(
     session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
+    replay_estimator: PortableReplayEstimator | None,
     native_route: str | None = None,
-    replay_model: PortableReplayEstimator | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run.
 
@@ -69,7 +73,11 @@ def estimate_prompt_visible_history_tokens(
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
     )
-    tokens, has_checkpoint = _route_tokens(history_messages, replay_model=replay_model, native_route=native_route)
+    tokens, has_checkpoint = _route_tokens(
+        history_messages,
+        replay_estimator=replay_estimator,
+        native_route=native_route,
+    )
     # A checkpoint covers the summary message before it, which native projection drops.
     return tokens if has_checkpoint else estimate_summary_tokens(session) + tokens
 
@@ -77,7 +85,7 @@ def estimate_prompt_visible_history_tokens(
 def _route_tokens(
     messages: list[Message],
     *,
-    replay_model: PortableReplayEstimator | None,
+    replay_estimator: PortableReplayEstimator | None,
     native_route: str | None,
 ) -> tuple[int, bool]:
     """Estimate messages as a route replays them, and report whether a native checkpoint replaced their prefix."""
@@ -90,27 +98,27 @@ def _route_tokens(
                 checkpoint_tokens += checkpoint_estimated_tokens(items)
             else:
                 messages.append(message)
-    tokens = _estimate_messages_tokens(messages, replay_model=replay_model, native_route=native_route)
+    tokens = _estimate_messages_tokens(messages, replay_estimator=replay_estimator, native_route=native_route)
     return checkpoint_tokens + tokens, checkpoint_tokens > 0
 
 
 def estimate_request_messages_tokens(
     messages: Sequence[Message],
     *,
-    replay_model: PortableReplayEstimator | None,
+    replay_estimator: PortableReplayEstimator | None,
     native_route: str | None = None,
 ) -> int:
     """Estimate one provider request's messages the way replay planning estimates history."""
-    return _route_tokens(list(messages), replay_model=replay_model, native_route=native_route)[0]
+    return _route_tokens(list(messages), replay_estimator=replay_estimator, native_route=native_route)[0]
 
 
 def _estimate_messages_tokens(
     history_messages: list[Message],
     *,
-    replay_model: PortableReplayEstimator | None,
+    replay_estimator: PortableReplayEstimator | None,
     native_route: str | None,
 ) -> int:
-    uses_visual_tokens = replay_model is not None and replay_model.portable_replay_uses_visual_tokens()
+    uses_visual_tokens = replay_estimator is not None and replay_estimator.portable_replay_uses_visual_tokens()
     attachment_tokens = _attachment_fallback_tokens(history_messages)
     history_messages = [_without_attachments(message) for message in history_messages]
     estimation_messages = (
@@ -119,8 +127,8 @@ def _estimate_messages_tokens(
         else [_without_image_transport(message, strip_content_blocks=False) for message in history_messages]
     )
     provider_estimate = (
-        replay_model.estimate_portable_replay_tokens(estimation_messages)
-        if replay_model is not None and (estimation_messages or native_route is None)
+        replay_estimator.estimate_portable_replay_tokens(estimation_messages)
+        if replay_estimator is not None and (estimation_messages or native_route is None)
         else None
     )
     provider_accounts_for_images = uses_visual_tokens and provider_estimate is not None
@@ -128,14 +136,7 @@ def _estimate_messages_tokens(
         _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
         for message in history_messages
     ]
-    # TODO(simplify): Canonical text counts as total characters // 4 without a native route but as a per-message
-    # ceiling with one, so one history gets two estimates. Use one rounding rule. Operators would see compaction and
-    # replay trimming trigger a few tokens earlier or later.
-    canonical_tokens = (
-        sum(_estimated_message_chars(message) for message in canonical_messages) // 4
-        if native_route is None
-        else sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_messages)
-    )
+    canonical_tokens = estimate_char_tokens(sum(_estimated_message_chars(message) for message in canonical_messages))
     image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
     return max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens + attachment_tokens
 
@@ -180,10 +181,8 @@ def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> lis
 
 
 def current_summary_text(session: ConversationSession) -> str | None:
-    """Return a nonempty durable summary, normalized for replay."""
-    if session.summary is None:
-        return None
-    return session.summary.text.strip() or None
+    """Return the session's durable summary as replay reads it (``replayed_summary_text``), or None without one."""
+    return replayed_summary_text(session.summary.text) if session.summary is not None else None
 
 
 def compaction_marker(session: ConversationSession, scope: HistoryScope) -> tuple[str | None, str | None]:
@@ -204,20 +203,10 @@ def compaction_marker(session: ConversationSession, scope: HistoryScope) -> tupl
 
 
 def _estimated_message_chars(message: Message) -> int:
+    """Count a message's text and tool calls; estimation charges its media separately, by bounded allowances."""
     content_chars = len(render_message_content(message))
     tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
-    return content_chars + tool_call_chars + _estimate_message_media_chars(message)
-
-
-def _estimate_message_media_chars(message: Message) -> int:
-    """Estimate serialized character cost for a message's media payloads."""
-    # TODO(simplify): Estimation strips every non-empty media field before counting characters, so this adds only two
-    # characters per empty media list. Drop the media count. Operators would see estimates move by a few tokens at most.
-    return sum(
-        len(stable_serialize(media_payload_snapshot(media_value)))
-        for _tag, media_value in message_media_entries(message)
-        if media_value is not None
-    )
+    return content_chars + tool_call_chars
 
 
 def _image_fallback_tokens(messages: list[Message]) -> int:
@@ -232,7 +221,7 @@ def plan_replay_that_fits(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
-    replay_model: PortableReplayEstimator | None = None,
+    replay_estimator: PortableReplayEstimator | None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
     summary_tokens = estimate_summary_tokens(session)
@@ -256,7 +245,7 @@ def plan_replay_that_fits(
         available_history_budget=available_history_budget,
         limit_mode=limit_mode,
         max_limit=max_limit,
-        replay_model=replay_model,
+        replay_estimator=replay_estimator,
     )
     if fitting_limit > 0:
         policy = HistoryPolicy(mode=limit_mode, limit=fitting_limit)
@@ -298,7 +287,7 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
-    replay_model: PortableReplayEstimator | None = None,
+    replay_estimator: PortableReplayEstimator | None,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
@@ -313,7 +302,7 @@ def _find_fitting_history_limit_for_budget(
             session=session,
             scope=scope,
             history_settings=replace(history_settings, policy=HistoryPolicy(mode=limit_mode, limit=mid)),
-            replay_model=replay_model,
+            replay_estimator=replay_estimator,
         )
         if candidate_tokens <= available_history_budget:
             best = mid

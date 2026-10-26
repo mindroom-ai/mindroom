@@ -22,10 +22,10 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities
 from mindroom.llm.runs import RunStatus
 from mindroom.mid_turn import QueuedMessage
 from tests.agent_loop.helpers import collect, context, gated, spec
+from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ def _tool_calls() -> list[dict[str, Any]]:
 def _hooks() -> LoopHooks:
     """Return the notice and receipt hooks an agent run and its resume install."""
     return LoopHooks(
-        before_request=(approval_receipt_hook(Capabilities()),),
+        before_request=(approval_receipt_hook,),
         after_tool_batch=(queued_notice_after_tool_batch(_NOTICE),),
         on_resume_entry=(queued_notice_on_resume_entry(_NOTICE),),
     )
@@ -103,7 +103,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
         assert paused.status is RunStatus.paused
         assert len(paused.requirements or []) == 2
         assert not executed
-        with approval_receipt_context("Trusted approval receipt.", run_id=paused.run_id):
+        with approval_receipt_context(RECEIPT_CALLS, run_id=paused.run_id):
             _events, resumed = await collect(
                 resume_agent(
                     agent,
@@ -123,7 +123,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
     assert executed == [1, 2]
     [_, request] = model.requests
     messages = request.messages
-    assert any(message.role == "system" and "Trusted approval receipt." in str(message.content) for message in messages)
+    assert any(message.role == "system" and RECEIPT_TEXT in str(message.content) for message in messages)
     assert [message.tool_call_id for message in messages if message.role == "tool"] == ["call-1", "call-2"]
     assert sum(message.content == _NOTICE for message in messages) == 1
     assert messages[-1].content == _NOTICE
@@ -131,20 +131,19 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
 
 @pytest.mark.parametrize(
     "boundary",
-    ["resolved", "system", "unresolved", "newer-input", "no-queue"],
+    ["resolved", "unresolved", "newer-input", "no-queue"],
 )
 @pytest.mark.asyncio
 async def test_resume_entry_only_notifies_a_resolved_current_batch(boundary: str) -> None:
     """Resume entry must not split a batch or revisit history; a batch that stops the run never reaches it."""
     messages = [
+        Message(role="system", content="You are a helpful agent."),
         Message(role="user", content="Read both items."),
         Message(role="assistant", tool_calls=_tool_calls()),
         Message(role="tool", tool_call_id="call-1", content="Result 1"),
     ]
     if boundary != "unresolved":
         messages.append(Message(role="tool", tool_call_id="call-2", content="Result 2"))
-    if boundary == "system":
-        messages.insert(2, Message(role="system", content="Trusted runtime context."))
     if boundary == "newer-input":
         messages.append(Message(role="user", content="A different request."))
 
@@ -152,7 +151,7 @@ async def test_resume_entry_only_notifies_a_resolved_current_batch(boundary: str
         await queued_notice_on_resume_entry(_NOTICE)(messages, messages[-1:])
 
     notices = [message for message in messages if message.content == _NOTICE]
-    assert len(notices) == (1 if boundary in {"resolved", "system"} else 0)
+    assert len(notices) == (1 if boundary == "resolved" else 0)
 
 
 @pytest.mark.asyncio

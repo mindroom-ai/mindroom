@@ -3483,6 +3483,31 @@ def test_mcp_manager_wraps_exception_group_with_inner_message(tmp_path: Path) ->
     assert "transport handshake failed" in str(wrapped)
 
 
+@pytest.mark.parametrize(
+    ("exc", "kind", "text"),
+    [
+        (TimeoutError(), MCPTimeoutError, "MCP operation timed out: TimeoutError"),
+        (ConnectionResetError(), MCPConnectionError, "MCP operation failed: ConnectionResetError"),
+        (
+            ExceptionGroup("unhandled errors in a TaskGroup", [ConnectionResetError()]),
+            MCPConnectionError,
+            "MCP operation failed: unhandled errors in a TaskGroup: ConnectionResetError",
+        ),
+    ],
+    ids=["timeout", "connection", "group"],
+)
+def test_mcp_manager_names_a_failure_without_text_by_its_type(
+    tmp_path: Path,
+    exc: Exception,
+    kind: type[Exception],
+    text: str,
+) -> None:
+    """A runtime failure without text reads as its exception's type name, never as a sentence ending in a colon."""
+    wrapped = MCPServerManager(_runtime_paths(tmp_path))._wrap_runtime_exception("demo", exc)
+
+    assert (type(wrapped), str(wrapped)) == (kind, text)
+
+
 @pytest.mark.asyncio
 async def test_mcp_manager_reconnect_notifies_when_catalog_changes(
     monkeypatch: pytest.MonkeyPatch,
@@ -4751,6 +4776,8 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
             runtime_paths,
             execution_identity=worker_target.execution_identity,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         await manager.shutdown()
@@ -5170,6 +5197,8 @@ async def test_oauth_mcp_catalog_projection_hides_function_colliding_with_deferr
             runtime_paths,
             execution_identity=worker_target.execution_identity,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         await manager.shutdown()
@@ -5230,6 +5259,8 @@ async def test_failed_deferred_non_oauth_mcp_server_is_left_out_of_agent_constru
         runtime_paths,
         execution_identity=None,
         include_interactive_questions=False,
+        knowledge=None,
+        active_model_name=None,
     )
     tool_names = [toolkit.name for toolkit in agent.spec.toolkits]
     assert "mcp_demo" not in tool_names
@@ -5288,6 +5319,8 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
             runtime_paths,
             execution_identity=None,
             include_interactive_questions=False,
+            knowledge=None,
+            active_model_name=None,
         )
     finally:
         await manager.shutdown()

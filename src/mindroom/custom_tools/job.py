@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from agno.tools import Toolkit
 
-from mindroom.tool_jobs.consumption import consume_tool_job
+from mindroom.tool_jobs.consumption import consume_tool_job, job_failure_text
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
@@ -25,6 +25,8 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -53,8 +55,7 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
     """Return a claimed outcome as this call's own result, raising its failure for the call to report."""
     value, payload = await consume_tool_job(runtime, job, claim)
     if job.status == "failed":
-        text = value.content if isinstance(value, ToolValue) else value
-        raise RuntimeError(str(payload.error or text or "Background tool job failed."))
+        raise RuntimeError(job_failure_text(value, payload))
     return value
 
 
@@ -81,7 +82,7 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> str
         if isinstance(value, ToolValue):
             collected.append(value)
             value = value.content
-        detail = payload.error or value or ""
+        detail = job_failure_text(value, payload) if job.status == "failed" else value or ""
         sections.append(f"{describe_job(job)} {job.status}:\n{detail}".rstrip())
     if not sections:
         return "No ended background jobs."
@@ -121,7 +122,7 @@ class JobTools(Toolkit):
 
     @staticmethod
     def build(
-        tools: list[Toolkit],
+        offered: Collection[str],
         runtime_paths: RuntimePaths,
         owner: ToolExecutionIdentity | None,
         *,
@@ -129,7 +130,10 @@ class JobTools(Toolkit):
         enabled: bool,
         output_file_policy: ToolOutputFilePolicy | None = None,
     ) -> Toolkit | None:
-        """Build the reserved toolkit for a top-level Matrix caller while the job runtime runs, else nothing."""
+        """Build the reserved toolkit for a top-level Matrix caller while the job runtime runs, else nothing.
+
+        ``offered`` names the functions the caller's other toolkits offer, none of which may be ``job``.
+        """
         if (
             not enabled
             or depth != 0
@@ -138,7 +142,7 @@ class JobTools(Toolkit):
             or get_background_runtime(runtime_paths) is None
         ):
             return None
-        if any("job" in toolkit.get_async_functions() for toolkit in tools):
+        if "job" in offered:
             msg = "Tool function name job is reserved for managed job controls"
             raise ValueError(msg)
         return wrap_toolkit_for_output_files(JobTools(runtime_paths, owner), output_file_policy)

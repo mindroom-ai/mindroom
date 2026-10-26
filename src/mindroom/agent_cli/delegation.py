@@ -18,7 +18,6 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRequirement, ToolExecution
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
@@ -29,10 +28,10 @@ def approval_calls_for_cli_pause(paused: PausedAttempt, agent_name: str) -> tupl
     invoking_agent = paused.approval_agent_name or agent_name
     return tuple(
         ApprovalCall(
-            tool_call_id=str(tool.tool_call_id),
-            tool_name=str(tool.tool_name),
+            tool_call_id=tool.tool_call_id,
+            tool_name=tool.tool_name,
             invoking_agent=invoking_agent,
-            toolkit_name=paused.toolkit_owners.get((invoking_agent, str(tool.tool_name))),
+            toolkit_name=paused.toolkit_owners.get((invoking_agent, tool.tool_name)),
             arguments_digest=approval_arguments_digest(tool.tool_args),
             expires_at_ns=0,
         )
@@ -46,12 +45,11 @@ async def advance_cli_delegation(
     *,
     parent_bash_call_id: str,
     delegation_depth: int,
-    run_child: ChildResponseRunner | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    decisions: dict[str, bool] | None = None,
-    denial_reasons: dict[str, str | None] | None = None,
-    approval_calls: Sequence[ApprovalCall] = (),
-    on_event: Callable[[object], None] | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    decisions: dict[str, bool] | None,
+    denial_reasons: dict[str, str | None] | None,
+    approval_calls: Sequence[ApprovalCall],
+    on_event: Callable[[object], None],
 ) -> PausedAttempt | ToolExecution:
     """Advance one child, persisting state on the real parent run without resuming it."""
     from mindroom.ai import run_delegated_child_response  # noqa: PLC0415 - envelope creation cycle
@@ -81,7 +79,7 @@ async def advance_cli_delegation(
     if decisions is None:
         # A CLI requirement has no member agent, so its gate key is the bare call ID, which the CLI caller
         # chooses; a fresh call therefore never inherits an approval saved under the same ID.
-        state.gates.pop(str(tool.tool_call_id), None)
+        state.gates.pop(tool.tool_call_id, None)
     persist = partial(persist_delegation_state, catalog.store, catalog.session, response)
 
     # Same mutation/authorization owner as ordinary prepared dispatch. The parent never resumes, and no hidden
@@ -94,7 +92,7 @@ async def advance_cli_delegation(
             previous_state=previous,
             persist=persist,
             agent_name=context.agent_name,
-            run_child=run_child or run_delegated_child_response,
+            run_child=run_delegated_child_response,
             config=config,
             runtime_paths=context.runtime_paths,
             execution_identity=build_execution_identity_from_runtime_context(context),
@@ -112,7 +110,7 @@ async def advance_cli_delegation(
     view.status = RunStatus.paused
     paused = paused_attempt_from_response(
         view,
-        toolkit_owners={(context.agent_name, binding.key.function): binding.key.toolkit},
+        toolkit_owners={(context.agent_name, binding.key.function): binding.approval_toolkit},
     )
     if paused is None:
         msg = "Delegated child paused without supported exact approval requirements"
@@ -121,10 +119,10 @@ async def advance_cli_delegation(
         paused,
         runtime_model_name=catalog.run.model_name,
         cli_call=CliApprovalCall(
-            toolkit=binding.key.toolkit,
+            toolkit=binding.approval_toolkit,
             function=binding.key.function,
             arguments=deepcopy(tool.tool_args or {}),
-            call_id=str(tool.tool_call_id),
+            call_id=tool.tool_call_id,
             parent_bash_call_id=parent_bash_call_id,
             requirements=paused.requirements,
             external_requirement=requirement,

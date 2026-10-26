@@ -12,10 +12,8 @@ from pathlib import Path
 import httpx
 import pytest
 from bs4 import BeautifulSoup
-from structlog.testing import capture_logs
 
-from mindroom.config import legacy_fields
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import website
 from mindroom.custom_tools.website import (
@@ -117,6 +115,34 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
     assert "Welcome to the product guide" in content_by_url[root_url]
     assert "Docs Navigation" not in content_by_url[root_url]
     assert "Detailed reference material" in content_by_url[docs_url]
+
+
+def test_website_reader_pauses_only_between_fetches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single-page read fetches at once; a crawl pauses before each later fetch so it does not hammer the host."""
+    root_url = "https://example.test/"
+    docs_url = "https://example.test/docs"
+    pages = {
+        root_url: '<html><body><main><p>Home page.</p><a href="/docs">Docs</a></main></body></html>',
+        docs_url: "<html><body><main><p>Docs page.</p></main></body></html>",
+    }
+    steps: list[str] = []
+
+    def fake_get(url: str, **_kwargs: object) -> httpx.Response:
+        steps.append(f"fetch {url}")
+        return httpx.Response(200, content=pages[url].encode(), request=httpx.Request("GET", url))
+
+    def record_delay(_reader: _MindRoomWebsiteReader) -> None:
+        steps.append("pause")
+
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", record_delay)
+
+    _MindRoomWebsiteReader().read(docs_url)
+    assert steps == [f"fetch {docs_url}"]
+
+    steps.clear()
+    _MindRoomWebsiteReader().read(root_url)
+    assert steps == [f"fetch {root_url}", "pause", f"fetch {docs_url}"]
 
 
 def test_website_reader_rejects_private_starting_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -616,48 +642,18 @@ def test_website_tool_always_offers_read_url(tmp_path: Path) -> None:
         validate_authored_tool_entry_overrides("website", {"knowledge": "docs"})
 
 
-def test_a_retired_knowledge_option_loads_with_one_warning_and_reads_urls(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Website entries that still set ``knowledge`` load with one warning, and the configured tool reads URLs."""
+def test_a_retired_knowledge_option_fails_config_load_and_says_to_remove_it(tmp_path: Path) -> None:
+    """A website entry that still sets ``knowledge`` fails config load, naming the option and saying to remove it."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    entry = {"website": {"knowledge": "docs"}}
-    legacy_fields._warn_retired_field.cache_clear()
-    with capture_logs() as logs:
-        config = Config.validate_with_runtime(
-            {
-                "defaults": {"tools": [entry]},
-                "agents": {"researcher": {"display_name": "Researcher", "tools": [entry]}},
-            },
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {"agents": {"researcher": {"display_name": "Researcher", "tools": [{"website": {"knowledge": "docs"}}]}}},
             runtime_paths,
         )
 
-    warned = [
-        log["field"] for log in logs if log["event"] == "Ignoring a retired config field; remove it from the config"
-    ]
-    assert warned == ["tools.website.knowledge"]
-    [default_entry] = config.defaults.tools
-    [agent_entry] = config.agents["researcher"].tools
-    assert default_entry.overrides == agent_entry.overrides == {}
-
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        del timeout, follow_redirects
-        return httpx.Response(200, content=b"<main><p>Guide text.</p></main>", request=httpx.Request("GET", url))
-
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", lambda _reader: None)
-    tool = get_tool_by_name(
-        "website",
-        runtime_paths,
-        tool_config_overrides=agent_entry.overrides,
-        disable_sandbox_proxy=True,
-        worker_target=None,
-    )
-
-    assert list(tool.functions) == ["read_url"]
-    [document] = json.loads(tool.functions["read_url"].entrypoint("https://example.test/"))
-    assert "Guide text." in document["content"]
+    message = str(exc_info.value)
+    assert "website.knowledge: unknown authored override field(s): knowledge; remove or correct them." in message
 
 
 def test_website_tool_factory_uses_mindroom_reader() -> None:

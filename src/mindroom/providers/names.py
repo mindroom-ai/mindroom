@@ -1,12 +1,29 @@
-"""Provider name spelling shared by model dispatch, pricing, and the wire adapters; imports nothing."""
+"""Provider name spelling shared by config validation, model dispatch, pricing, and the wire adapters; imports nothing."""
 
 # ``provider`` values that select the same route as the value they map to.
 _PROVIDER_ALIASES = {"gemini": "google", "openai_codex": "codex", "kimi_code": "kimi"}
 
-
-def canonical_provider(provider: str) -> str:
-    """Return a provider name's normalized spelling, aliases kept; ``provider_route`` resolves the aliases."""
-    return provider.strip().lower().replace("-", "_")
+# Every route the provider registry builds a model for, as ``provider_route`` names it.
+PROVIDER_ROUTES = frozenset(
+    {
+        "anthropic",
+        "azure",
+        "bedrock_claude",
+        "cerebras",
+        "codex",
+        "deepseek",
+        "google",
+        "groq",
+        "kimi",
+        "llama_cpp",
+        "ollama",
+        "openai",
+        "openrouter",
+        "synthetic",
+        "vertexai_claude",
+        "zai",
+    },
+)
 
 
 def provider_route(provider: str) -> str:
@@ -14,5 +31,5 @@ def provider_route(provider: str) -> str:
 
     It is the value's normalized spelling with aliases resolved, so ``gemini`` selects ``google``.
     """
-    canonical = canonical_provider(provider)
+    canonical = provider.strip().lower().replace("-", "_")
     return _PROVIDER_ALIASES.get(canonical, canonical)

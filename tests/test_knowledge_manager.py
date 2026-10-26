@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from openai import AuthenticationError
+from openai import UnprocessableEntityError
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 from watchfiles import Change
@@ -95,7 +95,7 @@ from mindroom.logging_config import subprocess_logging_env
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
 from tests.knowledge_test_support import (
     _Client,
@@ -123,16 +123,25 @@ def _source_has_vectors(manager: KnowledgeManager, relative_path: str) -> bool:
     return published.exists() and _collection_has_source_path(published.collection(), relative_path)
 
 
+async def _wait_until(condition: Callable[[], bool], failure: str) -> None:
+    """Poll `condition` until it holds, and fail with `failure` if the settle deadline passes first."""
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not condition():  # noqa: ASYNC110 - the states polled here are plain attributes
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        pytest.fail(failure)
+
+
 async def _wait_for_refresh_lock_borrowers(
     key: knowledge_registry.KnowledgeSourceRoot,
     expected: int,
 ) -> None:
-    for _ in range(50):
+    def reached() -> bool:
         entry = knowledge_refresh_locks._refresh_locks.get(key)
-        if entry is not None and entry.borrowers == expected:
-            return
-        await asyncio.sleep(0)
-    pytest.fail(f"refresh lock for {key} did not reach {expected} borrowers")
+        return entry is not None and entry.borrowers == expected
+
+    await _wait_until(reached, f"refresh lock for {key} did not reach {expected} borrowers")
 
 
 def _create_idle_refresh_lock(key: knowledge_registry.KnowledgeSourceRoot) -> None:
@@ -1069,14 +1078,16 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
         assert knowledge is not None
         assert [document.content for document in await knowledge.asearch("shared", 5)] == ["shared local old"]
 
-        for _attempt in range(500):
-            await asyncio.sleep(0.01)
-            refreshed = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
-            if refreshed is not None and [document.content for document in await refreshed.asearch("shared", 5)] == [
-                "shared local new",
-            ]:
-                break
-        else:
+        try:
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                while True:
+                    await asyncio.sleep(0.01)
+                    refreshed = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
+                    if refreshed is not None and [
+                        document.content for document in await refreshed.asearch("shared", 5)
+                    ] == ["shared local new"]:
+                        break
+        except TimeoutError:
             pytest.fail("background on-access refresh did not publish the edited local source")
     finally:
         await scheduler.shutdown()
@@ -1226,7 +1237,7 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
     source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
 
     await source_watcher.sync(config=config, runtime_paths=runtime_paths)
-    await asyncio.wait_for(event_delivered.wait(), timeout=1)
+    await asyncio.wait_for(event_delivered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     await source_watcher.shutdown()
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -1334,18 +1345,44 @@ async def test_knowledge_polling_repeats_after_poll_interval(
 
     await source_watcher.sync(config=config, runtime_paths=runtime_paths)
     try:
-        for _attempt in range(50):
-            if second_schedule.is_set():
-                break
-            await asyncio.sleep(0)
-        else:
-            pytest.fail("Poller did not schedule refresh after interval")
+        await _wait_until(second_schedule.is_set, "Poller did not schedule refresh after interval")
     finally:
         await source_watcher.shutdown()
 
     assert refresh_scheduler.schedule_refresh.call_count == 2
     assert wait_calls >= 2
     assert [call.args for call in refresh_scheduler.schedule_refresh.call_args_list] == [("docs",), ("docs",)]
+
+
+@pytest.mark.asyncio
+async def test_source_watcher_skips_bases_whose_folder_was_replaced(tmp_path: Path) -> None:
+    """A link or file planted at one shared base's folder must not keep the other bases' watchers from starting."""
+    linked = tmp_path / "mindroom_data" / "agents" / "coder" / "workspace" / "repo"
+    linked.parent.mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    linked.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    planted = tmp_path / "planted"
+    planted.write_text("not a folder", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": tmp_path / "docs", "linked": linked, "planted": planted},
+        agent_bases=["docs", "linked", "planted"],
+        poll_intervals={"linked": 5},
+        watch=True,
+    )
+    source_watcher = KnowledgeSourceWatcher(MagicMock())
+
+    with capture_logs() as logs:
+        await source_watcher.sync(config=config, runtime_paths=runtime_paths_for(config))
+        await source_watcher.shutdown()
+
+    started = [entry["base_ids"] for entry in logs if entry["event"] == "Knowledge filesystem watcher started"]
+    skipped = [
+        entry["base_ids"] for entry in logs if entry["event"] == "Knowledge source not watched: its path is unusable"
+    ]
+    assert started == [["docs"]]
+    assert not [entry for entry in logs if entry["event"] == "Knowledge poller started"]
+    assert sorted(skipped) == [["linked"], ["linked"], ["planted"]]
 
 
 def test_local_knowledge_without_poll_interval_starts_no_poller(tmp_path: Path) -> None:
@@ -1882,7 +1919,7 @@ def test_read_only_git_refuses_transports_that_repository_config_allows(tmp_path
         check=False,
         capture_output=True,
         text=True,
-        timeout=10.0,
+        timeout=SETTLE_TIMEOUT_SECONDS,
     )
 
     assert result.returncode != 0
@@ -2265,7 +2302,7 @@ async def test_refreshing_state_cancellation_clears_active_refresh_count(
 
     def _blocked_refreshing_state(*_args: object, **_kwargs: object) -> None:
         loop.call_soon_threadsafe(refreshing_write_started.set)
-        assert release_refreshing_write.wait(timeout=5)
+        assert release_refreshing_write.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(knowledge_refresh_runner, "mark_published_index_refresh_running", _blocked_refreshing_state)
 
@@ -2304,7 +2341,7 @@ async def test_cancelled_refresh_after_refreshing_write_keeps_existing_index_sta
     def _block_after_refreshing_state(*args: object, **kwargs: object) -> None:
         original_save_refreshing(*args, **kwargs)
         loop.call_soon_threadsafe(refreshing_saved.set)
-        assert release_refreshing_save.wait(timeout=5)
+        assert release_refreshing_save.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(
         knowledge_refresh_runner,
@@ -2412,7 +2449,7 @@ async def test_cancelled_source_lock_waiter_does_not_wedge_later_mutation(tmp_pa
     release_holder.set()
     await holder_task
 
-    async with asyncio.timeout(1):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
             pass
     assert not waiter_entered.is_set()
@@ -2461,7 +2498,7 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     assert knowledge_refresh_locks._refresh_locks.get(source_root) is original_entry
 
     release_holder.set()
-    async with asyncio.timeout(1):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         await asyncio.gather(holder_task, waiter_task)
     assert waiter_entered.is_set()
 
@@ -2737,7 +2774,7 @@ async def test_async_source_changed_cancellation_waits_for_state_commit(
     def _block_after_stale_write(matching_key: knowledge_registry.PublishedIndexKey, *, reason: str) -> bool:
         result = original_mark(matching_key, reason=reason)
         loop.call_soon_threadsafe(stale_written.set)
-        assert release_stale_write.wait(timeout=5)
+        assert release_stale_write.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return result
 
     monkeypatch.setattr(knowledge_registry, "_mark_published_index_key_stale_on_disk", _block_after_stale_write)
@@ -2791,7 +2828,7 @@ async def test_async_source_changed_cancellation_finishes_same_source_aliases(
         written_base_ids.append(matching_key.base_id)
         if len(written_base_ids) == 1:
             loop.call_soon_threadsafe(first_alias_written.set)
-            assert release_remaining_writes.wait(timeout=5)
+            assert release_remaining_writes.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return result
 
     monkeypatch.setattr(knowledge_registry, "_mark_published_index_key_stale_on_disk", _block_after_first_alias)
@@ -2842,7 +2879,7 @@ async def test_async_source_changed_recached_index_reports_refresh_state_after_w
 
     def _block_before_stale_write(matching_key: knowledge_registry.PublishedIndexKey, *, reason: str) -> bool:
         loop.call_soon_threadsafe(stale_write_started.set)
-        assert release_stale_write.wait(timeout=5)
+        assert release_stale_write.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_mark(matching_key, reason=reason)
 
     monkeypatch.setattr(knowledge_registry, "_mark_published_index_key_stale_on_disk", _block_before_stale_write)
@@ -3692,7 +3729,7 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
         save_published_index_state(metadata_path, state)
         if state.status == "complete" and "_candidate_" in str(state.collection):
             loop.call_soon_threadsafe(metadata_saved.set)
-            assert release_metadata_save.wait(timeout=5)
+            assert release_metadata_save.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(
         "mindroom.knowledge.manager.save_published_index_state",
@@ -3741,7 +3778,7 @@ async def test_publish_metadata_save_finishes_before_repeated_cancellation_escap
 
     def _blocked_save(*_args: object, **_kwargs: object) -> None:
         loop.call_soon_threadsafe(save_started.set)
-        assert release_save.wait(timeout=5)
+        assert release_save.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
     monkeypatch.setattr("mindroom.knowledge.manager.save_published_index_state", _blocked_save)
     save = asyncio.create_task(
@@ -3783,7 +3820,7 @@ async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
 
     def _failed_save(*_args: object, **_kwargs: object) -> None:
         loop.call_soon_threadsafe(save_started.set)
-        assert release_save.wait(timeout=5)
+        assert release_save.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         msg = "publish metadata write failed"
         raise RuntimeError(msg)
 
@@ -4173,7 +4210,7 @@ async def test_cancelled_async_file_lock_waiter_closes_unacquired_handle(
 
 @pytest.mark.asyncio
 async def test_refresh_generations_keep_latest_index_without_protecting_old_handles(tmp_path: Path) -> None:
-    """Old read handles are best effort; refresh cleanup only guarantees the next active index."""
+    """Old read handles are best effort; refresh cleanup only guarantees the active index and the one it retired."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -4190,9 +4227,10 @@ async def test_refresh_generations_keep_latest_index_without_protecting_old_hand
         doc.write_text(f"generation {generation}", encoding="utf-8")
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert first_collection not in _VectorDb.collections
     latest = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert latest.index is not None
+    # Two collections take turns: the first one was resumed and rewritten under its old handle, and no third survives.
+    assert set(_VectorDb.collections) == {first_collection, latest.index.reader.collection_name}
     assert [document.content for document in await latest.index.reader.asearch("generation", limit=5)] == [
         "generation 6",
     ]
@@ -4267,7 +4305,7 @@ async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_
 
 @pytest.mark.asyncio
 async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) -> None:
-    """Repeated publishes keep the published index and clean older generations best effort."""
+    """Repeated publishes keep the published index and the one it retired, and clean older generations."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -4283,7 +4321,7 @@ async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) ->
     state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
     assert state.collection in _VectorDb.collections
-    assert len(_VectorDb.collections) == 1
+    assert len(_VectorDb.collections) == 2, "only the published index and the one the next refresh resumes may stay"
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
     assert [document.content for document in await lookup.index.reader.asearch("generation", limit=5)] == [
@@ -5081,10 +5119,10 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
     assert checkpoint.status == "failed"
 
 
-def _embedder_auth_error() -> AuthenticationError:
+def _embedder_rejection_error() -> UnprocessableEntityError:
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
-    response = httpx.Response(401, request=request, json={"error": {"message": "Incorrect API key provided"}})
-    return AuthenticationError("Error code: 401", response=response, body=None)
+    response = httpx.Response(422, request=request, json={"error": {"message": "Input could not be embedded"}})
+    return UnprocessableEntityError("Error code: 422", response=response, body=None)
 
 
 @pytest.mark.asyncio
@@ -5092,29 +5130,35 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The persisted refresh summary carries the first classified per-file indexing error."""
+    """The persisted refresh summary carries the first classified per-file indexing error past a later success.
+
+    The rejection is per-file on purpose: a rejected credential stops every file not yet started, so "good.md"
+    would never get its turn.
+    """
+    # One file at a time, in name order, so "good.md" succeeds after the rejection is recorded.
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "aaa-broken.md").write_text("cannot embed", encoding="utf-8")
     (docs_path / "good.md").write_text("indexed text", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
-    class _AuthFailingEmbedder(_FakeEmbedder):
+    class _RejectingEmbedder(_FakeEmbedder):
         def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
             if "cannot embed" in texts:
-                raise _embedder_auth_error()
+                raise _embedder_rejection_error()
             return super().embed(texts, purpose=purpose)
 
     monkeypatch.setattr(
         "mindroom.knowledge.manager.create_configured_embedder",
-        lambda *_a, **_k: _AuthFailingEmbedder(),
+        lambda *_a, **_k: _RejectingEmbedder(),
     )
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
     assert await manager.reindex_all() == RefreshOutcome(
         indexed_count=1,
         published=False,
-        error="Indexed 1 of 2 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
+        error="Indexed 1 of 2 managed knowledge files (first error: embedder request failed (HTTP 422))",
     )
 
 
@@ -5661,7 +5705,7 @@ async def test_refresh_scheduled_during_a_turn_does_not_retain_the_turn_context(
     finally:
         _TURN_OWNER.reset(token)
     del agent
-    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     gc.collect()
 
     try:
@@ -5711,7 +5755,7 @@ async def test_refresh_deferred_behind_a_direct_refresh_does_not_retain_the_turn
         assert agent_ref() is None
         knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
         direct_claim_active = False
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         if direct_claim_active:
             knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
@@ -5740,7 +5784,7 @@ async def test_refresh_scheduler_does_not_deep_copy_config_on_event_loop(
     monkeypatch.setattr(Config, "model_copy", _unexpected_copy)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    await asyncio.wait_for(refreshed.wait(), timeout=5)
+    await asyncio.wait_for(refreshed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     await scheduler.shutdown()
 
 
@@ -5783,10 +5827,7 @@ async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure
         config=config,
         runtime_paths=runtime_paths,
     ) if manual else scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    for _ in range(200):
-        if probe_reasons:
-            break
-        await asyncio.sleep(0.01)
+    await _wait_until(lambda: bool(probe_reasons), "the failed refresh never probed the embedder")
     await scheduler.shutdown()
 
     assert probe_reasons == ["knowledge_refresh_failed"]
@@ -5823,10 +5864,7 @@ async def test_refresh_scheduler_skips_probe_for_non_embedder_subprocess_failure
     monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    for _ in range(200):
-        if not scheduler._tasks:
-            break
-        await asyncio.sleep(0.01)
+    await _wait_until(lambda: not scheduler._tasks, "the refresh task did not finish")
     await scheduler.shutdown()
 
     assert probe_reasons == []
@@ -5863,8 +5901,8 @@ async def test_refresh_scheduler_does_not_probe_after_successful_refresh(
     monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    await asyncio.wait_for(refreshed.wait(), timeout=5)
-    await wait_for_background_tasks(timeout=5)
+    await asyncio.wait_for(refreshed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
     await scheduler.shutdown()
 
 
@@ -5906,10 +5944,7 @@ async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
             config=config,
             runtime_paths=runtime_paths,
         ) if manual else scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-        for _ in range(200):
-            if probe_reasons:
-                break
-            await asyncio.sleep(0.01)
+        await _wait_until(lambda: bool(probe_reasons), "the recovered refresh never probed the embedder")
         await scheduler.shutdown()
     finally:
         embedder_health.capture_embedder_health_recorder().record(None)
@@ -5954,11 +5989,8 @@ async def test_refresh_scheduled_before_reload_cannot_probe_old_config(
     embedder_health._reset_embedder_health_generation()
     embedder_health.capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
     release.set()
-    for _ in range(200):
-        if not scheduler._tasks:
-            break
-        await asyncio.sleep(0.01)
-    await wait_for_background_tasks(timeout=5)
+    await _wait_until(lambda: not scheduler._tasks, "the refresh task did not finish")
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
     await scheduler.shutdown()
     embedder_health.capture_embedder_health_recorder().record(None)
 
@@ -6036,13 +6068,8 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
     assert seen_chunk_sizes == [5000]
 
     release_first.set()
-    await asyncio.wait_for(second_started.wait(), timeout=1)
-    for _attempt in range(50):
-        if not scheduler._tasks:
-            break
-        await asyncio.sleep(0)
-    else:
-        pytest.fail("coalesced refresh task did not finish")
+    await asyncio.wait_for(second_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    await _wait_until(lambda: not scheduler._tasks, "coalesced refresh task did not finish")
 
     assert seen_chunk_sizes == [5000, 4096]
 
@@ -6774,7 +6801,9 @@ time.sleep(60)
     )
     os.close(ready_write_fd)
     try:
-        assert await asyncio.wait_for(asyncio.to_thread(os.read, ready_read_fd, 1), timeout=30) == b"1"
+        assert (
+            await asyncio.wait_for(asyncio.to_thread(os.read, ready_read_fd, 1), timeout=SETTLE_TIMEOUT_SECONDS) == b"1"
+        )
         assert file_locks.file_lock_is_held(descendant_lock_path) is True
 
         await knowledge_refresh_runner._terminate_refresh_subprocess(process)
@@ -6917,7 +6946,7 @@ async def test_blocked_refresh_request_is_terminated_after_timeout(
                 config=config,
                 runtime_paths=runtime_paths,
             ),
-            timeout=0.5,
+            timeout=SETTLE_TIMEOUT_SECONDS,
         )
 
     assert terminated.is_set()
@@ -7459,7 +7488,7 @@ async def test_refresh_scheduler_claim_is_exclusive_across_instances(
 
     matrix_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     api_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     await asyncio.sleep(0)
 
     try:
@@ -7513,7 +7542,7 @@ async def test_refresh_scheduler_retries_request_after_direct_refresh_owner_fini
         assert calls == 0
         knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
         direct_claim_active = False
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         assert calls == 1
     finally:
         if direct_claim_active:
@@ -9586,12 +9615,7 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
     await asyncio.sleep(0)
     release_first.set()
     await manual_task
-    for _attempt in range(50):
-        if not scheduler._tasks:
-            break
-        await asyncio.sleep(0)
-    else:
-        pytest.fail("manual refresh left a stale background refresh running")
+    await _wait_until(lambda: not scheduler._tasks, "manual refresh left a stale background refresh running")
     await scheduler.shutdown()
 
     assert seen == [(1024, False), (5000, True)]

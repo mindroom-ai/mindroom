@@ -108,12 +108,21 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
     """Build the next standalone agent, team member, team, and router model."""
     config = runtime.config
     assert config is not None
-    agent = create_agent("general", config, runtime.runtime_paths, execution_identity=None)
+    agent = create_agent(
+        "general",
+        config,
+        runtime.runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        active_model_name=None,
+    )
     members = materialize_exact_team_members(
         ["general"],
         config=config,
         runtime_paths=runtime.runtime_paths,
         execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=None,
     )
     team = build_team_spec(
         members=members,
@@ -124,6 +133,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         execution_identity=None,
         model_name=config.resolve_entity("team").model_name,
         configured_team_name="team",
+        timezone="UTC",
     )
     router = build_model_provider(config, runtime.runtime_paths, config.router.model)
     return agent, members.builds[0], team, router
@@ -138,12 +148,12 @@ def _temperature(model: ModelProvider) -> float | None:
 
 def _history_plan(config: Config, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
-    entity = config.resolve_entity(entity_name)
+    settings = config.resolve_entity(entity_name).history_settings
     model = config.resolve_runtime_model(entity_name=entity_name)
     return resolve_history_execution_plan(
         config=config,
-        compaction_config=entity.compaction_config,
-        has_authored_compaction_config=entity.has_authored_compaction_config,
+        compaction_config=settings.compaction_config,
+        has_authored_compaction_config=settings.has_authored_compaction_config,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
         static_prompt_tokens=0,
@@ -191,7 +201,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
     for model in (agent.spec.model, member.spec.model, router):
         assert model.identity.id == expected_id
         assert _temperature(model) == (0.1 if context_only else 0.7)
-    assert team.spec.model.identity.id == ("other-model" if context_only else "updated-team-model")
+    assert team.spec.leader.model.identity.id == ("other-model" if context_only else "updated-team-model")
     after = resolve_entity_preparation_inputs(
         entity_name="general",
         history_settings=agent.history_settings,

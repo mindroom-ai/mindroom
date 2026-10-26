@@ -38,10 +38,8 @@ from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, Compacti
 from mindroom.history.summary_input import build_summary_input, messages_for_runs
 from mindroom.history.types import (
     CompactionLifecycleProgress,
-    HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
-    ResolvedHistorySettings,
 )
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -214,6 +212,7 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
         compacted_runs=runs,
         max_input_tokens=1_000_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
     assert len(full_runs) == len(runs)
 
@@ -223,6 +222,7 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
         compacted_runs=runs,
         max_input_tokens=tight_budget,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert 0 < len(included_runs) < len(runs)
@@ -251,6 +251,7 @@ def test_build_summary_input_leaves_the_stored_runs_unchanged() -> None:
         compacted_runs=[run],
         max_input_tokens=1_000_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimate_compaction_input_tokens,
     )
 
     assert run.messages == stored
@@ -1098,10 +1099,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
     )
     session = _session("session-1", runs=[first_run, second_run])
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     summary_input_budget = next(
         budget
         for budget in range(1, 5_000)
@@ -1111,6 +1109,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1120,6 +1119,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1186,7 +1186,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -1864,6 +1864,7 @@ async def test_compaction_strips_stale_replay_fields_from_the_runs_it_kept(tmp_p
                 compacted_runs=list(working_session.runs or []),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1872,6 +1873,7 @@ async def test_compaction_strips_stale_replay_fields_from_the_runs_it_kept(tmp_p
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
+            token_estimator=estimate_compaction_input_tokens,
         )[1]
         == []
     )
@@ -1966,6 +1968,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
                 compacted_runs=list(session.runs or []),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1974,6 +1977,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
+            token_estimator=estimate_compaction_input_tokens,
         )[1]
         == []
     )
@@ -1994,7 +1998,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -2033,14 +2037,12 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
     )
     working_session = _session("session-1", runs=[first_run, second_run])
     seed_session(storage, working_session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     before_tokens = estimate_prompt_visible_history_tokens(
         session=working_session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     summary_input_budget = next(
         budget
@@ -2051,6 +2053,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -2060,12 +2063,13 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
     )
     progress_events: list[CompactionLifecycleProgress] = []
-    replay_model = responses_adapter(tmp_path) if portable else None
+    replay_estimator = responses_adapter(tmp_path) if portable else None
 
     async def record_progress(event: CompactionLifecycleProgress) -> None:
         persisted = storage.load_session("session-1", "agent")
@@ -2089,13 +2093,13 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
                 session=working_session,
                 scope=scope,
                 history_settings=history_settings,
-                replay_model=replay_model,
+                replay_estimator=replay_estimator,
             ),
             replay_window_tokens=None,
             threshold_tokens=None,
             progress=record_progress,
             complete=_reported,
-            replay_model=replay_model,
+            replay_estimator=replay_estimator,
         )
 
     assert outcome is not None
@@ -2214,7 +2218,7 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
             threshold_tokens=None,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert appended == [True, False]
@@ -2251,7 +2255,7 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
             threshold_tokens=None,
             progress=None,
             complete=_reported,
-            replay_model=None,
+            replay_estimator=None,
         )
 
     assert outcome is None

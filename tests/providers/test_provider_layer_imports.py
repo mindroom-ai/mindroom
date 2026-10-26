@@ -31,7 +31,7 @@ OWNED_PROVIDER_MODULES = (
     "mindroom.providers.gemini.adapter",
     "mindroom.providers.gemini.wire",
     "mindroom.providers.gemini.files",
-    "mindroom.providers.ollama_adapter",
+    "mindroom.providers.ollama.adapter",
     "mindroom.providers.synthetic_adapter",
     "mindroom.providers.registry",
 )
@@ -111,3 +111,32 @@ def test_building_a_model_loads_its_sdk_before_its_first_request(provider: str, 
         text=True,
     )
     assert json.loads(completed.stdout.strip().splitlines()[-1]) == [False, True]
+
+
+# Reports which provider SDKs are loaded after config load checks the extra_kwargs of one model of every family.
+_CONFIG_LOAD_PROBE = """
+import json, sys, tempfile
+from pathlib import Path
+
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
+
+with tempfile.TemporaryDirectory() as root:
+    config_path = Path(root) / "config.yaml"
+    paths = resolve_runtime_paths(config_path=config_path, storage_path=Path(root) / "data", process_env={})
+    families = ("openai", "codex", "anthropic", "vertexai_claude", "google", "ollama")
+    models = {name: {"provider": name, "id": "m", "extra_kwargs": {"timeout": 5}} for name in families}
+    Config.validate_with_runtime({"models": {**models, "synthetic": {"provider": "synthetic", "id": "m"}}}, paths)
+    print(json.dumps(sorted(set(sys.argv[1:]) & set(sys.modules))))
+"""
+
+
+def test_config_load_checks_every_family_s_extra_kwargs_without_loading_an_sdk() -> None:
+    """Config validation checks each model's keys against its route without importing any provider SDK."""
+    completed = subprocess.run(
+        [sys.executable, "-c", _CONFIG_LOAD_PROBE, *_PROVIDER_SDKS],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(completed.stdout.strip().splitlines()[-1]) == []

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import inspect
 import json
 from dataclasses import dataclass, field, replace
 from threading import Event
@@ -17,6 +16,7 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.script_runs.models import (
     ScriptCallRecord,
     ScriptCallState,
@@ -35,7 +35,7 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
-from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -43,6 +43,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import (
     BackgroundToolApprovalDenied,
     SyncToolCompletionTracker,
@@ -193,7 +194,7 @@ class _PreparedExecution:
 
 @dataclass(frozen=True, slots=True)
 class _ToolFailure:
-    """A tool call that raised; ``message`` is the exception's text."""
+    """A tool call that raised, or that the tool-call policy declined; ``message`` is why, as the model would read it."""
 
     message: str
 
@@ -540,7 +541,7 @@ class ScriptToolBroker:
                     if isinstance(result, BackgroundToolApprovalDenied)
                     else {
                         "kind": "tool_failure",
-                        "message": sanitize_failure_text(result.message or "Tool execution failed."),
+                        "message": sanitize_failure_text(result.message),
                         "retryable": False,
                     }
                 )
@@ -560,7 +561,11 @@ class ScriptToolBroker:
             return await self._publish_async(
                 call,
                 state=ScriptCallState.FAILED,
-                error={"kind": "call_rejected", "message": sanitize_failure_text(str(exc)), "retryable": False},
+                error={
+                    "kind": "call_rejected",
+                    "message": sanitize_failure_text(failure_text(exc)),
+                    "retryable": False,
+                },
             )
         except BaseException as exc:
             state = ScriptCallState.INDETERMINATE if execution_started else ScriptCallState.FAILED
@@ -568,7 +573,7 @@ class ScriptToolBroker:
             error = (
                 _INDETERMINATE_ERROR
                 if execution_started
-                else {"kind": kind, "message": sanitize_failure_text(str(exc)), "retryable": True}
+                else {"kind": kind, "message": sanitize_failure_text(failure_text(exc)), "retryable": True}
             )
             return await self._publish_async(call, state=state, error=error)
 
@@ -652,9 +657,11 @@ class ScriptToolBroker:
                     call_id=call.call_id,
                 )
                 try:
-                    return await run_tool_call(function, arguments, call_context, middleware=(policy,))
+                    result = await run_tool_call(function, arguments, call_context, middleware=(policy,))
                 except Exception as error:
-                    return _ToolFailure(str(error))
+                    return _ToolFailure(failure_text(error))
+                # The policy answers a call a plugin hook declined with a failed outcome, which fails the call too.
+                return _ToolFailure(result.content) if isinstance(result, ToolOutcome) and result.is_error else result
 
         try:
             return await run_with_tool_execution_identity(
@@ -815,10 +822,6 @@ class ScriptToolBroker:
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
         execution_identity = _validate_resolved_authority(run, context, worker_authority)
         function = _toolkit_function(toolkit, call.grant.function_name)
-        if inspect.isgeneratorfunction(function.entrypoint) or inspect.isasyncgenfunction(function.entrypoint):
-            self._close_rejected_toolkit(toolkit)
-            msg = "Generator tool entrypoints are not supported for background scripts."
-            raise ScriptCapabilityError(msg)
         return _PreparedExecution(
             context=context,
             correlation_id=correlation_id,
@@ -918,12 +921,8 @@ def _validate_resolved_authority(
 ) -> ToolExecutionIdentity:
     durable_identity = parse_tool_execution_identity_payload(
         run.execution_identity,
-        strict=True,
         error_prefix="Background script execution_identity",
     )
-    if durable_identity is None:
-        msg = "Background script execution identity is unavailable."
-        raise ValueError(msg)
     live_identity = build_execution_identity_from_runtime_context(context)
     live_config = context.current_config
     expected_process_worker_target = build_agent_toolkit_worker_target(
@@ -1069,7 +1068,7 @@ async def _close_toolkit(toolkit: Toolkit) -> None:
 
 
 def _strict_json_result(result: object) -> object:
-    normalized = to_json_compatible(result)
+    normalized = to_json_compatible(client_tool_result(result))
     try:
         json.dumps(
             normalized,

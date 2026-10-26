@@ -56,8 +56,9 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
-from tests.fakes.scripted_model import ScriptedModel
+from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
@@ -73,6 +74,7 @@ from tests.history_helpers import (
     folded_run_ids,
     summary_rows_of,
 )
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord, TeamRunRecord
@@ -177,7 +179,12 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(
 
     assert prepared.replays_persisted_history is True
     assert prepared.compaction_reply_outcome == "success"
-    assert completed_outcome(lifecycle).summary == "merged summary"
+    start, outcome = lifecycle.events
+    assert isinstance(start, CompactionLifecycleStart)
+    assert isinstance(outcome, CompactionOutcome)
+    assert outcome.summary == "merged summary"
+    # A requested compaction reports itself as manual from its first notice to its outcome.
+    assert (start.mode, outcome.mode) == ("manual", "manual")
 
 
 @pytest.mark.asyncio
@@ -556,10 +563,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     second_summary_text = "final summary"
@@ -575,6 +579,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
 
@@ -593,12 +598,14 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         session=after_first_session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     assert (
         estimate_prompt_visible_history_tokens(
             session=session,
             scope=scope,
             history_settings=history_settings,
+            replay_estimator=None,
         )
         > replay_budget
     )
@@ -694,10 +701,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         ],
     )
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     second_summary_text = "second pass summary"
@@ -713,6 +717,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
 
@@ -853,12 +858,14 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
         prepared = await prepare_scope_history(
             compaction_lifecycle=RecordingCompactionLifecycle(),
-            model=None,
+            model=estimate_only_model(),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
 
     assert prepared.compaction_decision.mode == "none"
@@ -909,6 +916,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         session=session,
         scope=scope,
         history_settings=_ALL_HISTORY_SETTINGS,
+        replay_estimator=None,
     )
     trigger_budget = history_tokens // 2
     hard_budget = history_tokens * 2
@@ -943,13 +951,14 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            model=_native_model() if native_model else None,
+            model=_native_model() if native_model else estimate_only_model(),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
             allow_native_compaction=allow_native_compaction,
+            pipeline_timing=None,
         )
 
     persisted = storage.load_session("session-1", "agent")
@@ -975,6 +984,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
             session=persisted,
             scope=scope,
             history_settings=_ALL_HISTORY_SETTINGS,
+            replay_estimator=None,
         )
         <= trigger_budget
     )
@@ -1007,10 +1017,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     summary_inputs: list[str] = []
@@ -1024,6 +1031,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
                 max_input_tokens=budget,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 9
@@ -1037,11 +1045,13 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         session=after_first_session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     assert before_tokens > replay_budget
 
@@ -1127,6 +1137,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
             session=current_run_session,
             scope=scope,
             history_settings=history_settings,
+            replay_estimator=None,
         )
         > summary_only_tokens
     )
@@ -1176,10 +1187,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
 
@@ -1194,6 +1202,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
 
@@ -1212,6 +1221,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         session=after_first_session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
@@ -1321,6 +1331,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1330,6 +1341,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs[1:],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=estimate_compaction_input_tokens,
             )[1],
         )
         == 1
@@ -1662,7 +1674,6 @@ async def test_prepare_history_for_run_context_window_guard_skips_system_prompts
         execution_identity=None,
         storage=storage,
         session=persisted,
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         # The 40-token window minus its clamped 20-token reserve leaves 10 tokens of history beside this prompt.
         static_prompt_tokens=10,
         available_history_budget=10,
@@ -1863,17 +1874,33 @@ def _reported_run(
     model: str = "fake-model",
     created_at: int = _SUMMARY_WRITTEN_AT + 1,
     images: list[Image] | None = None,
+    reasoning_tokens: int | None = None,
 ) -> RunRecord:
     """Return a completed run whose answer carries the request size its provider reported and the model's stamp.
 
-    By default the answer's request starts the second after any summary a test writes.
+    By default the answer's request starts the second after any summary a test writes. With ``reasoning_tokens``
+    the answer also stores one encrypted reasoning item, as a Responses route records it, and reports that much
+    reasoning.
     """
     answer = Message(
         role="assistant",
         content="a" * 2_000,
-        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens)),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens, reasoning_tokens=reasoning_tokens or 0)),
         created_at=created_at,
     )
+    if reasoning_tokens is not None:
+        answer.provider_data = {
+            "mindroom_response_output": [
+                {"type": "reasoning", "id": "rs_answer", "summary": [], "encrypted_content": "gAAAA" * 1_000},
+                {
+                    "type": "message",
+                    "id": "msg_answer",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "a" * 2_000, "annotations": []}],
+                },
+            ],
+        }
     stamp_model(answer, ModelIdentity(id=model, provider="fake", provider_name="fake"))
     run = _completed_run(run_id, messages=[Message(role="user", content="u" * 2_000, images=images), answer])
     run.model = model
@@ -1911,6 +1938,7 @@ async def _prepare_with_reported_usage(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_estimator=None,
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
@@ -1947,6 +1975,8 @@ async def _prepare_with_reported_usage(
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            pipeline_timing=None,
+            allow_native_compaction=True,
         )
     return prepared, estimate, lifecycle
 
@@ -1974,7 +2004,12 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
     assert prepared.compaction_reply_outcome == "success"
-    assert completed_outcome(lifecycle).before_tokens == expected
+    outcome = completed_outcome(lifecycle)
+    assert outcome.before_tokens == expected
+    start = lifecycle.events[0]
+    assert isinstance(start, CompactionLifecycleStart)
+    # A compaction nobody requested reports itself as automatic from its first notice to its outcome.
+    assert (start.mode, outcome.mode) == ("auto", "auto")
 
 
 @pytest.mark.asyncio
@@ -1989,6 +2024,24 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
     # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
     assert estimate < 4_000
     assert prepared.compaction_decision.current_history_tokens == 8_000 + 1_200 - 400
+
+
+@pytest.mark.asyncio
+async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays(tmp_path: Path) -> None:
+    """A model that renders earlier turns' reasoning holds the answer's reasoning, which its own request did not."""
+    sized = {}
+    for reasoning_tokens in (1_000, 3_000):
+        root = tmp_path / str(reasoning_tokens)
+        root.mkdir()
+        prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+            root,
+            {"input_tokens": 8_000, "reasoning_tokens": reasoning_tokens},
+            replay_estimator=responses_adapter(root, store=False),
+        )
+        sized[reasoning_tokens] = prepared.compaction_decision.current_history_tokens
+
+    # Both answers size above their 500-token chars / 4 floor, so the difference is the extra reasoning alone.
+    assert sized[3_000] - sized[1_000] == 2_000
 
 
 @pytest.mark.asyncio
