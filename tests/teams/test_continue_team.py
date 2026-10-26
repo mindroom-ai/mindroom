@@ -176,9 +176,8 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     assert checker_request.messages[-1].content == "Alice declined."
 
 
-async def test_a_resumed_leader_reads_a_new_delegation_by_the_streamed_result_rules() -> None:
-    # The result rules still depend on the stream mode (``member_result_text``), and a resume uses the streamed ones,
-    # so a member whose text is blank and that ran no tools hands over the no-response notice rather than nothing.
+async def test_a_resumed_leader_reads_a_new_delegation_by_the_one_result_rule() -> None:
+    # A member whose text is blank and that ran no tools hands over the no-response notice (``member_result_text``).
     paused = _paused_team_approved()
     leader = scripted(
         "leader-model",
@@ -231,7 +230,9 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
         start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.tools is not None
-    assert paused.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
+    assert paused.tools[0].result == (
+        "Agent Writer: Six times seven is 42.\n\n" + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
+    )
 
     store = Store()
     _, record = await collect(

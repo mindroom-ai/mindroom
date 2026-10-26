@@ -747,7 +747,7 @@
           ]
         },
         {
-          "content": "okok",
+          "content": "Agent Planner: ok\n\nAgent Writer: ok",
           "role": "tool",
           "tool_args": {
             "task": "Draft the launch note."

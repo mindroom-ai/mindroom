@@ -258,7 +258,21 @@ async def test_a_member_approval_pauses_the_team_with_the_team_paused_rows() -> 
     assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
 
 
-async def test_a_streamed_collaborate_run_stores_the_panel_rows_and_joins_member_text_in_member_order() -> None:
+def _with_delegation_result(row: dict[str, Any], call_id: str, result: str) -> dict[str, Any]:
+    """Return a stored run dict whose delegation call ``call_id`` answered ``result``, in its tools and its messages."""
+    return {
+        **row,
+        "tools": [{**tool, "result": result} if tool["tool_call_id"] == call_id else tool for tool in row["tools"]],
+        "messages": [
+            {**message, "content": result} if message.get("tool_call_id") == call_id else message
+            for message in row["messages"]
+        ],
+    }
+
+
+async def test_a_collaborate_run_stores_the_panel_rows_with_labeled_member_results_in_member_order() -> None:
+    # The panel golden's rows differ only in the delegation's result, which now labels each member's piece.
+    labeled = "Agent Writer: Five is prime.\n\nAgent Checker: Five is odd."
     team_row = golden_run("team_panel", PANEL, "panel-completed")
     writer_row = golden_run("team_panel", PANEL, "00000000-0000-4000-8000-00000000006d")
     checker_row = golden_run("team_panel", PANEL, "00000000-0000-4000-8000-000000000070")
@@ -284,14 +298,16 @@ async def test_a_streamed_collaborate_run_stores_the_panel_rows_and_joins_member
         ),
     )
 
-    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
+    assert comparable(record.to_dict()) == comparable(
+        _with_delegation_result(stored_as_owned(team_row), "call-panel", labeled),
+    )
     members = store.members
     assert [comparable(member.to_dict()) for member in members] == [
         comparable(stored_as_owned(writer_row)),
         comparable(stored_as_owned(checker_row)),
     ]
     assert record.tools is not None
-    assert record.tools[0].result == "Five is prime.Five is odd."
+    assert record.tools[0].result == labeled
     streamed = {
         member_id: "".join(
             event.event.text
@@ -347,7 +363,7 @@ async def test_an_unknown_member_id_answers_the_leader_with_the_not_found_notice
     assert record.status is RunStatus.completed
 
 
-async def test_a_collaborate_member_that_pauses_adds_its_paused_notice_in_its_place_and_pauses_the_team() -> None:
+async def test_a_collaborate_member_that_pauses_adds_its_labeled_notice_in_its_place_and_pauses_the_team() -> None:
     leader = scripted(
         "leader-model",
         calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
@@ -368,7 +384,9 @@ async def test_a_collaborate_member_that_pauses_adds_its_paused_notice_in_its_pl
 
     assert record.status is RunStatus.paused
     assert record.tools is not None
-    assert record.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
+    assert record.tools[0].result == (
+        "Agent Writer: Six times seven is 42.\n\n" + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
+    )
     writer_record, checker_record = store.members
     assert (writer_record.status, checker_record.status) == (RunStatus.completed, RunStatus.paused)
     assert record.member_responses == [checker_record]  # Only the paused member rides along.
@@ -521,32 +539,32 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
         pytest.param(
             [answer("Five is prime.")],
             [answer("Five is odd.")],
-            "Agent Writer: Five is prime.Agent Checker: Five is odd.",
+            "Agent Writer: Five is prime.\n\nAgent Checker: Five is odd.",
             id="text",
         ),
         pytest.param(
             [_blank()],
             [_silent()],
-            f"Agent Writer: No ResponseAgent Checker: {NO_MEMBER_RESPONSE}",
+            f"Agent Writer: {NO_MEMBER_RESPONSE}\n\nAgent Checker: {NO_MEMBER_RESPONSE}",
             id="empty",
         ),
         pytest.param(
             [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="")), _blank()],
             [calls(tool_call("echo", "call-c", text="c")), _silent()],
-            # Blank text keeps an empty tool result in the broadcast; no text drops it, as a coordinate delegation does.
-            "Agent Writer: a,Agent Checker: c",
+            # A member without text gives its tool results, leaving out empty ones, as a coordinate delegation does.
+            "Agent Writer: a\n\nAgent Checker: c",
             id="tool-only",
         ),
         pytest.param(
             [answer("Five is prime.")],
             [[Await(_overloaded)]],
             # A failed member hands over its error text, which the broadcast labels like any result.
-            "Agent Writer: Five is prime.Agent Checker: Checker overloaded",
+            "Agent Writer: Five is prime.\n\nAgent Checker: Checker overloaded",
             id="error",
         ),
     ],
 )
-async def test_a_blocking_collaborate_run_gives_the_leader_each_member_result_labeled_with_its_name(
+async def test_a_collaborate_run_gives_the_leader_each_member_s_labeled_result(
     writer_turns: list[list[Any]],
     checker_turns: list[list[Any]],
     expected: str,
@@ -570,7 +588,6 @@ async def test_a_blocking_collaborate_run_gives_the_leader_each_member_result_la
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            stream=False,
         ),
     )
 
@@ -585,23 +602,19 @@ _REDACTED_FAILURE = "checker provider down: api_key=***redacted***"
 
 
 @pytest.mark.parametrize(
-    ("mode", "stream", "expected"),
+    ("mode", "expected"),
     [
-        pytest.param(TeamMode.COORDINATE, True, _REDACTED_FAILURE, id="coordinate-streamed"),
-        pytest.param(TeamMode.COORDINATE, False, _REDACTED_FAILURE, id="coordinate-blocking"),
-        pytest.param(TeamMode.COLLABORATE, True, f"Five is prime.{_REDACTED_FAILURE}", id="collaborate-streamed"),
+        pytest.param(TeamMode.COORDINATE, _REDACTED_FAILURE, id="coordinate"),
         pytest.param(
             TeamMode.COLLABORATE,
-            False,
-            f"Agent Writer: Five is prime.Agent Checker: {_REDACTED_FAILURE}",
-            id="collaborate-blocking",
+            f"Agent Writer: Five is prime.\n\nAgent Checker: {_REDACTED_FAILURE}",
+            id="collaborate",
         ),
     ],
 )
 @pytest.mark.parametrize("wrote_text", [True, False], ids=["wrote-text", "silent"])
 async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_redacted_error(
     mode: TeamMode,
-    stream: bool,
     expected: str,
     *,
     wrote_text: bool,
@@ -636,7 +649,6 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
             persist=store,
-            stream=stream,
         ),
     )
 
@@ -651,49 +663,15 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
     assert (failed.status, failed.content) == (RunStatus.error, stored_content)
 
 
-async def test_a_blocking_collaborate_pause_adds_the_notice_after_the_labeled_results_and_pauses_the_team() -> None:
-    leader = scripted(
-        "leader-model",
-        calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
-    )
-    writer = scripted("writer-model", answer("Six times seven is 42."))
-    checker = scripted("checker-model", calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)))
-    team = squad(leader, writer, checker, mode=TeamMode.COLLABORATE)
-    store = Store()
-
-    _, record = await collect(
-        start_team(
-            team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
-            ctx=run_context("r", SQUAD),
-            stream=False,
-            persist=store,
-        ),
-    )
-
-    assert record.status is RunStatus.paused
-    assert record.tools is not None
-    assert record.tools[0].result == (
-        "Agent Writer: Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
-    )
-    _, checker_record = store.members
-    assert record.member_responses == [checker_record]
-    assert record.requirements is not None
-    [requirement] = record.requirements
-    assert (requirement.member_agent_id, requirement.member_run_id) == ("checker", checker_record.run_id)
-
-
 @pytest.mark.parametrize(
-    ("stream", "writer_turns", "expected"),
+    ("writer_turns", "expected"),
     [
-        pytest.param(True, [answer("")], NO_MEMBER_RESPONSE, id="streamed-empty"),
-        pytest.param(False, [_blank()], "", id="blocking-empty"),
-        pytest.param(True, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="streamed-tool-only"),
-        pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="blocking-tool-only"),
+        pytest.param([answer("")], NO_MEMBER_RESPONSE, id="empty"),
+        pytest.param([_blank()], NO_MEMBER_RESPONSE, id="blank"),
+        pytest.param([calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="tool-only"),
     ],
 )
-async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_member_result_rule_of_its_stream_mode(
-    stream: bool,
+async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_one_result_rule(
     writer_turns: list[list[Any]],
     expected: str,
 ) -> None:
@@ -710,7 +688,6 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_member
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            stream=stream,
         ),
     )
 
@@ -738,7 +715,7 @@ def _chat_completion(message: dict[str, Any], finish_reason: str) -> dict[str, A
         pytest.param(False, 2, id="silent-after-its-tool"),
     ],
 )
-async def test_a_blocking_turn_hands_the_leader_a_chat_member_s_tool_results_when_it_writes_no_text(
+async def test_the_leader_reads_a_chat_member_s_tool_results_when_it_writes_no_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -766,7 +743,6 @@ async def test_a_blocking_turn_hands_the_leader_a_chat_member_s_tool_results_whe
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            stream=False,
         ),
     )
 
@@ -776,7 +752,7 @@ async def test_a_blocking_turn_hands_the_leader_a_chat_member_s_tool_results_whe
     assert leader.requests[1].messages[-1].content == "x"
 
 
-async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_without_its_thinking(
+async def test_the_leader_reads_an_ollama_member_s_answer_without_its_thinking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -817,7 +793,6 @@ async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_withou
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            stream=False,
             persist=store,
         ),
     )

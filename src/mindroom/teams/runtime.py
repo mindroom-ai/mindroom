@@ -82,15 +82,13 @@ def run_team(
     hooks: LoopHooks,
     persist: Persist[AnyRunRecord],
     request_template: ModelRequest,
-    stream: bool,
 ) -> AsyncIterator[TeamRunEvent]:
-    """Run one team turn: the leader's system message, then ``run_input`` as the history subsystem built it.
+    """Run one team turn: the leader's system messages, then ``run_input`` as the history subsystem built it.
 
     The stream yields the leader's events, every member's events as ``MemberEvent``, and finally ``RunFinished`` with
     the ``COMPLETED`` or ``PAUSED`` team record after ``persist`` stored it; ``persist`` also receives every member
     record as its run ends. The team record ends as ``run_agent``'s does on cancellation and errors, and cancelling
-    the stream cancels the members with the leader. ``stream`` says whether the turn's reply streams, which selects
-    the rules of what the leader reads for a member's run (``member_result_text``).
+    the stream cancels the members with the leader.
     """
     leader = spec.leader
     identity = leader.model.identity
@@ -113,7 +111,6 @@ def run_team(
         hooks=hooks,
         persist=persist,
         template=request_template,
-        stream=stream,
     )
 
 
@@ -181,10 +178,6 @@ def continue_team(
         hooks=hooks,
         persist=persist,
         template=request_template,
-        # TODO(simplify): a resume hands its leader members' results by the streamed rules even when the run it
-        # continues did not stream. Resume with the run's own rules. Models would notice: such a resume would hand a
-        # team leader its members' results as a non-streaming run does.
-        stream=True,
         entry=entry,
         resumed=decided,
     )
@@ -349,13 +342,10 @@ def _answer_delegations(
             messages[index] = replace(message, content=text)
 
 
-def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner, *, stream: bool) -> AgentSpec:
-    """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run.
-
-    ``stream`` is whether the run's reply streams, which selects the delegation's result rules.
-    """
+def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner) -> AgentSpec:
+    """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run."""
     leader = spec.leader
-    delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member, stream=stream)
+    delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member)
     return replace(leader, toolkits=(*leader.toolkits, delegation))
 
 
@@ -452,19 +442,17 @@ async def _drive_team(
     hooks: LoopHooks,
     persist: Persist[AnyRunRecord],
     template: ModelRequest,
-    stream: bool,
     entry: Callable[[_MemberRuns], Awaitable[None]] | None = None,
     resumed: Sequence[RunRequirement] | None = None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Stream the leader's loop over ``messages`` and its members' runs, owning the team run's cancellation.
 
-    ``stream`` selects the delegation's result rules (``_leader_spec``), ``entry`` is the work the run does with its
-    members before the loop, and ``resumed`` the leader's decided calls.
+    ``entry`` is the work the run does with its members before the loop, and ``resumed`` the leader's decided calls.
     """
 
     async def produce(emit: Emit) -> None:
         members = _MemberRuns(record, ctx, emit, persist)
-        leader = _leader_spec(spec, record, members.run, stream=stream)
+        leader = _leader_spec(spec, record, members.run)
         events = drive_run(
             leader,
             record,

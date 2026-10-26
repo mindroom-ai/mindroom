@@ -559,21 +559,15 @@ async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_r
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("stream", "expected"),
-    [
-        (False, "Agent GeneralAgent: Five is prime.Agent ResearchAgent: Five is odd."),
-        (True, "Five is prime.Five is odd."),
-    ],
-)
-async def test_a_collaborate_leader_reads_its_members_results_labeled_only_from_a_blocking_reply(
+@pytest.mark.parametrize("stream", [False, True])
+async def test_a_collaborate_leader_reads_its_members_labeled_results_on_either_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
-    expected: str,
 ) -> None:
-    """A blocking reply labels each member's result with its name; a streamed reply joins the results as they are."""
+    """Whether the reply streams or not, each member's result is labeled with its name, a blank line apart."""
+    expected = "Agent GeneralAgent: Five is prime.\n\nAgent ResearchAgent: Five is odd."
     team = _team(
         tmp_path,
         monkeypatch,

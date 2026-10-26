@@ -249,12 +249,8 @@ def start_team(
     ctx: RunContext,
     persist: Persist[AnyRunRecord] = no_store,
     request_template: ModelRequest = EMPTY_REQUEST,
-    stream: bool = True,
 ) -> AsyncIterator[TeamRunEvent]:
-    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store.
-
-    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
-    """
+    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store."""
     return run_team(
         team,
         run_input,
@@ -262,7 +258,6 @@ def start_team(
         hooks=NO_HOOKS,
         persist=persist,
         request_template=request_template,
-        stream=stream,
     )
 
 

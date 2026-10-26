@@ -296,7 +296,6 @@ class _LeaderRun:
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
             request_template=self.request_template,
-            stream=self.stream,
         )
 
 

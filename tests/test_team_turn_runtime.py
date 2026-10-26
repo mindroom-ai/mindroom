@@ -406,7 +406,7 @@ async def test_a_collaborate_team_puts_the_task_to_every_member_and_reads_them_i
     )
     record, members = team.stored_runs()
     assert record.tools is not None
-    assert record.tools[0].result == "Writer fact.Checker fact."
+    assert record.tools[0].result == "Agent Writer: Writer fact.\n\nAgent Checker: Checker fact."
     assert sorted(member.agent_id or "" for member in members) == ["checker", "writer"]
     assert "collaborate mode" in str(team.models["default"].requests[0].messages[0].content)
 
