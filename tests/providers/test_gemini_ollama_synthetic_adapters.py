@@ -328,6 +328,28 @@ async def test_client_params_choose_the_gemini_route_and_the_sdk_agrees(
 
 
 @pytest.mark.asyncio
+async def test_an_explicit_vertexai_false_keeps_a_model_on_the_gemini_api_whatever_the_environment_says(
+    tmp_path: Path,
+) -> None:
+    """``GOOGLE_GENAI_USE_VERTEXAI`` moves only the Gemini models that choose no route themselves."""
+    (tmp_path / ".env").write_text("GOOGLE_GENAI_USE_VERTEXAI=true\n", encoding="utf-8")
+    runtime_paths = runtime_paths_for(tmp_path)
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    gemini_api = _transported_gemini({**GEMINI, "extra_kwargs": {"vertexai": False}}, respond, runtime_paths)
+    unset = gemini_adapter.build_provider(ModelConfig(provider="google", id="gemini-3.8-flash"), runtime_paths)
+    _completed([event async for event in gemini_api.stream(_request())])
+
+    assert (gemini_api.settings.vertexai, unset.settings.vertexai) == (False, True)
+    assert seen[0].url.host == "generativelanguage.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "test-key"
+
+
+@pytest.mark.asyncio
 async def test_vertex_express_mode_takes_no_project_location_or_credentials_from_the_runtime_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

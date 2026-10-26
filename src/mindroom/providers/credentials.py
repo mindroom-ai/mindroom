@@ -43,16 +43,16 @@ def dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | Non
 def gemini_uses_vertexai(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
     """Return whether a Gemini model runs on Vertex AI.
 
-    ``client_params`` wins over every client option, so a ``client_params.enterprise`` set to true or false decides
-    first, else a ``client_params.vertexai``, as google-genai ranks them. Otherwise a true ``extra_kwargs.vertexai`` or a
-    true ``GOOGLE_GENAI_USE_VERTEXAI`` selects Vertex AI; ``extra_kwargs.vertexai: false`` overrides nothing.
+    The first of these the model sets, to true or false, decides: ``client_params.enterprise``, then
+    ``client_params.vertexai``, as google-genai ranks them, since ``client_params`` wins over every client option, then
+    ``extra_kwargs.vertexai``. Only a model that sets none of them follows ``GOOGLE_GENAI_USE_VERTEXAI``.
     """
     extra_kwargs = model_config.extra_kwargs or {}
     client_params = extra_kwargs.get("client_params") or {}
-    for flag in ("enterprise", "vertexai"):
-        if client_params.get(flag) is not None:
-            return bool(client_params[flag])
-    return bool(extra_kwargs.get("vertexai")) or runtime_paths.env_flag("GOOGLE_GENAI_USE_VERTEXAI")
+    for flag in (client_params.get("enterprise"), client_params.get("vertexai"), extra_kwargs.get("vertexai")):
+        if flag is not None:
+            return bool(flag)
+    return runtime_paths.env_flag("GOOGLE_GENAI_USE_VERTEXAI")
 
 
 def uses_alternative_auth(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
