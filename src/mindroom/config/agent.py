@@ -297,7 +297,10 @@ class AgentConfig(BaseModel):
             "invites from matching inviter Matrix IDs or glob patterns"
         ),
     )
-    markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
+    markdown: bool | None = Field(
+        default=None,
+        description="Whether the system prompt tells the agent its replies are shown as Markdown",
+    )
     knowledge_graph: bool | None = Field(
         default=None,
         description="Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",

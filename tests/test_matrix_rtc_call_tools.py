@@ -17,7 +17,7 @@ from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
-from mindroom.agent_loop.prompt import PromptSpec
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
@@ -43,6 +43,7 @@ from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
     CallAgentTooling,
     _call_agent_run_state,
+    _call_instructions,
     _CallAgentCache,
     _CallAgentRunState,
     _CallResponseTracker,
@@ -182,6 +183,17 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
         tool_policy=policy,
         tool_jobs=None,
     )
+
+
+def test_realtime_call_instructions_leave_out_the_chat_s_markdown_format() -> None:
+    """A realtime call speaks its replies, so its instructions drop the Markdown line the chat prompt states."""
+    build = _build()
+    chat = replace(build, prompt=replace(build.prompt, markdown=True, turn_context="Today."))
+
+    assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
+    instructions = _call_instructions(chat)
+    assert MARKDOWN_OUTPUT_FORMAT not in instructions
+    assert instructions == "<your_role>\nTHE CHAT ROLE\n</your_role>\n\nToday."
 
 
 def _functions(build: AgentBuild) -> Mapping[str, ToolFunction]:

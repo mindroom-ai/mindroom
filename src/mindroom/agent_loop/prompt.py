@@ -16,6 +16,9 @@ from mindroom.llm.messages import Message
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+# The chat renders every reply as Markdown; ``PromptSpec.markdown`` decides whether the prompt says so.
+MARKDOWN_OUTPUT_FORMAT = "Your replies are shown as Markdown, so format them with Markdown where it helps the reader."
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PromptSpec:
@@ -24,7 +27,8 @@ class PromptSpec:
     ``persona`` is an authored prompt that leads the stable part in place of the agent's identity.
     ``role`` fills ``<your_role>``: an agent's identity, runtime facts, preloaded files, and authored role (only the
     runtime facts under a persona), or a helper's task.
-    ``markdown`` adds the markdown line; callers with an output schema leave it False.
+    ``markdown`` states the chat's Markdown output format right after the role (``MARKDOWN_OUTPUT_FORMAT``); callers
+    with an output schema, and realtime voice calls, leave it False.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered, and
     ``output_format_prompt`` the JSON prompt a structured-output request needs (``structured.output_format_prompt``).
     ``turn_context`` is the turn part: the date and session context, plus the blocks a turn appends
@@ -72,10 +76,8 @@ def render_system_messages(spec: PromptSpec) -> tuple[Message, ...]:
         (
             spec.persona,
             f"<your_role>\n{spec.role.strip()}\n</your_role>" if spec.role and spec.role.strip() else None,
+            MARKDOWN_OUTPUT_FORMAT if spec.markdown else None,
             render_instructions(spec.instructions) if spec.instructions else None,
-            "<additional_information>\n- Use markdown to format your answers.\n</additional_information>"
-            if spec.markdown
-            else None,
             *spec.tool_instructions,
             spec.skills_block,
             spec.knowledge_block,
@@ -87,6 +89,7 @@ def render_system_messages(spec: PromptSpec) -> tuple[Message, ...]:
 
 
 __all__ = [
+    "MARKDOWN_OUTPUT_FORMAT",
     "PromptSpec",
     "join_sections",
     "render_instructions",

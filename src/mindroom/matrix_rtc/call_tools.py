@@ -863,8 +863,11 @@ def _call_agent_run_state(
 
 
 def _call_instructions(build: AgentBuild) -> str:
-    """Return the system message a chat turn of the agent starts from, without the turn's own context."""
-    content = system_text(prompt_for_turn(build))
+    """Return the system prompt a chat turn of the agent starts from, without the turn's own context.
+
+    A realtime call speaks its replies, so the prompt leaves out the chat's Markdown output format.
+    """
+    content = system_text(prompt_for_turn(replace(build, prompt=replace(build.prompt, markdown=False))))
     if not content.strip():
         msg = "Agent produced an empty system prompt for its voice session"
         raise ValueError(msg)

@@ -779,7 +779,7 @@ class ConfigManagerTools(Toolkit):
             rooms: List of room IDs or names to auto-join
             knowledge_bases: List of knowledge base IDs to assign to this agent
             include_default_tools: Whether this agent should include defaults.tools
-            markdown: Whether to use markdown formatting
+            markdown: Whether the agent's system prompt says its replies are shown as Markdown
 
         Returns:
             Success message or error details

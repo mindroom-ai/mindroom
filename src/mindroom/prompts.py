@@ -68,7 +68,7 @@ _MATRIX_MENTION_GUIDE = "When mentioning a user in your reply, always write the 
 
 # Universal identity context template for all agents
 AGENT_IDENTITY_CONTEXT_TEMPLATE = f"""## Your Identity
-You are {{display_name}} (Matrix ID: {{matrix_id}}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).
+You are {{display_name}} (Matrix ID: {{matrix_id}}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.
 You are powered by the {{model_provider}} model: {{model_id}}.
 When working in teams with other agents, you should identify yourself as {{display_name}} and leverage your specific expertise.
 

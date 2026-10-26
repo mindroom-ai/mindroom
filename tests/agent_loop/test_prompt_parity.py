@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_loop.prompt import PromptSpec, render_instructions, render_system_messages
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec, render_instructions, render_system_messages
 from mindroom.llm.messages import Message
 from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import (
@@ -80,8 +80,7 @@ def test_sections_render_as_a_stable_part_and_a_turn_part() -> None:
 
     stable, turn = render_system_messages(spec)
     assert stable.content == (
-        "Persona.\n\n<your_role>\nRole.\n</your_role>\n\n- One.\n- Two.\n\n"
-        "<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n"
+        f"Persona.\n\n<your_role>\nRole.\n</your_role>\n\n{MARKDOWN_OUTPUT_FORMAT}\n\n- One.\n- Two.\n\n"
         "Toolkit guidance.\n\nMore guidance.\n\n<skills_system>\n</skills_system>\n\n"
         "<knowledge_base>\n</knowledge_base>\n\nJSON prompt."
     )

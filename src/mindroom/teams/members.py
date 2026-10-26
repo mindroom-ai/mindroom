@@ -466,6 +466,7 @@ def build_team_spec(
         team_members,
         mode,
         identity=identity,
+        markdown=config.defaults.markdown,
         tool_instructions=toolkit_instructions(leader.toolkits),
         turn_context=turn_context,
     )

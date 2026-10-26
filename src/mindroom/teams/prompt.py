@@ -80,14 +80,16 @@ def render_leader_system_messages(
     mode: TeamMode,
     *,
     identity: str,
+    markdown: bool,
     tool_instructions: Sequence[str],
     turn_context: str,
 ) -> tuple[Message, ...]:
     """Return the leader's system messages for ``members`` in ``mode``.
 
-    ``identity`` is the team's rendered identity (``TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE``), ``tool_instructions`` the
-    leader's toolkit instructions in offer order, and ``turn_context`` the turn part: the date and session context and
-    any appended system enrichment.
+    ``identity`` is the team's rendered identity (``TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE``), ``markdown`` whether the
+    prompt states the chat's Markdown output format, as an agent's does, ``tool_instructions`` the leader's toolkit
+    instructions in offer order, and ``turn_context`` the turn part: the date and session context and any appended
+    system enrichment.
     """
     delegation = (
         _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE
@@ -106,6 +108,7 @@ def render_leader_system_messages(
     return render_system_messages(
         PromptSpec(
             role=identity,
+            markdown=markdown,
             instructions=(team,),
             tool_instructions=tuple(tool_instructions),
             turn_context=turn_context,

@@ -52,6 +52,7 @@ def test_the_leader_prompt_keeps_its_roster_stable_and_its_date_in_the_turn_part
             members,
             TeamMode.COORDINATE,
             identity="You are Squad.",
+            markdown=False,
             tool_instructions=(),
             turn_context=day,
         )
