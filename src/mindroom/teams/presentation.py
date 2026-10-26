@@ -5,7 +5,7 @@
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
 member's config name, the id stored snapshots and reply records carry. ``publish_team_presentation`` shows a resumed
 run's document live in the reply it continues. ``format_team_response`` renders a finished run from its records
-instead, as a blocking reply shows it.
+instead, as a blocking reply that never paused shows it.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.agent_loop.run import own_answers
 from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunStatus
 from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
@@ -76,11 +77,15 @@ def _format_member_contribution(agent_name: str, content: str) -> str:
     return f"**{agent_name}**:{separator}{content}"
 
 
-def _with_consensus(contributions: list[str], consensus: str) -> list[str]:
-    """Return the contributions, then the consensus, or the no-consensus note when only members spoke."""
+def _with_consensus(contributions: list[str], consensus: str, *, finished: bool) -> list[str]:
+    """Return the contributions, then the consensus or, for a finished reply in which only members spoke, the note.
+
+    ``finished`` means the team run completed. A reply still running or waiting for an approval may yet get its
+    leader's answer, and a stopped or failed one ended without it, so neither shows the note.
+    """
     if consensus.strip():
         return [*contributions, "\n**Team Consensus**:", consensus]
-    return [*contributions, _NO_CONSENSUS_NOTE] if contributions else contributions
+    return [*contributions, _NO_CONSENSUS_NOTE] if contributions and finished else contributions
 
 
 def render_team_member_slots(
@@ -89,14 +94,18 @@ def render_team_member_slots(
     display_names_by_id: Mapping[str, str],
     per_member: Mapping[str, str],
     consensus: str,
+    finished: bool,
 ) -> list[str]:
-    """Render stable identity slots using labels only as presentation attributes; each slot's text is stripped."""
+    """Render stable identity slots using labels only as presentation attributes; each slot's text is stripped.
+
+    A ``finished`` reply whose leader said nothing ends with the no-consensus note (``_with_consensus``).
+    """
     contributions = [
         _format_member_contribution(display_names_by_id[member_id], per_member[member_id].strip())
         for member_id in member_ids
         if per_member[member_id].strip()
     ]
-    return _with_consensus(contributions, consensus.strip())
+    return _with_consensus(contributions, consensus.strip(), finished=finished)
 
 
 def finished_run_text(record: AnyRunRecord) -> str:
@@ -109,13 +118,14 @@ def finished_run_text(record: AnyRunRecord) -> str:
 
 
 def format_team_response(record: TeamRunRecord) -> str:
-    """Return a finished team run's text as a blocking team reply shows it, without the header.
+    """Return a team run's text as a blocking team reply shows it, without the header.
 
     Each member run that ended (``ended_member_runs``, in the order they ended) contributes its ``finished_run_text``,
     so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
     credentials redacted, even when it wrote text first. What the leader's run hands over (``handover_content``) is
     the consensus, so a leader that failed shows that reason too. A run in which nobody wrote anything renders as
-    empty text.
+    empty text. Only a completed run is a finished reply, so a stopped, failed, or paused one shows no no-consensus
+    note.
     """
     # TODO(simplify): A blocking reply lists member runs in the order they ended, one entry per delegation, while a
     # streamed reply shows one slot per member in configured order. Render both from the member slots in configured
@@ -125,7 +135,8 @@ def format_team_response(record: TeamRunRecord) -> str:
         for member in record.ended_member_runs
         if (text := finished_run_text(member)).strip()
     ]
-    return "\n\n".join(_with_consensus(contributions, record.handover_content or ""))
+    finished = record.status is RunStatus.completed
+    return "\n\n".join(_with_consensus(contributions, record.handover_content or "", finished=finished))
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
@@ -356,13 +367,17 @@ class TeamStreamPresentation:
         """Record a tool completion in the slot of ``member_id``, which ``resolve_member_id`` returned."""
         self.complete_tool(f"agent:{member_id}", call)
 
-    def render_body(self) -> str:
-        """Render the current structured document."""
+    def render_body(self, *, finished: bool) -> str:
+        """Render the current structured document: a ``finished`` reply's, or one still running or waiting.
+
+        Only a finished reply whose leader said nothing ends with the no-consensus note.
+        """
         parts = render_team_member_slots(
             self.member_ids,
             display_names_by_id=self.display_names_by_id,
             per_member=self.per_member,
             consensus=self.consensus,
+            finished=finished,
         )
         header = format_team_header([self.display_names_by_id[member_id] for member_id in self.member_ids])
         return header + "\n\n".join(parts) if parts else ""
@@ -391,10 +406,10 @@ async def publish_team_presentation(
     progress: ProgressPublisher | None,
     presentation: TeamStreamPresentation,
 ) -> None:
-    """Show the team continuation's current document in the reply it resumes."""
+    """Show the team continuation's current document, still running, in the reply it resumes."""
     if progress is not None:
         await progress(
-            StructuredStreamChunk(content=presentation.render_body(), tool_trace=presentation.tool_trace),
+            StructuredStreamChunk(content=presentation.render_body(finished=False), tool_trace=presentation.tool_trace),
         )
 
 

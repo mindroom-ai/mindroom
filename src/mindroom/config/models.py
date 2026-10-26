@@ -622,15 +622,15 @@ class EmbedderConfig(BaseModel):
     credentials_service: str | None = Field(
         default=None,
         description=(
-            "Optional credential service used only by this embedder. When omitted, legacy resolution checks the "
-            "dedicated 'embedder' service and then the provider credential"
+            "Optional credential service used only by this embedder, for the openai provider. When omitted, legacy "
+            "resolution checks the dedicated 'embedder' service and then the provider credential"
         ),
     )
     api_key: str | None = Field(
         default=None,
         description=(
-            "Explicit embedder API key. Highest priority, above credentials_service and the legacy "
-            "dedicated embedder-to-openai fallback"
+            "Explicit embedder API key for the openai provider. Highest priority, above credentials_service and the "
+            "legacy dedicated embedder-to-openai fallback"
         ),
         json_schema_extra=dashboard_hint(secret=True),
     )

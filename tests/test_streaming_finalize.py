@@ -892,14 +892,16 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         membership=make_membership_stub(),
         agent_name="agent",
     )
-    await apply_post_response_effects(
-        final_outcome,
-        ResponseOutcome(response_target=target),
-        support.build_deps(
-            room_id=target.room_id,
-            membership_turn_id="$turn",
-        ),
-    )
+    # A threaded reply also queues its thread's summary check, which this test leaves out.
+    with patch("mindroom.post_response_effects.should_queue_thread_summary_check", return_value=False):
+        await apply_post_response_effects(
+            final_outcome,
+            ResponseOutcome(response_target=target),
+            support.build_deps(
+                room_id=target.room_id,
+                membership_turn_id="$turn",
+            ),
+        )
 
     reaction_targets = [call.kwargs["content"]["m.relates_to"]["event_id"] for call in client.room_send.await_args_list]
     reaction_keys = [call.kwargs["content"]["m.relates_to"]["key"] for call in client.room_send.await_args_list]

@@ -11,7 +11,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_loop.run import resume_agent
 from mindroom.agent_loop.spec import RunContext
@@ -27,7 +27,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -36,14 +36,14 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
-    from mindroom.history.types import ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.llm.events import RunEvent
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRecord
     from mindroom.run_storage import RunStorage
 
 type ResumeEvents = Callable[[RunEvent], None]
-type ContinueRun[R: AnyRunRecord] = Callable[[R, ResumeDecisions, ResumeEvents | None], Awaitable[R]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +60,22 @@ class ResumeDecisions:
     external_results: Mapping[tuple[str | None, str], str] = field(default_factory=dict)
 
 
+class ContinueRun[R: AnyRunRecord](Protocol):
+    """How the delegation driver continues a paused parent run with its children's results.
+
+    ``storage`` is where the run's row lives, which the driver also writes the run's delegation state to.
+    """
+
+    @property
+    def storage(self) -> RunStorage:
+        """Where the paused run's row lives."""
+        ...
+
+    def events(self, paused: R, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` and the run's terminal record."""
+        ...
+
+
 def approval_decisions(
     calls: Sequence[ApprovalCall],
     decisions: Mapping[str, bool],
@@ -69,6 +85,37 @@ def approval_decisions(
     return ResumeDecisions(
         approved=tuple(call for call in calls if decisions.get(call.tool_call_id)),
         denied={call_id: denial_reasons.get(call_id) for call_id, approved in decisions.items() if not approved},
+    )
+
+
+def resume_inputs(
+    paused: AnyRunRecord,
+    storage: RunStorage,
+    settings: ResolvedHistorySettings,
+    plan: ResolvedReplayPlan | None,
+    *,
+    user_id: str | None,
+    model_name: str,
+    history_scope: HistoryScope | None,
+) -> tuple[list[Message], Callable[[str], RunContext]]:
+    """Return the resume request of ``paused`` where ``storage`` stores it, and the context of its resumed run.
+
+    The request is the paused run's stored messages after the summary and history ``plan`` replays. The context
+    shares the stored session's state with the run's tools, carries the paused run's metadata and ``model_name``,
+    and names ``history_scope``: a team run's scope, or None for an agent's own run.
+    """
+    session = storage.session
+    history, summary = replayed_history(session, storage.scope, settings, plan)
+    return (
+        build_resume_request(paused=paused.messages, summary=summary, history=history),
+        lambda run_id: RunContext(
+            run_id=run_id,
+            user_id=user_id,
+            metadata=deepcopy(paused.metadata),
+            session=session,
+            history_scope=history_scope,
+            model_name=model_name,
+        ),
     )
 
 
@@ -92,25 +139,26 @@ def resume_from_session(
     stream ends with ``RunFinished`` as ``resume_agent``'s does. ``model_name`` is the configured model the run uses,
     which its tool calls carry.
     """
-    session = storage.session
-    history, summary = replayed_history(session, storage.scope, settings, plan)
+    request, context = resume_inputs(
+        paused,
+        storage,
+        settings,
+        plan,
+        user_id=user_id,
+        model_name=model_name,
+        history_scope=None,
+    )
     return resume_agent(
         spec,
         paused,
-        build_resume_request(paused=paused.messages, summary=summary, history=history),
+        request,
         approved=decisions.approved,
         denied=decisions.denied,
         # An agent's run waits only for calls of its own; a result naming a member answers none of them.
         external_results={
             call_id: result for (member, call_id), result in decisions.external_results.items() if member is None
         },
-        context=lambda run_id: RunContext(
-            run_id=run_id,
-            user_id=user_id,
-            metadata=deepcopy(paused.metadata),
-            session=session,
-            model_name=model_name,
-        ),
+        context=context,
         hooks=hooks,
         persist=persist,
         request_template=request_template,
@@ -221,15 +269,6 @@ class ResumeRunner:
         )
         return with_resumed_turn_log_context(events)
 
-    async def continue_run(
-        self,
-        paused: RunRecord,
-        decisions: ResumeDecisions,
-        on_event: ResumeEvents | None,
-    ) -> RunRecord:
-        """Resume ``paused`` with ``decisions``, forwarding its events, and return its terminal record."""
-        return await forward_resume(self.events(paused, decisions), on_event, paused=paused)
-
 
 __all__ = [
     "ContinueRun",
@@ -239,5 +278,6 @@ __all__ = [
     "approval_decisions",
     "forward_resume",
     "resume_from_session",
+    "resume_inputs",
     "with_resumed_turn_log_context",
 ]

@@ -57,16 +57,13 @@ async def resolve_subagent(
 
 def _load_child_context(child: DelegationChild, config: Config, paths: RuntimePaths) -> ScopeSessionContext:
     """Load the child's agent-scope session from its frozen storage; ``config`` already carries the child's bindings."""
-    context = load_scope_session(
+    return load_scope_session(
         scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
         session_id=child.session_id,
         runtime_paths=paths,
         config=config,
         execution_identity=child_execution_identity(child),
     )
-    # A named scope and session always load a context.
-    assert context is not None
-    return context
 
 
 async def read_child_run(
@@ -226,8 +223,6 @@ async def cancel_approval_delegations(
         config=config,
         execution_identity=continuation.execution_identity,
     )
-    # A named scope and session always load a context.
-    assert context is not None
     response = await asyncio.to_thread(context.storage.get_run, continuation.run_id)
     if response is not None and bool((response.metadata or {}).get(DELEGATION_STATE_KEY)):
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)

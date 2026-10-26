@@ -911,8 +911,7 @@ async def prepare_agent_execution_context(
 async def _prepare_bound_team_execution_context(
     ctx: ResponseTurnContext,
     *,
-    scope_context: ScopeSessionContext | None,
-    member_names: Sequence[str],
+    scope_context: ScopeSessionContext,
     leader_system_message: Message,
     leader_tools: Sequence[ToolSpec],
     model: ModelProvider,
@@ -949,7 +948,6 @@ async def _prepare_bound_team_execution_context(
         prepared_prompt: str,
     ) -> PreparedScopeHistory:
         return await prepare_bound_scope_history(
-            member_names=member_names,
             model=model,
             runtime_paths=runtime_paths,
             config=config,
@@ -998,8 +996,7 @@ async def _prepare_bound_team_execution_context(
 async def prepare_bound_team_run_context(
     ctx: ResponseTurnContext,
     *,
-    scope_context: ScopeSessionContext | None,
-    member_names: Sequence[str],
+    scope_context: ScopeSessionContext,
     leader_system_message: Message,
     leader_tools: Sequence[ToolSpec],
     model: ModelProvider,
@@ -1030,7 +1027,6 @@ async def prepare_bound_team_run_context(
     return await _prepare_bound_team_execution_context(
         ctx,
         scope_context=scope_context,
-        member_names=member_names,
         leader_system_message=leader_system_message,
         leader_tools=leader_tools,
         model=model,

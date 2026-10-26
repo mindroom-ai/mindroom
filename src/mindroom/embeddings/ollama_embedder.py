@@ -36,6 +36,7 @@ class OllamaEmbedder:
 
     model: str
     host: str
+    api_key: str | None = field(default=None, repr=False)
     client: Client | None = field(default=None, repr=False)
     async_client: AsyncClient | None = field(default=None, repr=False)
 
@@ -44,14 +45,17 @@ class OllamaEmbedder:
         """Return false: each request carries one text."""
         return False
 
+    def _headers(self) -> dict[str, str] | None:
+        return {"authorization": f"Bearer {self.api_key}"} if self.api_key else None
+
     def _sync_client(self) -> Client:
         if self.client is None:
-            self.client = Client(host=self.host)
+            self.client = Client(host=self.host, headers=self._headers())
         return self.client
 
     def _async_client(self) -> AsyncClient:
         if self.async_client is None:
-            self.async_client = AsyncClient(host=self.host)
+            self.async_client = AsyncClient(host=self.host, headers=self._headers())
         return self.async_client
 
     def embed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:

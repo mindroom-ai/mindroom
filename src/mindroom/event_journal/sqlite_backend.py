@@ -25,6 +25,7 @@ from mindroom.logging_config import get_logger
 
 from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
+    upgrade_hydration_walk_version,
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
 )
@@ -193,6 +194,10 @@ class SqliteBackend:
                 str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             )
             upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
+            hydration_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(conversation_hydration)")
+            )
+            upgrade_hydration_walk_version(_SqliteTransaction(connection), hydration_columns)
             outbox_columns = frozenset(
                 str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
             )

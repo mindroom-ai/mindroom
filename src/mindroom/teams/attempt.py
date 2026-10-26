@@ -2,6 +2,7 @@
 
 A streamed attempt records ``TeamReplyText``, the reply's text without tool markers, however it ends; a blocking
 attempt renders and records its reply from the records the run hands over, which give every attempt's run metadata.
+An attempt of either kind that pauses shows the document its events built.
 """
 
 from __future__ import annotations
@@ -46,8 +47,11 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
     unless that is not its content: a failed run hands over why it failed. What a resumed run carried over from its
-    pause the document the resume continues already accounts for.
+    pause the document the resume continues already accounts for. A paused run shows nothing more: beyond the text
+    it streamed, its content is a paused notice, which a team reply never shows, as a pause of a live turn does not.
     """
+    if run.status is RunStatus.paused:
+        return None
     handover = run.new_handover_content
     return None if streamed and handover == run.content else handover
 
@@ -85,14 +89,18 @@ class TeamReplyText:
         elif isinstance(event, TextDelta):
             self.consensus += event.text
 
-    def canonical_text(self) -> str:
-        """Return the text in the configured member order, then the consensus: what a streamed reply records."""
+    def canonical_text(self, *, finished: bool) -> str:
+        """Return the text in the configured member order, then the consensus: what a streamed reply records.
+
+        Only a ``finished`` reply, one whose team run completed, ends with the no-consensus note.
+        """
         return "\n\n".join(
             render_team_member_slots(
                 self.presentation.member_ids,
                 display_names_by_id=self.presentation.display_names_by_id,
                 per_member=self.per_member,
                 consensus=self.consensus,
+                finished=finished,
             ),
         )
 
@@ -104,7 +112,8 @@ class TeamAttempt:
     run_id: str
     members: ResolvedExactTeamMembers
     presentation: TeamStreamPresentation
-    # Whether the document streams as it grows; a blocking turn renders its reply from the run's records instead.
+    # Whether the document streams as it grows; a blocking turn renders a reply that does not pause from the run's
+    # records instead.
     stream: bool
     team_name: str
     runtime_model_name: str
@@ -137,11 +146,13 @@ class TeamAttempt:
 
         A streamed attempt records its reply's text (``TeamReplyText``); a blocking one its stored runs' document,
         stripped, or nothing before the run stored a record. A stopped leader that wrote nothing
-        contributes nothing; a failed one contributes the reason its run recorded, credentials redacted.
+        contributes nothing; a failed one contributes the reason its run recorded, credentials redacted. Either text
+        ends with the no-consensus note only once the team run completed, so it matches the message a stopped
+        streamed reply shows.
         """
-        if self.stream:
-            return self.reply.canonical_text()
         record = self.records.record
+        if self.stream:
+            return self.reply.canonical_text(finished=record is not None and record.status is RunStatus.completed)
         return format_team_response(record).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
@@ -198,9 +209,12 @@ class TeamAttempt:
                 shown = self.show_unshown_handover(member) or shown
         return shown
 
-    def chunk(self) -> StructuredStreamChunk | None:
-        """Return the rendered document as a stream chunk, or None while it is still empty."""
-        rendered_body = self.presentation.render_body()
+    def chunk(self, *, finished: bool) -> StructuredStreamChunk | None:
+        """Return the rendered document as a stream chunk, or None while it is still empty.
+
+        A live chunk shows the run still running; the ``finished`` one shows the reply its completed run ends with.
+        """
+        rendered_body = self.presentation.render_body(finished=finished)
         if not rendered_body:
             return None
         return StructuredStreamChunk(

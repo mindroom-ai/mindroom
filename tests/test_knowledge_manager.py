@@ -50,6 +50,7 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
     KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
+    resolve_runtime_paths,
 )
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_embedder_api_key
@@ -95,7 +96,9 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_
 from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from mindroom.knowledge.watch import KnowledgeSourceWatcher, _shared_poll_targets
 from mindroom.logging_config import subprocess_logging_env
+from mindroom.memory import _semantic_file_search as semantic_file_search
 from mindroom.memory_scope_ids import agent_scope_user_id
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -3300,24 +3303,38 @@ def test_legacy_empty_optional_filter_metadata_remains_compatible() -> None:
     )
 
 
-def test_knowledge_file_indexing_parallelism_default_is_conservative() -> None:
+def test_knowledge_file_indexing_parallelism_default_is_conservative(tmp_path: Path) -> None:
     """One refresh subprocess should not fan out into dozens of concurrent file embeds by default."""
-    assert knowledge_manager_module._max_concurrent_knowledge_file_indexes() == 4
+    assert knowledge_manager_module._max_concurrent_knowledge_file_indexes(test_runtime_paths(tmp_path)) == 4
 
 
-def test_knowledge_file_indexing_parallelism_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Large corpora can raise file-level indexing concurrency explicitly."""
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "16")
-
-    assert knowledge_manager_module._max_concurrent_knowledge_file_indexes() == 16
-
-
-def test_knowledge_file_indexing_parallelism_is_validated_at_manager_startup(
+@pytest.mark.parametrize(
+    ("process_env", "env_file", "expected"),
+    [
+        ({}, "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=16\n", 16),
+        ({"MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY": "8"}, "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=16\n", 8),
+        ({}, "", 4),
+    ],
+    ids=["env_file", "process_env_wins", "live_environ_ignored"],
+)
+def test_knowledge_file_indexing_parallelism_reads_the_runtime_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    process_env: dict[str, str],
+    env_file: str,
+    expected: int,
 ) -> None:
-    """A bad operator override should fail when the manager is built, before refresh work starts."""
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "bad")
+    """Large corpora can raise file-level indexing concurrency in the runtime env or the `.env` beside `config.yaml`."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "2")
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
+
+    assert knowledge_manager_module._max_concurrent_knowledge_file_indexes(runtime_paths) == expected
+
+
+def test_knowledge_file_indexing_parallelism_is_validated_at_manager_startup(tmp_path: Path) -> None:
+    """A bad override in the `.env` beside `config.yaml` fails when the manager is built, before refresh work starts."""
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=bad\n", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
 
     with pytest.raises(ValueError, match="MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"):
@@ -3325,15 +3342,15 @@ def test_knowledge_file_indexing_parallelism_is_validated_at_manager_startup(
 
 
 @pytest.mark.parametrize("raw_value", ["bad", "0", "129"])
-def test_knowledge_file_indexing_parallelism_rejects_invalid_env(
-    raw_value: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_knowledge_file_indexing_parallelism_rejects_invalid_env(raw_value: str, tmp_path: Path) -> None:
     """Invalid file-level indexing concurrency should fail loudly."""
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", raw_value)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY": raw_value},
+    )
 
     with pytest.raises(ValueError, match="MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"):
-        knowledge_manager_module._max_concurrent_knowledge_file_indexes()
+        knowledge_manager_module._max_concurrent_knowledge_file_indexes(runtime_paths)
 
 
 def test_indexing_settings_filter_keys_are_order_insensitive(tmp_path: Path) -> None:
@@ -5140,7 +5157,7 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
     would never get its turn.
     """
     # One file at a time, in name order, so "good.md" succeeds after the rejection is recorded.
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=1\n", encoding="utf-8")
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "aaa-broken.md").write_text("cannot embed", encoding="utf-8")
@@ -5158,6 +5175,7 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
         lambda *_a, **_k: _RejectingEmbedder(),
     )
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    assert manager._max_concurrent_file_indexes == 1
 
     assert await manager.reindex_all() == RefreshOutcome(
         indexed_count=1,
@@ -6001,13 +6019,44 @@ async def test_refresh_scheduled_before_reload_cannot_probe_old_config(
     assert probe_reasons == []
 
 
-def test_refresh_scheduler_reads_env_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The background refresh limit can be tuned from the deployment environment."""
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY", "3")
+@pytest.mark.parametrize(
+    ("process_env", "env_file", "expected"),
+    [
+        ({}, "MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY=3\n", 3),
+        ({"MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY": "2"}, "MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY=3\n", 2),
+        ({}, "", 1),
+    ],
+    ids=["env_file", "process_env_wins", "live_environ_ignored"],
+)
+def test_orchestrator_refresh_scheduler_reads_concurrency_from_the_runtime_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_env: dict[str, str],
+    env_file: str,
+    expected: int,
+) -> None:
+    """The background refresh limit can be tuned in the runtime env or the `.env` beside `config.yaml`."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY", "5")
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
 
-    scheduler = KnowledgeRefreshScheduler()
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+
+    assert orchestrator.knowledge_refresh_scheduler.max_concurrent_refreshes == expected
+
+
+def test_file_memory_refresh_scheduler_reads_concurrency_from_the_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Semantic file-memory refreshes use the same limit, built from the runtime of the first refresh."""
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", None)
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY=3\n", encoding="utf-8")
+
+    scheduler = semantic_file_search._memory_scheduler(test_runtime_paths(tmp_path))
 
     assert scheduler.max_concurrent_refreshes == 3
+    assert semantic_file_search._memory_scheduler(test_runtime_paths(tmp_path)) is scheduler
 
 
 @pytest.mark.parametrize(
@@ -6018,16 +6067,15 @@ def test_refresh_scheduler_reads_env_concurrency(monkeypatch: pytest.MonkeyPatch
         ("-2", "must be at least 1"),
     ],
 )
-def test_refresh_scheduler_env_concurrency_fails_fast(
-    raw_value: str,
-    match: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_refresh_scheduler_env_concurrency_fails_fast(raw_value: str, match: str, tmp_path: Path) -> None:
     """Malformed refresh concurrency env values fail startup instead of hiding typos."""
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY", raw_value)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY": raw_value},
+    )
 
     with pytest.raises(ValueError, match=match):
-        KnowledgeRefreshScheduler()
+        _MultiAgentOrchestrator(runtime_paths=runtime_paths)
 
 
 @pytest.mark.asyncio

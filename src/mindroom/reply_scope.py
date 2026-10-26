@@ -48,6 +48,7 @@ from mindroom.reply_presentation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.streaming import ProgressPermission, UnfinishedStreamedReply
+from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import (
     ToolTraceEntry,
@@ -229,10 +230,11 @@ class _SpanToolCalls:
             return
         if isinstance(result, BaseException):
             result, is_error = f"{type(result).__name__}: {result}", True
-        elif isinstance(result, ToolOutcome) and result.is_error:
-            result, is_error = result.content, True
         else:
-            is_error = False
+            # A value that carries text and media is recorded as the text the model reads.
+            value = read_tool_value(result)
+            is_error = isinstance(value, ToolOutcome) and value.is_error
+            result = result if value is None else value.content
         _, entry = format_tool_combined(tool_name, dict(args), result, is_error=is_error)
         try:
             await self.runtime.store.replies.record_tool_call(

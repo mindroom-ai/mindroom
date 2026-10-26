@@ -83,8 +83,12 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
     with pytest.raises(ValueError, match="project_id"):
         parse_claude_settings("anthropic", {"project_id": "p"})
     assert parse_claude_settings("vertexai_claude", {"project_id": "p", "region": "global"}).region == "global"
-    settings = parse_claude_settings("bedrock_claude", {"aws_profile": "dev", "cache_system_prompt": False})
-    assert (settings.aws_profile, settings.cache_system_prompt, settings.extended_cache_time) == ("dev", False, True)
+    settings = parse_claude_settings("bedrock_claude", {"aws_region": "us-east-1", "cache_system_prompt": False})
+    assert (settings.aws_region, settings.cache_system_prompt, settings.extended_cache_time) == (
+        "us-east-1",
+        False,
+        True,
+    )
     assert settings.max_tokens == 8192
     assert settings.timeout == 3600.0
     assert parse_claude_settings("anthropic", {"timeout": 120.0}).timeout == 120.0
@@ -504,6 +508,22 @@ async def test_default_sampling_models_lose_sampling_controls_everywhere(tmp_pat
     assert not {"temperature", "top_p", "top_k"} & body.keys()
     # The conversation ends with a user turn already, and thinking is off, yet Sonnet 5.5 rejects prefill.
     assert body["messages"][-1]["content"][0]["text"] == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_vertex_keeps_an_older_claude_s_authored_sampling_and_ignores_the_override(tmp_path: Path) -> None:
+    """Vertex leaves overriding sampling to the provider, but only the newest generations lose the authored values."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(
+        "vertexai_claude",
+        tmp_path,
+        wire,
+        id="claude-sonnet-4-5",
+        extra_kwargs={"temperature": 0.7, "top_k": 3},
+    )
+    await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
+    body = wire.body()
+    assert (body["temperature"], body["top_k"]) == (0.7, 3)
 
 
 @pytest.mark.asyncio
@@ -1043,11 +1063,7 @@ def test_bedrock_static_keys_win_over_a_profile_and_the_ambient_chain_needs_no_r
             ModelConfig(provider="bedrock_claude", id="anthropic.claude-sonnet-5-5"),
             runtime_paths,
         )
-    assert (static.settings.aws_access_key, static.settings.aws_profile, static.settings.session) == (
-        "AKIA-static",
-        None,
-        None,
-    )
+    assert (static.settings.aws_access_key, static.settings.session) == ("AKIA-static", None)
     assert static.settings.aws_region is None
     assert isinstance(ambient.settings.session, boto3.session.Session)
     assert (ambient.settings.aws_access_key, ambient.settings.aws_region) == (None, None)
@@ -1094,6 +1110,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
             None,
         )
         assert vertex.settings.base_url == "https://vertex-gateway.example/v1"
+        assert vertex.identity.endpoint == "https://vertex-gateway.example/v1|env-project|europe-west1"
         assert (
             provider_for(
                 {"provider": "vertexai_claude", "id": "claude-sonnet-5-5"},
@@ -1102,6 +1119,27 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
             ).settings.region
             is None
         )
+
+
+def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_set_none(tmp_path: Path) -> None:
+    """``ANTHROPIC_BASE_URL`` from the runtime env is the direct route's endpoint unless the model configures one."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_BASE_URL": "https://env-gateway.example/"},
+    )
+    own = {"client_params": {"base_url": "https://own-gateway.example"}}
+    with isolated_provider_environment():
+        from_env = build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k"), runtime_paths)
+        configured = build_provider(
+            ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=own),
+            runtime_paths,
+        )
+    assert from_env.identity.endpoint == "https://env-gateway.example"
+    assert configured.identity.endpoint == "https://own-gateway.example"
+    assert configured.settings.client_params == own["client_params"]
 
 
 @pytest.mark.asyncio
@@ -1140,6 +1178,11 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
     assert str(wire.requests[-1].url) == (
         "https://vertex.example/v1/projects/params-project/locations/eu/publishers/anthropic/models/"
         "claude-sonnet-5-5:streamRawPredict"
+    )
+    # The endpoint identity names the endpoint the client reaches.
+    assert (direct.identity.endpoint, vertex.identity.endpoint) == (
+        "https://gateway.example/anthropic",
+        "https://vertex.example/v1|params-project|eu",
     )
 
     bedrock = route_provider(

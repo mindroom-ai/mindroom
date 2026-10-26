@@ -978,7 +978,7 @@ def _build_team(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     *,
@@ -1017,7 +1017,7 @@ def _build_team(
 
 async def _prepare_openai_team_execution(
     *,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     team_name: str,
     built: BuiltTeam,
     prompt: str,
@@ -1055,7 +1055,7 @@ async def _prepare_team_turn(
     execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     stream: bool,
-) -> tuple[ScopeSessionContext | None, BuiltTeam, PreparedTeamExecution] | JSONResponse:
+) -> tuple[ScopeSessionContext, BuiltTeam, PreparedTeamExecution] | JSONResponse:
     """Load the team's session scope, build the team, and prepare its turn, or return the error response a failure gets."""
     scope_context = load_bound_scope_session(
         member_names=[],
@@ -1161,7 +1161,6 @@ async def _non_stream_team_completion(
                 runtime_paths=runtime_paths,
                 scope_context=scope_context,
                 team_name=team_name,
-                session_id=session_id,
                 user_id=requester_id,
                 stream=False,
             )
@@ -1252,7 +1251,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                             runtime_paths=runtime_paths,
                             scope_context=scope_context,
                             team_name=team_name,
-                            session_id=session_id,
                             user_id=requester_id,
                             stream=True,
                         ),

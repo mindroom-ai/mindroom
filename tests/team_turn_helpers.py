@@ -232,26 +232,30 @@ class TeamTurn:
         *,
         message: str = "Hello",
         ctx: ResponseTurnContext | None = None,
+        chunks: list[TeamStreamChunk] | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> list[TeamStreamChunk]:
-        """Stream one team reply as the response runner does and return its chunks."""
+        """Stream one team reply as the response runner does and return its chunks.
+
+        ``chunks`` collects them as they arrive, so a reply that pauses, which raises, keeps the chunks it sent first.
+        """
         kwargs.setdefault("mode", self.mode)
         kwargs.setdefault("user_id", REQUESTER_ID)
         kwargs.setdefault("agent_names", list(self.member_names))
         self.recorder = TurnRecorder(user_message=message)
+        collected = [] if chunks is None else chunks
         with tool_runtime_context(self.runtime):
-            return [
-                chunk
-                async for chunk in team_response_stream(
-                    message=message,
-                    orchestrator=self.orchestrator,
-                    execution_identity=self.identity,
-                    ctx=ctx or self.ctx(),
-                    configured_team_name=self.team_name,
-                    turn_recorder=self.recorder,
-                    **kwargs,
-                )
-            ]
+            async for chunk in team_response_stream(
+                message=message,
+                orchestrator=self.orchestrator,
+                execution_identity=self.identity,
+                ctx=ctx or self.ctx(),
+                configured_team_name=self.team_name,
+                turn_recorder=self.recorder,
+                **kwargs,
+            ):
+                collected.append(chunk)
+        return collected
 
     async def respond(
         self,
@@ -376,7 +380,6 @@ def build_team_turn(
         team_name=team_name,
         execution_identity=identity,
     )
-    assert scope is not None
     orchestrator = team_orchestrator(config, runtime_paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in config.agents}
     return TeamTurn(

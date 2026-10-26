@@ -2853,7 +2853,6 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         await runner._approval_execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={},
             denial_reasons={},
@@ -8011,7 +8010,6 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
     assert await paused_for_approval(store, continuation) is not None
     runtime = response_runner._PreparedResponseRuntime(
         resolved_target=target,
-        response_thread_id=target.resolved_thread_id,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
         model_prompt="test",
@@ -8067,7 +8065,6 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
     target = request.response_envelope.target
     runtime = response_runner._PreparedResponseRuntime(
         resolved_target=target,
-        response_thread_id=target.resolved_thread_id,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
         model_prompt="test",
@@ -8107,7 +8104,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     target = request.response_envelope.target
     runtime = response_runner._PreparedResponseRuntime(
         resolved_target=target,
-        response_thread_id=target.resolved_thread_id,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
         model_prompt="test",

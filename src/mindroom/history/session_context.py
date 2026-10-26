@@ -38,13 +38,14 @@ class ScopeSessionContext:
     was given (``with_session``) before anything stored it; None while the context holds neither.
     ``session_exists`` tells whether the scope had a stored session when the context was loaded. ``session_id`` is
     the id the context was loaded for, which the scope's first session takes, so a run is saved from the context alone.
+    ``storage_factory`` opens the scope's store again, for work that outlives ``storage``'s handle.
     """
 
     scope: HistoryScope
     storage: ConversationStore
     session: ConversationSession | None
     session_id: str
-    storage_factory: Callable[[], ConversationStore] | None = None
+    storage_factory: Callable[[], ConversationStore]
     session_exists: bool = True
 
     def first_session(self) -> ConversationSession:
@@ -63,21 +64,18 @@ class ScopeSessionContext:
         return replace(self, session=self.stored_or_first_session())
 
 
-def has_named_member(member_names: Sequence[str]) -> bool:
-    """Return whether a team run names a member; a team run that names none has no history."""
-    return any(member_names)
-
-
 def resolve_bound_team_scope(
     *,
     member_names: Sequence[str],
     config: Config,
     team_name: str | None,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> HistoryScope | None:
-    """Resolve the history scope backing one live team run, or None when the run names no member."""
-    if not has_named_member(member_names):
-        return None
+) -> HistoryScope:
+    """Resolve the history scope backing one live team run: the configured team's, else its members' ad hoc scope.
+
+    ``team_name`` is the configured team's name, or None for an ad hoc team. Every team run names a member, as a
+    configured team lists one and an ad hoc team forms from them, so an ad hoc team that names none is refused.
+    """
     if team_name is not None and team_name in config.teams:
         return HistoryScope(kind="team", scope_id=team_name)
     team_scope_id = ad_hoc_team_scope_id(
@@ -85,20 +83,21 @@ def resolve_bound_team_scope(
         config.agents,
         requester_user_id=execution_identity.requester_id if execution_identity is not None else None,
     )
-    return HistoryScope(kind="team", scope_id=team_scope_id) if team_scope_id is not None else None
+    if team_scope_id is None:
+        msg = "An ad hoc team that names no member has no history scope"
+        raise ValueError(msg)
+    return HistoryScope(kind="team", scope_id=team_scope_id)
 
 
 def load_scope_session(
     *,
-    scope: HistoryScope | None,
-    session_id: str | None,
+    scope: HistoryScope,
+    session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-) -> ScopeSessionContext | None:
+) -> ScopeSessionContext:
     """Load the session context of one already-resolved persisted history scope for the current request."""
-    if session_id is None or scope is None:
-        return None
     storage_factory = partial(
         create_scope_session_storage,
         scope=scope,
@@ -121,29 +120,20 @@ def load_scope_session(
 def load_bound_scope_session(
     *,
     member_names: Sequence[str],
-    session_id: str | None,
+    session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     team_name: str | None,
-) -> ScopeSessionContext | None:
-    """Load the canonical scope-backed session context for one bound team run.
-
-    ``team_name`` is the configured team's name, or None for an ad-hoc team.
-    """
-    if not member_names and team_name is not None and team_name in config.teams:
-        scope = HistoryScope(kind="team", scope_id=team_name)
-    else:
-        scope = resolve_bound_team_scope(
+) -> ScopeSessionContext:
+    """Load the canonical scope-backed session context for one bound team run (``resolve_bound_team_scope``)."""
+    return load_scope_session(
+        scope=resolve_bound_team_scope(
             member_names=member_names,
             config=config,
             team_name=team_name,
             execution_identity=execution_identity,
-        )
-    if scope is None:
-        return None
-    return load_scope_session(
-        scope=scope,
+        ),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,

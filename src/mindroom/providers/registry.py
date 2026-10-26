@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
-from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings
+from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.credentials import dashboard_api_key
 from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
 from mindroom.providers.gemini.settings import GeminiSettings
@@ -176,7 +176,7 @@ def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -
     if provider in OPENAI_FAMILY_PROVIDERS:
         allowed = openai_accepted_extra_kwargs(model_config, runtime_paths)
     elif provider in _CLAUDE_PROVIDERS:
-        allowed = settings_keys(ClaudeSettings, CLAUDE_ACCEPTED_KEYS[cast("ClaudeRouteKind", provider)])
+        allowed = CLAUDE_ACCEPTED_KEYS[cast("ClaudeRouteKind", provider)]
     else:
         allowed = _SETTINGS_KEYS[provider]
     reject_unsupported_extra_kwargs(model_config.extra_kwargs, allowed, provider=model_config.provider)

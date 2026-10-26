@@ -84,6 +84,35 @@ def test_runtime_policy_defaults_to_50_kib_auto_save_threshold(tmp_path: Path) -
     assert policy.auto_save_threshold_bytes == DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 
 
+@pytest.mark.parametrize(
+    ("process_env", "env_file", "expected"),
+    [
+        ({}, "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES=5\n", 5),
+        ({"MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES": "7"}, "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES=5\n", 7),
+        ({"MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES": ""}, "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES=5\n", 64 * 1024**2),
+        ({}, "", 64 * 1024**2),
+    ],
+    ids=["env_file", "process_env_wins", "blank_restores_default", "live_environ_ignored"],
+)
+def test_runtime_policy_reads_the_output_cap_from_the_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    process_env: dict[str, str],
+    env_file: str,
+    expected: int,
+) -> None:
+    """The cap resolves like every runtime setting: the runtime's process env, then its `.env`, then the default."""
+    monkeypatch.setenv("MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES", "11")
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env,
+    )
+
+    assert ToolOutputFilePolicy.from_runtime(tmp_path, runtime_paths).max_bytes == expected
+
+
 def _receipt(result: object) -> dict[str, object]:
     assert isinstance(result, dict)
     envelope = result.get("mindroom_tool_output")
@@ -853,7 +882,7 @@ def test_parent_rechecked_inside_workspace_before_atomic_replace(tmp_path: Path)
     toolkit = _EchoToolkit(result="payload")
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
 
-    with patch("mindroom.tool_system.output_files.os.replace", side_effect=OSError("replace denied")):
+    with patch("mindroom.atomic_file.os.replace", side_effect=OSError("replace denied")):
         result = FunctionCall(
             function=_first_function(toolkit),
             arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "result.txt"},

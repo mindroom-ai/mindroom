@@ -260,7 +260,7 @@ def _approved(paused: RunRecord) -> ResumeDecisions:
 
 
 async def _resume(agent: _Resumable, paused: RunRecord) -> RunRecord:
-    return await agent.runner().continue_run(paused, _approved(paused), None)
+    return await forward_resume(agent.runner().events(paused, _approved(paused)), None, paused=paused)
 
 
 def _summaries(messages: Sequence[Message]) -> list[Message]:

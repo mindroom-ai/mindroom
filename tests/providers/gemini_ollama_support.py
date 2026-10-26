@@ -91,7 +91,7 @@ def build_adapter(
         "http_options": {"httpx_async_client": httpx.AsyncClient(transport=transport)},
     }
     if extra_kwargs.get("vertexai"):
-        extra_kwargs["credentials"] = Credentials(token="parity-google-token")  # noqa: S106 - synthetic credential
+        extra_kwargs["client_params"]["credentials"] = Credentials(token="parity-google-token")  # noqa: S106
     return build_gemini_provider(ModelConfig(**config), runtime_paths_for(root))
 
 

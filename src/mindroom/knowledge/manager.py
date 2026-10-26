@@ -163,9 +163,9 @@ _ShieldedResult = TypeVar("_ShieldedResult")
 _EMBEDDING_RETRY_SLEEP: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
-def _max_concurrent_knowledge_file_indexes() -> int:
+def _max_concurrent_knowledge_file_indexes(runtime_paths: RuntimePaths) -> int:
     """Return bounded file-level indexing concurrency."""
-    raw_value = os.getenv(KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV)
+    raw_value = runtime_paths.env_value(KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV)
     if raw_value is None:
         return DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES
     try:
@@ -541,7 +541,7 @@ class KnowledgeManager:
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
-        self._max_concurrent_file_indexes = _max_concurrent_knowledge_file_indexes()
+        self._max_concurrent_file_indexes = _max_concurrent_knowledge_file_indexes(self.runtime_paths)
         base_config = self.config.get_knowledge_base_config(self.base_id)
         if self.storage_path is None:
             self.storage_path = self.runtime_paths.storage_root

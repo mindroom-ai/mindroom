@@ -44,7 +44,6 @@ async def _turn(tmp_path: Path, hook_source: str | None, intent: TurnIntent) -> 
         run_id="run",
         active_event_ids={"$event"},
         transient_enrichment_items=(),
-        system_enrichment_items=(),
     )
 
 

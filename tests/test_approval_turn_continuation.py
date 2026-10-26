@@ -29,6 +29,7 @@ from mindroom.llm.provider import ToolCallReady
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
+from mindroom.response_runner import _paused_with_committed_presentation
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -114,8 +115,13 @@ async def _paused_turn(
     prompt: str,
     *,
     show_tool_calls: bool = True,
+    collect_streamed_response: bool = False,
 ) -> PausedAttempt:
-    """Run one reply of ``general`` as the response runner does and return the pause it suspended on."""
+    """Run one reply of ``general`` as the response runner does and return the pause it suspended on, as it shows.
+
+    ``collect_streamed_response`` collects the run's events into the reply, as a non-streaming reply that shows its
+    tool calls does; without it the reply renders from the run's record.
+    """
     ctx = make_turn_context(
         "general",
         session_id=identity.session_id,
@@ -131,9 +137,10 @@ async def _paused_turn(
             runtime_paths=paths,
             execution_identity=identity,
             show_tool_calls=show_tool_calls,
+            collect_streamed_response=collect_streamed_response,
             supports_native_tool_approval=True,
         )
-    return raised.value.paused
+    return _paused_with_committed_presentation(raised.value, show_tool_calls=show_tool_calls)
 
 
 @pytest.mark.asyncio
@@ -353,7 +360,6 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
             return await execution.continue_run(
                 continuation,
                 paused_answer=paused_answer,
-                execution_identity=identity,
                 tool_dispatch=dispatch,
                 decisions={call.tool_call_id: True for call in continuation.calls},
                 denial_reasons={call.tool_call_id: None for call in continuation.calls},
@@ -508,11 +514,9 @@ async def test_approval_settlement_preserves_tool_boundary(
         _continuation_turn_context(continuation, model_name="default", metadata=None),
         presentation,
         prompt=continuation.request_body,
-        show_tool_calls=continuation.show_tool_calls,
         resumed_attempt=ResumedAttempt(CompletedAttempt(response_text=collected.terminal_content)),
         config=config,
         runtime_paths=paths,
-        execution_identity=identity,
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=trace,
@@ -564,11 +568,9 @@ async def test_approval_settlement_uses_typed_status(
         _continuation_turn_context(continuation, model_name="default", metadata=None),
         CollectedStreamPresentation(show_tool_calls=False),
         prompt=continuation.request_body,
-        show_tool_calls=continuation.show_tool_calls,
         resumed_attempt=ResumedAttempt(CompletedAttempt()),
         config=config,
         runtime_paths=paths,
-        execution_identity=identity,
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=[],
@@ -702,7 +704,6 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     result = await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=saved.response_text, tool_trace=tuple(saved.tool_trace)),
-        execution_identity=identity,
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
         decisions={"approved": True},
         denial_reasons={"approved": None},
@@ -731,26 +732,23 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("before", "saved", "reply"),
+    ("before", "reply"),
     [
-        pytest.param("Adding first.", None, "Adding first.", id="wrote-before-the-pause"),
-        pytest.param(None, None, "I have tools to execute, but I need confirmation.", id="paused-without-text"),
-        pytest.param(None, "", "Tool approval continuation completed", id="pause-showed-nothing"),
+        pytest.param("Adding first.", "Adding first.", id="wrote-before-the-pause"),
+        pytest.param(None, "Tool approval continuation completed", id="paused-without-text"),
     ],
 )
 async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     before: str | None,
-    saved: str | None,
     reply: str,
 ) -> None:
     """A run that answers its approved call without text adds nothing to the reply it continues.
 
-    Its run still holds what it carried over from the pause: the text it wrote before it, or the paused notice, which
-    the blocking pause's saved reply already shows. A saved reply that showed nothing, as a streamed pause without
-    text leaves it, ends with the completion note instead of the paused notice, which no longer holds once the call
-    ran.
+    Its run still holds what it carried over from the pause: the text it wrote before it, which the pause's saved
+    reply already shows, or the paused notice, which no pause shows. A run that paused without text shows nothing,
+    so its reply ends with the completion note instead of the paused notice, which no longer holds once the call ran.
     """
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
@@ -795,8 +793,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
 
     result = await execution.continue_run(
         continuation,
-        paused_answer=PausedAnswer(text=paused.response_text if saved is None else saved, tool_trace=paused.tool_trace),
-        execution_identity=identity,
+        paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
         decisions={"approved": True},
         denial_reasons={"approved": None},
@@ -807,6 +804,95 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
 
     assert isinstance(result, CompletedApprovalRun)
     assert result.response_text == reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collect_streamed_response", [False, True], ids=["record", "events"])
+@pytest.mark.parametrize(
+    ("show_tool_calls", "pause", "reply"),
+    [
+        pytest.param(False, "", "The sum is 5.", id="tool-calls-hidden"),
+        pytest.param(True, "🔧 `add` [1] ⏳", "🔧 `add` [1]\n\nThe sum is 5.", id="tool-calls-shown"),
+    ],
+)
+async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_pause_or_its_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    collect_streamed_response: bool,
+    show_tool_calls: bool,
+    pause: str,
+    reply: str,
+) -> None:
+    """A blocking reply rendered from its run's record shows its pause and its approved reply as an event-built one does.
+
+    The run paused without text of its own, so its record holds the paused notice as its content, which neither
+    reply shows: the approval card says what the pause waits for.
+    """
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    identity = _identity("notice-free-session")
+    model = _CheckedModel([calls(tool_call("add", "approved", a=2, b=3)), answer("The sum is 5.")])
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(
+        config,
+        paths,
+        identity,
+        "Add them.",
+        show_tool_calls=show_tool_calls,
+        collect_streamed_response=collect_streamed_response,
+    )
+    assert paused.response_text.strip() == pause
+    [stored] = stored_runs(config, paths, identity.session_id)
+    assert stored.content == "I have tools to execute, but I need confirmation."
+    continuation = approval_continuation(
+        approval_id="approval-notice-free",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
+        request_body="Add them.",
+        show_tool_calls=show_tool_calls,
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+
+    result = await execution.continue_run(
+        continuation,
+        paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
+        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        decisions={"approved": True},
+        denial_reasons={"approved": None},
+        tool_trace_collector=[],
+        typing_log_context={},
+        progress=None,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text.strip() == reply
 
 
 @pytest.mark.asyncio
@@ -859,7 +945,6 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={"approved": True},
             denial_reasons={"approved": None},
@@ -909,11 +994,9 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         _continuation_turn_context(continuation, model_name="default", metadata=None),
         CollectedStreamPresentation(show_tool_calls=True, response_text="Checked."),
         prompt=continuation.request_body,
-        show_tool_calls=continuation.show_tool_calls,
         resumed_attempt=ResumedAttempt(CompletedAttempt()),
         config=config,
         runtime_paths=paths,
-        execution_identity=identity,
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=[],
@@ -1001,7 +1084,6 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
         await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(text=segment.text, tool_trace=segment.tool_trace),
-            execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={"approved": True},
             denial_reasons={"approved": None},

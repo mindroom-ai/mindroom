@@ -9,9 +9,21 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.path_globs import validate_safe_relative_pattern
+from mindroom.providers.names import normalized_provider_name
 
 MemoryBackend = Literal["mem0", "file", "none"]
 _MemorySearchMode = Literal["keyword", "semantic"]
+
+# The memory.embedder.config fields each provider other than openai, which reads them all, may set.
+_EMBEDDER_FIELDS_BY_PROVIDER = {"ollama": frozenset({"model", "host"}), "sentence_transformers": frozenset({"model"})}
+# Nothing reads dimensions for a huggingface or other Mem0-only embedder, but its Mem0 collection name includes it,
+# so rejecting it would cut such a deployment off from its stored memories.
+_MEM0_ONLY_EMBEDDER_FIELDS = frozenset({"model", "dimensions"})
+
+
+def _sets_a_value(value: object) -> bool:
+    """Return whether a config value sets anything: null and blank strings do not, matching credential resolution."""
+    return bool(value.strip()) if isinstance(value, str) else value is not None
 
 
 def _validate_memory_search_includes(value: list[str]) -> list[str]:
@@ -69,11 +81,27 @@ class _MemoryEmbedderConfig(BaseModel):
     )
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
 
+    @field_validator("provider")
+    @classmethod
+    def _canonical_provider(cls, value: str) -> str:
+        """Spell the provider as every embedder consumer compares it, so `OpenAI` selects openai."""
+        return normalized_provider_name(value)
+
     @model_validator(mode="after")
-    def _prefixes_need_openai_provider(self) -> Self:
-        """Reject prefixes that the configured provider would silently ignore."""
-        if self.provider != "openai" and (self.config.query_prefix or self.config.document_prefix):
-            msg = "memory.embedder.config.query_prefix and document_prefix apply only to the openai provider"
+    def _reject_fields_the_provider_never_reads(self) -> Self:
+        """Reject a set field that the provider never reads, except a Mem0-only provider's dimensions."""
+        if self.provider == "openai":
+            return self
+        accepted = _EMBEDDER_FIELDS_BY_PROVIDER.get(self.provider, _MEM0_ONLY_EMBEDDER_FIELDS)
+        ignored = [
+            f"memory.embedder.config.{name}"
+            for name, value in self.config
+            if name not in accepted and _sets_a_value(value)
+        ]
+        if ignored:
+            listed = ignored[0] if len(ignored) == 1 else f"{', '.join(ignored[:-1])} and {ignored[-1]}"
+            verb, pronoun = ("does", "it") if len(ignored) == 1 else ("do", "them")
+            msg = f"{listed} {verb} not apply to the {self.provider} provider; remove {pronoun}"
             raise ValueError(msg)
         return self
 

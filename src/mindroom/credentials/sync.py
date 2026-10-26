@@ -540,3 +540,8 @@ def get_ollama_host(runtime_paths: RuntimePaths) -> str | None:
     if ollama_creds:
         return ollama_creds.get("host")
     return None
+
+
+def get_ollama_api_key(runtime_paths: RuntimePaths) -> str | None:
+    """Return ``OLLAMA_API_KEY``, the key an Ollama server that requires one gets from a caller with no key of its own."""
+    return get_secret_from_env("OLLAMA_API_KEY", runtime_paths=runtime_paths)

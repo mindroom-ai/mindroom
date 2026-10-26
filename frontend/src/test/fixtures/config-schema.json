@@ -1936,7 +1936,7 @@
             }
           ],
           "default": null,
-          "description": "Optional credential service used only by this embedder. When omitted, legacy resolution checks the dedicated 'embedder' service and then the provider credential",
+          "description": "Optional credential service used only by this embedder, for the openai provider. When omitted, legacy resolution checks the dedicated 'embedder' service and then the provider credential",
           "title": "Credentials Service"
         },
         "api_key": {
@@ -1949,7 +1949,7 @@
             }
           ],
           "default": null,
-          "description": "Explicit embedder API key. Highest priority, above credentials_service and the legacy dedicated embedder-to-openai fallback",
+          "description": "Explicit embedder API key for the openai provider. Highest priority, above credentials_service and the legacy dedicated embedder-to-openai fallback",
           "title": "Api Key",
           "x-mindroom": {
             "secret": true

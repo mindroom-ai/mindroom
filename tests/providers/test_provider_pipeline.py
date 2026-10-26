@@ -1149,6 +1149,21 @@ async def test_a_partial_usage_report_of_an_abandoned_stream_is_recorded(tmp_pat
     assert response_record["usage"]["cache_read_tokens"] == 42
 
 
+@pytest.mark.asyncio
+async def test_a_failed_attempt_logs_the_partial_usage_it_reported(tmp_path: Path) -> None:
+    """An attempt that fails after only a partial report, as a Claude stream can, logs that usage."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, cache_read_tokens=42))
+    inner = _ScriptedProvider([[UsageReported(usage, final=False), _transient()]])
+
+    with capture_logs() as logs, pytest.raises(ProviderUnavailable):
+        await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)
+    _, response_record = _log_records(tmp_path)
+    assert response_record["usage"]["cache_read_tokens"] == 42
+
+
 def _request() -> ModelRequest:
     return ModelRequest(messages=[_user()])
 

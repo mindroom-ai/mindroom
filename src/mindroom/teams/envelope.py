@@ -13,14 +13,13 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
@@ -65,9 +64,10 @@ from mindroom.response_turn import (
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
-from mindroom.run_storage import bind_turn_session, persist_into, scope_run_storage
+from mindroom.run_storage import bind_turn_session, scope_run_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
+from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     allow_direct_private_team_agents,
@@ -84,17 +84,16 @@ from mindroom.teams.presentation import (
     format_team_header,
     format_team_response,
 )
-from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
-from mindroom.teams.runtime import leader_tool_specs, run_team
+from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
+from mindroom.teams.runtime import leader_tool_specs
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 
-    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.history.request_messages import TurnMessages
@@ -105,11 +104,11 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import EmptyRunDiscard, TurnRunState
-    from mindroom.run_storage import RunStorage, TerminalRecord
+    from mindroom.run_storage import RunStorage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
     from mindroom.teams.runtime import TeamRunEvent
-    from mindroom.teams.spec import TeamMode, TeamSpec
+    from mindroom.teams.spec import TeamMode
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -158,7 +157,7 @@ class PreparedTeamExecution:
 async def prepare_materialized_team_execution(
     ctx: ResponseTurnContext,
     *,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     built: BuiltTeam,
     message: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
@@ -190,7 +189,6 @@ async def prepare_materialized_team_execution(
     prepared_execution = await prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,
-        member_names=[member.spec.id for member in spec.members],
         leader_system_message=leader.system_message,
         leader_tools=leader_tool_specs(spec),
         model=leader.model,
@@ -222,15 +220,11 @@ async def prepare_materialized_team_execution(
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
     # The stored team history this request replays under the resolved plan, and the scope summary.
-    history, summary = (
-        replayed_history(
-            scope_context.session,
-            scope_context.scope,
-            built.history_settings,
-            prepared_history.replay_plan,
-        )
-        if scope_context is not None
-        else ([], None)
+    history, summary = replayed_history(
+        scope_context.session,
+        scope_context.scope,
+        built.history_settings,
+        prepared_history.replay_plan,
     )
     run_extra_content = build_prepared_history_metadata_content(prepared_history)
     run_metadata = build_matrix_run_metadata(
@@ -259,65 +253,21 @@ async def prepare_materialized_team_execution(
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _LeaderRun:
-    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata.
-
-    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
-    """
-
-    spec: TeamSpec
-    storage: RunStorage | None
-    hooks: LoopHooks
-    request_template: ModelRequest
-    stream: bool
-    model_name: str
-    metadata: dict[str, Any] | None
-
-    def start(
-        self,
-        run_input: Sequence[Message],
-        *,
-        run_id: str,
-        session_id: str,
-        user_id: str | None,
-        records: TerminalRecord[TeamRunRecord] | None,
-    ) -> AsyncIterator[TeamRunEvent]:
-        """Start the run; its tools share the stored session's ``session_state``, which the store writes back."""
-        return run_team(
-            self.spec,
-            run_input,
-            ctx=RunContext(
-                run_id=run_id,
-                session=self.storage.session if self.storage is not None else UnstoredSession(session_id),
-                user_id=user_id,
-                metadata=self.metadata,
-                history_scope=self.storage.scope if self.storage is not None else None,
-                model_name=self.model_name,
-            ),
-            hooks=self.hooks,
-            persist=persist_into(records, self.storage),
-            request_template=self.request_template,
-            stream=self.stream,
-        )
-
-
 def _leader_run(
     built: BuiltTeam,
     prepared: PreparedTeamExecution,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    storage: RunStorage | None,
+    storage: RunStorage,
     configured_team_name: str | None,
-    stream: bool,
     compaction_lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
-) -> _LeaderRun:
+) -> LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
-    return _LeaderRun(
-        spec=built.spec,
+    return LeaderRun(
+        built=built,
         storage=storage,
         hooks=leader_loop_hooks(
             built,
@@ -334,9 +284,7 @@ def _leader_run(
             entity_name=configured_team_name,
         ),
         request_template=with_native_history(ModelRequest(messages=()), history.native_history),
-        stream=stream,
         model_name=prepared.runtime_model_name,
-        metadata=prepared.run_metadata,
     )
 
 
@@ -346,9 +294,8 @@ def run_prepared_team(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     team_name: str,
-    session_id: str,
     user_id: str | None,
     stream: bool,
 ) -> AsyncIterator[TeamRunEvent]:
@@ -356,7 +303,7 @@ def run_prepared_team(
 
     The run and its usage are stored in the team scope, a scope without a stored session getting its first one.
     """
-    storage = scope_run_storage(scope_context) if scope_context is not None else None
+    storage = scope_run_storage(scope_context)
     leader = _leader_run(
         built,
         prepared,
@@ -364,27 +311,25 @@ def run_prepared_team(
         runtime_paths=runtime_paths,
         storage=storage,
         configured_team_name=team_name,
-        stream=stream,
         compaction_lifecycle=None,
         turn_recorder=None,
     )
     return leader.start(
         prepared.run_input(MediaInputs()),
         run_id=str(uuid4()),
-        session_id=session_id,
         user_id=user_id,
+        metadata=prepared.run_metadata,
         records=None,
+        stream=stream,
     )
 
 
-async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext | None, event_ids: list[str]) -> None:
+async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext, event_ids: list[str]) -> None:
     """Record the Matrix events this team turn consumed on the stored session row, creating the row if needed.
 
     The ids merge into the metadata the row holds, so nothing the run or another writer stored is put back or lost.
     The write runs in the database's lane, as the session's other writes do.
     """
-    if scope_context is None:
-        return
     storage = scope_context.storage
     # A new session names the row to merge into, so the run's loaded session never writes its stale state back.
     record = partial(
@@ -412,17 +357,22 @@ def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[st
 class _TeamTurnHolder:
     """Live per-turn team state shared between attempt closures and adapter callbacks.
 
-    ``team_members`` holds the members the turn built until its first attempt takes them.
+    ``members`` are the members the turn's latest attempt runs with: the ones the turn built, which its first attempt
+    takes (``first_members_taken``), then each later attempt's rebuild.
     """
 
-    team_members: ResolvedExactTeamMembers | None = None
-    member_model_names: dict[str, str] = field(default_factory=dict)
+    members: ResolvedExactTeamMembers
+    first_members_taken: bool = False
     attempt_started: bool = False
 
 
 @dataclass(frozen=True)
 class _TeamTurn:
-    """The constants of one team turn, shared by its attempts."""
+    """The constants of one team turn, shared by its attempts.
+
+    ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
+    agent turn runs on the config it was given; ``orchestrator`` says which agents are running now.
+    """
 
     ctx: ResponseTurnContext
     orchestrator: OrchestratorRuntime
@@ -434,7 +384,6 @@ class _TeamTurn:
     model_name: str | None
     media: MediaInputs
     show_tool_calls: bool
-    run_id_callback: Callable[[str], None] | None
     user_id: str | None
     response_sender_id: str | None
     compaction_lifecycle: CompactionLifecycle | None
@@ -488,25 +437,33 @@ class _TeamTurn:
         )
 
     async def members_for_attempt(self, continuation_state: TurnContinuationRunState) -> ResolvedExactTeamMembers:
-        """Return the attempt's member set: the turn's members for its first attempt, rebuilt for every later one."""
+        """Return the attempt's member set: the turn's members for its first attempt, rebuilt for every later one.
+
+        A rebuild keeps the latest members' models unless a continuation applies a new model to the members.
+        """
         holder = self.holder
-        if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
-            holder.member_model_names = dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name)
-        members, holder.team_members = holder.team_members, None
-        if members is None:
-            # TODO(simplify): an empty-reply retry or a continuation that keeps the members' models rebuilds them too.
-            # Rebuild only when a continuation applies a new model to the members. Plugin authors would notice:
-            # member toolkit factories and MCP servers start fewer times.
-            members = await asyncio.to_thread(
-                materialize_team_members,
-                self.requested_agent_names,
-                self.orchestrator,
-                self.execution_identity,
-                reason_prefix=self.reason_prefix,
-                configured_team_name=self.configured_team_name,
-                active_model_names=holder.member_model_names,
-            )
-        return members
+        if not holder.first_members_taken:
+            holder.first_members_taken = True
+            return holder.members
+        # TODO(simplify): an empty-reply retry or a continuation that keeps the members' models rebuilds them too.
+        # Rebuild only when a continuation applies a new model to the members. Plugin authors would notice:
+        # member toolkit factories and MCP servers start fewer times.
+        model_names = (
+            dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name)
+            if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None
+            else holder.members.model_names
+        )
+        holder.members = await asyncio.to_thread(
+            materialize_team_members,
+            self.requested_agent_names,
+            self.orchestrator,
+            self.execution_identity,
+            config=self.config,
+            reason_prefix=self.reason_prefix,
+            configured_team_name=self.configured_team_name,
+            active_model_names=model_names,
+        )
+        return holder.members
 
     async def start_attempt(
         self,
@@ -531,7 +488,7 @@ class _TeamTurn:
             mode=self.mode,
             config=config,
             runtime_paths=self.runtime_paths,
-            scope_context=run.scope_context,
+            scope_context=run.scope,
             execution_identity=self.execution_identity,
             model_name=runtime_model.model_name,
             configured_team_name=self.configured_team_name,
@@ -540,7 +497,7 @@ class _TeamTurn:
         )
         prepared = await prepare_materialized_team_execution(
             self.ctx,
-            scope_context=run.scope_context,
+            scope_context=run.scope,
             built=built,
             message=continuation_state.active_prompt,
             thread_history=self.thread_history,
@@ -583,7 +540,6 @@ class _TeamTurn:
             agents=members.display_names,
             prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
         )
-        # A team without a bound scope stores nothing.
         storage = bind_turn_session(run)
         leader = _leader_run(
             built,
@@ -592,16 +548,14 @@ class _TeamTurn:
             runtime_paths=self.runtime_paths,
             storage=storage,
             configured_team_name=self.configured_team_name,
-            stream=stream,
             compaction_lifecycle=self.compaction_lifecycle,
             turn_recorder=self.turn_recorder,
         )
-        if self.run_id_callback is not None:
-            self.run_id_callback(attempt.run_id)
+        self.turn_recorder.set_run_id(attempt.run_id)
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
             run_input=run_input,
-            metadata=leader.metadata,
+            metadata=prepared.run_metadata,
         )
         with bind_llm_request_log_context(**request_context):
             if self.pipeline_timing is not None:
@@ -609,30 +563,26 @@ class _TeamTurn:
             events = leader.start(
                 run_input,
                 run_id=attempt.run_id,
-                session_id=self.session_id,
                 user_id=self.user_id,
+                metadata=prepared.run_metadata,
                 records=attempt.records,
+                stream=stream,
             )
-        if storage is not None:
-            events = drive_team_delegations(
-                events,
-                TeamResume(
-                    built=built,
-                    storage=storage,
-                    records=attempt.records,
-                    hooks=leader.hooks,
-                    request_template=leader.request_template,
-                    plan=prepared.prepared_history.replay_plan,
-                    user_id=self.user_id,
-                    toolkit_owners=tool_owners_by_agent(*members.builds),
-                    model_name=prepared.runtime_model_name,
-                ),
-                team_name=self.entity_name,
-                config=config,
-                runtime_paths=self.runtime_paths,
-                execution_identity=self.execution_identity,
-                refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
-            )
+        events = drive_team_delegations(
+            events,
+            TeamResume(
+                leader=leader,
+                records=attempt.records,
+                plan=prepared.prepared_history.replay_plan,
+                user_id=self.user_id,
+                toolkit_owners=tool_owners_by_agent(*members.builds),
+            ),
+            team_name=self.entity_name,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=self.execution_identity,
+            refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
+        )
         return attempt, stream_with_llm_request_log_context(events, request_context=request_context)
 
     async def run_blocking_attempt(
@@ -664,7 +614,10 @@ class _TeamTurn:
             self.sync_live_turn_recorder(run, attempt)
         record = attempt.terminal_record()
         if record.status is RunStatus.paused:
-            return self.resolve_paused(attempt, record, blocking=True)
+            # The pause shows the document the run's events built, as a streamed pause does, with each failed member
+            # run's reason, which its deltas never show.
+            attempt.show_failure_reasons(record)
+            return self.resolve_paused(attempt, record)
         return await self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
 
     async def run_streaming_attempt(
@@ -674,16 +627,16 @@ class _TeamTurn:
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state, stream=True)
-        emitted_output = False
+        shown: str | None = None
         try:
             async with closing_async_stream(events):
                 async for event in events:
                     if not attempt.apply(event):
                         continue
                     self.sync_live_turn_recorder(run, attempt)
-                    chunk = attempt.chunk()
+                    chunk = attempt.chunk(finished=False)
                     if chunk is not None:
-                        emitted_output = True
+                        shown = chunk.content
                         yield chunk
         except Exception as error:
             logger.exception("team_streaming_failed", agents=attempt.members.display_names)
@@ -697,7 +650,7 @@ class _TeamTurn:
         if shown_reasons:
             self.sync_live_turn_recorder(run, attempt)
         if record.status is RunStatus.paused:
-            paused = self.resolve_paused(attempt, record, blocking=False)
+            paused = self.resolve_paused(attempt, record)
             if paused.response_text:
                 yield StructuredStreamChunk(
                     content=paused.response_text,
@@ -706,13 +659,15 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
-        if shown_reasons and (chunk := attempt.chunk()) is not None:
-            emitted_output = True
+        # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
+        # when only members spoke.
+        if (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
+            shown = chunk.content
             yield chunk
         # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
         # carries the trigger either, so the next turn still reads it.
         yield AttemptResolved(
-            await self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output),
+            await self.resolve_completed(run, attempt, record, blocking=False, mark_seen=shown is not None),
         )
 
     def run_metadata_content(self, attempt: TeamAttempt, status: RunStatus) -> dict[str, Any] | None:
@@ -744,10 +699,11 @@ class _TeamTurn:
             interrupted_tools=snapshot.interrupted_tools,
         )
 
-    def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:
-        """Return the pause the lifecycle owner asks the requester about, rendered into the document it shows.
+    def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
+        """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
-        A blocking pause renders its runs' records; a streamed one freezes the document its events built.
+        A blocking pause and a streamed one freeze the same document, so neither shows the paused notices its runs
+        hold as their content (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
         """
         paused = paused_attempt_from_response(
             record,
@@ -755,21 +711,10 @@ class _TeamTurn:
         )
         if paused is None:
             raise pause_without_approval_error(record, entity_label="team")
-        presented = (
-            blocking_team_pause(
-                paused,
-                record,
-                config_names=attempt.members.requested_agent_names,
-                display_names=attempt.members.display_names,
-                show_tool_calls=attempt.presentation.show_tool_calls,
-            )
-            if blocking
-            else continued_team_pause(attempt.presentation, paused)
-        )
         return replace(
-            presented,
+            continued_team_pause(attempt.presentation, paused),
             runtime_model_name=attempt.runtime_model_name,
-            team_member_model_names=tuple(sorted(self.holder.member_model_names.items())),
+            team_member_model_names=tuple(sorted(attempt.members.model_names.items())),
         )
 
     async def resolve_completed(
@@ -787,7 +732,7 @@ class _TeamTurn:
         """
         if mark_seen and self.ctx.reply_to_event_id:
             await _persist_bound_seen_event_ids(
-                scope_context=run.scope_context,
+                scope_context=run.scope,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
         tool_executions = team_tool_executions(record)
@@ -810,7 +755,7 @@ class _TeamTurn:
             response_text = leader_text.strip() if silent else rendered
             replayable_text = response_text if has_visible_output else ""
         else:
-            body_text = attempt.reply.canonical_text()
+            body_text = attempt.reply.canonical_text(finished=True)
             has_visible_output = bool(body_text)
             rendered = header + (body_text or NO_TEAM_RESPONSE)
             response_text = ""
@@ -849,7 +794,7 @@ class _TeamTurn:
             output_tokens=discard.output_tokens,
         )
 
-    def load_scope(self) -> ScopeSessionContext | None:
+    def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
             member_names=self.requested_agent_names,
             session_id=self.session_id,
@@ -888,7 +833,6 @@ def _team_turn(
     model_name: str | None,
     media: MediaInputs | None,
     show_tool_calls: bool,
-    run_id_callback: Callable[[str], None] | None,
     user_id: str | None,
     response_sender_id: str | None,
     compaction_lifecycle: CompactionLifecycle | None,
@@ -931,6 +875,7 @@ def _team_turn(
             requested_agent_names,
             orchestrator,
             execution_identity,
+            config=config,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
@@ -957,7 +902,6 @@ def _team_turn(
         model_name=model_name,
         media=media or MediaInputs(),
         show_tool_calls=show_tool_calls,
-        run_id_callback=run_id_callback,
         user_id=user_id,
         response_sender_id=response_sender_id,
         compaction_lifecycle=compaction_lifecycle,
@@ -966,7 +910,7 @@ def _team_turn(
         pipeline_timing=pipeline_timing,
         turn_recorder=turn_recorder,
         reason_prefix=reason_prefix,
-        holder=_TeamTurnHolder(team_members=team_members, member_model_names=team_members.model_names),
+        holder=_TeamTurnHolder(members=team_members),
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
         timezone=config.get_entity_timezone(ctx.entity_label),
     )
@@ -988,7 +932,6 @@ async def team_response(
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
-    run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
@@ -1018,7 +961,6 @@ async def team_response(
         model_name=model_name,
         media=media,
         show_tool_calls=show_tool_calls,
-        run_id_callback=run_id_callback,
         user_id=user_id,
         response_sender_id=response_sender_id,
         compaction_lifecycle=compaction_lifecycle,
@@ -1062,7 +1004,6 @@ async def team_response_stream(
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
-    run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
@@ -1093,7 +1034,6 @@ async def team_response_stream(
         model_name=model_name,
         media=media,
         show_tool_calls=show_tool_calls,
-        run_id_callback=run_id_callback,
         user_id=user_id,
         response_sender_id=response_sender_id,
         compaction_lifecycle=compaction_lifecycle,
