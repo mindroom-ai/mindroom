@@ -377,7 +377,13 @@ def load_seals(base_storage_path: Path) -> dict[Path, CandidateCheckpoint | None
 
 
 def take_sealed_candidate(base_storage_path: Path, seal_path: Path) -> None:
-    """Make the sealed collection the candidate by renaming its seal onto the candidate snapshot."""
+    """Make the sealed collection the candidate by renaming its seal onto the candidate snapshot.
+
+    Any candidate it replaces is retired first, snapshot before journal, so an
+    interruption leaves either that whole candidate or none, never a snapshot
+    that lost its journal.
+    """
+    _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)
     _candidate_journal_path(base_storage_path).unlink(missing_ok=True)
     seal_path.replace(_candidate_checkpoint_path(base_storage_path))
 

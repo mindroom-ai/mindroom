@@ -4884,7 +4884,7 @@ async def test_a_cancelled_refresh_finishes_its_seal_change_before_it_returns(
     await _refresh_and_check(config, docs_path)
 
 
-@pytest.mark.parametrize("damage", ["unreadable", "lost_row"])
+@pytest.mark.parametrize("damage", ["unreadable", "lost_row", "missing"])
 @pytest.mark.asyncio
 async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing_or_serving_lost_rows(
     tmp_path: Path,
@@ -4907,9 +4907,11 @@ async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing_or
             return original_count(self)
 
         monkeypatch.setattr(_FakeCollection, "count", _unreadable_count)
-    else:
+    elif damage == "lost_row":
         lost = next(record for record in _FakeVectorDb.store[retired] if record.metadata["source_path"] == names[5])
         _FakeVectorDb.store[retired].remove(lost)
+    else:
+        del _FakeVectorDb.store[retired]
     (docs_path / names[3]).write_text("change after the damage", encoding="utf-8")
     _FakeVectorDb.writes = []
 
@@ -4920,3 +4922,44 @@ async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing_or
     for step in range(2):
         (docs_path / names[step]).write_text(f"later change {step}", encoding="utf-8")
         await _refresh_and_check(config, docs_path)
+
+
+@pytest.mark.asyncio
+async def test_taking_a_seal_over_a_stranded_candidate_never_leaves_that_candidate_without_its_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted take-over leaves the candidate it replaces whole or gone, never a snapshot missing its journal."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    storage = _storage_path(config, runtime_paths_for(config))
+    await _build_steady_state(config, docs_path, names)
+    # A candidate holding rows it never claimed is rebuilt, which is where a seal is taken over instead.
+    stranded = f"{_manager(config)._collections.default_collection}_candidate_strandedstranded"
+    _FakeVectorDb.store[stranded] = [
+        _Record(identifier=_next_record_id(), content="stray", embedding=[1.0], metadata={"source_path": "stray.md"}),
+    ]
+    save_candidate_checkpoint(
+        storage,
+        CandidateCheckpoint(collection=stranded, settings=_manager(config)._indexing_settings),
+    )
+    append_candidate_journal(storage, removed=("stray.md",))
+    snapshot = _candidate_checkpoint_path(storage)
+    original_replace = Path.replace
+
+    def _crash_before_the_seal_lands(self: Path, target: Path) -> Path:
+        if Path(target) == snapshot:
+            raise _Crash
+        return original_replace(self, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", _crash_before_the_seal_lands)
+        with pytest.raises(_Crash):
+            await _manager(config).reindex_all()
+
+    assert not snapshot.exists(), "the replaced candidate's snapshot outlived its journal"
+    (docs_path / names[2]).write_text("change after the interrupted take-over", encoding="utf-8")
+    _FakeVectorDb.writes = []
+    await _refresh_and_check(config, docs_path)
+    assert _copied_rows() == 0, "the seal was lost along with the stranded candidate"
