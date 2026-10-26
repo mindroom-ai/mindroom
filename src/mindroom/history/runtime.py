@@ -371,7 +371,7 @@ def _reported_history_tokens(
         or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
     ):
         return None
-    messages = [message for message in latest_run.messages if not message.from_history]
+    messages = latest_run.messages
     anchor = next(
         (index for index in range(len(messages) - 1, -1, -1) if is_own_model_message(messages[index])),
         None,

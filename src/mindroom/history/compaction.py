@@ -705,7 +705,7 @@ def _after_native_checkpoint(previous_summary: str | None, runs: Sequence[AnyRun
     for index in range(len(runs) - 1, 0, -1):
         basis = replay_basis(previous_summary, runs[:index])
         for message in reversed(runs[index].messages):
-            if not message.from_history and (summary := checkpoint_summary(message, basis)) is not None:
+            if (summary := checkpoint_summary(message, basis)) is not None:
                 return _SummarySource(list(runs[:index]), summary, list(runs[index:]))
     return None
 

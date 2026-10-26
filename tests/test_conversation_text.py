@@ -70,14 +70,6 @@ def test_a_prompt_is_split_by_who_sent_each_message() -> None:
     ]
 
 
-def _history_copy() -> RunRecord:
-    run = _turn()
-    for message in run.messages or []:
-        message.from_history = True
-    run.messages = [Message(role="system", content="You are mind."), *(run.messages or [])]
-    return run
-
-
 def _child() -> RunRecord:
     run = _turn()
     run.parent_run_id = "parent"
@@ -87,7 +79,7 @@ def _child() -> RunRecord:
 @pytest.mark.parametrize(
     "run",
     [
-        pytest.param(_history_copy(), id="history-copy"),
+        pytest.param(_run(Message(role="system", content="You are mind.")), id="system"),
         pytest.param(_child(), id="child"),
         pytest.param(_run(Message(role="user", content="hi"), status=RunStatus.paused), id="paused"),
         pytest.param(_run(Message(role="user", content="hi"), status=RunStatus.cancelled), id="cancelled"),
@@ -95,7 +87,7 @@ def _child() -> RunRecord:
     ],
 )
 def test_what_the_agent_history_does_not_show_is_not_conversation(run: RunRecord) -> None:
-    """Copies of earlier turns, system messages, and runs left out of the agent's history are never read."""
+    """System messages and runs left out of the agent's history are never read."""
     assert _kinds(run, agent_work=True) == []
 
 

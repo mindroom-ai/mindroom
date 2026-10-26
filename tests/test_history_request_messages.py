@@ -284,17 +284,9 @@ def test_team_scope_replays_only_its_own_finished_top_level_runs() -> None:
     assert _contents(_replay(runs, scope=_TEAM)) == ["team question", "team answer"]
 
 
-def test_prompt_roles_and_stored_history_copies_never_replay() -> None:
-    stored_copy = Message(role="user", content="replayed earlier", from_history=True)
+def test_prompt_roles_never_replay() -> None:
     runs: list[AnyRunRecord] = [
-        _agent_run(
-            "run",
-            messages=[
-                Message(role="system", content="old system prompt"),
-                stored_copy,
-                *_exchange("run"),
-            ],
-        ),
+        _agent_run("run", messages=[Message(role="system", content="old system prompt"), *_exchange("run")]),
     ]
     assert _contents(_replay(runs)) == ["run question", "run answer"]
 

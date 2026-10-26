@@ -70,10 +70,10 @@ def _prompt_utterances(message: Message, content: str, requester: str, *, mindro
 def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance]:
     """Return what was said in one stored turn, oldest first.
 
-    Only turns the agent's own history shows count, never copies of earlier turns. A prompt MindRoom wrote is nobody's
-    words: an automation's turn is left out entirely, a background job follow-up keeps only its reply, and a run's own
-    compaction summary is left out. A stopped turn's answer is a rendered summary that can quote tool previews, so it is
-    left out too. ``agent_work`` keeps all of these, plus tool calls and results, for a reviewer of how the agent worked.
+    Only turns the agent's own history shows count. A prompt MindRoom wrote is nobody's words: an automation's turn is
+    left out entirely, a background job follow-up keeps only its reply, and a run's own compaction summary is left out.
+    A stopped turn's answer is a rendered summary that can quote tool previews, so it is left out too. ``agent_work``
+    keeps all of these, plus tool calls and results, for a reviewer of how the agent worked.
     """
     if not is_model_history_visible_run(run):
         return []
@@ -87,8 +87,6 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     said: list[Utterance] = []
     for message in run.messages:
         content = message.content if isinstance(message.content, str) else ""
-        if message.from_history:
-            continue
         mindroom_wrote = runtime_prompt or is_queued_notice_message(message) or is_compaction_summary(message)
         if message.role == "user" and (agent_work or not mindroom_wrote):
             said.extend(_prompt_utterances(message, content, requester, mindroom_wrote=mindroom_wrote))

@@ -434,9 +434,8 @@ async def test_summary_starts_from_the_latest_readable_native_checkpoint() -> No
     run_4 = _completed_run(
         "run-4",
         messages=[
-            # A replayed copy, an encrypted checkpoint, and checkpoints whose request replayed other history are skipped.
-            checkpointed_answer({"type": "compaction", "content": "REPLAYED CHECKPOINT"}, later, from_history=True),
             Message(role="user", content="run-4 question"),
+            # An encrypted checkpoint and checkpoints whose request replayed other history are skipped.
             checkpointed_answer({"type": "compaction", "encrypted_content": "opaque"}, later),
             checkpointed_answer(
                 {"type": "compaction", "content": "OTHER RUNS"},
@@ -462,7 +461,6 @@ async def test_summary_starts_from_the_latest_readable_native_checkpoint() -> No
     for covered in (
         "PREVIOUS SUMMARY",
         "OLDER CHECKPOINT",
-        "REPLAYED CHECKPOINT",
         "OTHER RUNS",
         "OTHER SUMMARY",
         "NO BASIS",

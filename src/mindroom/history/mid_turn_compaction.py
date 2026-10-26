@@ -608,8 +608,8 @@ async def _summarize_run_locally(
 ) -> Message:
     scope = HistoryScope(kind="team" if compaction.is_team else "agent", scope_id=compaction.scope_id)
     # Without a stored session to append a summary row to, replayed history is summarized with the turn's exchanges,
-    # as content of its own snapshot rather than a copy the summary input skips.
-    history = [_snapshot_run(record, [replace(message, from_history=False)], None) for message in layout.history]
+    # each message as a snapshot of its own.
+    history = [_snapshot_run(record, [message], None) for message in layout.history]
     summary = await summarize_run_locally(
         resolved_inputs=inputs,
         previous_summary=layout.previous_run_local_summary,
