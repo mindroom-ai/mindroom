@@ -58,8 +58,9 @@ class TeamReplyText:
 
     ``presentation`` owns the member identities: the configured slot order, the display names, and the slot an event's
     member resolves to. Text written after a tool call of the same slot starts a new paragraph, as a run's content
-    separates its requests' texts. ``streamed_member_runs`` names the member runs whose deltas gave text, by run id,
-    since a member's slot holds the text of each of its runs.
+    separates its requests' texts, and so does a member's text from another run than the slot's last text came from,
+    as a blocking reply separates a member's runs (``format_team_response``). ``streamed_member_runs`` names the member
+    runs whose deltas gave text, by run id, since a member's slot holds the text of each of its runs.
     """
 
     presentation: TeamStreamPresentation
@@ -68,19 +69,31 @@ class TeamReplyText:
     streamed_member_runs: set[str] = field(default_factory=set, init=False)
     # The slots, member ids or ``None`` for the consensus, whose next text follows a tool call.
     _separate_next: set[str | None] = field(default_factory=set, init=False, repr=False)
+    # The run whose deltas last gave each member slot text.
+    _last_text_run: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Give every configured slot empty text."""
         self.per_member = dict.fromkeys(self.presentation.member_ids, "")
+
+    def starts_another_run(self, event: TeamRunEvent) -> bool:
+        """Return whether ``event`` is a member's text from another run than the one its slot's last text came from."""
+        if not (isinstance(event, MemberEvent) and isinstance(event.event, TextDelta) and event.event.text):
+            return False
+        member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
+        return self._last_text_run.get(member_id, event.run_id) != event.run_id
 
     def apply(self, event: TeamRunEvent) -> None:
         """Fold one run event into the text: a member's or the leader's delta, or a tool call between them."""
         if isinstance(event, MemberEvent):
             member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
             if isinstance(event.event, TextDelta):
+                if self.starts_another_run(event):
+                    self._separate_next.add(member_id)
                 self.per_member[member_id] = self._appended(member_id, self.per_member[member_id], event.event.text)
                 if event.event.text:
                     self.streamed_member_runs.add(event.run_id)
+                    self._last_text_run[member_id] = event.run_id
             elif isinstance(event.event, ToolStarted) and self.per_member[member_id]:
                 self._separate_next.add(member_id)
         elif isinstance(event, TextDelta):
@@ -155,7 +168,11 @@ class TeamAttempt:
         return format_team_response(record, self.presentation).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
-        """Fold one run event into the attempt; return whether the document changed."""
+        """Fold one run event into the attempt; return whether the document changed.
+
+        The document and the reply's text separate a member's runs by the same rule (``starts_another_run``).
+        """
+        separate = self.reply.starts_another_run(event)
         self.reply.apply(event)
         if self.records.collect(event):
             return False
@@ -174,7 +191,7 @@ class TeamAttempt:
             )
         elif not isinstance(inner, TextDelta):
             return False
-        apply_team_event(self.presentation, event)
+        apply_team_event(self.presentation, event, separate=separate)
         return True
 
     def show_unshown_handover(self, run: AnyRunRecord) -> bool:

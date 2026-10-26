@@ -372,13 +372,16 @@ class TeamStreamPresentation:
         return header + "\n\n".join(parts) if parts else ""
 
 
-def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) -> None:
-    """Apply one team run event to the document: member events to the member's slot, the leader's to the consensus."""
+def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent, *, separate: bool = False) -> None:
+    """Apply one team run event to the document: member events to the member's slot, the leader's to the consensus.
+
+    ``separate`` starts a member's text in a paragraph of its own, for text from another of the member's runs.
+    """
     if isinstance(event, MemberEvent):
         member_id = presentation.resolve_member_id(event.member_id, event.member_name)
         inner = event.event
         if isinstance(inner, TextDelta):
-            presentation.append_member(member_id, inner.text)
+            presentation.append_member(member_id, inner.text, separate=separate)
         elif isinstance(inner, ToolStarted):
             presentation.start_member_tool(member_id, inner.call)
         elif isinstance(inner, ToolCompleted):

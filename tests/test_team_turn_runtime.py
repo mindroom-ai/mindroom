@@ -287,6 +287,31 @@ async def test_a_team_reply_lists_the_members_as_configured_on_either_path(
     assert team.recorder.assistant_text == text
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_member_delegated_twice_shows_each_run_a_paragraph_apart_on_either_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A coordinate leader asks the writer twice; both replies, and what each records, keep the two runs apart."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            delegate("call-draft", "writer", "Draft"),
+            delegate("call-revise", "writer", "Revise"),
+            answer("Both drafts done.", usage(50, 5)),
+        ],
+        writer=[answer("Draft one."), answer("Draft two.")],
+    )
+
+    text = await team.reply(stream=stream, show_tool_calls=False)
+
+    assert text == f"{HEADER}**Writer**: Draft one.\n\nDraft two.\n\n\n**Team Consensus**:\n\nBoth drafts done."
+    assert team.recorder.assistant_text == text
+
+
 async def _checker_overloaded() -> None:
     msg = "Checker overloaded"
     raise ProviderError(msg, provider="Synthetic", status_code=503)
