@@ -20,7 +20,7 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import member_call_id, member_delegation_card
+from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
@@ -225,20 +225,23 @@ def drive_team_delegations(
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
     """Render the pending calls into their slots and freeze the document the pause shows.
 
-    A member's call waits in its member's slot, and the leader's own calls and a child's calls its parent holds in
-    the team's. The approval card of a member's own delegation call adds no marker: the member's slot already shows
-    that call pending under its own id, and the resume finishes it there.
+    Each call waits in the slot ``pending_call_slot`` names, the rule the approval card anchors by too. The approval
+    card of a member's own delegation call adds no marker: the member's slot already shows that call pending under
+    its own id, and the resume finishes it there. Every other call waits under its own id.
     """
     member_names = presentation.config_names_by_id.values()
     for requirement in paused.requirements:
         if member_delegation_card(requirement, member_names):
             continue
+        member_id, _ = pending_call_slot(requirement, member_names)
         call = requirement.tool_execution.call
-        if requirement.member_agent_id is None:
+        if member_id is None:
             presentation.start_tool("team", call)
         else:
-            member_id = presentation.resolve_member_id(requirement.member_agent_id, requirement.member_display_name)
-            presentation.start_member_tool(member_id, call)
+            presentation.start_member_tool(
+                presentation.resolve_member_id(member_id, requirement.member_display_name),
+                call,
+            )
     return replace(
         paused,
         response_text=presentation.render_body(),
