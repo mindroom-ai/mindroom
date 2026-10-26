@@ -73,7 +73,8 @@ def connect_conversation_database(path: Path, *, timeout: float = BUSY_TIMEOUT_S
     """
     # No implicit transactions: every operation begins its own, so its reads cannot straddle a commit.
     connection = sqlite3.connect(path, timeout=timeout, isolation_level=None)
-    # Deleting a session row cascades to its runs, summary rows, and usage, and deleting a run to its messages.
+    # Deleting a session row cascades to its runs, summary rows, and usage, and deleting a run to its message and tool
+    # rows.
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
 
