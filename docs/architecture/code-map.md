@@ -264,20 +264,22 @@ Matrix sync callback
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
-| `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, running the preflight archive check and the one-time migrations first |
-| `session_storage/store.py` | The conversation store: one SQLite database of sessions, their run log, summary rows, and usage ledger, each operation in one transaction on its own connection, and the helper every one-time database migration runs through |
-| `session_storage/schema.py` | File and table names, table listing, and the layout of a conversation database, column for column as Agno 3 created it |
-| `session_storage/codec.py` | Run rows to run records and back, with the JSON keys stored runs carry |
+| `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, running the preflight archive check and the conversion to the current layout first |
+| `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
+| `session_storage/schema.py` | File and table names, table listing, and the layout of a conversation database: the sessions table, the five `*_log_*` tables, and the usage ledger |
+| `session_storage/codec.py` | A run record to its run row and message rows and back, with the JSON keys stored runs carry |
 | `session_storage/types.py` | `ConversationSession` and the other values the store reads and writes |
 | `session_storage/lanes.py` | One FIFO lane per conversation database for storage operations started from async code |
-| `session_storage/legacy_agno2_runs.py` | Run data older Agno releases stored: Agno 2 run blobs, JSON columns encoded twice, and rows without a position |
-| `session_storage/legacy_tool_results.py` | Tool results an earlier release stored combined in one message, decoded as one message per result |
-| `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks, the event ids each row folds, and edit and redaction cuts |
-| `history/summary_rows_schema.py` | Summary-row table layout and the shared SQL for which runs a session load returns |
-| `history/legacy_compaction_state.py` | One-time conversion, when a conversation database opens, of earlier compaction state, the compaction archive, and unpositioned run rows into the log |
+| `session_storage/legacy_agno2_runs.py` | Data older Agno releases stored: Agno 2 run blobs, rows without a position, and odd timestamps, which the conversion reads, and session JSON columns encoded twice, which loads read |
+| `session_storage/legacy_tool_results.py` | Tool results an earlier release stored combined in one message, split into one message per result when a database converts |
+| `session_storage/legacy_agno3_conversion.py` | The one-way conversion of an Agno-layout conversation database to storage v2, run by every store open and by the startup sweep over the session state root |
+| `session_storage/legacy_agno3_backup.py` | The `<name>.db.pre-storage-v2` copy a database gets before its conversion, after a free-space check, through no-follow descriptors |
+| `session_storage/legacy_agno3_schema.py` | The Agno layout's table names, DDL, run-row decoder, and member-subtree delete, read only by the conversion and its Agno-era steps |
+| `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
+| `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
-| `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, read in the current shape where stored history, compaction input, and paused runs become messages |
+| `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
 | `history/session_runs.py` | Finished Matrix turns of an agent's conversations, live and compacted, with the approval hold-back and redaction filter background workers share |
 | `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |
@@ -456,4 +458,5 @@ Matrix sync callback
 
 [Data Persistence](../deployment/storage.md#data-persistence) lists the main directories under the storage root (`mindroom_data/` by default, overridable via `MINDROOM_STORAGE_PATH`).
 An agent's conversation database is `agents/<agent>/sessions/<agent>.db`, and private agents keep the same per-agent layout under their resolved private state roots.
-Its `<agent>_sessions_summaries` table holds compaction summary rows, and `<agent>_sessions_removed_runs` records runs that edits and redactions removed.
+Its tables are named after its sessions table `<agent>_sessions`: `_log_runs` holds a row per run, `_log_messages` a row per stored message, `_log_summaries` the compaction summary rows, `_log_removed` the runs that edits and redactions removed, `_log_meta` the layout version and run counter, and `_usage` the usage ledger.
+A database converted from the Agno layout keeps its pre-conversion copy beside it as `<agent>.db.pre-storage-v2`.

@@ -212,7 +212,7 @@ A capture script, deleted with Agno's runtime, wrote `storage/`, `runs/`, `histo
 Every scenario ran MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions.
 Only the provider was replaced, by the synthetic provider answering from a script.
 Never edit these files by hand.
-`tests/session_storage/test_store_goldens.py` proves the owned store reads and writes every `storage/` file as Agno did.
+`tests/session_storage/test_store_goldens.py` proves that every `storage/` file converts to storage v2 and then reads and writes with nothing lost or changed.
 
 ### Scenarios
 

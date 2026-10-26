@@ -80,6 +80,7 @@ Provider adapters, storage, the loop, and teams are built and unit-tested during
   It would also break every external plugin that subclasses `agno.tools.Toolkit` and drop Composio, whose `composio-agno` package returns Agno toolkits.
 - **A new storage schema with a one-time run rewrite.**
   Rewriting every stored run risks replay and approval regressions for no user-visible gain; owned codecs over the existing keys need no migration.
+  Once the replacement had shipped, [conversation storage rows](2026-10-25-conversation-storage-rows.md) reversed this for conversation databases in a release of its own.
 - **Adapters at every layer.**
   An Agno `Model` adapter over owned providers or an Agno storage adapter over the owned store would force the owned designs to mimic Agno's internals.
   Only the tool boundary is adapted, because an Agno `Function` already exposes its finished schema, entrypoint, and approval flags as public fields.

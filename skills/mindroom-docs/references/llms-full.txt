@@ -15253,6 +15253,8 @@ The config sent to runners with each request, and the config file projected into
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
+Agent and private-instance conversation databases stay in those directories, so every open of a conversation database refuses a `sessions` directory or database file that is a link.
+The one-time conversion of a database from an earlier release reads its rows as untrusted input and writes its `.pre-storage-v2` backup without following links, so a database worker code changed fails only its own agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
@@ -15422,6 +15424,8 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   By default these tools run in a worker, where they see only what the worker already mounts.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git then reopens that worktree by path.
   For a Git-backed knowledge base inside a workspace a worker writes, swapping the knowledge folder for a link between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
+- A conversation database's `sessions` directory swapped for a link inside SQLite's own resolve-then-open window opens the link's target under the expected name, and a missing or empty file there gets the storage v2 tables, because Python's `sqlite3` cannot open a database without following links.
+  Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory; a swap before that window is refused, and a file with tables at the target stops at the conversion's backup, which follows no link.
 
 ## Intentional behaviors
 
@@ -20184,6 +20188,8 @@ Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to 
 
 Back up the whole storage directory, and keep `tracking/` on persistent storage.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
+The [conversation storage v2 upgrade](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) leaves a `<name>.db.pre-storage-v2` copy beside each conversation database, which MindRoom never deletes.
+A conversation database restored from a backup taken before that upgrade converts again when it is next opened, which needs free space of twice its size in its directory.
 
 `tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
 These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.
@@ -20626,6 +20632,34 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to conversation storage v2
+
+The first start after this upgrade converts the conversation database of every agent and team, private instances included, to a new layout before any agent comes online.
+The conversion is one-way, and downgrading afterwards is not supported.
+
+### Before upgrading
+
+Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about twice the total size of their `.db` files.
+A database whose directory has less than twice its own size free is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
+
+### What carries over
+
+Conversation history, compaction summaries, pending tool approvals, and usage records carry over.
+Before converting a database, MindRoom copies it byte for byte to `<name>.db.pre-storage-v2` beside it and never deletes that copy.
+A stored run whose data cannot be read is left out of the converted database, logged as `conversation_run_left_out` with its run ID, and kept in the backup.
+A crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
+A converted database keeps the disk space its old tables used until later writes reuse it; with MindRoom stopped, `sqlite3 <name>.db VACUUM` returns that space.
+
+### Downgrading
+
+The only way back is to stop MindRoom, replace each `<name>.db` with its `<name>.db.pre-storage-v2` backup, delete any `<name>.db-journal` beside it, and start the older release.
+Everything written since the upgrade is lost: replies, summaries, session state, approvals requested since then, and usage records for that period.
+The older release drops messages redacted since the upgrade from the restored history before it next replies in that conversation, but edits made since the upgrade are not applied again, so the earlier reply to an edited message can return to the agent's history.
+An older release started on converted databases without restoring the backups moves each agent's or team's `sessions/` directory aside to `sessions.incompatible-<id>/`, backups included, and starts it with empty history; move the backups back out of that archive and restore them as above.
+Upgrading again converts each restored database again and writes a new backup.
+
+Once you are sure you will not downgrade, delete the `.pre-storage-v2` backups.
 
 ## Upgrading to durable reply records
 

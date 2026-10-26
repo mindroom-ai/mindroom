@@ -3,6 +3,7 @@
 Design note, October 12, 2026, written before any code and trimmed in PR A (#2856) once the implementation existed, so it keeps only what the code cannot show.
 Four design-review rounds (GPT-6 Astra and Claude Opus 5.5) found gaps in the transaction contract (stale writes, fencing, retirement, team members), not in the log model, so the design was patched rather than replaced; both approved it in round 4.
 It covers two PRs: PR A replaces `main`'s compaction archive with a log store and keeps `main`'s behavior, and a rework of #2798 then expresses mid-turn compaction on that store.
+Its storage shape (Agno's runs table, with each fold's segment on its summary row) was replaced by the rows in `docs/dev/2026-10-25-conversation-storage-rows.md`; the log model, the cut rules, and the compare-and-append stand.
 
 ## Why
 
