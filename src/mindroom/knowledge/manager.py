@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import contextmanager, nullcontext, suppress
@@ -137,10 +138,14 @@ class _InMemoryTextReader(TextReader):
 #: Files pulled into one prepare/embed/write batch. This bounds live asyncio
 #: tasks and peak memory independently of corpus size; the provider request
 #: bounds are applied separately when the batch's chunks are planned.
-_INDEX_FILES_PER_BATCH = 64
+_INDEX_FILES_PER_BATCH = 256
+#: Planned provider requests one batch keeps in flight. Every file write waits
+#: on the batch's vectors, so one request at a time leaves the provider idle
+#: between round trips; a batch needs enough files to plan several requests.
+_EMBEDDING_REQUESTS_IN_FLIGHT = 4
 #: Chunk text one batch holds between reading its files and writing them. File
-#: count alone does not bound memory: 64 large files can materialize far more
-#: text (and far more vectors) than 64 small ones. A batch closes once its text
+#: count alone does not bound memory: 256 large files can materialize far more
+#: text (and far more vectors) than 256 small ones. A batch closes once its text
 #: reaches this budget, so it holds at most the budget plus one file's chunks,
 #: which indexing that file has to materialize anyway.
 _MAX_BATCH_TEXT_BYTES = 8_000_000
@@ -943,7 +948,7 @@ class KnowledgeManager:
         embedder: RefreshEmbedder,
         prepared: Sequence[_PreparedFile],
     ) -> dict[str, list[float]]:
-        """Embed one batch's distinct chunk texts in as few provider requests as limits allow.
+        """Embed one batch's distinct chunk texts in as few provider requests as limits allow, several at once.
 
         A text left out here is embedded by its own file's write, one request
         per chunk, where a failure is retried and recorded against that file.
@@ -952,42 +957,62 @@ class KnowledgeManager:
         """
         vectors: dict[str, list[float]] = {}
         texts = list(dict.fromkeys(chunk.text for file in prepared for chunk in file.chunks if chunk.text))
-        for planned_batch in plan_embedding_batches(texts):
-            if not embedder.batches():
-                # Without batch requests, each file embeds its own chunks,
-                # concurrently with the rest of the batch.
-                break
-            try:
-                vectors.update(
-                    await run_with_embedding_retry(
-                        partial(asyncio.to_thread, embedder.embed_texts, planned_batch),
-                        policy=_EMBEDDING_RETRY_POLICY,
-                        sleep=_EMBEDDING_RETRY_SLEEP,
-                        on_retry=self._record_embedding_retry,
-                    ),
-                )
-            except Exception as exc:
-                if not embedder_failure_is_transient(exc):
-                    # Bad credentials or a wrong model will reject every
-                    # request; stop now instead of grinding out one doomed
-                    # request per remaining chunk, and report the failure the
-                    # same way a per-file rejection would.
-                    if self._last_file_index_error is None:
-                        self._last_file_index_error = classified_embedder_error(exc) or (
-                            f"knowledge indexing failed ({type(exc).__name__})"
-                        )
-                    raise _PermanentEmbeddingError from exc
-                # Exhausted transient retries: stop batching for this batch and
-                # let each file's write retry its own chunks, so the failure is
-                # attributed to specific files and nothing already embedded is
-                # embedded again.
-                logger.warning(
-                    "Falling back to per-file embedding after batch retries were exhausted",
-                    base_id=self.base_id,
-                    batch_items=len(planned_batch),
-                    exc_info=True,
-                )
-                break
+        planned_batches = iter(plan_embedding_batches(texts))
+        # Set once the batch gives up, on a permanent rejection or a request out of retries: no worker starts another
+        # planned request, and a thread embedding one text per request stops between texts. Requests already running
+        # finish; a permanent rejection drops their results, while after an exhausted request their vectors are kept.
+        stop = threading.Event()
+
+        async def embed_planned_batches() -> None:
+            for planned_batch in planned_batches:
+                if stop.is_set() or not embedder.batches():
+                    # Without batch requests, each file embeds its own chunks,
+                    # concurrently with the rest of the batch.
+                    return
+                try:
+                    vectors.update(
+                        await run_with_embedding_retry(
+                            partial(asyncio.to_thread, embedder.embed_texts, planned_batch, stop=stop),
+                            policy=_EMBEDDING_RETRY_POLICY,
+                            sleep=_EMBEDDING_RETRY_SLEEP,
+                            on_retry=self._record_embedding_retry,
+                        ),
+                    )
+                except Exception as exc:
+                    stop.set()
+                    if not embedder_failure_is_transient(exc):
+                        # Bad credentials or a wrong model will reject every
+                        # request; stop now instead of grinding out one doomed
+                        # request per remaining chunk, and report the failure the
+                        # same way a per-file rejection would.
+                        if self._last_file_index_error is None:
+                            self._last_file_index_error = classified_embedder_error(exc) or (
+                                f"knowledge indexing failed ({type(exc).__name__})"
+                            )
+                        raise _PermanentEmbeddingError from exc
+                    # Exhausted transient retries: stop batching for this batch
+                    # and leave the texts no request finished to their files'
+                    # writes, which retry their own chunks, so the failure is
+                    # attributed to specific files and nothing already
+                    # embedded is embedded again.
+                    logger.warning(
+                        "Falling back to per-file embedding after batch retries were exhausted",
+                        base_id=self.base_id,
+                        batch_items=len(planned_batch),
+                        exc_info=True,
+                    )
+
+        try:
+            # Each worker pulls the next planned request when its own one
+            # finishes. The group cancels and awaits every worker task before a
+            # permanent failure or a cancellation leaves this call.
+            async with asyncio.TaskGroup() as workers:
+                for _worker in range(min(_EMBEDDING_REQUESTS_IN_FLIGHT, self._max_concurrent_file_indexes)):
+                    workers.create_task(embed_planned_batches())
+        except* _PermanentEmbeddingError as failures:
+            raise _PermanentEmbeddingError from failures
+        finally:
+            stop.set()
         return vectors
 
     async def _prepare_batch(
