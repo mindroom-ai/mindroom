@@ -369,10 +369,9 @@ def _answer_call_reply(arguments: str) -> dict[str, Any]:
     "model_config",
     [
         {"provider": "groq", "id": "openai/gpt-oss-120b", "api_key": "k"},
-        {"provider": "deepseek", "id": "deepseek-chat", "api_key": "k"},
         {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k", "extra_kwargs": {"use_thinking": False}},
     ],
-    ids=["groq", "deepseek-chat", "deepseek-without-thinking"],
+    ids=["groq", "deepseek-without-thinking"],
 )
 async def test_a_route_that_can_force_a_tool_asks_for_structured_output_with_a_forced_call(
     tmp_path: Path,
@@ -1390,16 +1389,20 @@ async def test_a_disabled_openrouter_web_plugin_still_lets_decisions_run_without
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model_id", "use_thinking", "thinking"),
-    [("deepseek-flash", {"use_thinking": False}, {"type": "disabled"}), ("deepseek-chat", {}, None)],
-    ids=["turned-off", "non-thinking-model"],
+    [
+        ("deepseek-flash", {"use_thinking": False}, {"type": "disabled"}),
+        ("deepseek-v4-pro", {}, {"type": "enabled"}),
+        ("deepseek-chat", {}, {"type": "enabled"}),
+    ],
+    ids=["turned-off", "default", "any-model-id"],
 )
 async def test_deepseek_thinking_follows_use_thinking(
     tmp_path: Path,
     model_id: str,
     use_thinking: dict[str, bool],
-    thinking: dict[str, str] | None,
+    thinking: dict[str, str],
 ) -> None:
-    """Without thinking no reasoning effort is sent; only a config that turns thinking off says so."""
+    """Every DeepSeek model thinks unless the config turns it off, and without thinking no reasoning effort is sent."""
     config = {
         "provider": "deepseek",
         "id": model_id,
@@ -1412,7 +1415,7 @@ async def test_deepseek_thinking_follows_use_thinking(
 
     body = built.body()
     assert body.get("thinking") == thinking
-    assert "reasoning_effort" not in body
+    assert ("reasoning_effort" in body) is (thinking["type"] == "enabled")
 
 
 @pytest.mark.asyncio

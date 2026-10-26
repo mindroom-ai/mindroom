@@ -444,7 +444,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
         endpoint=endpoint.rstrip("/") if endpoint else None,
     )
     structured_output = route.structured_output
-    if route_key == "deepseek" and deepseek_thinking(settings, model_id):
+    if route_key == "deepseek" and deepseek_thinking(settings):
         # DeepSeek rejects a forced tool call in thinking mode (https://api-docs.deepseek.com/api/create-chat-completion).
         structured_output = "json_mode"
     capabilities = Capabilities(

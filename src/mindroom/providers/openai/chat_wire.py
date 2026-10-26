@@ -278,19 +278,20 @@ def _close_cerebras_objects(schema: Any) -> None:  # noqa: ANN401 - any JSON sch
         _close_cerebras_objects(child)
 
 
-def deepseek_thinking(settings: ChatSettings, model_id: str) -> bool:
-    """Return whether a DeepSeek request thinks: on for thinking-capable ids unless the config turns it off."""
-    return settings.use_thinking if settings.use_thinking is not None else model_id != "deepseek-chat"
+def deepseek_thinking(settings: ChatSettings) -> bool:
+    """Return whether a DeepSeek request thinks: every DeepSeek model does unless the config turns it off."""
+    return settings.use_thinking is not False
 
 
-def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings, model_id: str) -> None:
-    """Enable thinking for thinking-capable DeepSeek ids unless the config turns it off."""
-    if deepseek_thinking(settings, model_id):
-        params["extra_body"] = {"thinking": {"type": "enabled"}, **(params.get("extra_body") or {})}
-        return
-    params.pop("reasoning_effort", None)
-    if settings.use_thinking is False:
-        params["extra_body"] = {"thinking": {"type": "disabled"}, **(params.get("extra_body") or {})}
+def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings) -> None:
+    """Send DeepSeek's thinking switch, on unless the config turns it off; without thinking no reasoning effort goes."""
+    thinking = deepseek_thinking(settings)
+    if not thinking:
+        params.pop("reasoning_effort", None)
+    params["extra_body"] = {
+        "thinking": {"type": "enabled" if thinking else "disabled"},
+        **(params.get("extra_body") or {}),
+    }
 
 
 def _reject_native_search(params: Mapping[str, Any], model_id: str, wire: ChatWire) -> None:
@@ -375,7 +376,7 @@ def _add_route_params(
     if wire.route == "openrouter" and settings.models:
         params["extra_body"] = {**(params.get("extra_body") or {}), "models": settings.models}
     if wire.route == "deepseek":
-        _deepseek_thinking(params, settings, model_id)
+        _deepseek_thinking(params, settings)
     if wire.route == "kimi" and settings.prompt_cache_key:
         params.setdefault("prompt_cache_key", settings.prompt_cache_key)
     if disables_tools(tool_choice):
