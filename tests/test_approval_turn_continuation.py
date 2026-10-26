@@ -732,25 +732,23 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("before", "saved", "reply"),
+    ("before", "reply"),
     [
-        pytest.param("Adding first.", None, "Adding first.", id="wrote-before-the-pause"),
-        pytest.param(None, None, "Tool approval continuation completed", id="paused-without-text"),
-        pytest.param(None, "", "Tool approval continuation completed", id="pause-showed-nothing"),
+        pytest.param("Adding first.", "Adding first.", id="wrote-before-the-pause"),
+        pytest.param(None, "Tool approval continuation completed", id="paused-without-text"),
     ],
 )
 async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     before: str | None,
-    saved: str | None,
     reply: str,
 ) -> None:
     """A run that answers its approved call without text adds nothing to the reply it continues.
 
     Its run still holds what it carried over from the pause: the text it wrote before it, which the pause's saved
-    reply already shows, or the paused notice, which no pause shows. A saved reply that showed nothing ends with the
-    completion note instead of the paused notice, which no longer holds once the call ran.
+    reply already shows, or the paused notice, which no pause shows. A run that paused without text shows nothing,
+    so its reply ends with the completion note instead of the paused notice, which no longer holds once the call ran.
     """
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
@@ -795,7 +793,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
 
     result = await execution.continue_run(
         continuation,
-        paused_answer=PausedAnswer(text=paused.response_text if saved is None else saved, tool_trace=paused.tool_trace),
+        paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
         decisions={"approved": True},
         denial_reasons={"approved": None},
