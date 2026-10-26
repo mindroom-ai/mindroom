@@ -84,8 +84,11 @@ def _render_interruption_summary(snapshot: InterruptedReplaySnapshot) -> str:
     redacted Matrix previews are rendered separately as explicitly quoted data.
     """
     details: list[str] = []
-    if snapshot.completed_tools:
-        details.append(f"{len(snapshot.completed_tools)} tool call(s) had finished")
+    failed = sum(tool.is_error for tool in snapshot.completed_tools)
+    if finished := len(snapshot.completed_tools) - failed:
+        details.append(f"{finished} tool call(s) had finished")
+    if failed:
+        details.append(f"{failed} tool call(s) had failed")
     if snapshot.interrupted_tools:
         details.append(f"{len(snapshot.interrupted_tools)} tool call(s) were still running")
     summary = _INTERRUPTION_SUMMARIES.get(snapshot.original_status, "(turn ended without a model-visible completion")
