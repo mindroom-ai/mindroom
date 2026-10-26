@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -340,6 +340,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         model_provider=model.provider,
         model=model.id,
         created_at=started,
+        status=RunStatus.paused,
         messages=[request(started)],
         metrics=metrics(1_000_000),
     )
@@ -350,6 +351,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
             storage,
             ConversationSession(kind="agent", session_id="session-1", owner_id="code", runs=[run]),
         )
+        run.status = RunStatus.completed
         run.messages = [*run.messages, request(resumed)]
         run.metrics = metrics(2_000_000)
         clock.setattr("mindroom.session_storage.store.time", lambda: resumed)

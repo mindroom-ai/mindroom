@@ -222,11 +222,14 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         # Reconstruct an interrupted minimal response using its exact saved approval.
         scope_context = load_scope()
         assert scope_context is not None
-        stored = scope_context.storage.get_run(paused.run_id)
-        assert isinstance(stored, RunRecord)
-        stored.metadata = {**(stored.metadata or {}), "agent_mode": "minimal"}
+        assert isinstance(scope_context.storage.get_run(paused.run_id), RunRecord)
         assert scope_context.session is not None
-        scope_context.storage.save_runs(scope_context.session, [stored])
+        assert scope_context.storage.patch_run_metadata(
+            scope_context.session.session_id,
+            paused.run_id,
+            {"agent_mode": "minimal"},
+            session=scope_context.session,
+        )
     calls_ = (
         ApprovalCall(
             "approved",

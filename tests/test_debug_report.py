@@ -33,10 +33,15 @@ from mindroom.debug_report import (
 from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from mindroom.history.session_context import _team_scope_state_root
+from mindroom.history.types import HistoryScope
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system import tool_calls
 from mindroom.tool_system.worker_routing import (
@@ -46,6 +51,8 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import postgres_journal_schema_url, seed_session, test_runtime_paths
+from tests.history_helpers import store_fold
+from tests.session_storage.goldens import golden_stores
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -287,6 +294,7 @@ def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]
                     created_at=created_at,
                     status=RunStatus.completed,
                     metadata={"matrix_event_id": "$user"},
+                    messages=[Message(role="user", content=f"question {run_id}")],
                 )
                 for run_id, created_at in runs
             ],
@@ -300,15 +308,70 @@ def _seed_general_runs(storage_root: Path) -> None:
     _seed_runs(storage_root / "agents" / "general", "!other:example.com", [("run-other", 1_723_837_600)])
 
 
-def test_read_runs_matches_session_and_decodes_run_data(tmp_path: Path) -> None:
-    """Runs match by session id, and run_data comes back as a nested object."""
+def test_read_runs_matches_session_and_decodes_its_rows(tmp_path: Path) -> None:
+    """Runs match by session id, and each run row comes with its message rows, JSON columns as nested objects."""
     _seed_general_runs(tmp_path)
     ids = collect_ids(None, room_id=ROOM, thread_id="$root")
     result = _read_runs(tmp_path, ids)
     assert result.status == "ok"
-    assert [item["run_id"] for item in result.items] == ["run-1"]
-    assert result.items[0]["run_data"]["metadata"] == {"matrix_event_id": "$user"}
-    assert result.items[0]["table"] == "general_sessions_runs"
+    [item] = result.items
+    assert item["run_id"] == "run-1"
+    assert item["table"] == "general_sessions_log_runs"
+    assert item["metadata"] == {"matrix_event_id": "$user"}
+    assert item["record"]["user_id"] == "@alice:example.com"
+    assert [(message["folded_by"], message["data"]["content"]) for message in item["messages"]] == [
+        (None, "question run-1"),
+    ]
+
+
+def test_read_runs_names_the_fold_that_took_a_message(tmp_path: Path) -> None:
+    """A message a mid-turn fold took follows the run's stored messages and names that fold's summary row."""
+    _seed_general_runs(tmp_path)
+    storage = create_state_storage("general", tmp_path / "agents" / "general")
+    scope = HistoryScope(kind="agent", scope_id="general")
+    fold_id = store_fold(storage, f"{ROOM}:$root", scope, "run-1", tool_call_ids=["call-1"])
+
+    result = _read_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
+
+    [item] = result.items
+    assert [(message["folded_by"], message["data"].get("tool_call_id")) for message in item["messages"]] == [
+        (None, None),
+        (fold_id, "call-1"),
+    ]
+
+
+def test_read_runs_reads_converted_goldens_and_names_unconverted_databases(tmp_path: Path) -> None:
+    """A database from before storage v2 is an error until it is converted; then its runs read, its backup never."""
+    goldens = [store for store in golden_stores() if store.db_path.startswith(("agents/", "teams/"))]
+    databases = [store.restore(tmp_path) for store in goldens]
+    ids = dataclasses.replace(
+        collect_ids(None, event_ids=["$x"]),
+        session_ids=frozenset(session_id for store in goldens for session_id in store.sessions),
+    )
+
+    unconverted = _read_runs(tmp_path, ids)
+
+    assert unconverted.status == "error"
+    assert unconverted.error is not None
+    assert unconverted.error.count("not converted to the current storage layout") == len(databases)
+
+    for store, database in zip(goldens, databases, strict=True):
+        migrate_conversation_database(database, store.names)
+        assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").is_file()
+    converted = _read_runs(tmp_path, ids)
+
+    assert converted.status == "ok"
+    assert converted.error is None
+    assert converted.paths == sorted(str(database) for database in databases)
+    for store, database in zip(goldens, databases, strict=True):
+        stored = ConversationStore(database)
+        for session_id in store.sessions:
+            reported = {item["run_id"]: item for item in converted.items if item["session_id"] == session_id}
+            runs = stored.list_runs(session_id)
+            assert sorted(reported) == sorted(run.run_id for run in runs)
+            for run in runs:
+                replayed = [message["data"] for message in reported[run.run_id]["messages"] if not message["folded_by"]]
+                assert replayed == [message.to_dict() for message in run.messages]
 
 
 def test_read_runs_matches_a_run_id_alone(tmp_path: Path) -> None:
@@ -334,7 +397,7 @@ def test_read_runs_keeps_the_newest_runs_across_databases(tmp_path: Path, monkey
     assert result.status == "ok"
     assert [item["run_id"] for item in result.items] == ["run-250", "run-300"]
     assert result.dropped == 2
-    assert {item["table"] for item in result.items} == {"general_sessions_runs", "crew_sessions_runs"}
+    assert {item["table"] for item in result.items} == {"general_sessions_log_runs", "crew_sessions_log_runs"}
 
 
 def test_read_runs_reads_only_the_runtime_session_database_layouts(tmp_path: Path) -> None:

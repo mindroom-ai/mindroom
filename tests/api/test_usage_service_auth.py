@@ -16,7 +16,8 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.usage_export import UsageExportRunner
-from mindroom.usage.legacy_usage_storage import migrate_usage_database
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.schema import TableNames
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
 _ISSUER = "https://issuer.example"
@@ -120,12 +121,15 @@ def _seed_usage_database(storage_root: Path) -> None:
         "cache_write_tokens": 3,
     }
     with sqlite3.connect(database) as connection:
+        # An Agno 2 sessions table, whose runs blob the conversion reads.
         connection.execute(
             "CREATE TABLE test_agent_sessions (session_id TEXT PRIMARY KEY, session_type TEXT, agent_id TEXT, "
-            "team_id TEXT, user_id TEXT, session_data TEXT, runs TEXT)",
+            "team_id TEXT, user_id TEXT, session_data TEXT, runs TEXT, metadata TEXT, summary TEXT, "
+            "created_at INTEGER NOT NULL, updated_at INTEGER)",
         )
         connection.execute(
-            "INSERT INTO test_agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO test_agent_sessions (session_id, session_type, agent_id, team_id, user_id, session_data, "
+            "runs, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1700000000)",
             (
                 "session",
                 "agent",
@@ -175,7 +179,7 @@ def _seed_usage_database(storage_root: Path) -> None:
             ),
         )
 
-    migrate_usage_database(database)
+    migrate_conversation_database(database, TableNames.of_database(database))
 
 
 def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str | None:

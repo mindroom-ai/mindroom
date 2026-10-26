@@ -13,6 +13,7 @@ from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.teams.envelope import _persist_bound_seen_event_ids
+from tests.conftest import seed_session_row
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,7 +32,7 @@ async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_sn
         session_state={"phase": "before"},
         created_at=1,
     )
-    storage.ensure_session_row(stored)
+    seed_session_row(storage, stored)
     snapshot = deepcopy(stored)
     # What the run does behind the snapshot's back: its tools change the shared state and the run writes it back.
     stored.session_state = {"phase": "after"}

@@ -19,7 +19,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests, project_usage
-from tests.conftest import persist_runs
+from tests.conftest import persist_runs, seed_session_row
 from tests.history_helpers import compact_runs
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ def _session() -> ConversationSession:
 def usage_db(tmp_path: Path) -> ConversationStore:
     """Use the production storage owner with a real session row."""
     storage = create_state_storage("code", tmp_path)
-    storage.ensure_session_row(_session())
+    seed_session_row(storage, _session())
     return storage
 
 
@@ -43,12 +43,19 @@ def _save(storage: ConversationStore, run: RunRecord) -> None:
     persist_runs(storage, _session(), run)
 
 
-def _run(tokens: int = 10, *, run_id: str = "run-1", parent_run_id: str | None = None) -> RunRecord:
+def _run(
+    tokens: int = 10,
+    *,
+    run_id: str = "run-1",
+    parent_run_id: str | None = None,
+    status: RunStatus = RunStatus.completed,
+) -> RunRecord:
     return RunRecord(
         run_id=run_id,
         session_id="session",
         agent_id="code",
         parent_run_id=parent_run_id,
+        status=status,
         user_id="@alice:example.test",
         model_provider="test-provider",
         model="test-model",
@@ -123,9 +130,10 @@ def test_new_empty_session_has_complete_empty_usage(usage_db: ConversationStore)
 
 def test_concurrent_saves_keep_run_and_usage_snapshots_consistent(usage_db: ConversationStore) -> None:
     """Competing writes may finish in either order, but both representations must agree."""
-    _save(usage_db, _run())
+    # A paused run saves again when it continues; a finished one never changes.
+    _save(usage_db, _run(status=RunStatus.paused))
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(_save, usage_db, _run(tokens)) for tokens in (20, 30)]
+        futures = [pool.submit(_save, usage_db, _run(tokens, status=RunStatus.paused)) for tokens in (20, 30)]
         for future in futures:
             future.result()
     session = usage_db.load_session("session", "agent")
@@ -136,8 +144,8 @@ def test_concurrent_saves_keep_run_and_usage_snapshots_consistent(usage_db: Conv
 
 def test_repeated_saves_replace_the_usage_snapshot(usage_db: ConversationStore) -> None:
     """Checkpoints and continuation updates must not add the same snapshot twice."""
-    for tokens in (10, 10, 30):
-        _save(usage_db, _run(tokens))
+    for tokens, status in ((10, RunStatus.cancelled), (10, RunStatus.paused), (30, RunStatus.completed)):
+        _save(usage_db, _run(tokens, status=status))
 
     rows = _rows(usage_db)
     assert len(rows) == 1
@@ -147,22 +155,19 @@ def test_repeated_saves_replace_the_usage_snapshot(usage_db: ConversationStore) 
 def test_a_refused_save_of_a_removed_run_still_records_usage(usage_db: ConversationStore) -> None:
     """The provider calls behind a late save of a cut run were made, so their usage stays recorded."""
     with sqlite3.connect(usage_db.path) as connection:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS code_sessions_removed_runs (run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL)",
-        )
-        connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('run-1', 'session')")
+        connection.execute("INSERT INTO code_sessions_log_removed (run_id, session_id) VALUES ('run-1', 'session')")
 
     _save(usage_db, _run())
 
     assert [(run_id, payload["metrics"]["total_tokens"]) for run_id, payload in _rows(usage_db)] == [("run-1", 10)]
     with sqlite3.connect(usage_db.path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM code_sessions_runs").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM code_sessions_log_runs").fetchone() == (0,)
 
 
 def test_run_cleanup_preserves_usage_before_regeneration(usage_db: ConversationStore) -> None:
     """Replay cleanup cannot erase incurred usage, and the replacement run adds its own work."""
     _save(usage_db, _run())
-    usage_db.delete_run_subtrees(_session(), ["run-1"])
+    usage_db.delete_runs(["run-1"], session_id="session")
     _save(usage_db, _run(20, run_id="run-2"))
 
     assert [(run_id, payload["metrics"]["total_tokens"]) for run_id, payload in _rows(usage_db)] == [
@@ -176,7 +181,7 @@ def test_run_cleanup_preserves_usage_before_regeneration(usage_db: ConversationS
 
 def test_usage_write_failure_rolls_back_the_run(usage_db: ConversationStore) -> None:
     """A failed usage write cannot leave the conversation update committed alone."""
-    _save(usage_db, _run())
+    _save(usage_db, _run(status=RunStatus.paused))
     _rows(usage_db)
     with sqlite3.connect(usage_db.path) as connection:
         connection.execute(
@@ -206,13 +211,14 @@ def test_session_erasure_removes_usage(usage_db: ConversationStore) -> None:
 
 def test_nested_run_usage_retains_parent_identity(usage_db: ConversationStore) -> None:
     """Losing parent identity would let reporting count nested usage twice."""
-    _save(usage_db, _run())
+    # A member saves before its team run, as a team turn saves them.
     _save(usage_db, _run(5, run_id="member", parent_run_id="run-1"))
-    usage_db.delete_run_subtrees(_session(), ["run-1"])
+    _save(usage_db, _run())
+    usage_db.delete_runs(["run-1"], session_id="session")
 
     rows = _rows(usage_db)
-    assert len(rows) == 2
-    assert rows[1][1]["parent_run_id"] == "run-1"
+    assert [run_id for run_id, _ in rows] == ["member", "run-1"]
+    assert rows[0][1]["parent_run_id"] == "run-1"
 
 
 def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: ConversationStore) -> None:

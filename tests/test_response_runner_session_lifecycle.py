@@ -76,6 +76,7 @@ from tests.conftest import (
     install_model_providers,
     message_origin,
     request_envelope,
+    seed_session_row,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import response_span
@@ -100,7 +101,7 @@ def _history_store(tmp_path: Path) -> ConversationStore:
 
 def _start_session(storage: ConversationStore, session_id: str) -> None:
     """Store the session row a reply's first run creates."""
-    storage.ensure_session_row(ConversationSession(session_id=session_id, kind="agent", owner_id="general"))
+    seed_session_row(storage, ConversationSession(session_id=session_id, kind="agent", owner_id="general"))
 
 
 def _persisted_run(storage: ConversationStore, session_id: str = THREAD_SESSION_ID) -> AnyRunRecord:
