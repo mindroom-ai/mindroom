@@ -41,6 +41,7 @@ __all__ = [
     "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
     "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "OPENAI_COMPAT_HISTORY_GUIDANCE",
+    "OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
     "OUTPUT_REDIRECT_PROMPT",
     "PERSONALITY_CONTEXT_SECTION_HEADING",
     "PROMPT_CURATION_PROMPT_TEMPLATE",
@@ -103,6 +104,11 @@ You are powered by the {model_provider} model: {model_id}.
 {openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
 
 """
+
+# The team leader's identity in the OpenAI-compatible API, which has no Matrix chatroom, history format, or mentions.
+OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
+You are {display_name}, the MindRoom team exposed through the OpenAI-compatible API: you lead its members, hand them work, and write the team's answer.
+{team_purpose}{openai_compat_history_guidance}"""
 
 
 INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:
@@ -711,6 +717,9 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
             },
         ),
         "TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": frozenset({"display_name", "team_purpose"}),
+        "OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": frozenset(
+            {"display_name", "team_purpose", "openai_compat_history_guidance"},
+        ),
         "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE": frozenset(
             {
                 "agent_name",

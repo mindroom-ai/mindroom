@@ -17,7 +17,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
-from mindroom.prompt_templates import render_prompt_template
+from mindroom.prompt_templates import openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.system_prompt import render_session_context
 from mindroom.teams.formation import (
@@ -393,6 +393,35 @@ class BuiltTeam:
     leader_jobs: JobActor | None
 
 
+def _leader_identity(
+    config: Config,
+    *,
+    display_name: str,
+    team_purpose: str,
+    include_openai_compat_guidance: bool,
+) -> str:
+    """Render the leader's identity for its channel, as an agent's is rendered: Matrix, or the OpenAI-compatible API."""
+    matrix_identity = render_prompt_template(
+        config.get_prompt("TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE"),
+        display_name=display_name,
+        team_purpose=team_purpose,
+    )
+    if not include_openai_compat_guidance:
+        return matrix_identity
+    return openai_compat_identity(
+        config.prompts,
+        openai_identity=render_prompt_template(
+            config.get_prompt("OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE"),
+            display_name=display_name,
+            team_purpose=team_purpose,
+            openai_compat_history_guidance=config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE"),
+        ),
+        matrix_identity=matrix_identity,
+        openai_prompt_name="OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
+        matrix_prompt_name="TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
+    )
+
+
 def build_team_spec(
     *,
     members: ResolvedExactTeamMembers,
@@ -405,12 +434,13 @@ def build_team_spec(
     configured_team_name: str | None,
     timezone: str,
     system_enrichment: str = "",
+    include_openai_compat_guidance: bool = False,
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
     The leader is named by the team's label (``materialized_team_label``) and identified by the history scope of
     ``scope_context``. The leader prompt opens with the team's identity, the configured team's name and purpose or the
-    ad hoc team's label, then holds each member's authored role and the leader's tool instructions in offer order,
+    ad hoc team's label, in the OpenAI-compatible API's form with ``include_openai_compat_guidance``, then holds each member's authored role and the leader's tool instructions in offer order,
     then the date and session context in ``timezone`` with ``system_enrichment`` appended; the team's own history
     settings and call budget come from the configured team ``configured_team_name``, or the defaults when it is None
     for an ad hoc one.
@@ -444,15 +474,15 @@ def build_team_spec(
     )
     turn_context = appended_context(render_session_context(config, timezone), system_enrichment)
     team_config = config.teams.get(configured_team_name) if configured_team_name is not None else None
-    identity = render_prompt_template(
-        config.get_prompt("TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE"),
-        display_name=label if team_config is None else team_config.display_name,
-        team_purpose="" if team_config is None else f"Team purpose: {team_config.role}\n",
-    )
     system_messages = render_leader_system_messages(
         team_members,
         mode,
-        identity=identity,
+        identity=_leader_identity(
+            config,
+            display_name=label if team_config is None else team_config.display_name,
+            team_purpose="" if team_config is None else f"Team purpose: {team_config.role}\n",
+            include_openai_compat_guidance=include_openai_compat_guidance,
+        ),
         markdown=config.defaults.markdown,
         tool_instructions=toolkit_instructions(leader.toolkits),
         turn_context=turn_context,

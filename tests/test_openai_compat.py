@@ -3471,6 +3471,64 @@ def test_team_run_records_helper_usage_in_its_conversation(team_app_client: Test
 class TestTeamCompletion:
     """Tests for team model support (Phase 3)."""
 
+    @pytest.mark.parametrize(
+        ("prompts", "opening"),
+        [
+            ({}, ""),
+            (
+                {"TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": "Custom identity of {display_name}.\n"},
+                "Custom identity of Super Team.\n",
+            ),
+        ],
+        ids=["default", "custom_matrix_identity"],
+    )
+    def test_an_api_team_leader_is_told_it_answers_through_the_api_as_its_members_are(
+        self,
+        team_config: Config,
+        prompts: dict[str, str],
+        opening: str,
+    ) -> None:
+        """The leader gets the API identity and history format, never the Matrix chatroom, history, or mention guide.
+
+        An operator's custom Matrix leader identity, without a custom API one, opens it, as it does for an agent.
+        """
+        config = team_config.model_copy(update={"prompts": prompts})
+        runtime_paths = _runtime_paths_for_config(config)
+        identity = _team_identity("super_team", runtime_paths)
+        scope_context = load_bound_scope_session(
+            member_names=[],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=identity,
+            team_name="super_team",
+        )
+
+        built = openai_compat._build_team(
+            "super_team",
+            config,
+            runtime_paths,
+            identity,
+            scope_context,
+            {},
+            None,
+            models=openai_compat._openai_team_models("super_team", config, lambda model_name: model_name),
+        )
+
+        leader_prompt = str(built.spec.leader.system_messages[0].content)
+        assert leader_prompt.startswith(
+            f"<your_role>\n{opening}## Your Identity\nYou are Super Team, the MindRoom team exposed through the"
+            " OpenAI-compatible API: you lead its members, hand them work, and write the team's answer.\n"
+            "Team purpose: Collaborative engineering team\n"
+            "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines.",
+        )
+        for matrix_text in ("Matrix chatroom", "<conversation>", "complete Matrix ID"):
+            assert matrix_text not in leader_prompt
+        for member in built.spec.members:
+            assert "the MindRoom agent exposed through the OpenAI-compatible API" in str(
+                member.spec.system_messages[0].content,
+            )
+
     @pytest.mark.asyncio
     async def test_prepare_openai_team_execution_uses_non_matrix_team_preparation_defaults(
         self,

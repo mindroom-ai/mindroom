@@ -86,10 +86,10 @@ def render_leader_system_messages(
 ) -> tuple[Message, ...]:
     """Return the leader's system messages for ``members`` in ``mode``.
 
-    ``identity`` is the team's rendered identity (``TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE``), ``markdown`` whether the
-    prompt states the chat's Markdown output format, as an agent's does, ``tool_instructions`` the leader's toolkit
-    instructions in offer order, and ``turn_context`` the turn part: the date and session context and any appended
-    system enrichment.
+    ``identity`` is the team's rendered identity (``TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE``, or its
+    ``OPENAI_COMPAT_`` form in the OpenAI-compatible API), ``markdown`` whether the prompt states the chat's Markdown
+    output format, as an agent's does, ``tool_instructions`` the leader's toolkit instructions in offer order, and
+    ``turn_context`` the turn part: the date and session context and any appended system enrichment.
     """
     delegation = (
         _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE

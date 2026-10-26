@@ -41,7 +41,7 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, mcp_function_collisions
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
+from mindroom.prompt_templates import build_agent_identity_context, openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -1196,27 +1196,27 @@ def _render_agent_identity_context(
 ) -> str:
     openai_compat_history_guidance = config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
     if include_openai_compat_guidance:
-        openai_context = render_prompt_template(
-            config.get_prompt("OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"),
-            agent_name=agent_name,
-            display_name=display_name,
-            model_provider=model_provider,
-            model_id=model_id,
-            openai_compat_history_guidance=openai_compat_history_guidance,
+        return openai_compat_identity(
+            config.prompts,
+            openai_identity=render_prompt_template(
+                config.get_prompt("OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+                agent_name=agent_name,
+                display_name=display_name,
+                model_provider=model_provider,
+                model_id=model_id,
+                openai_compat_history_guidance=openai_compat_history_guidance,
+            ),
+            matrix_identity=render_prompt_template(
+                config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+                display_name=display_name,
+                matrix_id="not available in OpenAI-compatible API",
+                model_provider=model_provider,
+                model_id=model_id,
+                openai_compat_history_guidance=openai_compat_history_guidance,
+            ),
+            openai_prompt_name="OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
+            matrix_prompt_name="AGENT_IDENTITY_CONTEXT_TEMPLATE",
         )
-        has_custom_matrix_identity = "AGENT_IDENTITY_CONTEXT_TEMPLATE" in config.prompts
-        has_custom_openai_identity = "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE" in config.prompts
-        if not has_custom_matrix_identity or has_custom_openai_identity:
-            return openai_context
-        overridden_identity_context = render_prompt_template(
-            config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
-            display_name=display_name,
-            matrix_id="not available in OpenAI-compatible API",
-            model_provider=model_provider,
-            model_id=model_id,
-            openai_compat_history_guidance=openai_compat_history_guidance,
-        )
-        return overridden_identity_context + openai_context
 
     matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id
     return build_agent_identity_context(
