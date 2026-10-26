@@ -241,7 +241,7 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
             presentation.start_member_tool(member_id, call)
     return replace(
         paused,
-        response_text=presentation.render_body(paused=True),
+        response_text=presentation.render_body(),
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
     )
