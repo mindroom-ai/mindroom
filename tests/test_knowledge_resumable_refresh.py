@@ -4029,8 +4029,6 @@ class _StoreWrites:
     copied: int = 0
     #: Rows written for indexed files since the last ``clear``.
     file_rows: int = 0
-    #: Rows ever written into each collection since it was created, deleted or not: what a seal's ``rows_written`` counts.
-    written: dict[str, int] = field(default_factory=dict)
     lock: Lock = field(default_factory=Lock)
 
     def clear(self) -> None:
@@ -4038,13 +4036,12 @@ class _StoreWrites:
             self.copied = 0
             self.file_rows = 0
 
-    def record(self, collection: str, rows: int, *, copied: bool) -> None:
+    def record(self, rows: int, *, copied: bool) -> None:
         with self.lock:
             if copied:
                 self.copied += rows
             else:
                 self.file_rows += rows
-            self.written[collection] = self.written.get(collection, 0) + rows
 
 
 @pytest.fixture
@@ -4053,12 +4050,10 @@ def store_writes(monkeypatch: pytest.MonkeyPatch) -> _StoreWrites:
     writes = _StoreWrites()
     original_write = KnowledgeCollection.write_source_rows
     original_copy = KnowledgeCollection.copy_rows
-    original_reset = KnowledgeCollection.reset
-    original_delete = KnowledgeCollection.delete
 
     def _write(self: KnowledgeCollection, relative_path: str, rows: Sequence[StoredRow]) -> None:
         original_write(self, relative_path, rows)
-        writes.record(self.name, len(rows), copied=False)
+        writes.record(len(rows), copied=False)
 
     def _copy(
         self: KnowledgeCollection,
@@ -4070,25 +4065,13 @@ def store_writes(monkeypatch: pytest.MonkeyPatch) -> _StoreWrites:
         def _counting_select(metadata: Mapping[str, Any]) -> bool:
             selected = select(metadata)
             if selected:
-                writes.record(self.name, 1, copied=True)
+                writes.record(1, copied=True)
             return selected
 
         original_copy(self, source, select=_counting_select, page_rows=page_rows)
 
-    def _reset(self: KnowledgeCollection) -> None:
-        original_reset(self)
-        with writes.lock:
-            writes.written[self.name] = 0
-
-    def _delete(self: KnowledgeCollection) -> None:
-        original_delete(self)
-        with writes.lock:
-            writes.written.pop(self.name, None)
-
     monkeypatch.setattr(KnowledgeCollection, "write_source_rows", _write)
     monkeypatch.setattr(KnowledgeCollection, "copy_rows", _copy)
-    monkeypatch.setattr(KnowledgeCollection, "reset", _reset)
-    monkeypatch.setattr(KnowledgeCollection, "delete", _delete)
     return writes
 
 
@@ -4353,59 +4336,6 @@ async def test_a_chunking_change_or_forced_rebuild_re_embeds_everything_and_keep
     embedder.embedded_texts.clear()
     await _refresh_and_check(config, docs_path)
     assert embedder.embedded_texts == ["next change"]
-
-
-@pytest.mark.asyncio
-async def test_a_kept_collection_mostly_made_of_dead_entries_is_copied_afresh(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    embedder: _RecordingEmbedder,
-    store_writes: _StoreWrites,
-) -> None:
-    """A kept collection's ``rows_written`` bookkeeping bounds its rewritten rows, so a worn one is copied afresh."""
-    docs_path = tmp_path / "docs"
-    _write_corpus(docs_path, 6)
-    large = docs_path / "large.md"
-    large.write_text(_overlapping_body(300), encoding="utf-8")
-    config = _config(tmp_path, docs_path, chunk_size=500)
-    assert (await _manager(config).reindex_all()).published
-    large_rows = sum(path == "large.md" for path, _text in _served(config, _published_collection(config)))
-    assert large_rows > 3, "the large file must be several chunks for this to prove anything"
-    collections_while_copying: list[int] = []
-    original_copy = KnowledgeManager._copy_published_vectors
-
-    def _recording_copy(self: KnowledgeManager, **kwargs: Any) -> dict[str, FileSignature]:  # noqa: ANN401
-        collections_while_copying.append(len(_collection_names(config)))
-        return original_copy(self, **kwargs)
-
-    monkeypatch.setattr(KnowledgeManager, "_copy_published_vectors", _recording_copy)
-
-    copies = 0
-    for version in range(1, 16):
-        large.write_text(_overlapping_body(300).replace("token0000", f"tokenv{version:03d}"), encoding="utf-8")
-        store_writes.clear()
-        embedder.embedded_texts.clear()
-        assert (await _manager(config).reindex_all()).published
-        served = _served(config, _published_collection(config))
-        assert [row for row in served if row[0] != "large.md"] == [
-            row for row in _corpus(docs_path) if row[0] != "large.md"
-        ]
-        large_texts = [text for path, text in served if path == "large.md"]
-        assert len(large_texts) == large_rows, "the large file's rows were lost or duplicated"
-        assert [text.startswith(f"tokenv{version:03d}") for text in large_texts].count(True) == 1, (
-            "the large file's rows are stale"
-        )
-        copies += store_writes.copied > 0
-        assert not [text for text in embedder.embedded_texts if text.startswith("content")], (
-            "rows of unchanged files were embedded again"
-        )
-        for name in _collection_names(config):
-            rows = _collection(config, name).row_count()
-            dead = store_writes.written.get(name, 0) - rows
-            assert dead <= rows + 2 * large_rows, f"{name} holds {dead} rewritten rows over {rows} live rows"
-    assert 2 <= copies <= 8, f"the index was copied afresh {copies} times in 15 refreshes"
-    # The worn collection is dropped before the copy, so only the published index and the copy share the disk.
-    assert max(collections_while_copying) == 2
 
 
 @pytest.mark.asyncio

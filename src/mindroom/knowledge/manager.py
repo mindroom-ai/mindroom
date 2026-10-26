@@ -536,8 +536,6 @@ class KnowledgeManager:
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
     _max_concurrent_file_indexes: int = field(init=False, repr=False)
     _embedding_retry_count: int = field(default=0, init=False, repr=False)
-    #: Rows this refresh wrote into its candidate, each one an entry the local vector index keeps even once deleted.
-    _rows_written: int = field(default=0, init=False, repr=False)
     _file_index_errors: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _embedder_failure_streak: int = field(default=0, init=False, repr=False)
     _global_embedder_failure: str | None = field(default=None, init=False, repr=False)
@@ -868,7 +866,6 @@ class KnowledgeManager:
             )
 
         indexed_signatures[prepared.relative_path] = prepared.signature
-        self._rows_written += len(prepared.chunks)
         self._file_index_errors.pop(prepared.relative_path, None)
         self._note_embedder_success()
         # DEBUG, not INFO: a large corpus is 10^5 of these lines per refresh.
@@ -1203,7 +1200,6 @@ class KnowledgeManager:
                 return False
             relative_path, signature = entry
             reused[relative_path] = signature
-            self._rows_written += 1
             return True
 
         published = open_collection(self._collections, published_collection)
@@ -1286,7 +1282,6 @@ class KnowledgeManager:
                 exc_info=True,
             )
             await asyncio.to_thread(candidate.reset)
-            self._rows_written = 0
             return {}
         logger.info(
             "Reused published knowledge vectors in a new candidate",
@@ -1369,7 +1364,7 @@ class KnowledgeManager:
         checkpoint = await asyncio.to_thread(
             save_candidate_checkpoint,
             self._base_storage_path,
-            replace(checkpoint, completed={}, failed={}, rows_written=0),
+            replace(checkpoint, completed={}, failed={}),
         )
         collection = open_collection(self._collections, checkpoint.collection)
         await asyncio.to_thread(collection.reset)
@@ -1543,7 +1538,7 @@ class KnowledgeManager:
             ),
         )
         if cleanup_is_safe:
-            # Before any copy, so a worn collection never shares the disk with both the published one and its copy.
+            # Before any copy, so a dropped collection never shares the disk with both the published one and its copy.
             for collection_name in dropped - {published_collection}:
                 await delete_collection(self._collections, collection_name)
         if sealed is not None:
@@ -1602,12 +1597,10 @@ class KnowledgeManager:
         return taken, dropped
 
     def _sealed_collection_is_usable(self, seal: CandidateCheckpoint) -> bool:
-        """Return whether a sealed collection still holds its sealed rows, and not mostly dead vector-index entries.
+        """Return whether a sealed collection still holds exactly its sealed rows.
 
         A store that cannot answer makes the seal unusable rather than failing
-        the refresh: reusing it is only an optimization. Chroma's local vector
-        index never reuses a deleted row's entry, so a collection written over
-        and over is copied afresh once its dead entries outnumber its live rows.
+        the refresh: reusing it is only an optimization.
         """
         collection = open_collection(self._collections, seal.collection)
         try:
@@ -1620,7 +1613,7 @@ class KnowledgeManager:
                 exc_info=True,
             )
             return False
-        return rows is not None and rows == seal.row_count and seal.rows_written <= 2 * rows
+        return rows is not None and rows == seal.row_count
 
     def _published_state_and_cleanup_safety(self) -> tuple[PublishedIndexState | None, bool]:
         """Return the persisted state, and whether candidate cleanup may run at all.
@@ -1885,7 +1878,6 @@ class KnowledgeManager:
             self._last_refresh_error = None
             self._last_file_index_error = None
             self._embedding_retry_count = 0
-            self._rows_written = 0
             self._file_index_errors.clear()
             self._embedder_failure_streak = 0
             self._global_embedder_failure = None
@@ -2080,7 +2072,6 @@ class KnowledgeManager:
                 failed={},
                 target_revision=run.baseline_revision,
                 total_files=run.total_files,
-                rows_written=run.checkpoint.rows_written + self._rows_written,
                 row_count=await asyncio.to_thread(row_count, run.collection),
             )
         kept = await _shielded_write(
