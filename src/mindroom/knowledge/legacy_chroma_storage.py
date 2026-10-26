@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 # LEGACY_COMPAT: Chroma-era knowledge index files.
 # Legacy format: A base's index directory held chroma.sqlite3 (with its journal, WAL, and shared-memory files) and
 # UUID-named HNSW segment directories.
-# Last legacy release: v2026.10.552; replacement: v2026.10.553 stored semantic indexes in owned SQLite files.
+# Last legacy release: v2026.10.568; replacement: the next release stores semantic indexes in owned SQLite files.
 # Handling: The first owned candidate copies the published Chroma collection's rows verbatim, so upgrading re-embeds
 # nothing; the sweep after that candidate is published removes the Chroma files.
 # Coverage: tests/test_knowledge_collection_cleanup.py::test_a_chroma_era_index_is_copied_without_embedding_again.

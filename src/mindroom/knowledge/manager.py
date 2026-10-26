@@ -1236,7 +1236,7 @@ class KnowledgeManager:
         if not settings.vector_store:
             # LEGACY_COMPAT: Chroma-era publications are reusable: their vectors are copied out of Chroma once.
             # Legacy format: published metadata without vector_store, its vectors in the base's Chroma database.
-            # Last legacy release: v2026.10.552; replacement: v2026.10.553 stored semantic indexes in owned SQLite files.
+            # Last legacy release: v2026.10.568; replacement: the next release stores semantic indexes in owned SQLite files.
             # Handling: compare settings as if the publication were owned; the copy reads Chroma.
             # Coverage: tests/test_knowledge_collection_cleanup.py::test_a_chroma_era_index_is_copied_without_embedding_again.
             settings = replace(settings, vector_store=self._indexing_settings.vector_store)
