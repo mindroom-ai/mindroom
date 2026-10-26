@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.helper_usage import record_system_usage
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -52,7 +52,7 @@ async def chunk_contexts(
     chunks: Sequence[str],
 ) -> list[str]:
     """Return one short context per chunk of one document, in order; the first failed model call raises."""
-    provider = build_model_provider(config, runtime_paths, model_name)
+    provider = provider_registry.build_model_provider(config, runtime_paths, model_name)
     document = "\n".join(chunks)
     starts = [0, *accumulate(len(chunk) + 1 for chunk in chunks[:-1])]
     slots = asyncio.Semaphore(_CONCURRENCY)

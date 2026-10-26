@@ -47,7 +47,7 @@ async def test_chunk_contexts_situate_each_chunk_in_its_document(
         del runtime_paths
         usage_kinds.append(kind)
 
-    monkeypatch.setattr(chunk_context_module, "build_model_provider", lambda *_args: object())
+    monkeypatch.setattr(chunk_context_module.provider_registry, "build_model_provider", lambda *_args: object())
     monkeypatch.setattr(chunk_context_module, "complete_prompt", complete)
     monkeypatch.setattr(chunk_context_module, "record_system_usage", record)
     config = _config(tmp_path, bases={}, agent_bases=[])
