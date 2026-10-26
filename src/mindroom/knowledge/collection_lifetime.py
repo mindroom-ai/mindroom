@@ -1,4 +1,4 @@
-"""Cross-process exclusion between native readers and collection reclamation."""
+"""Cross-process exclusion between collection readers and collection deletion."""
 
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ if TYPE_CHECKING:
 
 @contextmanager
 def collection_lifetime_lock(storage_path: Path, *, exclusive: bool) -> Iterator[None]:
-    """Keep selection through native close atomic against deletion and reclamation.
+    """Keep selecting and reading a collection atomic against its deletion.
 
-    Readers take shared locks in their subprocess, after embedding. Writers
-    take exclusive locks only while deleting, never while building candidates
-    or waiting for reader subprocesses. Process exit releases either claim.
+    Readers take shared locks after embedding, for the length of one read.
+    Writers take exclusive locks only while deleting, never while building
+    candidates. Process exit releases either claim.
     """
     with advisory_file_lock(storage_path / "collection_lifetime.lock", exclusive=exclusive):
         yield

@@ -234,13 +234,6 @@ def published_index_settings_compatible(
     )
 
 
-def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
-    """Check collection existence without opening a Chroma client."""
-    from mindroom.knowledge.read_proxy import collection_exists  # noqa: PLC0415
-
-    return collection_exists(str(storage_path), collection_name)
-
-
 def _safe_identifier(value: str) -> str:
     sanitized = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in value)
     return sanitized or "default"

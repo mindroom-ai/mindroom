@@ -6,18 +6,17 @@ import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import time
 import uuid
-from contextlib import closing, contextmanager, nullcontext, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar, cast
-
-from chromadb.errors import InternalError
+from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar
 
 from mindroom.constants import (
     DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
@@ -54,10 +53,7 @@ from mindroom.knowledge.collections import (
     candidate_collection_name,
     cleanup_superseded_collections,
     delete_collection,
-    delete_source_path_vectors,
     open_collection,
-    paths_with_vectors,
-    reset_collection,
     write_source_rows,
 )
 from mindroom.knowledge.file_listing import (
@@ -76,7 +72,6 @@ from mindroom.knowledge.index_metadata import (
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.indexing_config import (
     IndexingSettings,
-    chroma_collection_exists,
     indexing_settings_key,
     knowledge_git_dir,
     storage_key_for_base,
@@ -91,10 +86,8 @@ from mindroom.path_confinement import MAX_READ_BYTES
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
 
-    from chromadb.api.types import Embeddings, Metadata
-
     from mindroom.config.main import Config
-    from mindroom.knowledge.chroma_client import KnowledgeCollection
+    from mindroom.knowledge.vector_store import KnowledgeCollection
 
 logger = get_logger(__name__)
 
@@ -147,11 +140,6 @@ _MAX_BATCH_TEXT_BYTES = 8_000_000
 #: Source files whose signatures are computed per thread hop, so a huge corpus
 #: still yields to the event loop and to cancellation while it is scanned.
 _SIGNATURE_SCAN_CHUNK = 512
-#: Published chunk rows read in one copy query. Chroma binds one SQL variable
-#: per *returned* row and SQLite caps a statement at 32,766, so nothing about
-#: the file or path count bounds a copy query -- only the rows it may return.
-#: The page also bounds how much vector data the copy holds in memory at once.
-_PUBLISHED_VECTOR_COPY_PAGE_ROWS = 500
 #: Reconciliation passes before a refresh gives up for now. A source that keeps
 #: changing keeps its candidate and converges over successive refreshes instead
 #: of thrashing inside one.
@@ -206,7 +194,7 @@ class _CandidateRun:
     failed: dict[str, CandidateFailure] = field(default_factory=dict)
     vanished: set[str] = field(default_factory=set)
     #: Completed entries whose vectors this process has already confirmed, so
-    #: repeated reconciliation rounds do not re-query Chroma for every file.
+    #: repeated reconciliation rounds do not re-query the store for every file.
     verified: set[str] = field(default_factory=set)
     #: Size of the corpus this candidate is currently targeting, refreshed by
     #: each reconciliation so progress reporting shows real pending work.
@@ -483,7 +471,7 @@ def _knowledge_source_signature(
 
 
 def _reusable_row_signature(
-    metadata: Metadata,
+    metadata: Mapping[str, Any],
     managed_paths: frozenset[str],
 ) -> tuple[str, FileSignature] | None:
     """Return the managed source path and signature one published chunk carries."""
@@ -628,7 +616,7 @@ class KnowledgeManager:
             return False
         collection_name = persisted_state.collection or self._collections.default_collection
         try:
-            return not chroma_collection_exists(self._base_storage_path, collection_name)
+            return not open_collection(self._collections, collection_name).exists()
         except Exception:
             logger.warning(
                 "Knowledge collection existence check failed during manager initialization",
@@ -1126,7 +1114,7 @@ class KnowledgeManager:
         missing: set[str] = set()
         for start in range(0, len(verifiable), VECTOR_VERIFY_BATCH):
             batch = verifiable[start : start + VECTOR_VERIFY_BATCH]
-            found = await asyncio.to_thread(paths_with_vectors, run.collection, batch)
+            found = await asyncio.to_thread(run.collection.paths_with_vectors, batch)
             missing.update(set(batch) - found)
             run.verified.update(found)
         return missing
@@ -1146,50 +1134,21 @@ class KnowledgeManager:
         metadata -- because ids key content in the vector store and
         regenerating them would corrupt the candidate.
 
-        Reads are paged because Chroma binds one SQL variable per *returned*
-        row and SQLite caps a statement at 32,766 of them. Neither the file
-        count nor the path count bounds that, so a single large file can refuse
-        an unpaged read on its own; only bounding the returned rows escapes.
-
         Returns the signature published for each path that actually received
         rows, so a path the published index cannot serve is never claimed.
         """
-        published = candidate.client.get_collection(name=published_collection)
-        candidate_rows = candidate.collection()
         reused: dict[str, FileSignature] = {}
-        offset = 0
-        while True:
-            page = published.get(
-                limit=_PUBLISHED_VECTOR_COPY_PAGE_ROWS,
-                offset=offset,
-                include=["embeddings", "documents", "metadatas"],
-            )
-            ids = page["ids"]
-            if not ids:
-                return reused
-            offset += len(ids)
-            # Chroma types every one of these optional because the caller may
-            # not have asked for it; this one did, in the ``include`` above.
-            # The annotation keeps the TYPE_CHECKING-only Embeddings import
-            # visible to vulture; the string cast avoids a runtime import.
-            embeddings: Embeddings = cast("Embeddings", page["embeddings"])
-            documents = cast("list[str]", page["documents"])
-            metadatas = cast("list[Metadata]", page["metadatas"])
-            kept: list[int] = []
-            for index, metadata in enumerate(metadatas):
-                entry = _reusable_row_signature(metadata, managed_paths)
-                if entry is None:
-                    continue
-                relative_path, signature = entry
-                reused[relative_path] = signature
-                kept.append(index)
-            if kept:
-                candidate_rows.add(
-                    ids=[ids[index] for index in kept],
-                    embeddings=[embeddings[index] for index in kept],
-                    documents=[documents[index] for index in kept],
-                    metadatas=[dict(metadatas[index]) for index in kept],
-                )
+
+        def select(metadata: Mapping[str, Any]) -> bool:
+            entry = _reusable_row_signature(metadata, managed_paths)
+            if entry is None:
+                return False
+            relative_path, signature = entry
+            reused[relative_path] = signature
+            return True
+
+        candidate.copy_rows(open_collection(self._collections, published_collection), select=select)
+        return reused
 
     def _reusable_published_collection(self, persisted_state: PublishedIndexState | None) -> str | None:
         """Return the published collection a fresh candidate may copy, if any.
@@ -1254,7 +1213,7 @@ class KnowledgeManager:
                 collection=published_collection,
                 exc_info=True,
             )
-            await asyncio.to_thread(reset_collection, candidate)
+            await asyncio.to_thread(candidate.reset)
             return {}
         logger.info(
             "Reused published knowledge vectors in a new candidate",
@@ -1276,11 +1235,7 @@ class KnowledgeManager:
         bounded by the in-flight file rather than the whole copied corpus.
         """
         collection = open_collection(self._collections, checkpoint.collection)
-        with closing(collection):
-            if not collection.exists():
-                return False
-            has_rows = bool(collection.collection().get(limit=1, include=[])["ids"])
-            return not checkpoint.completed and has_rows
+        return collection.exists() and not checkpoint.completed and collection.has_rows()
 
     async def _inspect_candidate_shape(
         self,
@@ -1289,16 +1244,8 @@ class KnowledgeManager:
         """Return candidate shape, retiring an unreadable unpublished index."""
         try:
             holds_unclaimed_rows = await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint)
-        except InternalError as inspection_error:
-            error_detail = str(inspection_error).lower()
-            if not any(
-                marker in error_detail
-                for marker in (
-                    "error constructing hnsw segment reader",
-                    "error deserializing pickle file",
-                    "failed to apply logs to the hnsw segment writer",
-                )
-            ):
+        except sqlite3.DatabaseError as inspection_error:
+            if getattr(inspection_error, "sqlite_errorname", None) not in {"SQLITE_CORRUPT", "SQLITE_NOTADB"}:
                 raise
             # A candidate is never live until publication, so an unreadable
             # one may be abandoned without risking the last-good index.
@@ -1348,7 +1295,7 @@ class KnowledgeManager:
             replace(checkpoint, completed={}, failed={}),
         )
         collection = open_collection(self._collections, checkpoint.collection)
-        await asyncio.to_thread(reset_collection, collection)
+        await asyncio.to_thread(collection.reset)
         if published_collection is None:
             return _OpenedCandidate(checkpoint=checkpoint, collection=collection)
         reused = await self._seed_candidate_from_published(
@@ -1367,11 +1314,7 @@ class KnowledgeManager:
 
     async def _resume_candidate_collection(self, checkpoint: CandidateCheckpoint) -> _OpenedCandidate:
         """Continue a candidate whose recorded work is still backed by its collection."""
-        if not await asyncio.to_thread(
-            chroma_collection_exists,
-            self._base_storage_path,
-            checkpoint.collection,
-        ):
+        if not await asyncio.to_thread(open_collection(self._collections, checkpoint.collection).exists):
             logger.warning(
                 "Knowledge candidate collection is missing; rebuilding it from scratch",
                 base_id=self.base_id,
@@ -1495,7 +1438,6 @@ class KnowledgeManager:
             await asyncio.to_thread(
                 cleanup_superseded_collections,
                 self._collections,
-                client=run.collection.client,
                 preserved=frozenset(preserved),
                 candidates_only=True,
             )
@@ -1576,7 +1518,7 @@ class KnowledgeManager:
         """Remove candidate vectors and checkpoint entries for gone or stale paths."""
         if not relative_paths:
             return
-        await asyncio.to_thread(delete_source_path_vectors, run.collection, relative_paths)
+        await asyncio.to_thread(run.collection.delete_source_paths, relative_paths)
         for relative_path in relative_paths:
             run.completed.pop(relative_path, None)
             run.failed.pop(relative_path, None)
@@ -1954,6 +1896,5 @@ class KnowledgeManager:
         await asyncio.to_thread(
             cleanup_superseded_collections,
             self._collections,
-            client=run.collection.client,
             preserved=frozenset({run.collection.name}),
         )

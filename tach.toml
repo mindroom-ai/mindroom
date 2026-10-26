@@ -6111,21 +6111,22 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.knowledge.chroma_client"
-depends_on = []
+path = "mindroom.knowledge.vector_store"
+depends_on = ["mindroom.knowledge.read_protocol"]
 visibility = [
     "mindroom.knowledge.collections",
+    "mindroom.knowledge.index_reader",
     "mindroom.knowledge.manager",
-    "mindroom.knowledge.read_worker",
+    "mindroom.knowledge.registry",
 ]
 
 [[modules]]
 path = "mindroom.knowledge.collections"
 depends_on = [
     "mindroom.knowledge.collection_lifetime",
-    "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.read_protocol",
+    "mindroom.knowledge.vector_store",
     "mindroom.logging_config",
 ]
 visibility = ["mindroom.knowledge.manager"]
@@ -6173,9 +6174,10 @@ path = "mindroom.knowledge.registry"
 depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.read_proxy",
+    "mindroom.knowledge.index_reader",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.vector_store",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.dependencies",
     "mindroom.tool_system.worker_routing",
@@ -6185,7 +6187,6 @@ depends_on = [
 path = "mindroom.knowledge.indexing_config"
 depends_on = [
     "mindroom.embeddings.signatures",
-    "mindroom.knowledge.read_proxy",
     "mindroom.knowledge.legacy_metadata",
     "mindroom.knowledge.redaction",
 ]
@@ -7614,24 +7615,11 @@ path = "mindroom.knowledge.read_protocol"
 depends_on = []
 
 [[modules]]
-path = "mindroom.knowledge.read_process"
-depends_on = ["mindroom.knowledge.read_protocol", "mindroom.logging_config"]
-
-[[modules]]
-path = "mindroom.knowledge.read_proxy"
+path = "mindroom.knowledge.index_reader"
 depends_on = [
     "mindroom.knowledge.collection_lifetime",
-    "mindroom.knowledge.read_process",
     "mindroom.knowledge.read_protocol",
-]
-
-[[modules]]
-path = "mindroom.knowledge.read_worker"
-depends_on = [
-    "mindroom.knowledge.collection_lifetime",
-    "mindroom.knowledge.chroma_client",
-    "mindroom.knowledge.read_protocol",
-    "mindroom.logging_config",
+    "mindroom.knowledge.vector_store",
 ]
 
 [[modules]]
@@ -8691,7 +8679,7 @@ visibility = ["mindroom.tool_jobs.results"]
 [[modules]]
 path = "mindroom.knowledge.collection_lifetime"
 depends_on = ["mindroom.file_locks", "mindroom.knowledge.index_metadata", "mindroom.knowledge.indexing_config"]
-visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker", "mindroom.knowledge.read_proxy"]
+visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.index_reader"]
 
 [[modules]]
 path = "mindroom.tool_system.agent_tool_calls"
