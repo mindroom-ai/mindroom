@@ -2748,6 +2748,7 @@ path = "mindroom.providers.anthropic.wire"
 depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
+    "mindroom.model_defaults",
     "mindroom.providers.claude_wire_blocks",
 ]
 visibility = ["mindroom.providers.anthropic.messages"]

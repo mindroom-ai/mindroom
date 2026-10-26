@@ -32,6 +32,7 @@ from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_re
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES
 from mindroom.providers.claude_wire_blocks import as_dict
 
 if TYPE_CHECKING:
@@ -77,10 +78,6 @@ _NON_STRUCTURED_OUTPUT_ALIASES = frozenset(
         "claude-opus-4-0",
     },
 )
-
-# These models reject forced tool use on every request
-# (https://platform.claude.com/docs/en/build-with-claude/thinking#limits-and-feature-compatibility).
-_NO_FORCED_TOOL_PREFIXES = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-mythos-5-1")
 
 _TRAILING_USER_MESSAGE = "continue"
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
@@ -149,7 +146,7 @@ def supports_forced_tool_use(model_id: str, *, manual_thinking: bool) -> bool:
 
     Manual extended thinking (``thinking.type: "enabled"``) rejects forced tool use on every model.
     """
-    return not manual_thinking and not _core_model_id(model_id).startswith(_NO_FORCED_TOOL_PREFIXES)
+    return not manual_thinking and not _core_model_id(model_id).startswith(CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES)
 
 
 def stop_reason_of(raw: str | None) -> StopReason | None:
