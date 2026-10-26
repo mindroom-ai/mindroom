@@ -12690,7 +12690,7 @@ A plugin can use one module for both registrations:
 
 ```python
 # sites.py
-from mindroom.tool_system.atlassian_connections import (
+from mindroom.plugin_api import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
     register_atlassian_connection_tools,
@@ -16090,7 +16090,7 @@ my-plugin/
 ```
 
 Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, and skills.
-Import MindRoom's plugin entry points from `mindroom.plugin_api`; the Google, Atlassian, and memory helpers stay in the modules their sections name.
+Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit` and the memory helpers stay in the modules their sections name.
 Other `mindroom` modules can change in any release.
 
 ## Manifest format
@@ -16382,7 +16382,7 @@ Each call is one request with no tools and no conversation history.
 
 ### Dispatch-time worker targets
 
-A tool that builds other registered tools while handling a call, for example a sub-toolkit from `get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically:
+A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically:
 
 ```python
 from mindroom.plugin_api import get_tool_runtime_context
@@ -16487,7 +16487,7 @@ One module can register both the tools and the OAuth providers:
 
 ```python
 # workspaces.py
-from mindroom.tool_system.google_workspaces import (
+from mindroom.plugin_api import (
     GoogleWorkspaceConfig,
     google_workspace_oauth_providers,
     register_google_workspace_tools,
@@ -16544,7 +16544,7 @@ Subclass `GoogleCloudToolkit`, set `_oauth_provider` and `_oauth_tool_name`, and
 import json
 
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
-from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+from mindroom.plugin_api import google_cloud_oauth_provider
 
 
 class CloudStorageBrowserTools(GoogleCloudToolkit):

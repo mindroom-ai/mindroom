@@ -1,7 +1,8 @@
 """`mindroom.plugin_api` exports exactly the supported plugin entry points, and their parameters change only on purpose.
 
-Plugins import these names (docs/plugins.md, docs/hooks.md), so removing a name or renaming, reordering, or
-changing the kind of a parameter breaks them; update this pin together with the plugin docs and the fleet.
+Plugins import these names (docs/plugins.md, docs/hooks.md, docs/tools/atlassian.md), so removing a name or an enum
+member, or renaming, reordering, or changing the kind of a parameter, breaks them; update this pin together with the
+plugin docs and the fleet.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ _EXPORTS = [
     "AfterResponseContext",
     "AgentLifecycleContext",
     "Ask",
+    "AtlassianConnectionConfig",
     "AutomationContext",
     "BeforeResponseContext",
     "CancelledResponseContext",
@@ -50,6 +52,7 @@ _EXPORTS = [
     "EnrichmentItem",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
+    "GoogleWorkspaceConfig",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -79,6 +82,7 @@ _EXPORTS = [
     "TurnIntent",
     "TurnOrigin",
     "TurnTrust",
+    "atlassian_connection_oauth_provider",
     "automation",
     "automation_threads",
     "build_execution_identity_from_runtime_context",
@@ -87,12 +91,17 @@ _EXPORTS = [
     "complete_prompt",
     "emit_custom_event",
     "get_logger",
+    "get_tool_by_name",
     "get_tool_runtime_context",
+    "google_cloud_oauth_provider",
+    "google_workspace_oauth_providers",
     "hook",
     "oauth_connect_url",
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",
     "read_regular_file_within_root",
+    "register_atlassian_connection_tools",
+    "register_google_workspace_tools",
     "register_tool_with_metadata",
     "resolve_agent_file",
     "resolve_config_relative_path",
@@ -120,6 +129,7 @@ _SIGNATURES = {
         "(agent_name, config, runtime_paths, entry, options, settings, requester_id, execution_identity, workspace, "
         "state_dir)"
     ),
+    "AtlassianConnectionConfig": "(*, name, display_name, site_url, cloud_id, products, write, client_config_service)",
     "BeforeResponseContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "CancelledResponseContext": f"({_HOOK}, info, *, {_HOOK_HELPERS})",
     "CompactionHookContext": (
@@ -139,6 +149,7 @@ _SIGNATURES = {
     "EnrichmentItem": "(key, text, cache_policy, persist, minimal_required)",
     "FinalResponseDraft": "(response_text, response_kind, envelope)",
     "FinalResponseTransformContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
+    "GoogleWorkspaceConfig": "(*, name, display_name, client_config_service, allowed_hosted_domains, services)",
     "MessageEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "MessageEnvelope": (
         "(source_event_id, target, body, attachment_ids, mentioned_agents, agent_name, hook_source, "
@@ -204,6 +215,7 @@ _SIGNATURES = {
         "(transport_sender_id, requester_id, sender_entity_name, requester_entity_name, sender_kind, requester_kind, "
         "intent, source_kind, trust)"
     ),
+    "atlassian_connection_oauth_provider": "(connection)",
     "automation": "(name, *, requires_file_memory)",
     "automation_threads": "(runtime_paths)",
     "build_execution_identity_from_runtime_context": "(context)",
@@ -212,12 +224,22 @@ _SIGNATURES = {
     "complete_prompt": "(provider, prompt, *, role, instructions, schema, overrides, run_id)",
     "emit_custom_event": "(plugin_name, event_name, payload)",
     "get_logger": "(name)",
+    "get_tool_by_name": (
+        "(tool_name, runtime_paths, *, disable_sandbox_proxy, credential_overrides, credentials_manager, "
+        "runtime_config, tool_config_overrides, tool_init_overrides, worker_tools_override, runtime_overrides, "
+        "shared_storage_root_path, allowed_shared_services, tool_output_workspace_root, agent_state_root, "
+        "tool_output_auto_save_threshold_bytes, worker_target, list_mcp_functions)"
+    ),
     "get_tool_runtime_context": "()",
+    "google_cloud_oauth_provider": "()",
+    "google_workspace_oauth_providers": "(workspace)",
     "hook": "(event, *, name, priority, timeout_ms, agents, rooms, required)",
     "oauth_connect_url": "(provider, runtime_paths, *, worker_target)",
     "oauth_runtime_bootstrapper": "(config)",
     "open_directory_within_root": "(root, relative_path, *, create, mode)",
     "read_regular_file_within_root": "(root, relative_path, *, max_bytes, truncate)",
+    "register_atlassian_connection_tools": "(connection)",
+    "register_google_workspace_tools": "(workspace)",
     "register_tool_with_metadata": (
         "(*, name, display_name, description, category, status, setup_type, default_execution_target, "
         "requires_primary_runtime, consumes_workspace_paths, file_access, executes_code, requires_room_context, "
@@ -231,6 +253,57 @@ _SIGNATURES = {
     "write_file_within_root": "(root, relative_path, payload, *, file_mode, dir_mode, exclusive)",
 }
 
+# Plugins use the enums through their members, so each member name is pinned in definition order.
+_ENUM_MEMBERS = {
+    "SenderKind": ["USER", "MANAGED_ENTITY"],
+    "SetupType": ["NONE", "API_KEY", "OAUTH", "SPECIAL"],
+    "ToolCategory": [
+        "EMAIL",
+        "ENTERTAINMENT",
+        "SOCIAL",
+        "DEVELOPMENT",
+        "RESEARCH",
+        "INFORMATION",
+        "PRODUCTIVITY",
+        "COMMUNICATION",
+        "INTEGRATIONS",
+        "SMART_HOME",
+    ],
+    "ToolExecutionTarget": ["PRIMARY", "WORKER"],
+    "ToolFileAccess": ["NONE", "AGENT", "UNCONFINED"],
+    "ToolManagedInitArg": [
+        "RUNTIME_PATHS",
+        "CREDENTIALS_MANAGER",
+        "WORKER_TARGET",
+        "RUNTIME_CONFIG",
+        "TOOL_OUTPUT_WORKSPACE_ROOT",
+        "WORKER_TOOLS_OVERRIDE",
+        "CURRENT_ROOM_ID",
+        "AGENT_NAME",
+        "FILE_ACCESS",
+        "AGENT_STATE_ROOT",
+        "SHARED_DIRECTORY_ROOTS",
+    ],
+    "ToolStatus": ["AVAILABLE", "REQUIRES_CONFIG"],
+    "TurnIntent": [
+        "USER_MESSAGE",
+        "MANAGED_MESSAGE",
+        "ROUTER_HANDOFF",
+        "ROUTER_NOTICE",
+        "SCHEDULED_FIRE",
+        "EXTERNAL_TRIGGER",
+        "HOOK_MESSAGE",
+        "HOOK_DISPATCH",
+        "TRUSTED_INTERNAL_RELAY",
+        "JOB_FOLLOW_UP",
+    ],
+    "TurnTrust": ["EXTERNAL", "TRUSTED_INTERNAL", "TRUSTED_USER_RELAY"],
+}
+
+
+def _is_enum(obj: object) -> bool:
+    return isinstance(obj, type) and issubclass(obj, enum.Enum)
+
 
 def _parameter_shape(obj: object) -> str:
     signature = inspect.signature(obj)
@@ -242,10 +315,6 @@ def _parameter_shape(obj: object) -> str:
     return str(inspect.Signature(parameters))
 
 
-def _is_pinned_callable(obj: object) -> bool:
-    return callable(obj) and not (isinstance(obj, type) and issubclass(obj, enum.Enum))
-
-
 def test_plugin_api_exports_exactly_the_supported_names() -> None:
     """Adding or removing a supported name is a deliberate change to this list."""
     assert plugin_api.__all__ == _EXPORTS
@@ -255,5 +324,12 @@ def test_plugin_api_exports_exactly_the_supported_names() -> None:
 def test_each_exported_callable_keeps_its_parameter_names_and_kinds() -> None:
     """A plugin calls these by position or keyword as documented, so each parameter's name and kind stay put."""
     exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
-    shapes = {name: _parameter_shape(obj) for name, obj in exported.items() if _is_pinned_callable(obj)}
+    shapes = {name: _parameter_shape(obj) for name, obj in exported.items() if callable(obj) and not _is_enum(obj)}
     assert shapes == _SIGNATURES
+
+
+def test_each_exported_enum_keeps_its_member_names() -> None:
+    """Plugins write members such as `ToolCategory.DEVELOPMENT`, so renaming or removing one breaks them."""
+    exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
+    members = {name: list(obj.__members__) for name, obj in exported.items() if _is_enum(obj)}
+    assert members == _ENUM_MEMBERS

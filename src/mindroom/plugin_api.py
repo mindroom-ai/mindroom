@@ -1,8 +1,8 @@
 """The supported import surface for plugin code.
 
 Plugins import MindRoom's entry points from here; the modules that own them may change between releases.
-The Google and Atlassian integration bases stay in the modules their docs name, as do helpers whose modules load Agno
-at import, such as `mindroom.memory`, so importing this module stays free of Agno and provider SDKs.
+`GoogleCloudToolkit` and the `mindroom.memory` helpers stay in their documented modules, because those modules load
+Agno at import and this one stays free of Agno and provider SDKs.
 `tests/test_plugin_api.py` pins these names and each callable's parameter names and kinds.
 """
 
@@ -67,9 +67,15 @@ from mindroom.hooks import (
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
+from mindroom.oauth.google_cloud import google_cloud_oauth_provider
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
 from mindroom.providers.registry import build_model_provider
+from mindroom.tool_system.atlassian_connections import (
+    AtlassianConnectionConfig,
+    atlassian_connection_oauth_provider,
+    register_atlassian_connection_tools,
+)
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -79,6 +85,12 @@ from mindroom.tool_system.declarations import (
     ToolManagedInitArg,
     ToolStatus,
 )
+from mindroom.tool_system.google_workspaces import (
+    GoogleWorkspaceConfig,
+    google_workspace_oauth_providers,
+    register_google_workspace_tools,
+)
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -118,6 +130,7 @@ __all__ = [
     "AfterResponseContext",
     "AgentLifecycleContext",
     "Ask",
+    "AtlassianConnectionConfig",
     "AutomationContext",
     "BeforeResponseContext",
     "CancelledResponseContext",
@@ -129,6 +142,7 @@ __all__ = [
     "EnrichmentItem",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
+    "GoogleWorkspaceConfig",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -158,6 +172,7 @@ __all__ = [
     "TurnIntent",
     "TurnOrigin",
     "TurnTrust",
+    "atlassian_connection_oauth_provider",
     "automation",
     "automation_threads",
     "build_execution_identity_from_runtime_context",
@@ -166,12 +181,17 @@ __all__ = [
     "complete_prompt",
     "emit_custom_event",
     "get_logger",
+    "get_tool_by_name",
     "get_tool_runtime_context",
+    "google_cloud_oauth_provider",
+    "google_workspace_oauth_providers",
     "hook",
     "oauth_connect_url",
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",
     "read_regular_file_within_root",
+    "register_atlassian_connection_tools",
+    "register_google_workspace_tools",
     "register_tool_with_metadata",
     "resolve_agent_file",
     "resolve_config_relative_path",
