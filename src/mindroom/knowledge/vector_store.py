@@ -470,7 +470,9 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
                 return index
             # A base serves one collection at a time, so before the load, drop the matrices of its other collections
             # (the one a refresh retired stays on disk unchanged), of this file's older versions (a rewrite within one
-            # timestamp tick may keep the stat key), and of deleted or rewritten files.
+            # timestamp tick may keep the stat key), and of deleted or rewritten files. A search that chose the old
+            # collection just before a publication and loads it after the new one can swap them once more; it costs
+            # one extra load per such search and settles as soon as it finishes.
             for stale in [
                 cached
                 for cached in _index_cache

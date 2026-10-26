@@ -395,7 +395,8 @@ def test_a_republished_file_replaces_its_stale_matrix(tmp_path: Path, monkeypatc
     """Matrices of deleted or rewritten files leave the cache, so a stale large one cannot crowd out the live index."""
     monkeypatch.setattr(vector_store_module, "_MATRIX_CACHE_BYTES", 1)
     monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
-    old = KnowledgeCollection(path=tmp_path, name="old")
+    # Another base's file, so only its deletion, not the directory rule, can drop its matrix.
+    old = KnowledgeCollection(path=tmp_path / "deleted_base", name="old")
     old.reset()
     old.write_source_rows("a.md", [_row(f"o{index}", "a.md", "old", [1.0, float(index)]) for index in range(40)])
     old.search([1.0, 0.0], limit=1)
