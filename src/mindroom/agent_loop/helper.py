@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from mindroom.agent_loop.prompt import PromptSpec, render_system_messages
+from mindroom.agent_loop.prompt import join_sections
 from mindroom.agent_loop.structured import output_format_prompt, parse_structured
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
@@ -48,25 +48,19 @@ async def complete_prompt[T: BaseModel](
     provider: ModelProvider,
     prompt: str,
     *,
-    role: str | None = None,
     instructions: Sequence[str] = (),
     schema: type[T] | None = None,
     overrides: RequestOverrides = _NO_OVERRIDES,
     run_id: str | None = None,
 ) -> HelperResult[T]:
-    """Send ``prompt`` under a system message rendered from ``role`` and ``instructions`` as one request.
+    """Send ``prompt`` as one request under a system message of the caller's ``instructions``, each as written.
 
-    Returns the answer with a completed run record. ``schema`` asks for structured output the way ``provider``
-    supports it, so JSON-mode routes also get the JSON prompt at the end of the system message.
+    The instructions join with one blank line between them. Returns the answer with a completed run record.
+    ``schema`` asks for structured output the way ``provider`` supports it, so JSON-mode routes also get the JSON prompt
+    at the end of the system message.
     """
-    system = render_system_messages(
-        PromptSpec(
-            role=role,
-            instructions=tuple(instructions),
-            output_format_prompt=output_format_prompt(provider.capabilities, schema),
-        ),
-    )
-    messages = [*system, Message(role="user", content=prompt)]
+    system = join_sections((*instructions, output_format_prompt(provider.capabilities, schema)))
+    messages = [*([Message(role="system", content=system)] if system else []), Message(role="user", content=prompt)]
     started = perf_counter()
     turn = await complete(
         provider,

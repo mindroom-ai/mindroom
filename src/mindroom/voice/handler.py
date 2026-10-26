@@ -687,7 +687,9 @@ async def _process_transcription(
                 response = await complete_prompt(
                     provider,
                     prompt,
-                    role="Normalize voice transcriptions while preserving natural language and mention intent",
+                    instructions=[
+                        "Normalize voice transcriptions while preserving natural language and mention intent",
+                    ],
                 )
         except TimeoutError:
             logger.warning(

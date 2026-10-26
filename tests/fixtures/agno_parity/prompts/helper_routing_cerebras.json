@@ -52,7 +52,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\nRoute messages to appropriate agents or teams\n</your_role>",
+          "content": "Route messages to appropriate agents or teams",
           "role": "system"
         },
         {

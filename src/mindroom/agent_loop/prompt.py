@@ -26,7 +26,7 @@ class PromptSpec:
 
     ``persona`` is an authored prompt that leads the stable part in place of the agent's identity.
     ``role`` fills ``<your_role>``: an agent's identity, runtime facts, preloaded files, and authored role (only the
-    runtime facts under a persona), or a helper's task.
+    runtime facts under a persona), or a team's identity.
     ``markdown`` states the chat's Markdown output format right after the role (``MARKDOWN_OUTPUT_FORMAT``); callers
     with an output schema, and realtime voice calls, leave it False.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered, and

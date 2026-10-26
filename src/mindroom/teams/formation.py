@@ -165,7 +165,7 @@ async def _select_team_mode(
         result = await complete_prompt(
             provider_registry.build_model_provider(config, runtime_paths, "default"),
             prompt,
-            role="Determine team mode",
+            instructions=["Determine team mode"],
             schema=_TeamModeDecision,
         )
         await record_system_usage(result.record, runtime_paths=runtime_paths, kind="team_mode")
