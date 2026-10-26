@@ -27,6 +27,7 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_loop.helpers import collect
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -74,6 +75,27 @@ def _stream(**options: object) -> AsyncIterator[RunEvent]:
         execution_identity=None,
         **options,  # type: ignore[arg-type]
     )
+
+
+@pytest.mark.asyncio
+async def test_the_driver_refuses_a_paused_run_whose_owner_is_not_a_matrix_conversation() -> None:
+    """A run paused on delegations whose owner is not a Matrix conversation is refused before any call advances."""
+    owner = ToolExecutionIdentity("openai_compat", "leader", "@alice:localhost", None, None, None, "session-1")
+    stream = execution.drive_delegation_stream(
+        _paused_run(),
+        record_type=RunRecord,
+        continue_parent=_UnusedContinuation(
+            RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
+        ),
+        agent_name="leader",
+        run_child=cast("Callable", None),
+        config=cast("Callable", None),  # type: ignore[arg-type]
+        runtime_paths=cast("Callable", None),  # type: ignore[arg-type]
+        execution_identity=owner,
+    )
+
+    with pytest.raises(RuntimeError, match="requires a Matrix execution owner"):
+        [event async for event in stream]
 
 
 @pytest.mark.asyncio

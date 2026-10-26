@@ -1279,13 +1279,14 @@ async def run_delegated_child_response(
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    supports_native_tool_approval: bool,
+    supports_native_tool_approval: bool = True,
     approval_config: Config | None = None,
 ) -> str:
     """Execute the normal response envelope for a prepared child owned by either adapter.
 
-    A minimal child cannot pause for approval: approval-gated tools stay hidden from it,
-    so no adapter ever has to resume it natively.
+    The native delegation driver resumes a child that pauses for approval; the direct delegate tool, which cannot,
+    passes ``supports_native_tool_approval=False``. A minimal child cannot pause for approval: approval-gated tools
+    stay hidden from it, so no adapter ever has to resume it natively.
     """
     identity = child_execution_identity(child)
     authorized_config = authorize_delegation(

@@ -446,12 +446,10 @@ async def _start_child_envelope(
             config=config,
             runtime_paths=runtime_paths,
             refresh_scheduler=refresh_scheduler,
-            supports_native_tool_approval=True,
         )
     except ResponsePausedForApproval as suspension:
+        # The paused attempt published its run id and model when it started, through ``run_child``.
         toolkit_owners = suspension.paused.toolkit_owners
-        if suspension.paused.runtime_model_name is not None:
-            note_child_run_id(child, child.run_id, runtime_paths, model_name=suspension.paused.runtime_model_name)
     response = await read_child_run(child, config, runtime_paths)
     if response is None:
         msg = result or "Delegated execution did not retain its exact run outcome"
@@ -1023,10 +1021,9 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     that saves the real parent without adding a provider requirement or message.
     A managed `background` runtime owns children this call starts or continues.
     The call's own started and completed events reach `on_event` through `tag_call_event`.
+    ``execution_identity`` is a Matrix owner's: the driver refuses any other, and a hidden CLI call's is built from
+    its Matrix runtime context.
     """
-    if execution_identity.channel != "matrix":
-        msg = "Native delegation requires a Matrix execution owner"
-        raise RuntimeError(msg)
     # Bind this exact parent call and its presentation before resolving the target.
     tool = requirement.tool_execution
     tool_name = tool.tool_name
