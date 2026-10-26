@@ -13,6 +13,10 @@ from mindroom.path_globs import validate_safe_relative_pattern
 MemoryBackend = Literal["mem0", "file", "none"]
 _MemorySearchMode = Literal["keyword", "semantic"]
 
+# The memory.embedder.config fields each provider accepts; a provider not listed accepts the defaults.
+_EMBEDDER_PROVIDER_FIELDS: dict[str, frozenset[str]] = {"openai": frozenset(EmbedderConfig.model_fields)}
+_DEFAULT_EMBEDDER_FIELDS = frozenset({"model", "host", "dimensions"})
+
 
 def _validate_memory_search_includes(value: list[str]) -> list[str]:
     """Validate include patterns stay inside the memory root."""
@@ -70,10 +74,14 @@ class _MemoryEmbedderConfig(BaseModel):
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
 
     @model_validator(mode="after")
-    def _prefixes_need_openai_provider(self) -> Self:
-        """Reject prefixes that the configured provider would silently ignore."""
-        if self.provider != "openai" and (self.config.query_prefix or self.config.document_prefix):
-            msg = "memory.embedder.config.query_prefix and document_prefix apply only to the openai provider"
+    def _reject_fields_the_provider_ignores(self) -> Self:
+        """Reject a set field that the configured provider would silently ignore."""
+        accepted = _EMBEDDER_PROVIDER_FIELDS.get(self.provider, _DEFAULT_EMBEDDER_FIELDS)
+        ignored = [f"memory.embedder.config.{name}" for name, value in self.config if value and name not in accepted]
+        if ignored:
+            listed = ignored[0] if len(ignored) == 1 else f"{', '.join(ignored[:-1])} and {ignored[-1]}"
+            verb, pronoun = ("does", "it") if len(ignored) == 1 else ("do", "them")
+            msg = f"{listed} {verb} not apply to the {self.provider} provider; remove {pronoun}"
             raise ValueError(msg)
         return self
 

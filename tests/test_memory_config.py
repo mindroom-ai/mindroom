@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 import threading
 import time
@@ -506,15 +507,70 @@ class TestMemoryConfig:
             != resolve_embedder_settings(config_with("other: "), runtime_paths).client_signature
         )
 
-    def test_embedder_prefixes_require_an_openai_compatible_provider(self) -> None:
-        """Other providers would ignore the prefixes, so configuring them there is an error."""
-        with pytest.raises(ValidationError, match="query_prefix and document_prefix"):
-            _MemoryEmbedderConfig.model_validate(
-                {
-                    "provider": "sentence_transformers",
-                    "config": {"model": "google/embeddinggemma-2", "query_prefix": "q: "},
+    @pytest.mark.parametrize(
+        ("provider", "fields", "message"),
+        [
+            (
+                "ollama",
+                {"api_key": "sk-test"},
+                "memory.embedder.config.api_key does not apply to the ollama provider; remove it",
+            ),
+            (
+                "sentence_transformers",
+                {"credentials_service": "embedder"},
+                "memory.embedder.config.credentials_service does not apply to the sentence_transformers provider;"
+                " remove it",
+            ),
+            (
+                "sentence_transformers",
+                {"query_prefix": "q: "},
+                "memory.embedder.config.query_prefix does not apply to the sentence_transformers provider; remove it",
+            ),
+            (
+                "huggingface",
+                {"api_key": "sk-test", "credentials_service": "embedder", "document_prefix": "d: "},
+                "memory.embedder.config.credentials_service, memory.embedder.config.api_key and"
+                " memory.embedder.config.document_prefix do not apply to the huggingface provider; remove them",
+            ),
+        ],
+    )
+    def test_embedder_rejects_the_fields_its_provider_ignores(
+        self,
+        provider: str,
+        fields: dict[str, object],
+        message: str,
+    ) -> None:
+        """A field the provider would silently ignore is a config error that names the field."""
+        with pytest.raises(ValidationError, match=re.escape(message)):
+            _MemoryEmbedderConfig.model_validate({"provider": provider, "config": {"model": "embed", **fields}})
+
+    @pytest.mark.parametrize("provider", ["ollama", "sentence_transformers", "huggingface"])
+    def test_embedder_fields_left_unset_load_with_any_provider(self, provider: str) -> None:
+        """A null or blank field sets nothing, so a provider that ignores it still loads."""
+        unset = {"api_key": None, "credentials_service": None, "query_prefix": "", "document_prefix": None}
+
+        embedder = _MemoryEmbedderConfig.model_validate({"provider": provider, "config": {"model": "embed", **unset}})
+
+        assert embedder.provider == provider
+
+    def test_openai_embedder_accepts_every_embedder_field(self) -> None:
+        """The openai provider reads every field, so none of them is rejected."""
+        embedder = _MemoryEmbedderConfig.model_validate(
+            {
+                "provider": "openai",
+                "config": {
+                    "model": "embeddinggemma-2",
+                    "credentials_service": "embedder",
+                    "api_key": "sk-test",
+                    "host": "http://local/v1",
+                    "dimensions": 768,
+                    "query_prefix": "q: ",
+                    "document_prefix": "d: ",
                 },
-            )
+            },
+        )
+
+        assert embedder.config.dimensions == 768
 
     def test_keyless_local_endpoint_constructs_both_real_clients(
         self,
