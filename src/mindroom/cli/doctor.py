@@ -226,12 +226,16 @@ def _endpoint_variables(env_key: str, runtime_paths: RuntimePaths) -> list[str]:
     )
 
 
-def _shared_key_not_checked(subject: str, env_key: str, reasons: Sequence[str]) -> bool:
-    """Report the shared ``env_key`` as not checked when ``reasons`` name a setting that may send it elsewhere."""
-    if reasons:
-        listed = ", ".join(reasons)
-        console.print(f"[yellow]![/yellow] {subject}: {env_key} not checked: {listed} may send it elsewhere")
-    return bool(reasons)
+def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons: Sequence[str]) -> bool:
+    """Print that ``key_name`` is not checked, and return True, when ``reasons`` name a setting that may send it elsewhere.
+
+    A provider without a key check is never probed, so it reports nothing here and gets the probe's "no key check".
+    """
+    if not reasons or provider_route(provider) not in PROVIDER_KEY_CHECKS:
+        return False
+    listed = ", ".join(reasons)
+    console.print(f"[yellow]![/yellow] {subject}: {key_name} not checked: {listed} may send it elsewhere")
+    return True
 
 
 def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
@@ -481,6 +485,7 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
     Doctor never works out where the runtime sends a key, which a header, a stored credential, or an SDK variable can
     change. So it skips the check while the provider's endpoint variable is set, reports each model that reads the key
     and sets an endpoint-like setting as not checked, and checks the key unless every model that reads it was skipped.
+    A provider without a key check is never probed, so it gets one "no key check" warning whatever its settings.
     """
     # Models with their own credential never read the shared key.
     shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
@@ -489,17 +494,13 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
         if shared_key_models:
             console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, int(bool(shared_key_models))
-    if _shared_key_not_checked(provider, env_key, _endpoint_variables(env_key, runtime_paths)):
+    if _report_key_not_checked(provider, provider, env_key, _endpoint_variables(env_key, runtime_paths)):
         return 0, 0, 1
-    skipped = [
-        name
-        for name, model in shared_key_models.items()
-        if _shared_key_not_checked(
-            provider,
-            env_key,
-            _endpoint_settings({"host": model.host, "extra_kwargs": model.extra_kwargs}, f"models.{name}"),
-        )
-    ]
+    skipped: list[str] = []
+    for name, model in shared_key_models.items():
+        settings = _endpoint_settings({"host": model.host, "extra_kwargs": model.extra_kwargs}, f"models.{name}")
+        if _report_key_not_checked(provider, provider, env_key, settings):
+            skipped.append(name)
     if shared_key_models and len(skipped) == len(shared_key_models):
         return 0, 0, len(skipped)
     valid, detail = _validate_provider_key(provider, api_key)
@@ -585,18 +586,15 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
         return 0, 0, 1
-    # A shared key is checked only where no endpoint setting or variable could send it elsewhere, as for models.
-    if (
-        env_key
-        and not configured_key
-        and _shared_key_not_checked(
-            "Memory LLM",
-            env_key,
-            _endpoint_settings(config.memory.llm.config, "memory.llm.config")
-            + _endpoint_variables(env_key, runtime_paths),
-        )
-    ):
-        return 0, 0, 1
+    # Mem0 sends the key to its configured endpoint, else to the endpoint variable, so a configured key is checked at a
+    # configured endpoint, and any other key is skipped where an endpoint setting or variable may send it elsewhere.
+    if env_key:
+        reasons = [] if configured_key and llm_base_url else _endpoint_variables(env_key, runtime_paths)
+        if not configured_key:
+            reasons = [*_endpoint_settings(config.memory.llm.config, "memory.llm.config"), *reasons]
+        key_name = "memory.llm.config.api_key" if configured_key else env_key
+        if _report_key_not_checked("Memory LLM", llm_provider, key_name, reasons):
+            return 0, 0, 1
     # The runtime drops host for memory LLMs other than Ollama.
     valid, detail = _validate_provider_key(llm_provider, api_key or "", llm_base_url)
     return _print_validation(
@@ -657,7 +655,12 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
         )
         return 0, 0, 1
-    if env_key and _shared_key_not_checked("Memory embedder", env_key, _endpoint_variables(env_key, runtime_paths)):
+    if env_key and _report_key_not_checked(
+        "Memory embedder",
+        emb.provider,
+        env_key,
+        _endpoint_variables(env_key, runtime_paths),
+    ):
         return 0, 0, 1
 
     valid, detail = _validate_provider_key(emb.provider, api_key or "")
