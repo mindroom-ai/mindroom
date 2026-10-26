@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pytest
 
 import mindroom.knowledge.vector_store as vector_store_module
@@ -277,3 +278,31 @@ def test_concurrent_cold_searches_load_the_matrix_once(
 
     assert loads == [1]
     assert all(result[0].content == "alpha" for result in results)
+
+
+@pytest.mark.parametrize("name", ["", "/etc/elsewhere", "../outside", "a/b", ".hidden", "with space"])
+def test_collection_names_must_be_one_plain_component(tmp_path: Path, name: str) -> None:
+    """A name read from worker-writable metadata can never become a path outside the base's directory."""
+    with pytest.raises(ValueError, match="Invalid knowledge collection name"):
+        KnowledgeCollection(path=tmp_path, name=name)
+
+
+def test_a_linked_collection_file_is_refused(collection: KnowledgeCollection, tmp_path: Path) -> None:
+    """A collection file replaced by a link is not followed into whatever database it names."""
+    target = KnowledgeCollection(path=tmp_path / "other", name="target")
+    target.reset()
+    collection.delete()
+    collection.file.symlink_to(target.file)
+
+    with pytest.raises(ValueError, match="is a link"):
+        collection.has_rows()
+    collection.delete()
+    assert target.exists()
+
+
+def test_top_k_keeps_the_earliest_positions_among_ties_at_the_cutoff() -> None:
+    """Equal scores at the cutoff are taken in position order, so tied chunks rank the same way every time."""
+    scores = np.array([0.5, 0.9, 0.5, 0.5, 0.9, 0.5], dtype=np.float32)
+
+    assert vector_store_module._top_indices(scores, 3) == [1, 4, 0]
+    assert vector_store_module._top_indices(scores, 6) == [1, 4, 0, 2, 3, 5]

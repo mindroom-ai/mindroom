@@ -39,6 +39,8 @@ _RRF_K = 60
 #: Query words matched in the keyword index, so a pasted document cannot make one search scan everything.
 _MAX_KEYWORD_TERMS = 32
 _WORD = re.compile(r"\w+")
+#: What a collection name may be: one plain file-name component, the same characters Chroma allowed.
+_COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 #: Vector matrices kept loaded across searches, bounded by their total size.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
 _SCHEMA = """
@@ -86,6 +88,16 @@ class KnowledgeCollection:
 
     path: Path
     name: str
+
+    def __post_init__(self) -> None:
+        """Refuse a name that is not one plain file-name component.
+
+        Names come from metadata a worker sharing the storage root can write, so a name must never reach a path
+        outside the base's directory.
+        """
+        if not _COLLECTION_NAME.fullmatch(self.name):
+            message = f"Invalid knowledge collection name: {self.name!r}"
+            raise ValueError(message)
 
     @property
     def file(self) -> Path:
@@ -215,6 +227,9 @@ class KnowledgeCollection:
         Only published files, which are never mid-transaction, open read-only. Anything else opens read-write, so
         SQLite can roll back the journal a refresh killed mid-write left behind instead of refusing to read.
         """
+        if self.file.is_symlink():
+            message = f"Knowledge collection {self.name!r} is a link, not a collection file"
+            raise ValueError(message)
         if not self.file.is_file():
             message = f"Knowledge collection {self.name!r} does not exist"
             raise _CollectionNotFoundError(message)
@@ -284,7 +299,12 @@ def _top_indices(scores: np.ndarray, count: int) -> list[int]:
 
     if count <= 0:
         return []
-    candidates = np.argpartition(-scores, count - 1)[:count] if count < len(scores) else np.arange(len(scores))
+    if count < len(scores):
+        cutoff = np.partition(scores, len(scores) - count)[len(scores) - count]
+        above = np.flatnonzero(scores > cutoff)
+        candidates = np.concatenate([above, np.flatnonzero(scores == cutoff)[: count - len(above)]])
+    else:
+        candidates = np.arange(len(scores))
     return [int(position) for position in candidates[np.lexsort((candidates, -scores[candidates]))]]
 
 

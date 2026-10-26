@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,6 +17,11 @@ if TYPE_CHECKING:
     from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
     from mindroom.knowledge.read_protocol import SearchHit
+
+#: A search's whole budget: embedding the query, waiting for the collection, and ranking it.
+_SEARCH_TIMEOUT_SECONDS = 30.0
+#: Searches wait on collection locks and load matrices here, never in the event loop's shared default executor.
+_search_threads = ThreadPoolExecutor(4, thread_name_prefix="knowledge-search")
 
 
 @dataclass
@@ -37,9 +43,16 @@ class PublishedIndexReader:
             return KnowledgeCollection(path=Path(self.path), name=collection_name).exists()
 
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        """Embed under the caller's credentials, then run the hybrid search on a worker thread."""
-        embedding = (await self.embedder.aembed([query], purpose="query"))[0]
-        return await asyncio.to_thread(self._search, query, embedding, limit)
+        """Embed under the caller's credentials, then run the hybrid search on a search thread, all within a deadline."""
+        async with asyncio.timeout(_SEARCH_TIMEOUT_SECONDS):
+            embedding = (await self.embedder.aembed([query], purpose="query"))[0]
+            return await asyncio.get_running_loop().run_in_executor(
+                _search_threads,
+                self._search,
+                query,
+                embedding,
+                limit,
+            )
 
     def _search(self, query: str, embedding: Sequence[float], limit: int) -> list[SearchHit]:
         with read_collection(self.path, self.collection_name, self._published_metadata()) as collection_name:
