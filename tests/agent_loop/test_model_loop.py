@@ -207,7 +207,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 6)
 
 
-async def test_unknown_tools_and_bad_arguments_answer_the_model_with_error_results() -> None:
+async def test_unknown_tools_and_bad_arguments_answer_the_model_in_call_order() -> None:
     model = ScriptedModel(
         [
             calls(
@@ -229,10 +229,11 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_error_resul
     assert tool_messages[0].content == MISSING_TOOL_ERROR_TEXT
     assert "validation error" in str(tool_messages[1].content)
     assert tool_messages[2].content == '{"sum": 7}'
-    # Only resolved calls are announced; the unknown one was answered without running.
-    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c2", "c3"]
+    # Every call is announced and recorded in call order; the unknown one answered without running.
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2", "c3"]
     assert record.tools is not None
-    assert [tool.tool_call_id for tool in record.tools] == ["c2", "c3"]
+    assert [(tool.tool_call_id, tool.is_error) for tool in record.tools] == [("c1", True), ("c2", True), ("c3", False)]
+    assert record.tools[0].result == MISSING_TOOL_ERROR_TEXT
     assert model.requests[1].messages[-3:] == tuple(tool_messages)
     # The run's agent is named on the warning for the tool it was not offered.
     assert [entry["entity"] for entry in logs if entry["event"] == "tool_not_offered"] == ["code"]
@@ -254,17 +255,22 @@ async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests()
 
     limit_text = "Tool call limit reached. Tool call add not executed. Don't try to execute it again."
     tool_messages = [message for message in messages if message.role == "tool"]
-    # Within a batch the refused calls answer first, then the executed ones, as Agno appended them.
+    # Every call answers in the order the model made it, refused ones included.
     assert [(m.tool_call_id, m.content) for m in tool_messages] == [
-        ("c2", limit_text),
         ("c1", '{"sum": 2}'),
+        ("c2", limit_text),
         ("c3", limit_text),
         ("c4", limit_text),
     ]
-    # Refused calls are neither announced nor recorded as executions.
-    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1"]
+    # Refused calls are announced and recorded as failed executions too.
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2", "c3", "c4"]
     assert record.tools is not None
-    assert len(record.tools) == 1
+    assert [(tool.tool_call_id, tool.is_error) for tool in record.tools] == [
+        ("c1", False),
+        ("c2", True),
+        ("c3", True),
+        ("c4", True),
+    ]
     assert len(model.requests) == 3
     assert len(model.turns) == 1
     assert events[-1] == LoopEnded(paused=False)

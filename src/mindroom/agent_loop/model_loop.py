@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.tools import (
     PlannedCall,
+    RefusedCall,
     dispatch_tool_calls,
     failed_answer,
     media_follow_up,
@@ -296,7 +297,6 @@ async def _run_tool_batch(
     batch = plan_tool_batch(
         message.tool_calls,
         state.offered.functions,
-        state.messages,
         calls_so_far=progress.calls_so_far,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
         entity=_entity(state.record),
@@ -304,15 +304,14 @@ async def _run_tool_batch(
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
         await hooks.before_dispatch(state, batch.planned)
-    for call in batch.planned:
+    for call in batch.calls:
         yield ToolStarted(call.execution.call)
     executed = await dispatch_tool_calls(batch.planned, run=state.run, middleware=hooks.tool_middleware)
-    for call in batch.planned:
+    for call in batch.calls:
         if not call.execution.is_paused:
             yield ToolCompleted(call.execution.call)
-    results = [*batch.refused, *executed]
-    progress.calls_so_far += len(results)
-    progress.stopped = await _answer_batch(state.messages, results, hooks.after_tool_batch)
+    progress.calls_so_far += len(executed) + sum(isinstance(call, RefusedCall) and call.counts for call in batch.calls)
+    progress.stopped = await _answer_batch(state.messages, batch.answers(executed), hooks.after_tool_batch)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
     progress.paused = batch.paused or _waits_for_decision(state.record)
 
@@ -465,10 +464,10 @@ def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelId
 
 
 def _record_batch(record: AnyRunRecord, batch: ToolBatch) -> None:
-    """Add the batch's executions to the record, and a requirement for each paused one."""
+    """Add every call's execution to the record in call order, refused ones included, and a requirement for each paused one."""
     if record.tools is None:
         record.tools = []
-    for call in batch.planned:
+    for call in batch.calls:
         record.tools.append(call.execution)
         if call.execution.is_paused:
             if record.requirements is None:

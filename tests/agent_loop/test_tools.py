@@ -16,6 +16,8 @@ from structlog.testing import capture_logs
 from mindroom.agent_loop.tools import (
     MEDIA_FOLLOW_UP_TEXT,
     PreparedTools,
+    RefusedCall,
+    ToolBatch,
     dispatch_tool_calls,
     media_follow_up,
     offered_toolkits,
@@ -112,9 +114,12 @@ def _functions() -> dict[str, object]:
     return dict(spec(ScriptedModel([]), toolkit(add, echo), gated(boom)).functions)
 
 
-def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> None:
+def _refused_answers(batch: ToolBatch) -> list[Message]:
+    return [call.answer for call in batch.calls if isinstance(call, RefusedCall)]
+
+
+def test_unknown_and_undecodable_calls_are_refused_in_call_order_and_bypass_the_limit() -> None:
     functions = spec(ScriptedModel([]), toolkit(add)).functions
-    messages: list[Message] = []
 
     batch = plan_tool_batch(
         [
@@ -124,13 +129,13 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
             tool_call("add", "c4", a=1, b=2),
         ],
         functions,
-        messages,
         calls_so_far=0,
         max_tool_calls_per_turn=1,
         entity="code",
     )
 
     # Each answer is a failed call, which Claude and Gemini read as a failure.
+    messages = _refused_answers(batch)
     assert [(m.role, m.tool_call_id, m.tool_name, m.tool_call_error) for m in messages] == [
         ("tool", "c1", "missing", True),
         ("tool", "c2", "add", True),
@@ -139,9 +144,10 @@ def test_unknown_and_undecodable_calls_answer_at_once_and_bypass_the_limit() -> 
     assert messages[0].content == MISSING_TOOL_ERROR_TEXT
     assert str(messages[1].content).startswith("Error while decoding function arguments: ")
     assert messages[2].content == "Function arguments are not a valid JSON object.\n\n Please fix and retry."
-    # The three errors never counted, so the fourth call is the first within the limit.
+    # The three errors never counted, so the fourth call is the first within the limit; every call keeps its place.
     assert [call.execution.tool_call_id for call in batch.planned] == ["c4"]
-    assert batch.refused == ()
+    assert [call.execution.tool_call_id for call in batch.calls] == ["c1", "c2", "c3", "c4"]
+    assert [call.counts for call in batch.calls if isinstance(call, RefusedCall)] == [False, False, False]
 
 
 def test_unknown_and_undecodable_calls_are_logged_without_their_arguments() -> None:
@@ -156,7 +162,6 @@ def test_unknown_and_undecodable_calls_are_logged_without_their_arguments() -> N
                 raw_tool_call("add", "c4", '"secret-3"'),
             ],
             functions,
-            [],
             calls_so_far=0,
             max_tool_calls_per_turn=None,
             entity="code",
@@ -179,14 +184,15 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
     batch = plan_tool_batch(
         [tool_call("add", "c1", a=1, b=2), tool_call("echo", "c2", text="x"), tool_call("add", "c3", a=3, b=4)],
         functions,
-        [],
         calls_so_far=1,
         max_tool_calls_per_turn=2,
         entity="code",
     )
 
     assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
-    assert [(m.tool_call_id, m.tool_name, m.content, m.tool_call_error, m.tool_args) for m in batch.refused] == [
+    assert [
+        (m.tool_call_id, m.tool_name, m.content, m.tool_call_error, m.tool_args) for m in _refused_answers(batch)
+    ] == [
         (
             "c2",
             "echo",
@@ -210,7 +216,6 @@ def test_empty_list_arguments_plan_as_no_arguments() -> None:
     batch = plan_tool_batch(
         [raw_tool_call("echo", "c1", "[]")],
         functions,
-        [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
@@ -226,7 +231,6 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
     batch = plan_tool_batch(
         [tool_call("add", "c1", a=1, b=2), tool_call("echo", "c2", text="x"), tool_call("boom", "c3", reason="r")],
         functions,
-        [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
@@ -273,7 +277,6 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
     batch = plan_tool_batch(
         [tool_call("meet", "c1", who="one"), tool_call("meet", "c2", who="two")],
         functions,
-        [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
@@ -317,7 +320,6 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
     batch = plan_tool_batch(
         [tool_call("linger", "c1"), tool_call("give_up", "c2")],
         functions,
-        [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
@@ -342,7 +344,6 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
     batch = plan_tool_batch(
         [tool_call("linger", "c1")],
         functions,
-        [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
@@ -367,7 +368,6 @@ async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results(
             tool_call("boom", "c3", reason="kaboom"),
         ],
         functions,
-        [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
@@ -395,7 +395,6 @@ async def test_dispatch_skips_paused_calls_and_passes_the_call_id_through_middle
     batch = plan_tool_batch(
         [tool_call("add", "c1", a=1, b=2), tool_call("echo", "c2", text="hi")],
         functions,
-        [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
@@ -427,7 +426,6 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
             tool_call("picture", "c3", label="b"),
         ],
         functions,
-        [],
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",

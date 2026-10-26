@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import Message
+from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.provider import ToolSpec
-    from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome, ToolValue
 
@@ -97,41 +97,60 @@ class PlannedCall:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ToolBatch:
-    """One assistant message's tool calls after resolution and limit accounting.
+class RefusedCall:
+    """One tool call the loop answered without running it: its run record entry and the failed answer it gets.
 
-    ``refused`` holds the limit-error results, which precede the executed results in the batch's messages; they and
-    the executed results, not the paused calls, count toward the run's tool calls.
+    ``counts`` says whether it counts toward the run's tool calls, as a limit refusal does; a call that names no
+    offered function or whose arguments cannot be decoded does not.
     """
 
-    planned: tuple[PlannedCall, ...]
-    refused: tuple[Message, ...]
+    execution: ToolExecution
+    answer: Message
+    counts: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolBatch:
+    """One assistant message's tool calls after resolution and limit accounting, in the order the model made them."""
+
+    calls: tuple[PlannedCall | RefusedCall, ...]
+
+    @property
+    def planned(self) -> tuple[PlannedCall, ...]:
+        """The admitted calls, in call order."""
+        return tuple(call for call in self.calls if isinstance(call, PlannedCall))
 
     @property
     def paused(self) -> bool:
         """Whether any admitted call waits for a decision, which ends the loop after this batch."""
         return any(call.execution.is_paused for call in self.planned)
 
+    def answers(self, executed: Sequence[Message]) -> list[Message]:
+        """Return the batch's answers in call order: each refused call's, and each executed one's from ``executed``."""
+        by_call = {message.tool_call_id: message for message in executed}
+        return [
+            call.answer if isinstance(call, RefusedCall) else by_call[call.execution.tool_call_id]
+            for call in self.calls
+            if isinstance(call, RefusedCall) or call.execution.tool_call_id in by_call
+        ]
+
 
 def plan_tool_batch(
     tool_calls: Sequence[Mapping[str, Any]],
     functions: Mapping[str, ToolFunction],
-    messages: list[Message],
     *,
     calls_so_far: int,
     max_tool_calls_per_turn: int | None,
     entity: str | None,
 ) -> ToolBatch:
-    """Resolve an assistant message's tool calls, apply the limit, and classify the admitted ones.
+    """Resolve an assistant message's tool calls in order, apply the limit, and classify the admitted ones.
 
-    A call naming no offered function, or whose arguments cannot be decoded, is answered with an error tool message
-    appended to ``messages`` right away, logged for ``entity`` without its arguments, and never counts toward the
-    limit. Of the rest, each call past ``max_tool_calls_per_turn`` gets a limit-error result instead of running. An
-    admitted call whose function requires confirmation or external execution is planned paused, with the flags its
-    stored execution carries.
+    A call naming no offered function, or whose arguments cannot be decoded, is refused with an error answer, logged
+    for ``entity`` without its arguments, and never counts toward the limit. Of the rest, each call past
+    ``max_tool_calls_per_turn`` is refused with a limit error instead of running. An admitted call whose function
+    requires confirmation or external execution is planned paused, with the flags its stored execution carries.
     """
-    planned: list[PlannedCall] = []
-    refused: list[Message] = []
+    calls: list[PlannedCall | RefusedCall] = []
     count = calls_so_far
     for tool_call in tool_calls:
         call_id = tool_call["id"]
@@ -140,22 +159,30 @@ def plan_tool_batch(
         function = functions.get(name) if isinstance(name, str) else None
         if function is None:
             logger.warning("tool_not_offered", entity=entity, tool_name=str(name)[:_MAX_LOGGED_TOOL_NAME])
-            messages.append(failed_answer(call_id, name, MISSING_TOOL_ERROR_TEXT))
+            calls.append(_refused(call_id, str(name), MISSING_TOOL_ERROR_TEXT, None, counts=False))
             continue
         arguments = parse_tool_arguments(function_data.get("arguments"), function)
         if isinstance(arguments, ToolArgumentError):
             logger.warning("invalid_tool_arguments", entity=entity, tool_name=name, reason=arguments.reason)
-            messages.append(failed_answer(call_id, name, arguments.error_text))
+            calls.append(_refused(call_id, function.name, arguments.error_text, None, counts=False))
             continue
         if max_tool_calls_per_turn is not None:
             count += 1
             if count > max_tool_calls_per_turn:
                 limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
-                refused.append(failed_answer(call_id, function.name, limit_text, tool_args=arguments))
+                calls.append(_refused(call_id, function.name, limit_text, arguments, counts=True))
                 continue
-        execution = function.planned_execution(call_id, arguments)
-        planned.append(PlannedCall(function=function, execution=execution))
-    return ToolBatch(planned=tuple(planned), refused=tuple(refused))
+        calls.append(PlannedCall(function=function, execution=function.planned_execution(call_id, arguments)))
+    return ToolBatch(calls=tuple(calls))
+
+
+def _refused(call_id: str, name: str, text: str, arguments: dict[str, Any] | None, *, counts: bool) -> RefusedCall:
+    execution = ToolExecution(tool_call_id=call_id, tool_name=name, tool_args=arguments, is_error=True, result=text)
+    return RefusedCall(
+        execution=execution,
+        answer=failed_answer(call_id, name, text, tool_args=arguments),
+        counts=counts,
+    )
 
 
 def failed_answer(
@@ -273,6 +300,7 @@ __all__ = [
     "MEDIA_FOLLOW_UP_TEXT",
     "PlannedCall",
     "PreparedTools",
+    "RefusedCall",
     "ToolBatch",
     "dispatch_tool_calls",
     "failed_answer",
