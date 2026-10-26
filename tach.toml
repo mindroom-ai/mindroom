@@ -1080,6 +1080,7 @@ depends_on = ["mindroom.usage.storage"]
 visibility = [
     "mindroom.session_storage.store",
     "mindroom.history.legacy_compaction_state",
+    "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.stats_storage",
 ]
@@ -1099,6 +1100,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.session_storage.codec",
+    "mindroom.session_storage.legacy_agno2_runs",
     "mindroom.session_storage.legacy_agno3_backup",
     "mindroom.session_storage.legacy_agno3_schema",
     "mindroom.session_storage.schema",

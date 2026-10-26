@@ -1,9 +1,10 @@
-"""One-time migration imports available usage without reconstructing missing history."""
+"""A database's conversion to storage v2 seeds its usage ledger from the history it holds, reconstructing nothing."""
 
 from __future__ import annotations
 
 import importlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -15,11 +16,21 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database, migrate_conversation_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.schema import TableNames
 from mindroom.usage import legacy_usage_storage
+from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from tests.conftest import create_agno_2_sessions_db
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_NAMES = AgnoTableNames("code")
+
+
+def _convert(path: Path) -> None:
+    migrate_conversation_database(path, TableNames.of_database(path))
 
 
 def _usage(path: Path) -> list[tuple[str | None, object]]:
@@ -31,12 +42,12 @@ def _usage(path: Path) -> list[tuple[str | None, object]]:
 
 
 def _skipped_paths(logs: list[dict[str, object]]) -> list[object]:
-    return [entry["path"] for entry in logs if entry["event"] == "usage_migration_skipped_unreadable_store"]
+    return [entry["path"] for entry in logs if entry["event"] == "conversation_conversion_skipped_store"]
 
 
 def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
     """Current run rows win; absent historical dates and IDs must not be synthesized."""
-    path = create_agno_2_sessions_db(tmp_path / "code.db")
+    path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
     with sqlite3.connect(path) as connection:
         connection.execute(
             "UPDATE code_sessions SET runs = ?",
@@ -50,11 +61,11 @@ def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
                 ),
             ),
         )
+        for statement in agno_runs_sql(_NAMES):
+            connection.execute(statement)
         connection.execute(
-            "CREATE TABLE code_sessions_runs (session_id TEXT, run_id TEXT, run_data TEXT, created_at INTEGER)",
-        )
-        connection.execute(
-            "INSERT INTO code_sessions_runs VALUES (?, ?, ?, ?)",
+            "INSERT INTO code_sessions_runs (session_id, run_id, run_type, run_index, run_data, created_at) "
+            "VALUES (?, ?, 'agent', 0, ?, ?)",
             (
                 "session-1",
                 "overlap",
@@ -62,9 +73,9 @@ def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
                 1,
             ),
         )
-    legacy_usage_storage.migrate_usage_database(path)
+    _convert(path)
     before = path.read_bytes()
-    legacy_usage_storage.migrate_usage_database(path)
+    _convert(path)
 
     assert path.read_bytes() == before
     rows = dict(_usage(path))
@@ -78,26 +89,55 @@ def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
 
 def test_migration_reads_the_agno_runs_table_beside_agno_sessions(tmp_path: Path) -> None:
     """Agno names the runs table beside ``agno_sessions`` ``agno_runs``, so an entity named agno keeps its run usage."""
-    path = tmp_path / "agno.db"
+    names = AgnoTableNames("agno")
+    path = names.database_path(tmp_path)
+    path.parent.mkdir()
     with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("CREATE TABLE agno_sessions (session_id TEXT PRIMARY KEY)")
-        connection.execute("INSERT INTO agno_sessions VALUES ('session-1')")
-        connection.execute("CREATE TABLE agno_runs (session_id TEXT, run_id TEXT, run_data TEXT, created_at INTEGER)")
+        for statement in agno_runs_sql(names):
+            connection.execute(statement)
         connection.execute(
-            "INSERT INTO agno_runs VALUES (?, ?, ?, ?)",
+            "INSERT INTO agno_sessions (session_id, session_type, agent_id, created_at) VALUES ('session-1', 'agent', 'agno', 1)",
+        )
+        connection.execute(
+            "INSERT INTO agno_runs (session_id, run_id, run_type, run_index, run_data, created_at) "
+            "VALUES (?, ?, 'agent', 0, ?, ?)",
             ("session-1", "run", json.dumps({"metrics": {"total_tokens": 7}}), 1),
         )
 
-    legacy_usage_storage.migrate_usage_database(path)
+    _convert(path)
 
     with closing(sqlite3.connect(path)) as connection:
         rows = connection.execute("SELECT run_id, usage_data FROM agno_sessions_usage").fetchall()
     assert [(run_id, json.loads(data)["metrics"]["total_tokens"]) for run_id, data in rows] == [("run", 7)]
 
 
+@pytest.mark.parametrize("created_at", [None, True, "invalid", [], {}, math.nan, math.inf])
+def test_a_blob_run_with_an_unusable_timestamp_keeps_its_usage(tmp_path: Path, created_at: object) -> None:
+    """A blob run whose timestamp is absent or malformed converts, and its usable token counters stay reported."""
+    path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
+    blob = [{"run_id": "odd", "agent_id": "code", "created_at": created_at, "metrics": {"total_tokens": 20}}]
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE code_sessions SET runs = ?", (json.dumps(json.dumps(blob)),))
+
+    _convert(path)
+
+    source = UsageStorageSource(
+        path=path,
+        path_label=path.name,
+        scope="shared_agent",
+        source_agent_id="code",
+        allowed_agent_ids=frozenset({"code"}),
+        requester_isolated=False,
+    )
+    [row] = list(iter_usage_storage_rows(source))
+    assert isinstance(row, UsageSessionRow)
+    [run] = row.runs
+    assert (run.run_id, run.created_at, run.metrics["total_tokens"]) == ("odd", None, 20)
+
+
 def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed first import cannot publish an empty or partially seeded usage table."""
-    path = create_agno_2_sessions_db(tmp_path / "code.db")
+    path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
     project = legacy_usage_storage.project_usage
     calls = 0
 
@@ -112,17 +152,17 @@ def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, mo
     with monkeypatch.context() as patch:
         patch.setattr(legacy_usage_storage, "project_usage", interrupt)
         with pytest.raises(RuntimeError, match="interrupted seed"):
-            legacy_usage_storage.migrate_usage_database(path)
+            _convert(path)
     with sqlite3.connect(path) as connection:
         assert not connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'code_sessions_usage'").fetchall()
 
-    legacy_usage_storage.migrate_usage_database(path)
+    _convert(path)
     assert len(_usage(path)) == 3
 
 
 def test_malformed_history_keeps_valid_records_and_a_gap(tmp_path: Path) -> None:
     """A malformed entry cannot discard adjacent facts or silently become zero usage."""
-    path = create_agno_2_sessions_db(tmp_path / "code.db")
+    path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
     with sqlite3.connect(path) as connection:
         connection.execute(
             "UPDATE code_sessions SET runs = ?",
@@ -135,7 +175,7 @@ def test_malformed_history_keeps_valid_records_and_a_gap(tmp_path: Path) -> None
                 ),
             ),
         )
-    legacy_usage_storage.migrate_usage_database(path)
+    _convert(path)
     rows = _usage(path)
     assert rows[0][1]["metrics"]["total_tokens"] == 5
     assert rows[1] == (None, None)
@@ -164,23 +204,11 @@ async def test_startup_migrates_dormant_stores_and_skips_aliases(tmp_path: Path)
     (root / "private_instances/alias").symlink_to(root / "private_instances/dormant", target_is_directory=True)
     before = untouched.read_bytes(), outside.read_bytes()
 
-    await legacy_usage_storage.migrate_usage_storage(paths)
-    await legacy_usage_storage.migrate_usage_storage(paths)
+    await migrate_conversation_storage(paths)
+    await migrate_conversation_storage(paths)
 
     assert [len(_usage(path)) for path in stores] == [3, 3, 3]
     assert (untouched.read_bytes(), outside.read_bytes()) == before
-
-
-def test_missing_database_and_empty_database_stay_empty(tmp_path: Path) -> None:
-    """Migration must not create new stores or force Agno's lazy tables into existence."""
-    path = tmp_path / "code.db"
-    legacy_usage_storage.migrate_usage_database(path)
-    assert not path.exists()
-    with sqlite3.connect(path):
-        pass
-    legacy_usage_storage.migrate_usage_database(path)
-    with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
 
 
 @pytest.mark.asyncio
@@ -201,7 +229,12 @@ async def test_unreadable_session_database_does_not_stop_startup(
     corrupt.write_bytes(b"not a database")
     healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
-    monkeypatch.setattr(module, "migrate_tool_credential_defaults", Mock(side_effect=_NextStartupStepError))
+    if entrypoint == "api":
+        monkeypatch.setattr(module, "migrate_tool_credential_defaults", Mock(side_effect=_NextStartupStepError))
+    else:
+        # The orchestrator converts after it sets up logging and retires old workers, right before it builds itself.
+        monkeypatch.setattr(module, "setup_logging", Mock())
+        monkeypatch.setattr(module, "_MultiAgentOrchestrator", Mock(side_effect=_NextStartupStepError))
     with capture_logs() as logs:
         if entrypoint == "api":
             monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
@@ -237,7 +270,7 @@ async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path
     blocked_dir.chmod(0)
     try:
         with capture_logs() as logs:
-            await legacy_usage_storage.migrate_usage_storage(paths)
+            await migrate_conversation_storage(paths)
     finally:
         blocked_dir.chmod(0o755)
 
@@ -255,7 +288,7 @@ async def test_locked_store_is_skipped_quickly_and_imported_by_its_owner(tmp_pat
     try:
         started = time.monotonic()
         with capture_logs() as logs:
-            await legacy_usage_storage.migrate_usage_storage(paths)
+            await migrate_conversation_storage(paths)
         elapsed = time.monotonic() - started
     finally:
         holder.execute("ROLLBACK")
@@ -263,13 +296,13 @@ async def test_locked_store_is_skipped_quickly_and_imported_by_its_owner(tmp_pat
 
     assert elapsed < 10
     assert _skipped_paths(logs) == [str(locked)]
-    legacy_usage_storage.migrate_usage_database(locked)
+    _convert(locked)
     assert len(_usage(locked)) == 3
 
 
 def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:
     """Invalid nested classification must never promote a child into top-level usage."""
-    path = create_agno_2_sessions_db(tmp_path / "code.db")
+    path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
     with sqlite3.connect(path) as connection:
         connection.execute(
             "UPDATE code_sessions SET runs = ?",
@@ -281,7 +314,9 @@ def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:
                 ),
             ),
         )
-    legacy_usage_storage.migrate_usage_database(path)
+    # The seeding step alone: the blob-to-rows step after it cannot store a parent that is not text.
+    with closing(sqlite3.connect(path)) as connection, connection:
+        legacy_usage_storage.seed_usage_ledger(connection, _NAMES)
     payload = _usage(path)[0][1]
     assert payload["parent_run_id"] is False
     assert "private" not in json.dumps(payload)

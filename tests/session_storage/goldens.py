@@ -10,10 +10,11 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 
 if TYPE_CHECKING:
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import SessionKind
 
 STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage"
@@ -28,9 +29,9 @@ class GoldenStore:
     sessions: dict[str, SessionKind]
 
     @property
-    def names(self) -> TableNames:
-        """The names of the database ``db_path`` holds."""
-        return TableNames.of_database(Path(self.db_path))
+    def names(self) -> AgnoTableNames:
+        """The names of the database ``db_path`` holds, its Agno tables' among them."""
+        return AgnoTableNames.of_database(Path(self.db_path))
 
     def restore(self, root: Path) -> Path:
         """Write this database under ``root`` from its dump and return the file."""
@@ -44,8 +45,8 @@ class GoldenStore:
         return db_file
 
     def open(self, root: Path) -> ConversationStore:
-        """Restore this database under ``root`` and open it with the owned store."""
-        return ConversationStore(self.restore(root))
+        """Restore this database under ``root`` and open it as production does, which converts it to storage v2."""
+        return create_state_storage(self.names.storage_name, self.restore(root).parent.parent)
 
 
 def golden_stores() -> list[GoldenStore]:

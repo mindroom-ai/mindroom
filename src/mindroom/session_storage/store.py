@@ -566,11 +566,11 @@ async def write_with_session_state[Result](
 def decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Return a stored JSON object column, ``null`` for SQL or JSON null, or None when unreadable or not an object.
 
-    An odd row therefore never fails a load.
+    An odd row therefore never fails a load or a conversion; JSON nested too deep to decode is unreadable too.
     """
     try:
         value = decode_session_json(raw_value)
-    except (TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError):
         return None
     if value is None:
         return null

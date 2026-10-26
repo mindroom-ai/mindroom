@@ -140,7 +140,7 @@ def run_from_row(run_type: str, run_data: str) -> AnyRunRecord | None:
 # Last legacy release: v2026.10.281; replacement: v2026.10.282 stopped storing tool schemas in run metadata.
 # Handling: Every Agno run row the conversion decodes drops the key, from its member responses too, so converted runs
 # never hold the schemas; rows written by current releases omit it.
-# Coverage: tests/session_storage/test_store.py::test_loaded_runs_drop_their_stored_tool_schemas.
+# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_converted_runs_drop_their_stored_tool_schemas.
 def _drop_tool_schemas(data: dict[str, Any]) -> None:
     for run in (data, *(data.get("member_responses") or ())):
         if isinstance(run, dict) and isinstance(metadata := run.get("metadata"), dict):

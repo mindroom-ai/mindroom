@@ -21,8 +21,8 @@ from mindroom.session_storage.legacy_agno3_backup import (
     ConversionSpaceError,
     write_conversion_backup,
 )
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.store import connect_conversation_database
-from mindroom.usage import legacy_usage_storage
 from tests.conftest import create_agno_2_sessions_db
 from tests.session_storage.goldens import GoldenStore, golden_stores
 
@@ -319,14 +319,14 @@ def test_the_write_lock_outlives_the_backup(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_neither_the_startup_sweep_nor_the_debug_report_takes_a_backup_for_a_database(tmp_path: Path) -> None:
-    """The backup name does not end in ``.db``, so it is never migrated or reported as a conversation database."""
+    """The backup name does not end in ``.db``, so it is never converted or reported as a conversation database."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
     root = paths.storage_root
     database = create_agno_2_sessions_db(root / "agents" / "code" / "sessions" / "code.db")
     backup = _write_backup(database)
     backup_bytes = backup.read_bytes()
 
-    await legacy_usage_storage.migrate_usage_storage(paths)
+    await migrate_conversation_storage(paths)
 
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("SELECT count(*) FROM code_sessions_usage").fetchone() == (3,)

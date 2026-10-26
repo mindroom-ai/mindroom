@@ -11,7 +11,8 @@ import pytest
 
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.session_storage.codec import run_columns, run_from_row, run_record, run_type
+from mindroom.session_storage.codec import run_columns, run_kind, run_record
+from mindroom.session_storage.legacy_agno3_schema import run_from_row
 
 _RUNS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "runs"
 # The stored-dict keys a run row keeps in columns of its own or in rows of other tables, never in ``record``.
@@ -43,7 +44,7 @@ _CASES = _stored_cases()
 def _round_trip(run: RunRecord | TeamRunRecord) -> RunRecord | TeamRunRecord:
     """Split ``run`` into its row columns and message dicts, as the store writes it, and decode it again."""
     data = run.to_dict()
-    columns = run_columns(data, run_type(run))
+    columns = run_columns(data, run_kind(run))
     return run_record(data["run_id"], data["session_id"], data.get("parent_run_id"), columns, data["messages"])
 
 
@@ -57,7 +58,7 @@ def test_every_stored_run_round_trips_through_its_row(case: str) -> None:
     if isinstance(run, TeamRunRecord):
         expected["member_responses"] = []
 
-    columns = run_columns(run.to_dict(), run_type(run))
+    columns = run_columns(run.to_dict(), run_kind(run))
     decoded = _round_trip(run)
 
     assert decoded.to_dict() == expected
@@ -114,7 +115,7 @@ def test_metadata_keeps_empty_apart_from_none(value: dict[str, Any] | None) -> N
 )
 def test_the_scope_key_names_the_runs_agent_or_team(run: RunRecord | TeamRunRecord, scope_key: str) -> None:
     """A run's scope key is its ``HistoryScope.key``; a run without its owner's id gets a key no scope has."""
-    assert run_columns(run.to_dict(), run_type(run)).scope_key == scope_key
+    assert run_columns(run.to_dict(), run_kind(run)).scope_key == scope_key
 
 
 def test_the_rows_ids_and_status_win_over_the_record_json() -> None:

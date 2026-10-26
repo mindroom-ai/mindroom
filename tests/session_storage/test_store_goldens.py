@@ -1,4 +1,4 @@
-"""The owned store reads and writes the conversation databases Agno 3.0.9 wrote, with nothing lost or changed."""
+"""The conversation databases Agno 3.0.9 wrote convert to storage v2 and read and write with nothing lost or changed."""
 
 from __future__ import annotations
 
@@ -11,10 +11,8 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.history.storage import new_scope_session
-from mindroom.llm.runs import RunRecord
-from mindroom.session_storage.codec import run_from_row
-from mindroom.session_storage.schema import SESSION_COLUMNS
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, run_from_row
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import persist_runs
 from tests.llm.agno_dict_helpers import expected_run_dict
@@ -25,6 +23,7 @@ if TYPE_CHECKING:
 
     from mindroom.history.types import ScopeSummary
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore
 
 _SESSIONS = golden_sessions()
 _SESSION_IDS = [f"{store.label}:{session_id}" for store, session_id in _SESSIONS]
@@ -44,7 +43,6 @@ _WITHOUT_METADATA = [
     for pair, name in zip(_REPLAYABLE, _REPLAYABLE_IDS, strict=True)
     if agno_loaded_session(*pair)["metadata"] is None
 ]
-_ROW_COLUMNS = ("run_id", "run_type", "agent_id", "team_id", "workflow_id", "user_id", "parent_run_id", "status")
 
 
 def _as_agno_reread(run: dict[str, Any]) -> dict[str, Any]:
@@ -65,16 +63,41 @@ def _summary_dict(summary: ScopeSummary | None) -> dict[str, str] | None:
     return None if summary is None else {"summary": summary.text, "updated_at": summary.updated_at.isoformat()}
 
 
-def _load(store: GoldenStore, db_file: Path, session_id: str) -> ConversationSession:
-    session = ConversationStore(db_file).load_session(session_id, store.sessions[session_id])
+def _load(conversation: ConversationStore, store: GoldenStore, session_id: str) -> ConversationSession:
+    session = conversation.load_session(session_id, store.sessions[session_id])
     assert session is not None
     return session
+
+
+def _query(db_file: Path, sql: str, *parameters: object) -> list[dict[str, Any]]:
+    with closing(sqlite3.connect(db_file)) as connection:
+        connection.row_factory = sqlite3.Row
+        return [dict(row) for row in connection.execute(sql, parameters)]
+
+
+def _folded_message_ids(db_file: Path) -> dict[str, set[str]]:
+    """Return the ids of the messages each run's mid-turn folds took, by run, from an Agno-layout file's segments."""
+    folded: dict[str, set[str]] = {}
+    for row in _query(
+        db_file,
+        f'SELECT segment_run_id, segment FROM "{AgnoTableNames.of_database(db_file).summaries}" '  # noqa: S608
+        "WHERE segment_run_id IS NOT NULL",
+    ):
+        messages = json.loads(row["segment"])["messages"]
+        folded.setdefault(row["segment_run_id"], set()).update(message["id"] for message in messages)
+    return folded
+
+
+def _replay_view(run_data: dict[str, Any], folded: set[str]) -> dict[str, Any]:
+    """Return what reading the run Agno stored as ``run_data`` gives: its dict without the messages its folds took."""
+    expected = expected_run_dict(run_data)
+    return {**expected, "messages": [message for message in expected["messages"] if message["id"] not in folded]}
 
 
 @pytest.mark.parametrize(("store", "session_id"), _SESSIONS, ids=_SESSION_IDS)
 def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id: str, tmp_path: Path) -> None:
     """Fields, run selection, order, summary, and every run match Agno's load, but for Agno's own reader losses."""
-    session = _load(store, store.restore(tmp_path), session_id)
+    session = _load(store.open(tmp_path), store, session_id)
     agno = agno_loaded_session(store, session_id)
 
     assert (
@@ -97,10 +120,12 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
 
 @pytest.mark.parametrize(("store", "session_id"), _SESSIONS, ids=_SESSION_IDS)
 def test_golden_runs_load_with_every_stored_key(store: GoldenStore, session_id: str, tmp_path: Path) -> None:
-    """A loaded run writes back exactly its stored row, keys in stored order, minus only messages a fold holds."""
-    db_file = store.restore(tmp_path)
-    session = _load(store, db_file, session_id)
-    rows = {row["run_id"]: row["run_data"] for row in stored_rows(db_file, store.names.runs, session_id)}
+    """A loaded run writes back exactly its Agno row, keys in stored order, minus only messages a fold holds."""
+    rows = {
+        row["run_id"]: row["run_data"]
+        for row in stored_rows(store.restore(tmp_path / "agno"), store.names.runs, session_id)
+    }
+    session = _load(store.open(tmp_path / "converted"), store, session_id)
     loaded_message_ids = {
         run["run_id"]: {message["id"] for message in run["messages"]}
         for run in agno_loaded_session(store, session_id)["runs"]
@@ -118,59 +143,68 @@ def test_golden_runs_load_with_every_stored_key(store: GoldenStore, session_id: 
 
 @pytest.mark.parametrize("store", golden_stores(), ids=lambda store: store.label)
 def test_golden_run_logs_list_and_get_as_stored(store: GoldenStore, tmp_path: Path) -> None:
-    """The whole run log, and each run by id, read back exactly as stored."""
-    conversation = store.open(tmp_path)
+    """The whole run log, and each run by id, read back as Agno stored it, minus the messages a fold holds."""
+    agno = store.restore(tmp_path / "agno")
+    folded = _folded_message_ids(agno)
+    conversation = store.open(tmp_path / "converted")
 
     for session_id in store.sessions:
-        rows = stored_rows(conversation.path, store.names.runs, session_id)
+        rows = stored_rows(agno, store.names.runs, session_id)
         assert rows
-        assert [run.to_dict() for run in conversation.list_runs(session_id)] == [
-            expected_run_dict(row["run_data"]) for row in rows
-        ]
-        for row in rows:
+        expected = [_replay_view(row["run_data"], folded.get(row["run_id"], set())) for row in rows]
+        assert [run.to_dict() for run in conversation.list_runs(session_id)] == expected
+        for row, stored in zip(rows, expected, strict=True):
             run = conversation.get_run(row["run_id"])
             assert run is not None
-            assert run.to_dict() == expected_run_dict(row["run_data"])
+            assert run.to_dict() == stored
     assert conversation.get_run("no-such-run") is None
 
 
-def _session_row(db_file: Path, table: str, session_id: str) -> tuple[Any, ...]:
-    with closing(sqlite3.connect(db_file)) as connection:
-        return connection.execute(f'SELECT * FROM "{table}" WHERE session_id = ?', (session_id,)).fetchone()  # noqa: S608
+def _log_rows(db_file: Path, names: AgnoTableNames, session_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Return what a session's log and ledger rows and its session row hold, update times aside.
 
-
-def _without_update_time(row: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in row.items() if key != "updated_at"}
+    Message rows come in replay order, the folded ones after; ``ord`` itself only orders the unfolded rows of a run,
+    which a save numbers from 0, so it is left out.
+    """
+    runs = _query(
+        db_file,
+        f'SELECT * FROM "{names.log_runs}" WHERE session_id = ? ORDER BY seq',  # noqa: S608
+        session_id,
+    )
+    return {
+        "runs": [{key: value for key, value in row.items() if key != "updated_at"} for row in runs],
+        "messages": _query(
+            db_file,
+            f'SELECT run_id, message_id, folded_by, data FROM "{names.log_messages}" WHERE run_id IN '  # noqa: S608
+            f'(SELECT run_id FROM "{names.log_runs}" WHERE session_id = ?) '
+            "ORDER BY run_id, folded_by IS NOT NULL, ord, message_id",
+            session_id,
+        ),
+        "usage": _query(db_file, f'SELECT * FROM "{names.usage}" WHERE session_id = ? ORDER BY id', session_id),  # noqa: S608
+        "session": _query(db_file, f'SELECT * FROM "{names.sessions}" WHERE session_id = ?', session_id),  # noqa: S608
+    }
 
 
 @pytest.mark.parametrize(("store", "session_id"), _SESSIONS, ids=_SESSION_IDS)
-def test_rewriting_every_loaded_golden_run_changes_only_its_rows(
+def test_saving_and_rewriting_every_loaded_golden_run_changes_nothing(
     store: GoldenStore,
     session_id: str,
     tmp_path: Path,
 ) -> None:
-    """A conversation rewrite of unchanged copies keeps every place, the ledger, the totals, and the session row."""
+    """Saving each loaded run's copy and rewriting their messages unchanged keeps every row but its update time."""
     conversation = store.open(tmp_path)
-    session = conversation.load_session(session_id, store.sessions[session_id])
-    assert session is not None
+    kind = store.sessions[session_id]
+    session = _load(conversation, store, session_id)
     loaded = [run.to_dict() for run in session.runs]
-    before = stored_rows(conversation.path, store.names.runs, session_id)
-    usage_before = stored_rows(conversation.path, store.names.usage, session_id)
-    session_before = _session_row(conversation.path, store.names.sessions, session_id)
+    before = _log_rows(conversation.path, store.names, session_id)
 
-    conversation.save_runs(session, [copy.deepcopy(run) for run in session.runs])
-    reloaded = conversation.load_session(session_id, store.sessions[session_id])
+    for run in list(session.runs):
+        conversation.save_run(session, copy.deepcopy(run), record_usage=False)
+    conversation.rewrite_run_messages(session_id, kind, lambda runs: runs, session=session)
 
-    after = stored_rows(conversation.path, store.names.runs, session_id)
-    rewritten = {run["run_id"]: run for run in loaded}
-    assert [(row["run_id"], row["run_index"]) for row in after] == [(row["run_id"], row["run_index"]) for row in before]
-    assert [_without_update_time(row) for row in after] == [
-        {**_without_update_time(row), "run_data": rewritten.get(row["run_id"], row["run_data"])} for row in before
-    ]
-    assert stored_rows(conversation.path, store.names.usage, session_id) == usage_before
-    assert _session_row(conversation.path, store.names.sessions, session_id) == session_before
-    assert reloaded is not None
-    assert [run.to_dict() for run in reloaded.runs] == [run.to_dict() for run in session.runs] == loaded
+    assert _log_rows(conversation.path, store.names, session_id) == before
+    assert [run.to_dict() for run in session.runs] == loaded
+    assert [run.to_dict() for run in _load(conversation, store, session_id).runs] == loaded
 
 
 def _sorted_details(totals: dict[str, Any]) -> dict[str, Any]:
@@ -187,33 +221,51 @@ def _replayed(rows: list[dict[str, Any]]) -> list[AnyRunRecord]:
     return [run for run in runs if run is not None]
 
 
+def _without_update_time(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key != "updated_at"}
+
+
 @pytest.mark.parametrize(("store", "session_id"), _REPLAYABLE, ids=_REPLAYABLE_IDS)
 def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
     store: GoldenStore,
     session_id: str,
     tmp_path: Path,
 ) -> None:
-    """Saving each stored run with its usage into a fresh store writes the rows, snapshots, and totals Agno wrote."""
+    """Saving each stored run with its usage into a new database writes the runs, snapshots, and totals Agno wrote."""
     golden = store.restore(tmp_path / "golden")
     rows = stored_rows(golden, store.names.runs, session_id)
-    with closing(sqlite3.connect(golden)) as connection:
-        kind, owner, user_id, created_at, session_data = connection.execute(
-            f'SELECT session_type, COALESCE(agent_id, team_id), user_id, created_at, session_data FROM "{store.names.sessions}" '  # noqa: S608
-            "WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-    fresh = ConversationStore(tmp_path / golden.name)
+    [golden_session] = _query(golden, f'SELECT * FROM "{store.names.sessions}" WHERE session_id = ?', session_id)  # noqa: S608
+    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh")
     # As the runtime builds the session of a conversation's first turn: it does not know the requester.
-    session = ConversationSession(session_id=session_id, kind=kind, owner_id=owner, created_at=created_at)
+    session = ConversationSession(
+        session_id=session_id,
+        kind=golden_session["session_type"],
+        owner_id=golden_session["agent_id"] or golden_session["team_id"],
+        created_at=golden_session["created_at"],
+    )
 
     persist_runs(fresh, session, *_replayed(rows))
 
-    replayed = stored_rows(fresh.path, store.names.runs, session_id)
-    assert [[row[column] for column in _ROW_COLUMNS] for row in replayed] == [
-        [row[column] for column in _ROW_COLUMNS] for row in rows
+    replayed = _query(
+        fresh.path,
+        f'SELECT run_id, kind, scope_key, parent_run_id, status, created_at FROM "{store.names.log_runs}" '  # noqa: S608
+        "WHERE session_id = ? ORDER BY seq",
+        session_id,
+    )
+    assert replayed == [
+        {
+            "run_id": row["run_id"],
+            "kind": row["run_type"],
+            "scope_key": f"{row['run_type']}:{row['agent_id'] if row['run_type'] == 'agent' else row['team_id']}",
+            "parent_run_id": row["parent_run_id"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
     ]
-    assert [row["created_at"] for row in replayed] == [row["created_at"] for row in rows]
-    assert [row["run_data"] for row in replayed] == [expected_run_dict(row["run_data"]) for row in rows]
+    assert [run.to_dict() for run in fresh.list_runs(session_id)] == [
+        expected_run_dict(row["run_data"]) for row in rows
+    ]
     assert sorted(
         (row["run_id"], _without_update_time(row["usage_data"]))
         for row in stored_rows(fresh.path, store.names.usage, session_id)
@@ -221,10 +273,10 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
         (row["run_id"], _without_update_time(row["usage_data"]))
         for row in stored_rows(golden, store.names.usage, session_id)
     )
-    assert _session_row(fresh.path, store.names.sessions, session_id)[5] == user_id
-    (fresh_session_data,) = _session_row(fresh.path, store.names.sessions, session_id)[6:7]
-    assert _sorted_details(json.loads(fresh_session_data)["session_metrics"]) == _sorted_details(
-        json.loads(session_data)["session_metrics"],
+    [fresh_session] = _query(fresh.path, f'SELECT * FROM "{store.names.sessions}" WHERE session_id = ?', session_id)  # noqa: S608
+    assert fresh_session["user_id"] == golden_session["user_id"]
+    assert _sorted_details(json.loads(fresh_session["session_data"])["session_metrics"]) == _sorted_details(
+        json.loads(golden_session["session_data"])["session_metrics"],
     )
 
 
@@ -241,59 +293,57 @@ def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
     """The row of a session built as the runtime builds a first turn's holds the JSON text Agno's JSON column wrote."""
     golden = store.restore(tmp_path / "golden")
     rows = stored_rows(golden, store.names.runs, session_id)
-    golden_row = _session_row(golden, store.names.sessions, session_id)
-    kind, agent_id, team_id = (
-        golden_row[SESSION_COLUMNS.index(column)] for column in ("session_type", "agent_id", "team_id")
+    [golden_row] = _query(golden, f'SELECT * FROM "{store.names.sessions}" WHERE session_id = ?', session_id)  # noqa: S608
+    session = new_scope_session(
+        session_id=session_id,
+        scope_id=golden_row["team_id"] or golden_row["agent_id"],
+        is_team=golden_row["session_type"] == "team",
     )
-    session = new_scope_session(session_id=session_id, scope_id=team_id or agent_id, is_team=kind == "team")
-    fresh = ConversationStore(tmp_path / golden.name)
+    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh")
 
     persist_runs(fresh, session, *_replayed(rows))
 
-    column = SESSION_COLUMNS.index("metadata")
-    assert golden_row[column] == "null"
-    assert _session_row(fresh.path, store.names.sessions, session_id)[column] == "null"
+    assert golden_row["metadata"] == "null"
+    sessions = f'"{store.names.sessions}"'
+    assert _query(fresh.path, f"SELECT metadata FROM {sessions} WHERE session_id = ?", session_id) == [  # noqa: S608
+        {"metadata": "null"},
+    ]
 
 
 def test_linking_a_delivered_reply_rewrites_only_that_run(tmp_path: Path) -> None:
-    """Production re-saves each delivered reply's run with its Matrix event id; nothing else about the run moves."""
+    """Production links each delivered reply's run to its Matrix event id; nothing else about the run moves."""
     [store] = [store for store in golden_stores() if store.label == "agent_code"]
     conversation = store.open(tmp_path)
     session_id = "!room:example.org:$approved"
-    session = conversation.load_session(session_id, "agent")
-    assert session is not None
-    usage_before = stored_rows(conversation.path, store.names.usage, session_id)
-    [before] = stored_rows(conversation.path, store.names.runs, session_id)
-    linked = copy.copy(session.runs[0])
-    linked.metadata = {**(linked.metadata or {}), "matrix_response_event_id": "$reply"}
+    session = _load(conversation, store, session_id)
+    [run] = session.runs
+    before = _log_rows(conversation.path, store.names, session_id)
 
-    conversation.save_runs(session, [linked])
+    assert conversation.patch_run_metadata(
+        session_id,
+        run.run_id,
+        {"matrix_response_event_id": "$reply"},
+        session=session,
+    )
 
-    [after] = stored_rows(conversation.path, store.names.runs, session_id)
-    assert session.runs == [linked]
-    assert after["run_index"] == before["run_index"]
-    assert after["run_data"] == {
-        **expected_run_dict(before["run_data"]),
-        "metadata": {**before["run_data"]["metadata"], "matrix_response_event_id": "$reply"},
-    }
-    assert stored_rows(conversation.path, store.names.usage, session_id) == usage_before
+    after = _log_rows(conversation.path, store.names, session_id)
+    [(before_run, after_run)] = zip(before.pop("runs"), after.pop("runs"), strict=True)
+    linked = {**(run.metadata or {}), "matrix_response_event_id": "$reply"}
+    assert after_run == {**before_run, "metadata": json.dumps(linked)}
+    assert after == before
+    assert [linked_run.to_dict() for linked_run in session.runs] == [{**run.to_dict(), "metadata": linked}]
 
 
 def test_a_resumed_team_run_keeps_its_empty_member_and_requirement_lists(tmp_path: Path) -> None:
-    """Agno stored a continued team run with ``member_responses: []`` and ``requirements: []``; both survive a rewrite."""
+    """Agno stored a continued team run with ``member_responses: []`` and ``requirements: []``; both survive."""
     [store] = [store for store in golden_stores() if store.label == "team_squad"]
     conversation = store.open(tmp_path)
-    session_id = "!room:example.org:$squad-approved"
-    session = conversation.load_session(session_id, "team")
-    assert session is not None
-    [team_run] = [run for run in session.runs if run.run_id == "team-approved"]
 
-    conversation.save_runs(session, [copy.deepcopy(team_run)])
+    team_run = conversation.get_run("team-approved")
 
-    [row] = [
-        row for row in stored_rows(conversation.path, store.names.runs, session_id) if row["run_id"] == "team-approved"
-    ]
-    assert (row["run_data"]["member_responses"], row["run_data"]["requirements"]) == ([], [])
+    assert team_run is not None
+    stored = team_run.to_dict()
+    assert (stored["member_responses"], stored["requirements"]) == ([], [])
 
 
 def _layout(db_file: Path, tables: tuple[str, ...]) -> dict[str, Any]:
@@ -316,25 +366,21 @@ def _schema_objects(db_file: Path) -> list[tuple[str, str]]:
         return connection.execute("SELECT type, name FROM sqlite_master ORDER BY type, name").fetchall()
 
 
-def test_new_databases_get_the_layout_agno_created(tmp_path: Path) -> None:
-    """A database the owned store creates has Agno 3's tables and indexes, and writing to Agno's adds none."""
-    [store] = [store for store in golden_stores() if store.label == "agent_code"]
-    golden = store.restore(tmp_path / "golden")
-    fresh = tmp_path / golden.name
-    objects = _schema_objects(golden)
-    session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
+@pytest.mark.parametrize("store", golden_stores(), ids=lambda store: store.label)
+def test_a_converted_golden_has_the_layout_a_new_database_gets(store: GoldenStore, tmp_path: Path) -> None:
+    """Every column, key, index, and schema object of a converted database is what a new database is created with."""
+    converted = store.open(tmp_path / "converted").path
+    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh").path
+    names = store.names
     tables = (
-        store.names.sessions,
-        store.names.runs,
-        store.names.summaries,
-        store.names.removed_runs,
-        store.names.usage,
+        names.sessions,
+        names.usage,
+        names.log_meta,
+        names.log_runs,
+        names.log_messages,
+        names.log_summaries,
+        names.log_removed,
     )
 
-    for db_file in (fresh, golden):
-        ConversationStore(db_file).save_runs(session, [RunRecord(run_id="r1", agent_id="code")])
-
-    assert _layout(fresh, tables) == _layout(golden, tables)
-    assert _schema_objects(golden) == objects
-    # Agno's own bookkeeping table is the one object the owned store does not create.
-    assert _schema_objects(fresh) == [item for item in objects if "agno_schema_versions" not in item[1]]
+    assert _layout(converted, tables) == _layout(fresh, tables)
+    assert _schema_objects(converted) == _schema_objects(fresh)
