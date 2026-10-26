@@ -86,8 +86,8 @@ class ChatSettings:
     models: list[str] | None = None
     cache_system_prompt: bool = True
     extended_cache_time: bool = True
-    # DeepSeek thinking mode: on unless False.
-    use_thinking: bool | None = None
+    # DeepSeek thinking mode.
+    use_thinking: bool = True
     # Kimi Code login.
     kimi_home: str | None = None
     prompt_cache_key: str | None = None

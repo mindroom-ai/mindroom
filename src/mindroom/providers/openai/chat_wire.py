@@ -51,7 +51,7 @@ __all__ = [
     "ChatWire",
     "chat_request_kwargs",
     "chat_stop_reason",
-    "deepseek_thinking",
+    "deepseek_request_thinks",
     "function_definition",
     "sdk_call_kwargs",
 ]
@@ -278,20 +278,25 @@ def _close_cerebras_objects(schema: Any) -> None:  # noqa: ANN401 - any JSON sch
         _close_cerebras_objects(child)
 
 
-def deepseek_thinking(settings: ChatSettings) -> bool:
-    """Return whether a DeepSeek request thinks: every DeepSeek model does unless the config turns it off."""
-    return settings.use_thinking is not False
+def deepseek_request_thinks(settings: ChatSettings) -> bool:
+    """Return whether a DeepSeek request thinks: as an authored ``extra_body.thinking`` says, else as ``use_thinking`` does.
+
+    The authored ``extra_body``, from ``request_params`` when it sets one, merges over the switch the route sends.
+    """
+    request_params = settings.request_params or {}
+    authored = request_params.get("extra_body", settings.extra_body)
+    thinking = authored.get("thinking") if isinstance(authored, Mapping) else None
+    if isinstance(thinking, Mapping) and thinking.get("type") in {"enabled", "disabled"}:
+        return thinking["type"] == "enabled"
+    return settings.use_thinking
 
 
 def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings) -> None:
-    """Send DeepSeek's thinking switch, on unless the config turns it off; without thinking no reasoning effort goes."""
-    thinking = deepseek_thinking(settings)
-    if not thinking:
+    """Send DeepSeek's thinking switch from ``use_thinking``; a request that does not think sends no reasoning effort."""
+    if not deepseek_request_thinks(settings):
         params.pop("reasoning_effort", None)
-    params["extra_body"] = {
-        "thinking": {"type": "enabled" if thinking else "disabled"},
-        **(params.get("extra_body") or {}),
-    }
+    switch = {"type": "enabled" if settings.use_thinking else "disabled"}
+    params["extra_body"] = {"thinking": switch, **(params.get("extra_body") or {})}
 
 
 def _reject_native_search(params: Mapping[str, Any], model_id: str, wire: ChatWire) -> None:

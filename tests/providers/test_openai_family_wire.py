@@ -392,6 +392,26 @@ async def test_a_route_that_can_force_a_tool_asks_for_structured_output_with_a_f
     assert [call["function"]["arguments"] for call in turn.tool_calls] == ['{"item": "coat"}']
 
 
+@pytest.mark.parametrize(
+    ("extra_kwargs", "structured_output"),
+    [
+        ({"use_thinking": False, "extra_body": {"thinking": {"type": "enabled"}}}, "json_mode"),
+        ({"request_params": {"extra_body": {"thinking": {"type": "disabled"}}}}, "forced_tool"),
+    ],
+    ids=["authored-on", "authored-off"],
+)
+def test_a_deepseek_route_follows_the_thinking_its_requests_send(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+    structured_output: str,
+) -> None:
+    """An authored ``extra_body.thinking`` wins over ``use_thinking`` on the wire, so the structured-output mode follows it."""
+    config = {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k", "extra_kwargs": extra_kwargs}
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "{}"}, finish_reason="stop")))
+
+    assert built.adapter.capabilities.structured_output == structured_output
+
+
 @pytest.mark.asyncio
 async def test_a_thinking_deepseek_model_asks_for_structured_output_in_json_mode(tmp_path: Path) -> None:
     """DeepSeek rejects a forced tool call in thinking mode, so a thinking model asks for JSON instead."""

@@ -266,6 +266,7 @@ def test_model_params_record_the_route_settings_without_credentials_or_clients(r
         "strict_output": True,
         "cache_system_prompt": True,
         "extended_cache_time": True,
+        "use_thinking": True,
     }
     params["metadata"]["team"] = "b"
     assert provider.model_params["metadata"] == {"team": "a"}

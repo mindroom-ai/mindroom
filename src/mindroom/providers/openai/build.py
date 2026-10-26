@@ -33,7 +33,7 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire, deepseek_thinking
+from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire, deepseek_request_thinks
 from mindroom.providers.openai.codex_auth import (
     CODEX_BASE_URL,
     CodexAuthError,
@@ -444,7 +444,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
         endpoint=endpoint.rstrip("/") if endpoint else None,
     )
     structured_output = route.structured_output
-    if route_key == "deepseek" and deepseek_thinking(settings):
+    if route_key == "deepseek" and deepseek_request_thinks(settings):
         # DeepSeek rejects a forced tool call in thinking mode (https://api-docs.deepseek.com/api/create-chat-completion).
         structured_output = "json_mode"
     capabilities = Capabilities(
