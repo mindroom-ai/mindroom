@@ -246,7 +246,9 @@ Each result still reports its cosine distance as `distances`.
 
 ### Reranking
 
-A reranker reads the query together with each candidate chunk and reorders them, which is slower than the merged ranking but more precise.
+A reranker reads the query together with each candidate chunk and reorders them.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, `BAAI/bge-reranker-v2-m3` put the right page first for 86% of questions instead of 79%, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+Strong rerankers need a GPU or a hosted API to answer quickly; `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
 
 ```yaml
 knowledge_reranker:
