@@ -52,16 +52,13 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
     return None if streamed and handover == run.content else handover
 
 
-# TODO(simplify): A second copy of each slot's text joins text around a hidden tool call directly, so a streamed reply
-# records "Looking.Four seats." where it showed two paragraphs: the streamed side of #3075's blocking-reply join.
-# Record the shown document's text without tool markers, one copy. Replayed history and models would notice.
 @dataclass
 class TeamReplyText:
     """The text of one team reply without tool markers: each member's text and the consensus, as the run's events build it.
 
     ``presentation`` owns the member identities: the configured slot order, the display names, and the slot an event's
-    member resolves to. A member's deltas join directly, so a hidden tool call between them leaves no gap, as the
-    run's own content joins them. ``streamed_member_runs`` names the member runs whose deltas gave text, by run id,
+    member resolves to. Text written after a tool call of the same slot starts a new paragraph, as a run's content
+    separates its requests' texts. ``streamed_member_runs`` names the member runs whose deltas gave text, by run id,
     since a member's slot holds the text of each of its runs.
     """
 
@@ -69,21 +66,34 @@ class TeamReplyText:
     per_member: dict[str, str] = field(init=False)
     consensus: str = ""
     streamed_member_runs: set[str] = field(default_factory=set, init=False)
+    # The slots, member ids or ``None`` for the consensus, whose next text follows a tool call.
+    _separate_next: set[str | None] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Give every configured slot empty text."""
         self.per_member = dict.fromkeys(self.presentation.member_ids, "")
 
     def apply(self, event: TeamRunEvent) -> None:
-        """Fold one run event into the text: a member's or the leader's delta."""
+        """Fold one run event into the text: a member's or the leader's delta, or a tool call between them."""
         if isinstance(event, MemberEvent):
+            member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
             if isinstance(event.event, TextDelta):
-                member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
-                self.per_member[member_id] += event.event.text
+                self.per_member[member_id] = self._appended(member_id, self.per_member[member_id], event.event.text)
                 if event.event.text:
                     self.streamed_member_runs.add(event.run_id)
+            elif isinstance(event.event, ToolStarted) and self.per_member[member_id]:
+                self._separate_next.add(member_id)
         elif isinstance(event, TextDelta):
-            self.consensus += event.text
+            self.consensus = self._appended(None, self.consensus, event.text)
+        elif isinstance(event, ToolStarted) and self.consensus:
+            self._separate_next.add(None)
+
+    def _appended(self, slot: str | None, text: str, delta: str) -> str:
+        if not delta:
+            return text
+        separate = slot in self._separate_next
+        self._separate_next.discard(slot)
+        return append_stream_text(text, delta, separate=separate)
 
     def canonical_text(self) -> str:
         """Return the text in the configured member order, then the consensus: what a streamed reply records."""

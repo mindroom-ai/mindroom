@@ -254,9 +254,10 @@ def _accept_turn(
 ) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
-    The provider stamped the message with the model that answered it. A request that answers without content, as the
-    adapters report a turn without text, leaves the content as it was, so a resumed run keeps its paused text until the
-    model says something new.
+    The provider stamped the message with the model that answered it. The run's content is its requests' texts, a
+    blank line between them, so the text before and after a tool call reads as two paragraphs. A request that answers
+    without content, as the adapters report a turn without text, leaves the content as it was, so a resumed run keeps
+    its paused text until the model says something new.
     """
     metrics = state.record.metrics
     assert metrics is not None
@@ -265,10 +266,15 @@ def _accept_turn(
     state.request_index += 1
     if message.content is not None:
         progress.text_parts.append(message.get_content_string())
-        # TODO(simplify): the requests' texts join with no separator, so the run's text before and after a tool call
-        # runs together in its content. Join them with a blank line. Users (blocking replies), models reading a
-        # member's result, and stored data would notice. (#3075)
-        state.record.content = "".join(progress.text_parts)
+        state.record.content = _joined_texts(progress.text_parts)
+
+
+def _joined_texts(parts: Sequence[str]) -> str:
+    """Return a run's request texts as its content: one text as it is, several stripped and a blank line apart."""
+    texts = [part for part in parts if part.strip()]
+    if len(texts) <= 1:
+        return texts[0] if texts else "".join(parts)
+    return "\n\n".join(text.strip() for text in texts)
 
 
 async def _run_tool_batch(

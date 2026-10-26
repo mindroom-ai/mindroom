@@ -9,11 +9,12 @@ from __future__ import annotations
 import pytest
 
 from mindroom.approval.response import require_ordered_pause_presentation
-from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
+from mindroom.teams.attempt import TeamReplyText
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
     apply_team_event,
@@ -400,3 +401,22 @@ def test_a_restored_visible_marker_keeps_one_paragraph_break_before_the_consensu
     apply_team_event(presentation, TextDelta("After approval."))
 
     assert presentation.consensus == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
+
+
+def test_the_reply_text_keeps_a_paragraph_break_where_a_hidden_tool_call_split_a_slot() -> None:
+    """Text written after a slot's tool call starts a new paragraph, as the run's own content separates it."""
+    reply = TeamReplyText(TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False))
+    call = ReportedCall(tool_call_id="call-1", tool_name="lookup", tool_args={})
+
+    for event in (
+        MemberEvent("general", "GeneralAgent", "run-1", TextDelta("Looking.")),
+        MemberEvent("general", "GeneralAgent", "run-1", ToolStarted(call)),
+        MemberEvent("general", "GeneralAgent", "run-1", TextDelta("Four seats.")),
+        TextDelta("Checking."),
+        ToolStarted(call),
+        TextDelta("Done."),
+    ):
+        reply.apply(event)
+
+    assert reply.per_member == {"general": "Looking.\n\nFour seats."}
+    assert reply.consensus == "Checking.\n\nDone."

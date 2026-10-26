@@ -198,7 +198,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     assert started == [replace(entry.call, result=None, is_error=None) for entry in record.tools]
     assert completed == [entry.call for entry in record.tools]
     assert [(call.result, call.is_error) for call in completed] == [('{"sum": 5}', False), ("yo", False)]
-    assert record.content == "Checking. 2 + 3 = 5."
+    assert record.content == "Checking.\n\n2 + 3 = 5."
     assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "assistant"]
     assert [m.tool_call_id for m in messages if m.role == "tool"] == ["c1", "c2"]
     second = model.requests[1]
