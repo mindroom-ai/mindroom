@@ -168,6 +168,7 @@ _LOG_OBJECTS = [
     ("table", "code_sessions_log_summaries", "code_sessions_log_summaries"),
     ("table", "code_sessions_usage", "code_sessions_usage"),
     ("table", "sqlite_sequence", "sqlite_sequence"),
+    ("index", "idx_code_sessions_log_messages_run_id_ord", "code_sessions_log_messages"),
     ("index", "idx_code_sessions_log_runs_parent_run_id", "code_sessions_log_runs"),
     ("index", "idx_code_sessions_log_runs_session_id_seq", "code_sessions_log_runs"),
     ("index", "idx_code_sessions_log_summaries_session_id_scope_key_id", "code_sessions_log_summaries"),

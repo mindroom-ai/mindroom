@@ -967,6 +967,27 @@ def test_load_reads_one_snapshot(store: ConversationStore, traced: list[Callable
     assert session.summary is None
 
 
+def test_saves_and_loads_read_messages_in_order_without_a_sort(
+    store: ConversationStore,
+    traced: list[Callable[[str], None]],
+) -> None:
+    """Message reads walk an index in ``ord`` order; a sort would spill a large run's messages to a temp file."""
+    reads: list[str] = []
+
+    def record(statement: str) -> None:
+        if statement.lstrip().upper().startswith("SELECT") and "code_sessions_log_messages" in statement:
+            reads.append(statement)
+
+    traced.append(record)
+    _save(store, _run("r1"))
+    _loaded(store)
+
+    assert len(reads) == 2
+    for read in reads:
+        plan = [step for *_, step in _query(store, f"EXPLAIN QUERY PLAN {read}")]
+        assert [step for step in plan if "TEMP B-TREE" in step] == [], plan
+
+
 # --- the session mirror -----------------------------------------------------------------------------------------
 
 
