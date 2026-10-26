@@ -21,7 +21,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.request_messages import TurnMessages
-from mindroom.history.types import HistoryPolicy, PreparedHistoryState, ResolvedHistorySettings
+from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
@@ -30,6 +30,7 @@ from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import bind_runtime_paths, make_turn_context, prepare_agent_and_prompt_for_test, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
+from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -208,7 +209,7 @@ def _build(turn_context: str | None = None) -> AgentBuild:
         spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_message=None, toolkits=()),
         prompt=PromptSpec(role="test", turn_context=turn_context, instructions=()),
         request_template=ModelRequest(messages=()),
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        history_settings=replay_settings(),
         store=None,
         surface=AgentSurface(
             mode="standard",

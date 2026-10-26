@@ -384,6 +384,7 @@ class _ApprovedEgressTools(Toolkit):
     file_access=ToolFileAccess.NONE,
     display_name="Network Access Requests",
     description="Request approval for temporary access to a blocked website or service",
+    docs_url="https://docs.mindroom.chat/deployment/approved-egress/",
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.SPECIAL,

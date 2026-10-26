@@ -9,6 +9,7 @@ import pytest
 
 from mindroom import agents
 from mindroom.agent_cli.minimal_agent import minimal_context_documents, minimal_turn, prepare_minimal_catalog
+from mindroom.agent_cli.response_owner import tool_catalog
 from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig
 from mindroom.error_handling import MinimalModeUnavailableError
@@ -113,6 +114,18 @@ def test_the_knowledge_document_lists_each_base_the_agent_s_search_reaches(tmp_p
     documents = minimal_context_documents(build)
 
     assert documents["knowledge"] == "handbook: The team handbook.\nrunbooks: Operations runbooks."
+
+
+def test_a_catalog_runs_under_its_own_agent_s_runtime_context(tmp_path: Path) -> None:
+    """An agent's generated functions run under its catalog's runtime context, so that context must be the agent's."""
+    runtime = _runtime_context(tmp_path)
+    build = _minimal_build(runtime)
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
+    run = RunContext(run_id="run", user_id=runtime.requester_id, session=session)
+    storage = RunStorage(None, session, None)
+    with pytest.raises(ValueError, match="needs its runtime context, not 'other'"):
+        tool_catalog(build, run=run, runtime=replace(runtime, agent_name="other"), storage=storage)
+    assert tool_catalog(build, run=run, runtime=runtime, storage=storage).runtime_context is runtime
 
 
 @pytest.mark.asyncio

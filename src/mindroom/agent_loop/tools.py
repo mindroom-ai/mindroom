@@ -1,18 +1,13 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""The tool side of the loop: the tools a run offers, and one assistant message's tool calls planned, run, and answered.
-
-Tool messages, tool executions, and the texts the model reads keep the shapes main stores and sends.
-"""
+"""The loop's tool side: the tools a run offers, and one assistant message's tool calls planned, run, and answered."""
 
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import Message
-from mindroom.llm.usage import ToolCallMetrics
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
@@ -195,35 +190,32 @@ async def dispatch_tool_calls(
 ) -> list[Message]:
     """Run the batch's unpaused calls concurrently and return their result messages in call order.
 
-    Each call's execution is filled in place with its result, error flag, stop flag, and timing. A tool's exception
+    Each call's execution is filled in place with its result, error flag, and stop flag. A tool's exception
     is its error text; only cancellation propagates, and no call of the batch is still running when it does: a
     cancelled dispatcher cancels every call and waits for it, and a call cancelled on its own lets its siblings
     finish first, so nothing a call does lands after the run stores its terminal record.
     """
     runnable = [call for call in calls if not call.execution.is_paused]
     async with asyncio.TaskGroup() as group:
-        tasks = [group.create_task(_timed(call, run, middleware)) for call in runnable]
-    return [_complete_call(call, *task.result()) for call, task in zip(runnable, tasks, strict=True)]
+        tasks = [
+            group.create_task(
+                execute_tool_call(
+                    call.function,
+                    call.execution.tool_args,
+                    run.call_context(call.execution.tool_call_id),
+                    middleware=middleware,
+                ),
+            )
+            for call in runnable
+        ]
+    return [_complete_call(call, task.result()) for call, task in zip(runnable, tasks, strict=True)]
 
 
-async def _timed(call: PlannedCall, run: RunContext, middleware: Sequence[ToolMiddleware]) -> tuple[ToolOutcome, float]:
-    started = time.perf_counter()
-    outcome = await execute_tool_call(
-        call.function,
-        call.execution.tool_args,
-        run.call_context(call.execution.tool_call_id),
-        middleware=middleware,
-    )
-    return outcome, time.perf_counter() - started
-
-
-def _complete_call(call: PlannedCall, outcome: ToolOutcome, elapsed: float) -> Message:
+def _complete_call(call: PlannedCall, outcome: ToolOutcome) -> Message:
     execution = call.execution
     execution.result = outcome.content
     execution.is_error = outcome.is_error
     execution.stop_after_call = outcome.stop_after_call
-    ended = time.time()
-    execution.metrics = ToolCallMetrics(start_time=ended - elapsed, end_time=ended, duration=elapsed)
     return tool_result_message(execution, media=outcome)
 
 
@@ -272,6 +264,11 @@ def media_follow_up(results: Sequence[Message]) -> Message | None:
     )
 
 
+def is_media_follow_up(message: Message) -> bool:
+    """Return whether a stored message is a media follow-up the loop wrote, which no person said."""
+    return message.role == "user" and message.content == MEDIA_FOLLOW_UP_TEXT
+
+
 __all__ = [
     "MEDIA_FOLLOW_UP_TEXT",
     "PlannedCall",
@@ -279,6 +276,7 @@ __all__ = [
     "ToolBatch",
     "dispatch_tool_calls",
     "failed_answer",
+    "is_media_follow_up",
     "media_follow_up",
     "offered_toolkits",
     "plan_tool_batch",

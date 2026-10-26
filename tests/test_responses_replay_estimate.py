@@ -24,7 +24,7 @@ from mindroom.history.runtime import (
     resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Image
 from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
 from mindroom.llm.provider import NativeCompactionReplay
@@ -34,7 +34,7 @@ from mindroom.providers.openai.responses_wire import responses_input, responses_
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 from tests.conftest import seed_session
-from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint
+from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint, replay_settings
 from tests.providers.golden_support import pipeline_provider
 from tests.providers.openai_family_support import responses_adapter
 
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.responses import ResponsesAdapter
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
-_ALL_HISTORY = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+_ALL_HISTORY = replay_settings()
 
 
 def _replayed_input(adapter: ResponsesAdapter, messages: list[Message]) -> list[Any]:

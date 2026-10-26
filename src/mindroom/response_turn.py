@@ -988,8 +988,9 @@ async def run_blocking_response_turn(
                 continuation = settled
             _raise_continuation_budget_exhausted()
     except asyncio.CancelledError:
-        # Kept as main behaves: a blocking turn records a cancel from the recorder's state,
-        # a streaming turn from the running attempt's partial output.
+        # TODO(simplify): a blocking turn records a cancel from the recorder's state, a streaming turn from the running
+        # attempt's partial output. Build an interrupted turn's record from the loop's terminal record in one place
+        # for both stream modes (#3108). Models would notice previews in replayed stopped turns.
         _record_turn_excluded_fallback(
             ctx,
             adapter,

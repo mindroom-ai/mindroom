@@ -23,6 +23,9 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `zai` - Z.ai GLM models
 - `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
+Letter case, surrounding spaces, and `-` versus `_` do not matter, so `Llama-CPP` means `llama_cpp`.
+A `provider` value that does not match one of these fails config load with an error that names the model and lists these values, even when no agent uses that model.
+
 To generate a starter config for one provider, use `mindroom config init --provider <preset>` (see [Getting Started](https://docs.mindroom.chat/getting-started/)).
 The [macOS app's local model setup](https://docs.mindroom.chat/installation/macos-app/#local-ai-models) downloads and runs models with one click, with hardware recommendations including Qwen3.8 27B when memory permits.
 
@@ -456,11 +459,11 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 Each provider accepts only the keys in the table below.
 A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
 
-- `base_url` sends requests to a custom endpoint, such as an OpenAI-compatible server.
+- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
 - `request_params` holds request body fields that MindRoom merges over its own.
 - `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).
-- `client_params` passes options to the provider's API client.
+- `client_params`, a mapping, passes options to the provider's API client; its `base_url`, when set, must be a string.
 
 | Provider | Accepted keys |
 |----------|---------------|

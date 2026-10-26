@@ -76,7 +76,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=[],
-    docs_url="https://docs.agno.com/tools/toolkits/others/reasoning",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#reasoning",
     function_names=("analyze", "think"),
 )
 def reasoning_tools() -> type[ReasoningTools]:

@@ -23,12 +23,13 @@ from mindroom.history.request_messages import (
     filter_tool_calls,
     scope_history_messages,
 )
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs
+from tests.history_helpers import replay_settings
 from tests.llm.agno_dict_helpers import stored_run_record
 
 _PARITY = Path(__file__).parent / "fixtures" / "agno_parity"
@@ -41,7 +42,7 @@ _SCOPED_SELECTIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
 _HISTORY_GOLDENS = sorted(
     path for path in (_PARITY / "history").glob("*.json") if path.name != "scoped_selections.json"
 )
-_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+_SETTINGS = replay_settings()
 _AGENT = HistoryScope(kind="agent", scope_id="code")
 _TEAM = HistoryScope(kind="team", scope_id="squad")
 _SUMMARY = ScopeSummary(

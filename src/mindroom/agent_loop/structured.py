@@ -2,8 +2,7 @@
 """Ask a model for structured output the way its provider supports, and read the answer back into the schema.
 
 Each adapter renders a request's output schema in its provider's wire format; a route that only offers JSON mode
-also needs a JSON prompt at the end of the system message. The prompt text and the lenient parsing are kept as main
-behaves: helper prompts are model-visible.
+also needs a JSON prompt at the end of the system message, which the model reads.
 """
 
 from __future__ import annotations
@@ -73,6 +72,9 @@ def _without_title(field: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in field.items() if key != "title"}
 
 
+# TODO(simplify): every helper answer parses leniently, repairing fences, markdown, and quotes and merging several
+# objects, also on routes that enforce the schema. Ask by forced tool call or schema where a route supports it, a
+# schema-derived prompt otherwise, and parse strictly (#3114). Helper models would notice: a malformed answer fails.
 def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T | None:
     """Read a model's text answer into ``schema``, or return None when no attempt validates.
 

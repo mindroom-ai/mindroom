@@ -48,10 +48,8 @@ from mindroom.history.summary_call import (
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
-    HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
-    ResolvedHistorySettings,
 )
 from mindroom.llm.errors import ContextWindowExceeded, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
@@ -71,6 +69,7 @@ from tests.history_helpers import (
     compact_runs,
     folded_run_ids,
     latest_summary_model,
+    replay_settings,
     seed_summary,
 )
 
@@ -78,7 +77,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider, StopReason
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
-_HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+_HISTORY_SETTINGS = replay_settings()
 
 
 def _provider_request() -> httpx.Request:

@@ -7,7 +7,6 @@
         "requests": [
           {
             "body": {
-              "dimensions": 4096,
               "input": "Which hotels are allowed?",
               "model": "nomic-embed-text"
             },
@@ -25,7 +24,6 @@
         "requests": [
           {
             "body": {
-              "dimensions": 4096,
               "input": "files/report.md is a path, not a file reference",
               "model": "nomic-embed-text"
             },
@@ -43,7 +41,6 @@
         "requests": [
           {
             "body": {
-              "dimensions": 4096,
               "input": "async query",
               "model": "nomic-embed-text"
             },
@@ -61,7 +58,6 @@
         "requests": [
           {
             "body": {
-              "dimensions": 4096,
               "input": "async document",
               "model": "nomic-embed-text"
             },

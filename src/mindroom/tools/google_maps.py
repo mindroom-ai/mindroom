@@ -87,7 +87,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["googlemaps", "google-maps-places"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/google_maps",
+    docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#google_maps",
     function_names=(
         "geocode_address",
         "get_directions",

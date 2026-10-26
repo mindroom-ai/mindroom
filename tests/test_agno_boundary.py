@@ -8,12 +8,14 @@ loggers, which vendor toolkits log through. Every other module must take Agno's 
 
 The ratchets below list the modules that still take an Agno type through that re-export and the test modules that
 import Agno. Each list must match the code exactly, so a module that stops leaves its list in the same change, and no
-module may join one.
+module may join one. No source comment or docstring may justify code by the retired Agno runtime, as "kept as main
+behaves" did: each states the outcome it protects, or marks behavior kept only for parity ``TODO(simplify)``.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
@@ -202,6 +204,25 @@ TEST_AGNO_RUNTIME_IMPORTERS = frozenset(
     },
 )
 
+_WORD_GAP = r"(?:\s|#)+"
+# Phrases that justify behavior by the retired Agno runtime instead of the outcome it protects, each matched across
+# line breaks and comment markers.
+PARITY_WORDING = re.compile(
+    "|".join(
+        rf"\b{_WORD_GAP.join(words)}\b"
+        for words in (
+            ("kept", "as", "main"),
+            ("as", "main", "(?:behaves|does|did|sends|sent|stores|stored|writes|wrote|reads|renders|selected|keeps)"),
+            ("main", "behaves"),
+            ("owned", "loop"),
+            ("the", "owned", "runtime"),
+            ("for", "parity"),
+            ("as", "Agno", "(?:did|does)"),
+        )
+    ),
+    re.IGNORECASE,
+)
+
 
 def agno_imports(source: str) -> set[str]:
     """Return the Agno modules ``source`` imports anywhere, including under ``if TYPE_CHECKING:`` and in functions."""
@@ -249,6 +270,15 @@ def agno_test_imports() -> dict[str, set[str]]:
         for path in sorted(TESTS_ROOT.rglob("*.py"))
     }
     return {module: imported for module, imported in imports.items() if imported}
+
+
+def parity_wording(source: str) -> list[str]:
+    """Return each phrase in ``source`` that justifies behavior by the retired Agno runtime, with its line number."""
+    phrases: list[str] = []
+    for match in PARITY_WORDING.finditer(source):
+        line = source.count("\n", 0, match.start()) + 1
+        phrases.append(f"line {line}: {' '.join(match.group().replace('#', ' ').split())}")
+    return phrases
 
 
 def boundary_violations() -> dict[str, list[str]]:
@@ -338,3 +368,34 @@ def test_the_test_modules_that_import_agno_are_exactly_the_listed_ones() -> None
     assert not left, (
         f"Delete these modules from TEST_AGNO_RUNTIME_IMPORTERS, since they no longer import Agno's runtime types: {left}"
     )
+
+
+def test_parity_wording_finds_each_phrase_across_comment_lines_and_in_docstrings() -> None:
+    """A phrase counts wherever a line break or a comment marker splits it; other uses of its words do not."""
+    source = '''"""Render the reply. Kept as main
+behaves."""
+
+# Each result is stored as main
+# does. Requests for parity with
+# the owned loop run on the main thread, as Agno did.
+mainline = "kept as mainline"
+'''
+
+    assert parity_wording(source) == [
+        "line 1: Kept as main",
+        "line 4: as main does",
+        "line 5: for parity",
+        "line 6: owned loop",
+        "line 6: as Agno did",
+    ]
+
+
+def test_no_source_comment_justifies_behavior_by_the_retired_agno_runtime() -> None:
+    """Source comments and docstrings state the outcome each behavior protects, not that the retired runtime had it."""
+    found = {
+        path.relative_to(SOURCE_ROOT).as_posix(): phrases
+        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        if (phrases := parity_wording(path.read_text(encoding="utf-8")))
+    }
+
+    assert not found, f"State what each behavior protects, or mark it TODO(simplify), in: {found}"

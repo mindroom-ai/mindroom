@@ -22,6 +22,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Subagents",
         description="Start allowed subagents, continue their conversations, and return their results",
+        docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#delegate",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

@@ -40,7 +40,7 @@ from mindroom.constants import (
 )
 from mindroom.history import summary_rows
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.types import HistoryScope, HistoryScopeState, replayed_summary_text
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -395,6 +395,18 @@ def set_force_compaction(
     )
 
 
+def _latest_summary_row(
+    storage: ConversationStore,
+    session: ConversationSession,
+    scope: HistoryScope,
+) -> tuple[int | None, str | None]:
+    """Return the id of the scope's latest summary row and its text as replay reads it, or ``None`` for each it lacks."""
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
+    if latest is None:
+        return None, None
+    return latest.id, replayed_summary_text(latest.summary)
+
+
 @dataclass(frozen=True)
 class _ChunkBasis:
     """What one compaction chunk's summary is built on: the latest summary row and the candidate runs, as read."""
@@ -416,12 +428,11 @@ def read_chunk_basis(
     The chunk summarizes the session as it was loaded, so this returns ``None`` when the stored history has
     changed since: the latest row's text is not ``previous_summary``, or a candidate run is gone or hidden.
     """
-    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
+    based_on, latest_summary = _latest_summary_row(storage, session, scope)
     covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
-    latest_summary = (latest.summary or "").strip() or None if latest is not None else None
     if latest_summary != previous_summary or {run.run_id for run in covered if run.visible} != set(run_ids):
         return None
-    return _ChunkBasis(based_on=latest.id if latest is not None else None, covered=covered)
+    return _ChunkBasis(based_on=based_on, covered=covered)
 
 
 def append_compaction_chunk(
@@ -470,7 +481,7 @@ def read_fold_basis(storage: ConversationStore, session: ConversationSession, sc
     as visible.
     Returns ``None`` when the stored history changed between the reads.
     """
-    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
+    based_on, latest_summary = _latest_summary_row(storage, session, scope)
     stored = storage.load_session(session.session_id, session.kind)
     runs = [run for run in (stored.runs if stored is not None else []) if replays_in_scope(run, scope)]
     run_ids = [run.run_id for run in runs]
@@ -478,8 +489,8 @@ def read_fold_basis(storage: ConversationStore, session: ConversationSession, sc
     if {run.run_id for run in covered if run.visible} != set(run_ids):
         return None
     return FoldBasis(
-        based_on=latest.id if latest is not None else None,
-        summary=(latest.summary or "").strip() or None if latest is not None else None,
+        based_on=based_on,
+        summary=latest_summary,
         runs=tuple(runs),
         covered=covered,
     )

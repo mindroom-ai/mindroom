@@ -449,8 +449,8 @@ async def _register_client(
         if resolution is not None and resolution.registered_token_url is None:
             # LEGACY_COMPAT: Dynamic client registrations without a recorded token endpoint.
             # Legacy format: a dynamically registered client config without `OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY`.
-            # Last legacy release: v2026.9.358, for records written since v2026.8.37 (earlier records lack the
-            # runtime-bootstrap flag and already resolve as operator-configured clients); the unreleased replacement
+            # Last legacy release: v2026.9.361, for records written since v2026.8.37 (earlier records lack the
+            # runtime-bootstrap flag and already resolve as operator-configured clients); the replacement, v2026.9.362,
             # records the token endpoint with every registration.
             # Handling: bind the registration once to the token endpoint resolved at first use after upgrade, keeping
             # its client ID and the tokens issued to it; later endpoint changes re-register.

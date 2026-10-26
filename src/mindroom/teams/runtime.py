@@ -138,9 +138,8 @@ def continue_team(
     delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
     requirements on the team run, and the leader sends no request.
     """
-    # TODO(simplify): A resume that fails or is cancelled stores this record over the paused team row, so its
-    # approval can no longer be resumed. Keep the paused row until the resume completes or pauses again. Users would
-    # notice (#3075).
+    # A resume that fails or is cancelled stores this record over the paused team row on purpose, as an agent's does
+    # (``_store_interrupted`` in ``agent_loop/run.py``): the resume ends its approval anyway.
     record = resumed_record(paused)
     record.member_responses = []
     # The paused notice is not part of the answer; the leader's text starts afresh.
@@ -305,8 +304,8 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
             msg = f"Paused team run {paused.run_id!r} no longer holds member run {run_id!r}"
             raise ValueError(msg)
         decided = decisions.take(member_id, {requirement.tool_execution.tool_call_id for requirement in group})
-        # The member resumes from its own record with its requirements naming the member, as the team run's copies
-        # do, so the resumed member row stores those fields as main stores them.
+        # The member resumes from its own record with its requirements naming the member and its run, as the team
+        # run's copies do, so the member row its resume stores names them too.
         named = replace(
             member_record,
             requirements=[

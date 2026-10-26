@@ -348,8 +348,9 @@ async def drive_run[R: AnyRunRecord](
         await _store_interrupted(record, messages, started, persist, error=error)
         raise
     else:
-        # Reported before the toolkits close, kept as main behaves. A consumer that reads the end of the stream, such
-        # as a delegation's, still waits through a slow close, such as a stdio MCP server's exit.
+        # Reported before the toolkits close, so a consumer handles the finished run before a slow close, such as a
+        # stdio MCP server's exit, begins; one that reads the end of the stream, such as a delegation's, still waits
+        # through it.
         yield RunFinished(record)
     finally:
         await close_toolkits(closes)
@@ -367,7 +368,7 @@ async def _store_interrupted[R: AnyRunRecord](
 
     Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
     run records its ``failure_text`` in ``error``, redacted, which is what its caller reports; its stored content is
-    that text only when its model said nothing, kept as main stores it. The store finishes even if the waiter is
+    that text only when its model said nothing. The store finishes even if the waiter is
     cancelled again, so a record the caller writes for the same run afterwards is never overwritten by this one.
     """
     if error is None:
@@ -384,9 +385,11 @@ async def _store_interrupted[R: AnyRunRecord](
         record.error = redact_sensitive_text(reason)
         if not record.content:
             record.content = reason
-    # TODO(simplify): a failed or cancelled approval resume stores its record over the paused run's row, as main does,
-    # so that approval can no longer be resumed. Keep the paused row when a resume ends this way.
-    # Users and stored data would notice: the approval could be retried. (#3075)
+    # A failed or cancelled approval resume stores this record over the paused run's row on purpose. Such a resume
+    # ends its approval anyway: its cards expire and the approval is finished. A row kept paused would hold back memory
+    # auto-flush and knowledge-graph ingestion, which wait on a paused run, until its approval window passes
+    # (``finished_runs`` in ``history/session_runs.py``), and approving it again would rerun a call this record shows
+    # already ran.
     if persist is not None:
         await run_coroutine_until_complete(_persist_quietly(persist, record))
 

@@ -3420,6 +3420,7 @@ depends_on = [
     "mindroom.credentials.manager",
     "mindroom.matrix.identity",
     "mindroom.model_defaults",
+    "mindroom.providers.names",
     "mindroom.tool_system.worker_routing",
     "mindroom.config.schema_hints",
 ]
@@ -5311,10 +5312,10 @@ depends_on = []
 [[interfaces]]
 from = ["mindroom.tool_system.tool_access"]
 expose = [
-    "ToolDescriptor",
     "ToolKey",
     "UnknownToolError",
     "search_tool_metadata",
+    "tool_definition",
     "validate_tool_arguments",
 ]
 
@@ -6983,6 +6984,7 @@ expose = [
     "DetachedRequesterContext",
     "detached_requester_context",
     "current_budget_monitor",
+    "current_requester_id",
     "get_detached_requester_context",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
@@ -7902,6 +7904,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.conversation_text"
 depends_on = [
+    "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
@@ -8712,6 +8715,9 @@ depends_on = [
 from = ["mindroom.tool_system.agent_tool_calls"]
 expose = [
     "AgentToolCallEvent",
+    "AgentToolCallMedia",
+    "AgentToolCallStep",
+    "AgentToolCallWaiting",
     "DeferredAgentToolkit",
     "PreparedAgentToolBinding",
     "PreparedAgentToolCatalog",
@@ -9527,6 +9533,7 @@ depends_on = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
+    "mindroom.tool_system.runtime_context",
     "mindroom.usage.storage",
 ]
 visibility = [

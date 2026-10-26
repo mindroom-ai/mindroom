@@ -305,8 +305,8 @@ def comparable(run: dict[str, Any]) -> dict[str, Any]:
 
     Prompt-role messages leave completed rows, as the store strips them; random ids become ``<id-n>`` in
     first-appearance order; every timestamp and duration becomes a sentinel, so its presence is compared but not its
-    value; a tool's timing keeps only which keys it recorded; the run metadata MindRoom adds after the turn
-    (``io.mindroom.ai_run``) goes, the rest of the metadata is compared.
+    value; the run metadata MindRoom adds after the turn (``io.mindroom.ai_run``) goes, the rest of the metadata is
+    compared.
     """
     text = json.dumps(_stored_shape(expected_run_dict(run)), sort_keys=True)
     ids: dict[str, str] = {}
@@ -345,22 +345,6 @@ def _with_clock_sentinels(run: dict[str, Any]) -> dict[str, Any]:
         # provider reported, so even its presence differs.
         metrics = _clocked(result["metrics"], frozenset({"duration"}))
         result["metrics"] = {key: value for key, value in metrics.items() if key != "time_to_first_token"}
-    if "tools" in result and result["tools"] is not None:
-        result["tools"] = [_tool_with_clock_sentinels(tool) for tool in result["tools"]]
-    if "requirements" in result and result["requirements"] is not None:
-        result["requirements"] = [
-            {
-                **_clocked(item, frozenset({"created_at"})),
-                "tool_execution": _tool_with_clock_sentinels(item["tool_execution"]),
-            }
-            for item in result["requirements"]
-        ]
     if "member_responses" in result:
         result["member_responses"] = [_with_clock_sentinels(item) for item in result["member_responses"]]
-    return result
-
-
-def _tool_with_clock_sentinels(tool: dict[str, Any]) -> dict[str, Any]:
-    result = _clocked(tool, frozenset({"created_at"}))
-    result["metrics"] = None if tool["metrics"] is None else sorted(tool["metrics"])
     return result

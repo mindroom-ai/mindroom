@@ -180,7 +180,12 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(
 
     assert prepared.replays_persisted_history is True
     assert prepared.compaction_reply_outcome == "success"
-    assert completed_outcome(lifecycle).summary == "merged summary"
+    start, outcome = lifecycle.events
+    assert isinstance(start, CompactionLifecycleStart)
+    assert isinstance(outcome, CompactionOutcome)
+    assert outcome.summary == "merged summary"
+    # A requested compaction reports itself as manual from its first notice to its outcome.
+    assert (start.mode, outcome.mode) == ("manual", "manual")
 
 
 @pytest.mark.asyncio
@@ -559,10 +564,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     second_summary_text = "final summary"
@@ -700,10 +702,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         ],
     )
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     second_summary_text = "second pass summary"
@@ -1019,10 +1018,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     summary_inputs: list[str] = []
@@ -1192,10 +1188,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = config.resolve_entity("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
 
@@ -1683,7 +1676,6 @@ async def test_prepare_history_for_run_context_window_guard_skips_system_prompts
         execution_identity=None,
         storage=storage,
         session=persisted,
-        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         # The 40-token window minus its clamped 20-token reserve leaves 10 tokens of history beside this prompt.
         static_prompt_tokens=10,
         available_history_budget=10,
@@ -2014,7 +2006,12 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
     assert prepared.compaction_reply_outcome == "success"
-    assert completed_outcome(lifecycle).before_tokens == expected
+    outcome = completed_outcome(lifecycle)
+    assert outcome.before_tokens == expected
+    start = lifecycle.events[0]
+    assert isinstance(start, CompactionLifecycleStart)
+    # A compaction nobody requested reports itself as automatic from its first notice to its outcome.
+    assert (start.mode, outcome.mode) == ("auto", "auto")
 
 
 @pytest.mark.asyncio

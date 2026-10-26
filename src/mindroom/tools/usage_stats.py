@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Usage Statistics",
     description="Inspect retained token usage without modifying session storage",
+    docs_url="https://docs.mindroom.chat/usage/#usage_stats",
     category=ToolCategory.INFORMATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

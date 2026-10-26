@@ -809,7 +809,6 @@ async def _checkpointed_batch(
         metadata={"agent_mode": "minimal"},
     )
     catalog = PreparedAgentToolCatalog(
-        agent_name="helper",
         run=RunContext(
             run_id="saved-run",
             user_id=runtime.requester_id,

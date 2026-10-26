@@ -842,7 +842,7 @@ async def prepare_agent_execution_context(
         PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
     )
-    compaction_config = config.resolve_entity(agent_name).compaction_config
+    compaction_config = build.history_settings.compaction_config
 
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
@@ -925,10 +925,11 @@ async def _prepare_bound_team_execution_context(
     """Prepare one bound team scope for the current call.
 
     ``leader_system_message`` and ``leader_tools`` size the static part of every leader request; the delegation tool
-    the run adds is among them. ``history_settings`` are the built team's, which the replay plan follows.
+    the run adds is among them. ``history_settings`` are the built team's, whose replay policy and compaction config
+    the scope follows.
     """
     static_token_estimator = build_static_token_estimator(leader_system_message, leader_tools, frozenset())
-    team_compaction_config = config.resolve_entity(team_name).compaction_config
+    team_compaction_config = history_settings.compaction_config
 
     async def _prepare_team_scope_history(
         prepared_prompt: str,

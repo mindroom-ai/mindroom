@@ -494,6 +494,8 @@ def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> l
         for key in ("$defs", "definitions"):
             if key in parameters:
                 input_schema[key] = parameters[key]
+        # TODO(simplify): a tool without a description sends an empty one, as on Gemini. Leave it out, as Chat,
+        # Responses, and Ollama do (#3113). Models would notice: Claude tool definitions change for such tools.
         definition: dict[str, Any] = {
             "name": tool.name,
             "description": tool.description or "",

@@ -103,7 +103,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["claude-agent-sdk"],
-    docs_url="https://platform.claude.com/docs/en/agent-sdk/python",
+    docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#claude_agent",
     function_names=(
         "claude_end_session",
         "claude_interrupt",

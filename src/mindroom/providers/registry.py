@@ -170,17 +170,15 @@ def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -
     """Raise ``ValueError`` for an ``extra_kwargs`` key the route that serves ``model_config`` does not accept.
 
     Config load calls this so such a key fails before any model is built; it reads only the routes' key tables,
-    so no provider SDK loads. A provider no route serves is left to ``build_model_provider``.
+    so no provider SDK loads.
     """
     provider = provider_route(model_config.provider)
     if provider in OPENAI_FAMILY_PROVIDERS:
         allowed = openai_accepted_extra_kwargs(model_config, runtime_paths)
     elif provider in _CLAUDE_PROVIDERS:
         allowed = settings_keys(ClaudeSettings, CLAUDE_ACCEPTED_KEYS[cast("ClaudeRouteKind", provider)])
-    elif provider in _SETTINGS_KEYS:
-        allowed = _SETTINGS_KEYS[provider]
     else:
-        return
+        allowed = _SETTINGS_KEYS[provider]
     reject_unsupported_extra_kwargs(model_config.extra_kwargs, allowed, provider=model_config.provider)
 
 

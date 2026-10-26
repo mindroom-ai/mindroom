@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import render_transient_context
@@ -874,26 +875,38 @@ def test_a_retired_agno_model_field_fails_config_load_and_names_the_model(
     )
 
 
+_NOT_A_MAPPING = "extra_kwargs.client_params must be a mapping, not str"
+_NESTED_NOT_A_STRING = "extra_kwargs.client_params.base_url must be a string, not int"
+
+
 @pytest.mark.parametrize(
-    ("extra_kwargs", "error"),
+    ("provider", "extra_kwargs", "error"),
     [
-        ({"client_params": "http://127.0.0.1:9/v1"}, "extra_kwargs.client_params must be a mapping, not str"),
-        ({"base_url": 9}, "extra_kwargs.base_url must be a string, not int"),
-        ({"client_params": {"base_url": 9}}, "extra_kwargs.client_params.base_url must be a string, not int"),
+        ("openai", {"client_params": "http://127.0.0.1:9/v1"}, _NOT_A_MAPPING),
+        ("openai", {"base_url": 9}, "extra_kwargs.base_url must be a string, not int"),
+        ("openai", {"client_params": {"base_url": 9}}, _NESTED_NOT_A_STRING),
+        ("openai", {"client_params": {"base_url": 0}, "base_url": "http://127.0.0.1:9/v1"}, _NESTED_NOT_A_STRING),
+        ("groq", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("codex", {"client_params": {"base_url": 9}}, _NESTED_NOT_A_STRING),
+        ("anthropic", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("google", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
+        ("ollama", {"client_params": "http://127.0.0.1:9"}, _NOT_A_MAPPING),
     ],
 )
-def test_a_wrongly_typed_openai_endpoint_fails_config_load_and_names_the_model_and_key(
-    tmp_path: Path,
+def test_a_wrongly_typed_client_setting_fails_config_validation_at_the_model(
+    provider: str,
     extra_kwargs: dict[str, Any],
     error: str,
 ) -> None:
-    """Config load reads an ``openai`` model's endpoint to pick its API, so a wrongly typed one is a config error."""
-    data = {"models": {"default": {"provider": "openai", "id": "gpt-6-astra", "extra_kwargs": extra_kwargs}}}
+    """The type of ``client_params`` and the endpoints is checked with the model, whatever its provider."""
+    data = {"models": {"default": {"provider": provider, "id": "gpt-6-astra", "extra_kwargs": extra_kwargs}}}
 
-    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
-        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(data)
 
-    assert str(exc_info.value) == f"models.default: {error}"
+    assert iter_config_validation_messages(exc_info.value) == [
+        ("models → default → extra_kwargs", f"Value error, {error}"),
+    ]
 
 
 _OPENAI_ENDPOINT_ENV = {"OPENAI_BASE_URL": "http://127.0.0.1:9/v1"}

@@ -426,6 +426,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
         ),
         persist=persist_to(agent.store, agent.session),
         request_template=agent.build.request_template,
+        model_name="default",
     )
     record = await forward_resume(events, None, paused=paused)
 

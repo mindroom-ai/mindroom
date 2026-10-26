@@ -19,7 +19,7 @@ from yaml.scanner import Scanner
 
 from mindroom import file_watcher
 from mindroom.cli.main import app
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, iter_config_validation_messages, load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source, partial_source_files
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
@@ -393,6 +393,14 @@ class TestIncludeErrors:
 
         with pytest.raises(ConfigIncludeError, match=r"missing\.yaml' does not exist \(in .*config\.yaml, line 2\)"):
             load_yaml_config_source(tmp_path / "config.yaml")
+
+    def test_include_errors_reach_users_as_written(self, tmp_path: Path) -> None:
+        """Config error surfaces show an include error's own text, not the generic YAML parse prefix."""
+        _write(tmp_path / "config.yaml", "top: value\nbroken: !include missing.yaml\n")
+        with pytest.raises(ConfigIncludeError) as info:
+            load_yaml_config_source(tmp_path / "config.yaml")
+
+        assert iter_config_validation_messages(info.value) == [("config", str(info.value))]
 
     def test_missing_directory_error_names_including_file(self, tmp_path: Path) -> None:
         """A missing include directory reports the including file and tag line."""

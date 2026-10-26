@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from mindroom.config.automations import Automation
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
-    from mindroom.config.models import CompactionConfig, EffectiveToolConfig, FileAccess
+    from mindroom.config.models import EffectiveToolConfig, FileAccess
     from mindroom.history.types import ResolvedHistorySettings
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -37,24 +37,10 @@ class ResolvedEntityView:
 
     @property
     def history_settings(self) -> ResolvedHistorySettings:
-        """Effective history replay settings for this scope."""
+        """Effective history replay settings and text compaction config for this scope."""
         if self.name is None:
             return self._config._default_history_settings()
         return self._config._entity_history_settings(self.name)
-
-    @property
-    def compaction_config(self) -> CompactionConfig:
-        """Effective text compaction config for this scope."""
-        if self.name is None:
-            return self._config._default_compaction_config()
-        return self._config._entity_compaction_config(self.name)
-
-    @property
-    def has_authored_compaction_config(self) -> bool:
-        """Whether text compaction was explicitly configured for this scope."""
-        if self.name is None:
-            return self._config._has_authored_default_compaction_config()
-        return self._config._has_authored_entity_compaction_config(self.name)
 
     @property
     def max_tool_calls_per_turn(self) -> int:

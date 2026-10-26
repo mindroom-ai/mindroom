@@ -66,7 +66,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["atlassian-python-api"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/confluence",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#confluence",
     function_names=(
         "create_page",
         "get_all_page_from_space",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
@@ -23,6 +24,7 @@ from mindroom.credentials.manager import validate_service_name
 from mindroom.credentials.policy import credential_service_policy
 from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
+from mindroom.providers.names import PROVIDER_ROUTES, provider_route
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 
@@ -766,6 +768,15 @@ class ModelConfig(BaseModel):
         description="Provider prices in USD per million tokens, used to measure spend against budgets",
     )
 
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        """Reject a provider no route serves, so a misspelling fails config load instead of the model's first build."""
+        if provider_route(value) not in PROVIDER_ROUTES:
+            msg = f"Unknown provider '{value}': use one of {', '.join(sorted(PROVIDER_ROUTES))}"
+            raise ValueError(msg)
+        return value
+
     @field_validator("display_name")
     @classmethod
     def _normalize_display_name(cls, value: str | None) -> str | None:
@@ -787,6 +798,27 @@ class ModelConfig(BaseModel):
     def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
         return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def _validate_client_settings(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Reject a ``client_params`` that is not a mapping, or a ``base_url`` or ``client_params.base_url`` that is not a string.
+
+        The providers that accept these keys pass ``client_params`` to their API client, and the OpenAI-family
+        routes read their endpoint, and the ``openai`` route its API, from the two ``base_url`` keys.
+        """
+        client_params = (value or {}).get("client_params")
+        if client_params is not None and not isinstance(client_params, Mapping):
+            msg = f"extra_kwargs.client_params must be a mapping, not {type(client_params).__name__}"
+            raise ValueError(msg)
+        for key, endpoint in (
+            ("client_params.base_url", (client_params or {}).get("base_url")),
+            ("base_url", (value or {}).get("base_url")),
+        ):
+            if endpoint is not None and not isinstance(endpoint, str):
+                msg = f"extra_kwargs.{key} must be a string, not {type(endpoint).__name__}"
+                raise ValueError(msg)
+        return value
 
     @field_validator("icon")
     @classmethod

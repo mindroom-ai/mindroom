@@ -39,8 +39,9 @@ class GeminiSettings:
     thinking_budget: int | None = None
     include_thoughts: bool | None = None
     thinking_level: str | None = None
-    # Google Search grounding, sent in place of the request's function tools, so a grounded model calls no
-    # function; kept as main behaves.
+    # TODO(simplify): Google Search grounding is sent in place of the request's function tools, so a grounded model
+    # calls no function. Decide whether search combines with function tools (#3075). Users would notice: a grounded
+    # agent could call its tools.
     search: bool = False
 
 

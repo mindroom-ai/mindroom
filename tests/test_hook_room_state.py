@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 def _config(tmp_path: object) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
-        Config(models={"default": ModelConfig(provider="test", id="test-model")}),
+        Config(models={"default": ModelConfig(provider="openai", id="test-model")}),
         runtime_paths,
     )
 

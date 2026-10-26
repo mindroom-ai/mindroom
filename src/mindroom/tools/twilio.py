@@ -101,7 +101,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["twilio"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/twilio",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#twilio",
     function_names=("get_call_details", "list_messages", "send_sms"),
 )
 def twilio_tools() -> type[TwilioTools]:
