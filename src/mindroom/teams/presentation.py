@@ -157,6 +157,8 @@ class TeamStreamPresentation:
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_scopes: set[str] = field(default_factory=set, init=False, repr=False)
+    # The member run whose deltas last gave each member slot text.
+    _last_text_run: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Restore pending tool identity from the durable trace."""
@@ -282,6 +284,16 @@ class TeamStreamPresentation:
         """
         self._append_text(f"agent:{member_id}", content, separate=separate)
 
+    def append_member_run(self, member_id: str, run_id: str, content: str) -> None:
+        """Append a delta of member run ``run_id``; text from another run than the slot's last text starts a paragraph.
+
+        A blocking reply separates a member's runs the same way (``format_team_response``).
+        """
+        if not content:
+            return
+        self.append_member(member_id, content, separate=self._last_text_run.get(member_id, run_id) != run_id)
+        self._last_text_run[member_id] = run_id
+
     def append_consensus(self, content: object | None, *, separate: bool = False) -> None:
         """Append a coordinator content delta to the consensus slot; ``separate`` as for ``append_member``."""
         self._append_text("team", content, separate=separate)
@@ -360,6 +372,25 @@ class TeamStreamPresentation:
         """Record a tool completion in the slot of ``member_id``, which ``resolve_member_id`` returned."""
         self.complete_tool(f"agent:{member_id}", call)
 
+    def text_without_tool_markers(self) -> str:
+        """Return the document's slots without its header and tool markers: the text a streamed reply records.
+
+        With tool calls hidden the slots hold no markers; with them shown, each marker line goes and the text around it
+        stays a blank line apart, as hidden tool calls leave it.
+        """
+        per_member, consensus = self.per_member, self.consensus
+        if self.show_tool_calls:
+            per_member = {member_id: _without_tool_markers(text) for member_id, text in per_member.items()}
+            consensus = _without_tool_markers(consensus)
+        return "\n\n".join(
+            render_team_member_slots(
+                self.member_ids,
+                display_names_by_id=self.display_names_by_id,
+                per_member=per_member,
+                consensus=consensus,
+            ),
+        )
+
     def render_body(self) -> str:
         """Render the current structured document."""
         parts = render_team_member_slots(
@@ -372,16 +403,26 @@ class TeamStreamPresentation:
         return header + "\n\n".join(parts) if parts else ""
 
 
-def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent, *, separate: bool = False) -> None:
-    """Apply one team run event to the document: member events to the member's slot, the leader's to the consensus.
+def _without_tool_markers(text: str) -> str:
+    """Return slot text without its tool marker lines, the text around each marker a blank line apart."""
+    pieces: list[list[str]] = [[]]
+    for line in text.split("\n"):
+        if is_visible_tool_marker_line(line):
+            pieces.append([])
+        else:
+            pieces[-1].append(line)
+    if len(pieces) == 1:
+        return text
+    return "\n\n".join(segment for piece in pieces if (segment := "\n".join(piece).strip("\n")).strip())
 
-    ``separate`` starts a member's text in a paragraph of its own, for text from another of the member's runs.
-    """
+
+def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) -> None:
+    """Apply one team run event to the document: member events to the member's slot, the leader's to the consensus."""
     if isinstance(event, MemberEvent):
         member_id = presentation.resolve_member_id(event.member_id, event.member_name)
         inner = event.event
         if isinstance(inner, TextDelta):
-            presentation.append_member(member_id, inner.text, separate=separate)
+            presentation.append_member_run(member_id, event.run_id, inner.text)
         elif isinstance(inner, ToolStarted):
             presentation.start_member_tool(member_id, inner.call)
         elif isinstance(inner, ToolCompleted):

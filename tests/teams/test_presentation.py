@@ -14,7 +14,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
-from mindroom.teams.attempt import TeamReplyText
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
     apply_team_event,
@@ -404,20 +403,25 @@ def test_a_restored_visible_marker_keeps_one_paragraph_break_before_the_consensu
     assert presentation.consensus == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
 
 
-def test_the_reply_text_keeps_a_paragraph_break_where_a_hidden_tool_call_split_a_slot() -> None:
-    """Text written after a slot's tool call starts a new paragraph, as the run's own content separates it."""
-    reply = TeamReplyText(TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False))
-    call = ReportedCall(tool_call_id="call-1", tool_name="lookup", tool_args={})
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+def test_the_recorded_text_is_the_document_without_tool_markers(show_tool_calls: bool) -> None:
+    """The text a streamed reply records is its document's slots, a blank line where a tool call split them."""
+    presentation = TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=show_tool_calls)
+    member_call = ReportedCall(tool_call_id="call-1", tool_name="lookup", tool_args={})
+    leader_call = ReportedCall(tool_call_id="call-2", tool_name="lookup", tool_args={})
 
     for event in (
         MemberEvent("general", "GeneralAgent", "run-1", TextDelta("Looking.")),
-        MemberEvent("general", "GeneralAgent", "run-1", ToolStarted(call)),
+        MemberEvent("general", "GeneralAgent", "run-1", ToolStarted(member_call)),
         MemberEvent("general", "GeneralAgent", "run-1", TextDelta("Four seats.")),
+        MemberEvent("general", "GeneralAgent", "run-2", TextDelta("Five now.")),
         TextDelta("Checking."),
-        ToolStarted(call),
+        ToolStarted(leader_call),
         TextDelta("Done."),
     ):
-        reply.apply(event)
+        apply_team_event(presentation, event)
 
-    assert reply.per_member == {"general": "Looking.\n\nFour seats."}
-    assert reply.consensus == "Checking.\n\nDone."
+    assert presentation.text_without_tool_markers() == (
+        "**GeneralAgent**: Looking.\n\nFour seats.\n\nFive now.\n\n\n**Team Consensus**:\n\nChecking.\n\nDone."
+    )
+    assert ("🔧" in presentation.render_body()) is show_tool_calls

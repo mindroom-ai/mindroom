@@ -804,7 +804,7 @@ class _TeamTurn:
             response_text = leader_text.strip() if silent else rendered
             replayable_text = response_text if has_visible_output else ""
         else:
-            body_text = attempt.reply.canonical_text()
+            body_text = attempt.presentation.text_without_tool_markers()
             has_visible_output = bool(body_text)
             rendered = header + (body_text or NO_TEAM_RESPONSE)
             response_text = ""
