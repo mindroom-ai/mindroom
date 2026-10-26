@@ -164,14 +164,16 @@ def format_claude_messages(
     *,
     append_trailing_user_message: bool,
     citations: bool,
+    earlier_thinking: bool,
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
     System messages are extracted and joined with a space. Consecutive same-role turns merge into one, dropping
     the earlier assistant turn's thinking: the API verifies an assistant message's thinking sequence against one
-    original response. A conversation that ends with an assistant turn gets a trailing ``continue`` user turn when
-    the model rejects prefill. Documents ask for citations unless ``citations`` is False, as a request with
-    structured output must be: the API rejects citations beside an output format.
+    original response. Without ``earlier_thinking``, the turns before the current tool loop replay without their
+    thinking (``_without_earlier_thinking``). A conversation that ends with an assistant turn gets a trailing
+    ``continue`` user turn when the model rejects prefill. Documents ask for citations unless ``citations`` is
+    False, as a request with structured output must be: the API rejects citations beside an output format.
     """
     turns: list[dict[str, Any]] = []
     system_texts: list[str] = []
@@ -192,6 +194,8 @@ def format_claude_messages(
             raise ValueError(msg)
         turns.append({"role": "assistant" if message.role == "assistant" else "user", "content": content})
     merged = _merged_turns(turns)
+    if not earlier_thinking:
+        merged = _merged_turns(_without_earlier_thinking(merged))
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
         merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
     # TODO(simplify): System messages join with one space, so a later one runs on from the end of the previous
@@ -216,6 +220,30 @@ def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             merged.append(turn)
     return merged
+
+
+def _without_earlier_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Leave the thinking out of the assistant turns before the current tool loop; a turn left empty goes too.
+
+    The loop starts after the last user turn without a tool result, where the API itself starts a new turn. The
+    API requires the loop's own thinking as received and allows leaving out every earlier turn's.
+    """
+    starts = [index for index, turn in enumerate(turns) if turn["role"] == "user" and not _answers_tool_calls(turn)]
+    start = starts[-1] if starts else 0
+    kept: list[dict[str, Any]] = []
+    for index, turn in enumerate(turns):
+        if index >= start or turn["role"] != "assistant":
+            kept.append(turn)
+            continue
+        content = [block for block in turn["content"] if _block_type(block) not in _THINKING_BLOCK_TYPES]
+        if content:
+            kept.append({**turn, "content": content})
+    return kept
+
+
+def _answers_tool_calls(turn: dict[str, Any]) -> bool:
+    """Return whether a user turn carries tool results, which continue the tool loop instead of starting a turn."""
+    return any(isinstance(block, dict) and block.get("type") == "tool_result" for block in turn["content"])
 
 
 def _user_blocks(message: Message, *, citations: bool) -> list[Any]:

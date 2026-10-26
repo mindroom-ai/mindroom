@@ -119,7 +119,8 @@ _STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
 # the date and the turn's memory and enrichment, a turn's transient context leaves the history after it, and
 # compaction and replay limits rewrite earlier turns, so a request regularly replays thinking produced after a different
 # prefix; the API rejects such a request by default on accounts created from 2026-08-31. Bedrock stays without it
-# until it is shown to accept the beta, because a platform rejects a beta it does not take.
+# until it is shown to accept the beta, because a platform rejects a beta it does not take; a request without the
+# binding leaves out earlier turns' thinking instead (``_replays_earlier_thinking``).
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 _THINKING_BINDING_ROUTES: frozenset[ClaudeRouteKind] = frozenset({"anthropic", "vertexai_claude"})
 _VERTEX_ENDPOINTS = {
@@ -315,7 +316,8 @@ class ClaudeProvider:
         transformations = response.input_transformations if isinstance(response, BetaMessage) else None
         dropped = [entry for entry in transformations or () if entry.type == "thinking_dropped"]
         if dropped:
-            # The model answered without that earlier reasoning: something before it changed since it was produced.
+            # The model answered without that earlier reasoning; ``reasons`` says why: the context before it changed, or
+            # another model, organization, or end user produced it.
             logger.info(
                 "claude_replayed_thinking_dropped",
                 model_id=self.identity.id,
@@ -385,15 +387,25 @@ class ClaudeProvider:
             or not checks_thinking_prefix(self.identity.id)
         ):
             return False
-        extra_body = params.get("extra_body") or {}
-        # The SDK sends ``extra_body`` over the body's own fields, so the thinking it holds is the one sent.
-        owner = extra_body if "thinking" in extra_body else params
+        owner = _thinking_owner(params)
         thinking = dict(owner.get("thinking") or {"type": "adaptive"})
         if thinking.get("type") != "adaptive":
             return False
         thinking.setdefault("block_binding", {"prefix_mismatch_behavior": "drop_block"})
         owner["thinking"] = thinking
         return True
+
+    def _replays_earlier_thinking(self, params: dict[str, Any]) -> bool:
+        """Return whether earlier turns' thinking replays: always, unless the API checks it and nothing binds it.
+
+        Where no ``block_binding`` can be sent (Bedrock, ``between_tools``, disabled thinking), a stale earlier block
+        fails the request, so earlier turns replay without thinking, which is always valid. An authored binding,
+        ``"error"`` included, is the operator's choice and keeps every block.
+        """
+        if not checks_thinking_prefix(self.identity.id):
+            return True
+        thinking = _thinking_owner(params).get("thinking")
+        return isinstance(thinking, dict) and thinking.get("block_binding") is not None
 
     def _request_params(
         self,
@@ -433,21 +445,19 @@ class ClaudeProvider:
             manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
         )
         output_format = self._output_format(request.output_schema)
+        # Vertex rejects the tool-level strict field.
+        strict_allowed = self.route != "vertexai_claude"
+        tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
+        strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
+        params = self._request_params(request, output_format, strict_tools=strict_tools)
         thinking_enabled = settings.thinking_enabled() and not overrides.disable_thinking
         conversation = format_claude_messages(
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
             citations=output_format is None,
+            earlier_thinking=self._replays_earlier_thinking(params),
         )
-        # Vertex rejects the tool-level strict field.
-        strict_allowed = self.route != "vertexai_claude"
-        tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
-        strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
-        body: dict[str, Any] = {
-            "model": self.identity.id,
-            "messages": conversation.messages,
-            **self._request_params(request, output_format, strict_tools=strict_tools),
-        }
+        body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
         if tools:
             body["tools"] = tools
         body = prepare_request_body(
@@ -570,6 +580,12 @@ def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady |
         if block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
             return ToolCallReady(tool_call_from_block(block))
     return None
+
+
+def _thinking_owner(params: dict[str, Any]) -> dict[str, Any]:
+    """Return the dict whose ``thinking`` the request sends: the SDK sends ``extra_body`` over the body's own fields."""
+    extra_body = params.get("extra_body") or {}
+    return extra_body if "thinking" in extra_body else params
 
 
 def _raw_request_params(settings: ClaudeSettings, *, disable_thinking: bool) -> dict[str, Any]:

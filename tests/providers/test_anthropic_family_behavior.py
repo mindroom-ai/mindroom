@@ -700,25 +700,125 @@ async def test_replayed_thinking_whose_context_changed_is_dropped_where_the_rout
     """A request whose earlier context changed drops the stale thinking instead of failing, on routes that accept it.
 
     Sonnet 5.5 checks replayed thinking against the system prompt, tools, and messages before it, which MindRoom's
-    date and turn context change; Bedrock has not shown that it accepts the beta, so its request stays as it was.
+    date and turn context change; Bedrock has not shown that it accepts the beta, so it sends no binding.
     """
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
-    signed = Message(
-        role="assistant",
-        content="Earlier.",
-        reasoning_content="",
-        provider_data={"content_blocks": [{"type": "thinking", "thinking": "", "signature": "sig"}]},
-    )
-    messages = [*_user(), signed, Message(role="user", content="And now?")]
-    await claude_turn(route_provider(route, tmp_path, wire), ModelRequest(messages=messages))
+    await claude_turn(route_provider(route, tmp_path, wire), ModelRequest(messages=_user()))
     request, body = wire.requests[0], wire.body()
-    assert body["messages"][1]["content"] == [{"type": "thinking", "thinking": "", "signature": "sig"}]
     if bound:
         assert request.headers["anthropic-beta"] == _THINKING_BINDING_BETA
         assert body["thinking"] == {"type": "adaptive", "block_binding": _DROP_STALE}
     else:
         assert "anthropic-beta" not in request.headers
         assert "thinking" not in body
+
+
+_EARLIER_THINKING = {"type": "thinking", "thinking": "", "signature": "sig-earlier"}
+_LOOP_THINKING = {"type": "thinking", "thinking": "", "signature": "sig-loop"}
+_LOOP_REDACTED = {"type": "redacted_thinking", "data": "opaque"}
+_LOOP_CALL = {"type": "tool_use", "id": "toolu_1", "name": "look", "input": {}}
+
+
+def _two_turns_with_a_tool_loop() -> list[Message]:
+    """An earlier answered turn, then the current turn's first tool call and its result, each reply with thinking."""
+    call = {"id": "toolu_1", "type": "function", "function": {"name": "look", "arguments": "{}"}}
+    return [
+        *_user("First?"),
+        Message(
+            role="assistant",
+            content="First answer.",
+            provider_data={"content_blocks": [dict(_EARLIER_THINKING), {"type": "text", "text": "First answer."}]},
+        ),
+        Message(role="user", content="Second?"),
+        Message(
+            role="assistant",
+            tool_calls=[call],
+            provider_data={"content_blocks": [dict(_LOOP_THINKING), dict(_LOOP_REDACTED), dict(_LOOP_CALL)]},
+        ),
+        Message(role="tool", content="Seen.", tool_call_id="toolu_1"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "model_id", "extra_kwargs", "earlier_kept"),
+    [
+        pytest.param("anthropic", "claude-sonnet-5-5", {}, True, id="anthropic-bound"),
+        pytest.param("vertexai_claude", "claude-sonnet-5-5", {}, True, id="vertex-bound"),
+        pytest.param(
+            "anthropic",
+            "claude-opus-5-5",
+            {
+                "thinking": {"type": "between_tools"},
+                "request_params": {"extra_body": {"thinking": {"type": "adaptive"}}},
+            },
+            True,
+            id="raw-override-bound",
+        ),
+        pytest.param(
+            "anthropic",
+            "claude-sonnet-5-5",
+            {"thinking": {"type": "between_tools"}},
+            False,
+            id="between-tools",
+        ),
+        pytest.param(
+            "vertexai_claude",
+            "claude-sonnet-5-5",
+            {"thinking": {"type": "between_tools"}},
+            False,
+            id="vertex-between-tools",
+        ),
+        pytest.param("anthropic", "claude-haiku-5-5", {"thinking": {"type": "disabled"}}, False, id="haiku-disabled"),
+        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5-5", {}, False, id="bedrock"),
+        pytest.param(
+            "bedrock_claude",
+            "anthropic.claude-sonnet-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}},
+            True,
+            id="bedrock-authored-binding",
+        ),
+        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5", {}, True, id="bedrock-unchecked-model"),
+    ],
+)
+async def test_a_request_without_the_binding_replays_thinking_only_inside_the_current_tool_loop(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+    extra_kwargs: dict[str, Any],
+    *,
+    earlier_kept: bool,
+) -> None:
+    """Where no binding can be sent, a stale earlier block would fail the request, so earlier turns lose thinking.
+
+    The API requires the current tool loop's thinking exactly as received and allows leaving out earlier turns'.
+    An authored binding is the operator's choice, and a model without the check keeps every block.
+    """
+    wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
+    provider = route_provider(route, tmp_path, wire, id=model_id, extra_kwargs=extra_kwargs)
+    await claude_turn(provider, ModelRequest(messages=_two_turns_with_a_tool_loop()))
+    assistant_turns = [
+        [{key: value for key, value in block.items() if key != "cache_control"} for block in message["content"]]
+        for message in wire.body()["messages"]
+        if message["role"] == "assistant"
+    ]
+    earlier = [{"type": "text", "text": "First answer."}]
+    assert assistant_turns == [
+        [_EARLIER_THINKING, *earlier] if earlier_kept else earlier,
+        [_LOOP_THINKING, _LOOP_REDACTED, _LOOP_CALL],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path) -> None:
+    """The API rejects an empty assistant turn, so one that had only thinking goes, and the user turns around it merge."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
+    thought = Message(role="assistant", provider_data={"content_blocks": [dict(_EARLIER_THINKING)]})
+    messages = [*_user("First?"), thought, Message(role="user", content="Second?")]
+    await claude_turn(route_provider("bedrock_claude", tmp_path, wire), ModelRequest(messages=messages))
+    (turn,) = wire.body()["messages"]
+    assert turn["role"] == "user"
+    assert [block["text"] for block in turn["content"]] == ["First?", "Second?"]
 
 
 @pytest.mark.asyncio
@@ -782,12 +882,17 @@ async def test_the_thinking_binding_rides_on_adaptive_thinking_of_checked_models
 
 
 @pytest.mark.asyncio
-async def test_a_reply_that_dropped_replayed_thinking_says_so_in_the_log(tmp_path: Path) -> None:
-    """Only blocks the API dropped are logged; a block it let through despite the changed context is not."""
+@pytest.mark.parametrize("event", ["message_start", "message_delta"])
+async def test_a_reply_that_dropped_replayed_thinking_says_so_in_the_log(tmp_path: Path, event: str) -> None:
+    """Only blocks the API dropped are logged; a block it let through despite the changed context is not.
+
+    The API reports them on ``message_start``, and on the final ``message_delta`` after a mid-stream fallback.
+    """
     events = claude_stream_events(claude_message([{"type": "text", "text": "Hi."}]))
-    events[-2]["input_transformations"] = [
+    reported = events[0]["message"] if event == "message_start" else events[-2]
+    reported["input_transformations"] = [
         {"type": "thinking_dropped", "path": "messages.1.content.0", "reason": "prefix_binding_mismatch"},
-        {"type": "thinking_dropped", "path": "messages.3.content.0", "reason": "prefix_binding_mismatch"},
+        {"type": "thinking_dropped", "path": "messages.3.content.0", "reason": "model_binding_mismatch"},
         {"type": "thinking_mismatch_allowed", "path": "messages.5.content.0", "reason": "prefix_binding_mismatch"},
     ]
     wire = Wire(sse_response(events, named=True))
@@ -797,7 +902,7 @@ async def test_a_reply_that_dropped_replayed_thinking_says_so_in_the_log(tmp_pat
     assert (entry["model_id"], entry["blocks"], entry["reasons"]) == (
         "claude-sonnet-5-5",
         2,
-        ["prefix_binding_mismatch"],
+        ["model_binding_mismatch", "prefix_binding_mismatch"],
     )
 
 

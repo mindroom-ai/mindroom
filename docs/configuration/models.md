@@ -165,7 +165,8 @@ The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each h
 Fable 5.1, Opus 5.5, and Sonnet 5.5 follow the same [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide): `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
 They reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effort with `extra_kwargs.output_config: {effort: low}` instead, or use `extra_kwargs.thinking: {type: between_tools}` on [Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5#turn-off-up-front-thinking).
 With adaptive thinking, the notes these models write between tool calls are hidden, so responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
-When something earlier in a conversation has changed since Claude reasoned about it, such as the date in the system prompt or a compacted history, Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 on `anthropic` and `vertexai_claude` answer without that earlier reasoning, while on `bedrock_claude` an AWS account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block``.
+Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because that turn had context of its own, such as memory search results or enrichment, or because the date in the system prompt has changed.
+With Sonnet 5.5's `between_tools`, with Haiku 5.5's `thinking: {type: disabled}`, or on `bedrock_claude`, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is.
 
 ## Environment Variables
 
