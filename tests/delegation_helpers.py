@@ -562,6 +562,28 @@ class ReportTools(Toolkit):
         return "report written"
 
 
+class MetadataProbeTools(Toolkit):
+    """The gated ``write_report`` of the ``report`` toolkit, keeping the run metadata each of its calls reads."""
+
+    seen: ClassVar[list[dict[str, object]]] = []
+
+    def __init__(self) -> None:
+        super().__init__(name="report", tools=[self.write_report])
+
+    async def write_report(self, run_context: RunContext) -> str:
+        """Write the report."""
+        type(self).seen.append(dict(run_context.metadata or {}))
+        return "report written"
+
+
+@contextmanager
+def registered_metadata_probe_tool() -> Iterator[type[MetadataProbeTools]]:
+    """Register ``MetadataProbeTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""
+    MetadataProbeTools.seen.clear()
+    with registered_toolkit("report", MetadataProbeTools):
+        yield MetadataProbeTools
+
+
 @contextmanager
 def registered_report_tool() -> Iterator[type[ReportTools]]:
     """Register the ``report`` toolkit for one test and restore the registries afterwards."""

@@ -43,6 +43,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
+from mindroom.teams import leader as leader_module
 from mindroom.teams.members import _as_member
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -653,7 +654,7 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     captured: dict[str, Any] = {}
     # Every member's hooks come from the same builder; the leader's compaction is the one built for the team.
     compactions: list[dict[str, Any]] = []
-    real_run_team = envelope.run_team
+    real_run_team = leader_module.run_team
     real_compaction_hook = loop_hooks.mid_turn_compaction_hook
 
     def capture_run_team(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -664,7 +665,7 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
         compactions.append(kwargs)
         return real_compaction_hook(**kwargs)
 
-    monkeypatch.setattr(envelope, "run_team", capture_run_team)
+    monkeypatch.setattr(leader_module, "run_team", capture_run_team)
     monkeypatch.setattr(loop_hooks, "mid_turn_compaction_hook", capture_compaction_hook)
 
     await team.stream()
@@ -827,6 +828,26 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     assert team.models["default"].requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Checker]: Touched."
     )
+
+
+@pytest.mark.asyncio
+async def test_a_member_resumed_by_an_approval_stores_to_the_team_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member's calls after its approved call address the team's history, as its calls before the pause did."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("Done.")])
+    team.models["checker-model"] = ScriptedModel([calls(tool_call("scope", "call-scope")), answer("Touched.")])
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.scopes == ["team:squad"]
 
 
 @pytest.mark.asyncio

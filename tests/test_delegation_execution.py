@@ -49,8 +49,10 @@ from tests.delegation_helpers import (
     _delegate_runtime_context,
     _runtime_paths,
     _saved_approval_calls,
+    approval_calls_for,
     approval_executor,
     pause_parent,
+    registered_metadata_probe_tool,
     registered_report_tool,
     respond,
     resume,
@@ -412,6 +414,37 @@ async def test_a_reply_whose_continuation_fails_records_every_delegation_it_answ
     replay = next(message.content for message in stored.messages if message.role == "assistant")
     assert isinstance(replay, str)
     assert replay.startswith("(turn failed before completion; 2 tool call(s) had finished)")
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_reads_the_run_metadata_of_the_run_it_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The call an approval resumes reads the paused run's metadata, as the call would have in the turn it paused."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = replace(_leader_identity(), agent_name="code")
+    ScriptedAgents(
+        {"code": ScriptedModel([calls(tool_call("write_report", "write-call")), answer("Written.")])},
+    ).install(monkeypatch)
+    with registered_metadata_probe_tool() as probe:
+        paused = await respond("code", "Write", config=config, runtime_paths=paths, identity=identity, run_id="run")
+        assert isinstance(paused, PausedAttempt)
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            approval_calls_for(paused, default_agent="code", toolkit_names={"write_report": "report"}),
+            agent_name="code",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={"write-call": True},
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    [metadata] = probe.seen
+    assert metadata["room_id"] == identity.room_id
 
 
 @pytest.mark.asyncio

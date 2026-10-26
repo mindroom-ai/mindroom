@@ -77,7 +77,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.routing import ResponderSelection
-from mindroom.teams import envelope
+from mindroom.teams import leader as leader_module
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
@@ -3237,7 +3237,7 @@ class _TeamRunCall:
 def _recorded_team_runs() -> Iterator[list[_TeamRunCall]]:
     """Run the real team loop while recording what the bridge hands it."""
     recorded: list[_TeamRunCall] = []
-    real_run_team = envelope.run_team
+    real_run_team = leader_module.run_team
 
     def recording_run_team(
         spec: TeamSpec,
@@ -3251,7 +3251,7 @@ def _recorded_team_runs() -> Iterator[list[_TeamRunCall]]:
         recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template, stream))
         return real_run_team(spec, messages, ctx=ctx, request_template=request_template, stream=stream, **kwargs)  # type: ignore[arg-type]
 
-    with patch("mindroom.teams.envelope.run_team", new=recording_run_team):
+    with patch("mindroom.teams.leader.run_team", new=recording_run_team):
         yield recorded
 
 
@@ -3455,7 +3455,7 @@ def test_team_run_records_helper_usage_in_its_conversation(team_app_client: Test
             "mindroom.api.openai_compat._prepare_openai_team_execution",
             new=AsyncMock(return_value=_PREPARED_TEAM_TURN),
         ),
-        patch("mindroom.teams.envelope.run_team", new=run),
+        patch("mindroom.teams.leader.run_team", new=run),
     ):
         response = team_app_client.post(
             "/v1/chat/completions",
@@ -3850,7 +3850,7 @@ class TestTeamCompletion:
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new=AsyncMock(side_effect=mock_prepare_team_execution),
             ),
-            patch("mindroom.teams.envelope.run_team", new=run),
+            patch("mindroom.teams.leader.run_team", new=run),
         ):
             response = await completion(
                 "super_team",
@@ -3954,7 +3954,7 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
-            patch("mindroom.teams.envelope.run_team", new=run),
+            patch("mindroom.teams.leader.run_team", new=run),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4002,7 +4002,7 @@ class TestTeamCompletion:
                 "mindroom.api.openai_compat._prepare_openai_team_execution",
                 new=AsyncMock(return_value=_PREPARED_TEAM_TURN),
             ),
-            patch("mindroom.teams.envelope.run_team", new=run),
+            patch("mindroom.teams.leader.run_team", new=run),
         ):
             response = await openai_compat._stream_team_completion(
                 "super_team",
@@ -4065,7 +4065,7 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
-            patch("mindroom.teams.envelope.run_team", new=run),
+            patch("mindroom.teams.leader.run_team", new=run),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4178,7 +4178,7 @@ class TestTeamCompletion:
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
-                "mindroom.teams.envelope.run_team",
+                "mindroom.teams.leader.run_team",
                 new=_team_events(
                     member("member noise "),
                     TextDelta("leader "),
@@ -4220,7 +4220,7 @@ class TestTeamCompletion:
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
-                "mindroom.teams.envelope.run_team",
+                "mindroom.teams.leader.run_team",
                 new=_team_events(
                     # Interleaved chunks from two parallel members, then the leader's synthesis.
                     member("a", "From A chunk1 "),
@@ -4527,7 +4527,7 @@ class TestTeamCompletion:
                 return_value=_scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))]),
             ),
             patch(
-                "mindroom.teams.envelope.run_team",
+                "mindroom.teams.leader.run_team",
                 new=_team_events(
                     ToolStarted(delegation().call),
                     member(TextDelta("member noise")),

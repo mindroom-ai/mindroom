@@ -36,8 +36,9 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
-    from mindroom.history.types import ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.llm.events import RunEvent
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRecord
     from mindroom.run_storage import RunStorage
@@ -87,6 +88,37 @@ def approval_decisions(
     )
 
 
+def resume_inputs(
+    paused: AnyRunRecord,
+    storage: RunStorage,
+    settings: ResolvedHistorySettings,
+    plan: ResolvedReplayPlan | None,
+    *,
+    user_id: str | None,
+    model_name: str,
+    history_scope: HistoryScope | None,
+) -> tuple[list[Message], Callable[[str], RunContext]]:
+    """Return the resume request of ``paused`` where ``storage`` stores it, and the context of its resumed run.
+
+    The request is the paused run's stored messages after the summary and history ``plan`` replays. The context
+    shares the stored session's state with the run's tools, carries the paused run's metadata and ``model_name``,
+    and names ``history_scope``: a team run's scope, or None for an agent's own run.
+    """
+    session = storage.session
+    history, summary = replayed_history(session, storage.scope, settings, plan)
+    return (
+        build_resume_request(paused=paused.messages, summary=summary, history=history),
+        lambda run_id: RunContext(
+            run_id=run_id,
+            user_id=user_id,
+            metadata=deepcopy(paused.metadata),
+            session=session,
+            history_scope=history_scope,
+            model_name=model_name,
+        ),
+    )
+
+
 def resume_from_session(
     spec: AgentSpec,
     paused: RunRecord,
@@ -107,25 +139,26 @@ def resume_from_session(
     stream ends with ``RunFinished`` as ``resume_agent``'s does. ``model_name`` is the configured model the run uses,
     which its tool calls carry.
     """
-    session = storage.session
-    history, summary = replayed_history(session, storage.scope, settings, plan)
+    request, context = resume_inputs(
+        paused,
+        storage,
+        settings,
+        plan,
+        user_id=user_id,
+        model_name=model_name,
+        history_scope=None,
+    )
     return resume_agent(
         spec,
         paused,
-        build_resume_request(paused=paused.messages, summary=summary, history=history),
+        request,
         approved=decisions.approved,
         denied=decisions.denied,
         # An agent's run waits only for calls of its own; a result naming a member answers none of them.
         external_results={
             call_id: result for (member, call_id), result in decisions.external_results.items() if member is None
         },
-        context=lambda run_id: RunContext(
-            run_id=run_id,
-            user_id=user_id,
-            metadata=deepcopy(paused.metadata),
-            session=session,
-            model_name=model_name,
-        ),
+        context=context,
         hooks=hooks,
         persist=persist,
         request_template=request_template,
@@ -245,5 +278,6 @@ __all__ = [
     "approval_decisions",
     "forward_resume",
     "resume_from_session",
+    "resume_inputs",
     "with_resumed_turn_log_context",
 ]

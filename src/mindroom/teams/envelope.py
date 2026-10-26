@@ -20,7 +20,6 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
@@ -65,9 +64,10 @@ from mindroom.response_turn import (
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
-from mindroom.run_storage import bind_turn_session, persist_into, scope_run_storage
+from mindroom.run_storage import bind_turn_session, scope_run_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
+from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     allow_direct_private_team_agents,
@@ -85,7 +85,7 @@ from mindroom.teams.presentation import (
     format_team_response,
 )
 from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
-from mindroom.teams.runtime import leader_tool_specs, run_team
+from mindroom.teams.runtime import leader_tool_specs
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -94,7 +94,6 @@ from mindroom.tool_system.events import StructuredStreamChunk
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
-    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.history.request_messages import TurnMessages
@@ -105,11 +104,11 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import EmptyRunDiscard, TurnRunState
-    from mindroom.run_storage import RunStorage, TerminalRecord
+    from mindroom.run_storage import RunStorage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
     from mindroom.teams.runtime import TeamRunEvent
-    from mindroom.teams.spec import TeamMode, TeamSpec
+    from mindroom.teams.spec import TeamMode
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -254,48 +253,6 @@ async def prepare_materialized_team_execution(
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _LeaderRun:
-    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata.
-
-    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
-    """
-
-    spec: TeamSpec
-    storage: RunStorage
-    hooks: LoopHooks
-    request_template: ModelRequest
-    stream: bool
-    model_name: str
-    metadata: dict[str, Any] | None
-
-    def start(
-        self,
-        run_input: Sequence[Message],
-        *,
-        run_id: str,
-        user_id: str | None,
-        records: TerminalRecord[TeamRunRecord] | None,
-    ) -> AsyncIterator[TeamRunEvent]:
-        """Start the run; its tools share the stored session's ``session_state``, which the store writes back."""
-        return run_team(
-            self.spec,
-            run_input,
-            ctx=RunContext(
-                run_id=run_id,
-                session=self.storage.session,
-                user_id=user_id,
-                metadata=self.metadata,
-                history_scope=self.storage.scope,
-                model_name=self.model_name,
-            ),
-            hooks=self.hooks,
-            persist=persist_into(records, self.storage),
-            request_template=self.request_template,
-            stream=self.stream,
-        )
-
-
 def _leader_run(
     built: BuiltTeam,
     prepared: PreparedTeamExecution,
@@ -304,14 +261,13 @@ def _leader_run(
     runtime_paths: RuntimePaths,
     storage: RunStorage,
     configured_team_name: str | None,
-    stream: bool,
     compaction_lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
-) -> _LeaderRun:
+) -> LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
-    return _LeaderRun(
-        spec=built.spec,
+    return LeaderRun(
+        built=built,
         storage=storage,
         hooks=leader_loop_hooks(
             built,
@@ -328,9 +284,7 @@ def _leader_run(
             entity_name=configured_team_name,
         ),
         request_template=with_native_history(ModelRequest(messages=()), history.native_history),
-        stream=stream,
         model_name=prepared.runtime_model_name,
-        metadata=prepared.run_metadata,
     )
 
 
@@ -357,7 +311,6 @@ def run_prepared_team(
         runtime_paths=runtime_paths,
         storage=storage,
         configured_team_name=team_name,
-        stream=stream,
         compaction_lifecycle=None,
         turn_recorder=None,
     )
@@ -365,7 +318,9 @@ def run_prepared_team(
         prepared.run_input(MediaInputs()),
         run_id=str(uuid4()),
         user_id=user_id,
+        metadata=prepared.run_metadata,
         records=None,
+        stream=stream,
     )
 
 
@@ -578,7 +533,6 @@ class _TeamTurn:
             runtime_paths=self.runtime_paths,
             storage=storage,
             configured_team_name=self.configured_team_name,
-            stream=stream,
             compaction_lifecycle=self.compaction_lifecycle,
             turn_recorder=self.turn_recorder,
         )
@@ -587,7 +541,7 @@ class _TeamTurn:
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
             run_input=run_input,
-            metadata=leader.metadata,
+            metadata=prepared.run_metadata,
         )
         with bind_llm_request_log_context(**request_context):
             if self.pipeline_timing is not None:
@@ -596,20 +550,18 @@ class _TeamTurn:
                 run_input,
                 run_id=attempt.run_id,
                 user_id=self.user_id,
+                metadata=prepared.run_metadata,
                 records=attempt.records,
+                stream=stream,
             )
         events = drive_team_delegations(
             events,
             TeamResume(
-                built=built,
-                storage=storage,
+                leader=leader,
                 records=attempt.records,
-                hooks=leader.hooks,
-                request_template=leader.request_template,
                 plan=prepared.prepared_history.replay_plan,
                 user_id=self.user_id,
                 toolkit_owners=tool_owners_by_agent(*members.builds),
-                model_name=prepared.runtime_model_name,
             ),
             team_name=self.entity_name,
             config=config,
