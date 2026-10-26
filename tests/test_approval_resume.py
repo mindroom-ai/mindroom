@@ -1,8 +1,8 @@
 """Production approval resumes continue the C6 pre-resume dumps into the rows Agno stored, and refuse what they must.
 
-Each test loads the sessions one approval resume read, as the capture dumped them just before the resume, into the
-stores the ``code`` and ``helper`` agents use, and continues the paused run through ``AgentApprovalExecution`` with
-the decisions the capture took. The stored rows are compared with the ones Agno wrote after the same resume, and the
+Each test writes the sessions one approval resume read, as the capture dumped them just before the resume, where the
+``code`` and ``helper`` agents' stores live, opens those stores, which converts the dumps as an upgrade does, and
+continues the paused run through ``AgentApprovalExecution`` with the decisions the capture took. The stored rows are compared with the ones Agno wrote after the same resume, and the
 run metadata the resume publishes with the metadata Agno's resume published.
 """
 
@@ -27,8 +27,10 @@ from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalDecision, approval_arguments_digest
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.ai_run_golden_helpers import golden_metadata, published_as_compared
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -124,11 +126,20 @@ class _Resume:
             )
 
 
-def _load_dump(store: ConversationStore, dump: str) -> None:
-    """Write one pre-resume dump into ``store``'s database, as the resume found it."""
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(store.path)) as connection:
+def _open_dump(
+    agent_name: str,
+    config: Config,
+    paths: RuntimePaths,
+    identity: ToolExecutionIdentity,
+    dump: str,
+) -> ConversationStore:
+    """Write one pre-resume dump where ``agent_name``'s store lives, then open the store, converting the dump."""
+    root = resolve_agent_storage(agent_name, config, paths, execution_identity=identity).session_state_root
+    path = TableNames(agent_name).database_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path)) as connection:
         connection.executescript((STORAGE / f"{dump}.sql").read_text(encoding="utf-8"))
+    return create_session_storage(agent_name, config, paths, identity)
 
 
 async def _setup(
@@ -151,14 +162,12 @@ async def _setup(
         resolved_thread_id=thread,
         session_id=create_session_id(ROOM, thread),
     )
-    store = create_session_storage("code", config, paths, identity)
-    _load_dump(store, f"agent_code__before_{run_id}")
+    store = _open_dump("code", config, paths, identity, f"agent_code__before_{run_id}")
     paused = store.get_run(run_id)
     assert isinstance(paused, RunRecord)
     assert paused.status is RunStatus.paused
     for child in DelegationState.from_metadata(paused.metadata).children:
-        child_store = create_session_storage("helper", config, paths, child_execution_identity(child))
-        _load_dump(child_store, f"agent_helper__before_{run_id}")
+        _open_dump("helper", config, paths, child_execution_identity(child), f"agent_helper__before_{run_id}")
         # The child's audit record is on disk beside its store; the capture started it on its frozen clock.
         monkeypatch.setattr(records, "_utc_timestamp", lambda: "2027-01-15T08:26:00+00:00")
         await start_child_record(
@@ -277,7 +286,7 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent_as_agno
 def _save(run: _Resume, record: RunRecord) -> None:
     session = run.store.load_session(record.session_id or "", "agent")
     assert session is not None
-    run.store.save_runs(session, [record])
+    run.store.save_run(session, record, record_usage=False)
 
 
 @pytest.mark.parametrize("tampering", ["planted_confirmed", "mismatched_digest", "unknown_id", "outstanding_external"])

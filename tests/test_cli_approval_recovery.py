@@ -114,9 +114,10 @@ def _with_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
 
 def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tuple[RunRecord, ConversationSession]:
     """Store ``record`` as the run an approval paused in, and return it with its session as recovery reads them."""
-    store.save_runs(
+    store.save_run(
         ConversationSession(session_id=session_id, kind="agent", owner_id="helper"),
-        [record],
+        record,
+        record_usage=False,
     )
     session = store.load_session(session_id, "agent")
     persisted = store.get_run(record.run_id)
@@ -717,7 +718,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
         result="nested tool output",
         is_error=False,
     )
-    # The fold took the earlier shell call out of the run's record and stored it on its summary row.
+    # A fold took the earlier shell call's result out of the run's replay view, and its summary holds it.
     store_fold(store, "session", HistoryScope(kind="agent", scope_id="helper"), "run", tool_call_ids=["folded-bash"])
     arguments = {"command": "touch never"}
     requirement = _outer_bash_approval(arguments)

@@ -7,7 +7,7 @@ import threading
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast
+from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
@@ -113,7 +113,7 @@ from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Iterable
+    from collections.abc import Awaitable, Callable, Coroutine
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -441,28 +441,34 @@ def _owned_notice(response_turn_id: str, *, marker: bool | str = True, from_hist
 
 @dataclass(frozen=True, slots=True)
 class _RecordingStore(ConversationStore):
-    """A conversation store that records the runs each save writes and can hold each session load until released."""
+    """A conversation store that records the runs each message rewrite stores and can hold each rewrite until released.
+
+    A rewrite whose edit returns no run stores nothing, so it records nothing.
+    """
 
     held: threading.Event | None = None
-    loading: threading.Event = field(default_factory=threading.Event)
+    rewriting: threading.Event = field(default_factory=threading.Event)
     saves: list[list[str]] = field(default_factory=list)
 
-    def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
-        self.loading.set()
+    def rewrite_run_messages(
+        self,
+        session_id: str,
+        kind: SessionKind,
+        edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]],
+        *,
+        session: ConversationSession | None = None,
+    ) -> None:
+        self.rewriting.set()
         if self.held is not None:
             assert self.held.wait(timeout=1)
-        return ConversationStore.load_session(self, session_id, kind)
 
-    def save_runs(
-        self,
-        session: ConversationSession,
-        runs: Iterable[AnyRunRecord],
-        *,
-        state: dict[str, Any] | None = None,
-    ) -> None:
-        written = list(runs)
-        self.saves.append([run.run_id for run in written])
-        ConversationStore.save_runs(self, session, written, state=state)
+        def recorded(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
+            edited = edit(runs)
+            if edited:
+                self.saves.append([run.run_id for run in edited])
+            return edited
+
+        ConversationStore.rewrite_run_messages(self, session_id, kind, recorded, session=session)
 
 
 def _recording_store(tmp_path: Path, name: str, *, held: threading.Event | None = None) -> _RecordingStore:
@@ -3253,6 +3259,8 @@ async def test_response_finalization_collapses_a_team_runs_current_notice_state(
     with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
         messages: list[OwnedMessage] = []
         await _after_batch(messages, OwnedMessage(role="tool", content="result"))
+        member = _completed("member-run-1", [], agent_id="member")
+        member.parent_run_id = "run-1"
         _seed(
             store,
             TeamRunRecord(
@@ -3261,20 +3269,21 @@ async def test_response_finalization_collapses_a_team_runs_current_notice_state(
                 team_id="queued-notice-team",
                 status=OwnedRunStatus.completed,
                 messages=deepcopy(messages),
-                member_responses=[_completed("member-run-1", [], agent_id="member")],
             ),
+            member,
             kind="team",
         )
         _register_notice_storage(store, session_kind="team", entity_name="queued-notice-team")
         assert _notice_count(messages, marker=True) == 1
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
-    [stored_team_run] = _stored_runs(store, "team")
+    stored = {run.run_id: run for run in _stored_runs(store, "team")}
+    assert set(stored) == {"run-1", "member-run-1"}
+    stored_team_run = stored["run-1"]
     assert isinstance(stored_team_run, TeamRunRecord)
     assert _notice_count(stored_team_run.messages, marker=True) == 0
     assert _notice_count(stored_team_run.messages, marker="persisted") == 1
-    [stored_member_run] = stored_team_run.member_responses
-    assert _notice_count(stored_member_run.messages) == 0
+    assert _notice_count(stored["member-run-1"].messages) == 0
 
 
 @pytest.mark.asyncio
@@ -3377,7 +3386,7 @@ async def test_async_cleanup_keeps_session_storage_io_off_event_loop(tmp_path: P
             ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
         )
         try:
-            assert await asyncio.to_thread(store.loading.wait, 1)
+            assert await asyncio.to_thread(store.rewriting.wait, 1)
             await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
             assert not cleanup_task.done()
         finally:
@@ -3403,7 +3412,7 @@ async def test_response_turn_finalization_completes_when_cancelled_during_storag
         finalization_task = asyncio.create_task(
             ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
         )
-        assert await asyncio.to_thread(store.loading.wait, 1)
+        assert await asyncio.to_thread(store.rewriting.wait, 1)
         finalization_task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
@@ -3439,7 +3448,7 @@ async def test_response_turn_finalization_defers_repeated_cancellation_during_st
             finalization_task = asyncio.create_task(
                 ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
             )
-            assert await asyncio.to_thread(store.loading.wait, 1)
+            assert await asyncio.to_thread(store.rewriting.wait, 1)
             finalization_task.cancel()
             await asyncio.wait_for(first_cancel_observed.wait(), timeout=1)
             finalization_task.cancel()
@@ -3504,7 +3513,7 @@ async def test_error_responses_never_attach_notices_to_prior_completed_run(tmp_p
             await _after_batch(messages, OwnedMessage(role="tool", content=f"failed result {index}"))
             error_run = _completed(f"error-run-{index}", messages)
             error_run.status = OwnedRunStatus.error
-            store.save_runs(session, [error_run])
+            store.save_run(session, error_run, record_usage=False)
             _register_notice_storage(store)
             await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 

@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,6 +48,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.codec import run_kind
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_record import (
@@ -63,7 +66,6 @@ from tests.conftest import (
     make_visible_message,
     request_envelope,
     runtime_paths_for,
-    seed_session,
     test_runtime_paths,
 )
 from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
@@ -260,35 +262,65 @@ def _seeded_storage(
 ) -> ConversationStore:
     """Return real conversation storage, seeded with ``session`` as an older release could have left it.
 
-    Reopening after seeding runs the storage-open migrations, as a restart onto this release would.
+    Opening it converts that layout, as a restart onto this release would.
     """
-    storage = create_state_storage(name, tmp_path / name)
-    if session is None:
-        return storage
-    _seed_as_older_release(storage, session)
-    _as_older_release(tmp_path / name / "sessions" / f"{name}.db", name)
+    if session is not None:
+        _write_as_older_release(tmp_path / name, name, session)
     return create_state_storage(name, tmp_path / name)
 
 
 _EPOCH = datetime.fromtimestamp(0, UTC)
 
 
-def _seed_as_older_release(storage: ConversationStore, session: ConversationSession) -> None:
-    """Seed ``session`` as an older release stored it: a replayed summary lived in the session row's ``summary``."""
-    seed_session(storage, session)
-    if session.summary is not None:
-        with storage.transaction(write=True) as connection:
+def _write_as_older_release(state_root: Path, name: str, session: ConversationSession) -> None:
+    """Write ``session`` as the one session of a new database ``name`` in the layout an older release kept.
+
+    That release kept Agno's sessions and runs tables and no summary rows: a replayed summary lived in the session
+    row's ``summary`` column, and each run, a member run too, in a runs-table row placed by its ``run_index``.
+    """
+    names = AgnoTableNames(name)
+    database = names.database_path(state_root)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    owner_column = "team_id" if session.kind == "team" else "agent_id"
+    summary = None if session.summary is None else json.dumps({"summary": session.summary.text})
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for statement in agno_runs_sql(names):
+            connection.execute(statement)
+        connection.execute(
+            f'INSERT INTO "{names.sessions}" (session_id, session_type, {owner_column}, session_data, metadata, '  # noqa: S608
+            "summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session.session_id,
+                session.kind,
+                session.owner_id,
+                json.dumps({"session_state": session.session_state}),
+                json.dumps(session.metadata),
+                summary,
+                session.created_at,
+                session.created_at,
+            ),
+        )
+        for run_index, run in enumerate(session.runs):
+            data = run.to_dict()
             connection.execute(
-                f"UPDATE {storage.names.sessions} SET summary = ? WHERE session_id = ?",  # noqa: S608
-                (json.dumps({"summary": session.summary.text}), session.session_id),
+                f'INSERT INTO "{names.runs}" (run_id, session_id, run_type, agent_id, team_id, user_id, '  # noqa: S608
+                "parent_run_id, status, run_index, run_data, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    data["run_id"],
+                    session.session_id,
+                    run_kind(run),
+                    data.get("agent_id"),
+                    data.get("team_id"),
+                    data.get("user_id"),
+                    data.get("parent_run_id"),
+                    data["status"],
+                    run_index,
+                    json.dumps(data),
+                    data.get("created_at") or session.created_at,
+                    session.created_at,
+                ),
             )
-
-
-def _as_older_release(db_file: Path, name: str) -> None:
-    """Drop the summary-row tables seeding created, since older releases had none; the next open adopts their state."""
-    with sqlite3.connect(db_file) as connection:
-        connection.execute(f'DROP TABLE IF EXISTS "{name}_sessions_summaries"')
-        connection.execute(f'DROP TABLE IF EXISTS "{name}_sessions_removed_runs"')
 
 
 def _stored(storage: ConversationStore, session: ConversationSession) -> ConversationSession:
@@ -1163,20 +1195,19 @@ async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
     )
     assert _stored_run_ids(storage, session) == []
 
-    storage.save_runs(
+    storage.save_run(
         session,
-        [
-            RunRecord(
-                run_id="replacement-run",
-                agent_id="agent",
-                session_id=target.session_id,
-                metadata={
-                    constants.MATRIX_EVENT_ID_METADATA_KEY: "$source",
-                    constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$source"],
-                    constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source"],
-                },
-            ),
-        ],
+        RunRecord(
+            run_id="replacement-run",
+            agent_id="agent",
+            session_id=target.session_id,
+            metadata={
+                constants.MATRIX_EVENT_ID_METADATA_KEY: "$source",
+                constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$source"],
+                constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source"],
+            },
+        ),
+        record_usage=False,
     )
     should_suppress = await _prepare_redaction(store, target, redacted_event_id="$source")
 
@@ -2564,7 +2595,6 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
         return create_state_storage("agent", tmp_path)
 
-    storage = storage_factory()
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
     edited = RunRecord(
@@ -2667,8 +2697,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         )
         session.summary = ScopeSummary(text="DELETED_EDIT_MARKER", updated_at=_EPOCH)
         session.runs = session.runs[1:]
-    _seed_as_older_release(storage, session)
-    _as_older_release(tmp_path / "sessions" / "agent.db", "agent")
+    _write_as_older_release(tmp_path, "agent", session)
     storage = storage_factory()
     initial_persisted = storage.load_session(target.session_id, "agent")
     assert initial_persisted is not None
@@ -3015,7 +3044,6 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
         return create_state_storage("agent", tmp_path)
 
-    storage = storage_factory()
     later_run = RunRecord(
         run_id="later",
         agent_id="agent",
@@ -3033,8 +3061,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         runs=[later_run] if later_run_names_revision else [],
     )
     session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids={"$user_msg"})
-    _seed_as_older_release(storage, session)
-    _as_older_release(tmp_path / "sessions" / "agent.db", "agent")
+    _write_as_older_release(tmp_path, "agent", session)
     if later_run_names_revision:
         # A modern compaction folds the later run on top of the legacy summary.
         storage = storage_factory()
