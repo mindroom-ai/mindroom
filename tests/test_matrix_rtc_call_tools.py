@@ -47,6 +47,7 @@ from mindroom.matrix_rtc.call_tools import (
     _CallAgentCache,
     _CallAgentRunState,
     _CallResponseTracker,
+    _spoken,
     _wrap_tool_function,
     build_call_tools,
     matrix_message_available_during_call,
@@ -185,13 +186,13 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
     )
 
 
-def test_realtime_call_instructions_leave_out_the_chat_s_markdown_format() -> None:
-    """A realtime call speaks its replies, so its instructions drop the Markdown line the chat prompt states."""
+def test_a_call_s_build_leaves_out_the_chat_s_markdown_format() -> None:
+    """A call speaks its replies, so its build drops the Markdown line the chat prompt states."""
     build = _build()
     chat = replace(build, prompt=replace(build.prompt, markdown=True, turn_context="Today."))
 
     assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
-    instructions = _call_instructions(chat)
+    instructions = _call_instructions(_spoken(chat))
     assert MARKDOWN_OUTPUT_FORMAT not in instructions
     assert instructions == "<your_role>\nTHE CHAT ROLE\n</your_role>\n\nToday."
 
@@ -288,7 +289,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     *,
     jobs: bool,
 ) -> None:
-    """The cached call agent offers chat's functions and prompt, so calls reuse chat's prompt cache.
+    """The cached call agent offers chat's functions and prompt, less the Markdown line a spoken reply has no use for.
 
     A gated call is refused in a call whether chat would pause for it or ask as its job, before any other tool-call
     policy sees it, so no card is posted and nothing is recorded.
@@ -328,7 +329,10 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     chat_functions = _functions(chat_build)
 
     assert list(call_functions) == list(chat_functions)
-    assert system_text(prompt_for_turn(call_build)) == system_text(prompt_for_turn(chat_build))
+    assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat_build))
+    assert system_text(prompt_for_turn(call_build)) == system_text(
+        prompt_for_turn(replace(chat_build, prompt=replace(chat_build.prompt, markdown=False))),
+    )
     assert chat_functions["add"].approval_type == (JOB_APPROVAL_TYPE if jobs else POLICY_CONFIRMATION_APPROVAL_TYPE)
     add = call_functions["add"]
     assert (add.requires_confirmation, add.external_execution, add.approval_type) == (False, False, None)
@@ -946,7 +950,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert kwargs["show_tool_calls"] is False
     assert kwargs["eager_deferred_tools"] is True
     used_build = cast("AgentBuild", kwargs["reusable_build"])
-    assert used_build.prompt is cached_build.prompt
+    assert used_build.prompt == cached_build.prompt
     assert create_agent_mock.call_args.kwargs["history_storage"] is history_storage
     # The cached delegate keeps chat's tools and prompt, so calls reuse chat's prompt cache.
     assert "tool_function_filter" not in create_agent_mock.call_args.kwargs
@@ -1842,8 +1846,8 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     assert all(call["execution_identity"] is execution_identity for call in resolver_calls)
     assert ai_calls[0][1]["knowledge"] is None
     assert ai_calls[1][1]["knowledge"] is ready_knowledge
-    assert cast("AgentBuild", ai_calls[0][1]["reusable_build"]).prompt is first_build.prompt
-    assert cast("AgentBuild", ai_calls[1][1]["reusable_build"]).prompt is second_build.prompt
+    assert cast("AgentBuild", ai_calls[0][1]["reusable_build"]).prompt == first_build.prompt
+    assert cast("AgentBuild", ai_calls[1][1]["reusable_build"]).prompt == second_build.prompt
     assert create_agent_mock.call_count == 2
     assert [item.key for item in ai_calls[0][0].system_enrichment_items] == ["voice_call"]
     assert [item.key for item in ai_calls[0][0].transient_enrichment_items] == ["knowledge_availability"]

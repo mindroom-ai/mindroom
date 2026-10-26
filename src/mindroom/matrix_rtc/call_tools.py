@@ -449,7 +449,7 @@ class _CallAgentCache:
             runtime_paths=self.runtime_paths,
             execution_identity=self.execution_identity,
         )
-        # Build the same tools and system prompt as text chat so call turns reuse its prompt cache.
+        # Build the same tools and system prompt as text chat, less its Markdown output format, which a call speaks.
         # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
         build = create_agent(
             self.agent_name,
@@ -464,7 +464,7 @@ class _CallAgentCache:
             supports_native_tool_approval=True,
             eager_deferred_tools=True,
         )
-        return _refuse_text_chat_functions(build, self.config)
+        return _refuse_text_chat_functions(_spoken(build), self.config)
 
 
 async def build_call_tools(
@@ -594,20 +594,22 @@ async def build_call_tools(
         refresh_scheduler=refresh_scheduler,
         execution_identity=execution_identity,
     )
-    build = await asyncio.to_thread(
-        functools.partial(
-            create_agent,
-            agent_name,
-            config,
-            runtime_paths,
-            execution_identity,
-            hook_registry=context.hook_registry,
-            knowledge=knowledge_resolution.knowledge,
-            include_interactive_questions=False,
-            tool_function_filter=context.tool_function_filter,
-            refresh_scheduler=refresh_scheduler,
-            eager_deferred_tools=True,
-            active_model_name=active_model_name,
+    build = _spoken(
+        await asyncio.to_thread(
+            functools.partial(
+                create_agent,
+                agent_name,
+                config,
+                runtime_paths,
+                execution_identity,
+                hook_registry=context.hook_registry,
+                knowledge=knowledge_resolution.knowledge,
+                include_interactive_questions=False,
+                tool_function_filter=context.tool_function_filter,
+                refresh_scheduler=refresh_scheduler,
+                eager_deferred_tools=True,
+                active_model_name=active_model_name,
+            ),
         ),
     )
     # Paid helper tools, such as claude_agent, record their usage in the call's ledger for the caller.
@@ -862,12 +864,14 @@ def _call_agent_run_state(
     )
 
 
-def _call_instructions(build: AgentBuild) -> str:
-    """Return the system prompt a chat turn of the agent starts from, without the turn's own context.
+def _spoken(build: AgentBuild) -> AgentBuild:
+    """Return ``build`` without the chat's Markdown output format: a call speaks its replies."""
+    return replace(build, prompt=replace(build.prompt, markdown=False))
 
-    A realtime call speaks its replies, so the prompt leaves out the chat's Markdown output format.
-    """
-    content = system_text(prompt_for_turn(replace(build, prompt=replace(build.prompt, markdown=False))))
+
+def _call_instructions(build: AgentBuild) -> str:
+    """Return the system prompt a turn of the call's agent starts from, without the turn's own context."""
+    content = system_text(prompt_for_turn(build))
     if not content.strip():
         msg = "Agent produced an empty system prompt for its voice session"
         raise ValueError(msg)
