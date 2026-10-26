@@ -753,6 +753,25 @@ def test_a_message_rewrite_holds_the_write_lock_while_it_edits(store: Conversati
     assert errors == ["database is locked"]
 
 
+def test_a_message_rewrite_that_stores_no_run_leaves_the_session_the_load_its_edit_was_handed(
+    store: ConversationStore,
+) -> None:
+    """Nothing changed, so the load the edit saw is what a load returns, without a second read."""
+    _save(store, _run("r1"), _run("r2"))
+    session = _loaded(store)
+    handed: list[AnyRunRecord] = []
+
+    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
+        handed.extend(runs)
+        return [_run("unknown")]
+
+    store.rewrite_run_messages("s1", "agent", edit, session=session)
+
+    assert [id(run) for run in session.runs] == [id(run) for run in handed]
+    assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
+    assert _row(store, "unknown") is None
+
+
 # --- deletes ----------------------------------------------------------------------------------------------------
 
 

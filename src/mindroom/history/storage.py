@@ -492,13 +492,14 @@ def strip_kept_replay_fields(storage: ConversationStore, *, session: Conversatio
     """Store compaction's strip of stale replay fields from the runs of ``scope`` it kept, a load's runs edited in place.
 
     Only messages change, under the write lock, so what another writer stored meanwhile, such as a completed approval
-    or a linked reply event, stays. ``session`` then holds what a load returns.
+    or a linked reply event, stays; a strip that finds no stale field stores nothing. ``session`` then holds what a
+    load returns.
     """
 
     def strip(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
         kept = [run for run in runs if replays_in_scope(run, scope)]
-        strip_stale_anthropic_replay_fields([message for run in kept for message in run.messages])
-        return kept
+        stripped = strip_stale_anthropic_replay_fields([message for run in kept for message in run.messages])
+        return kept if stripped else []
 
     storage.rewrite_run_messages(session.session_id, session.kind, strip, session=session)
 

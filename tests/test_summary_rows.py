@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -17,15 +18,16 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session_row
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.store import ConversationStore, SaveOutcome
+    from mindroom.session_storage.store import SaveOutcome
     from mindroom.session_storage.types import SessionKind
 
 _AGENT = "agent:code"
@@ -403,6 +405,45 @@ def test_the_replay_field_strip_keeps_what_another_writer_stored_meanwhile(store
         None,
     )
     assert [run.run_id for run in session.runs] == ["r2", "p1"]
+
+
+@dataclass(frozen=True, slots=True)
+class _RewriteRecordingStore(ConversationStore):
+    """A conversation store that records the run ids each message rewrite's edit hands back to store."""
+
+    returned: list[list[str]] = field(default_factory=list)
+
+    def rewrite_run_messages(
+        self,
+        session_id: str,
+        kind: SessionKind,
+        edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]],
+        *,
+        session: ConversationSession | None = None,
+    ) -> None:
+        def recorded(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
+            edited = edit(runs)
+            self.returned.append([run.run_id for run in edited])
+            return edited
+
+        ConversationStore.rewrite_run_messages(self, session_id, kind, recorded, session=session)
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_the_replay_field_strip_stores_the_kept_runs_only_when_a_field_is_stale(
+    store: ConversationStore,
+    stale: bool,
+) -> None:
+    """Without a stale replay field the strip hands back no run, so compaction rewrites no message."""
+    answer = Message(role="assistant", content="answer r1", provider_data={"signature": "sig"} if stale else {})
+    _save(store, _run("r0"), _run("r1", messages=[Message(role="user"), answer]), _run("r2"))
+    recording = _RewriteRecordingStore(store.path)
+    session = _loaded(recording)
+
+    strip_kept_replay_fields(recording, session=session, scope=_SCOPE)
+
+    assert recording.returned == [["r0", "r1", "r2"] if stale else []]
+    assert [run.run_id for run in session.runs] == ["r0", "r1", "r2"]
 
 
 def test_a_summary_id_is_never_handed_out_again_after_a_cut_deletes_the_newest_row(store: ConversationStore) -> None:

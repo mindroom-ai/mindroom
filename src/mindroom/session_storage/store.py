@@ -315,18 +315,23 @@ class ConversationStore:
     ) -> None:
         """Apply ``edit`` to fresh copies of the runs a load returns, under the write lock, and store their messages.
 
-        Only messages store, under the save's message rules, and only for runs the load returned, so no other writer's
-        status, metadata, or messages are lost and no covered run changes. Once it commits, ``session``, when given,
-        holds what a load returns.
+        ``edit`` returns the runs it changed and changes no other. Only messages store, under the save's message rules,
+        and only for runs the load returned, so no other writer's status, metadata, or messages are lost and no covered
+        run changes. Once it commits, ``session``, when given, holds what a load returns: the load ``edit`` was handed
+        when it stored nothing, which spares a second read.
         """
-        with self.log_transaction(session_id, session=session) as connection:
+        with self.transaction(write=True) as connection:
             loaded = self._read_load(connection, session_id, kind)
             runs = loaded.runs if loaded is not None else []
             statuses = {run.run_id: run.status.value for run in runs}
-            for run in edit(runs):
-                if (status := statuses.get(run.run_id)) is not None:
-                    messages = [message.to_dict() for message in run.messages]
-                    set_visible_messages(connection, self.names, run.run_id, messages, status)
+            stored = [(run, status) for run in edit(runs) if (status := statuses.get(run.run_id)) is not None]
+            for run, status in stored:
+                messages = [message.to_dict() for message in run.messages]
+                set_visible_messages(connection, self.names, run.run_id, messages, status)
+            if stored and session is not None:
+                loaded = self._read_load(connection, session_id, kind)
+        if session is not None:
+            _adopt_log(session, loaded)
 
     def delete_runs(
         self,
