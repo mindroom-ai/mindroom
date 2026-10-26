@@ -49,10 +49,10 @@ class ToolFunction:
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
-    ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, tool
-    jobs, and the agent CLI's eager bindings name it by; for an implied or preset tool that is the tool that brings it
-    in. The agent CLI binds a deferred toolkit's functions under that toolkit's registered tool name instead, which
-    differs for an implied tool, and still approves their calls under this one. None for a
+    ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, and
+    tool jobs name it by; for an implied or preset tool that is the tool that brings it in.
+    ``registered_toolkit`` is the registered tool the function comes from, which the agent CLI reaches it under,
+    eager or deferred; it differs from ``toolkit`` for an implied or preset tool. Both are None for a
     function generated for the agent, such as the knowledge search, the skill readers, and a team's delegation, and
     for one adapted by a caller that names its toolkit beside it: the MCP gateway and the script broker adapt the
     function a call names alone (``adapt_function``), and the gateway's search adapts a selected toolkit whole.
@@ -60,6 +60,7 @@ class ToolFunction:
 
     name: str
     toolkit: str | None = None
+    registered_toolkit: str | None = None
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None = None

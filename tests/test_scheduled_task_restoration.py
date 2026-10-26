@@ -72,7 +72,7 @@ class TestScheduledTaskRestoration:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -144,7 +144,7 @@ class TestScheduledTaskRestoration:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -187,7 +187,7 @@ class TestScheduledTaskRestoration:
     @pytest.mark.asyncio
     async def test_router_restores_tasks_without_rejoining_existing_room(self, tmp_path: Path) -> None:
         """Router restart setup should run even when the room is already joined."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "test", "id": "test-model"}}), tmp_path)
+        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
 
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -243,7 +243,7 @@ class TestScheduledTaskRestoration:
     @pytest.mark.asyncio
     async def test_router_drains_deferred_overdue_tasks_on_first_sync_response(self, tmp_path: Path) -> None:
         """The router should start deferred overdue tasks after the first successful sync."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "test", "id": "test-model"}}), tmp_path)
+        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
 
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -297,7 +297,7 @@ class TestScheduledTaskRestoration:
         tmp_path: Path,
     ) -> None:
         """A later sync response should restart draining if queued overdue work remains."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "test", "id": "test-model"}}), tmp_path)
+        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
 
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -340,7 +340,7 @@ class TestScheduledTaskRestoration:
         tmp_path: Path,
     ) -> None:
         """Late sync responses during teardown must not respawn the deferred drain."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "test", "id": "test-model"}}), tmp_path)
+        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
 
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -383,7 +383,7 @@ class TestScheduledTaskRestoration:
     @pytest.mark.asyncio
     async def test_router_stop_cancels_running_scheduled_tasks(self, tmp_path: Path) -> None:
         """Stopping the router should clear in-memory scheduled tasks before restart."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "test", "id": "test-model"}}), tmp_path)
+        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
 
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -440,7 +440,7 @@ class TestScheduledTaskRestoration:
         config = self._bind_runtime(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default", "rooms": ["lobby"]}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -494,7 +494,7 @@ class TestScheduledTaskRestoration:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )

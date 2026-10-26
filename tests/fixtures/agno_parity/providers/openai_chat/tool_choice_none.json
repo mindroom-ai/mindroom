@@ -101,6 +101,7 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
       "messages": [
         {
           "role": "developer",
@@ -111,7 +112,6 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-6-astra",
       "tool_choice": "none",
       "tools": [
         {

@@ -1138,7 +1138,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
     current_config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
@@ -1148,7 +1148,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
                 "general": {"display_name": "GeneralAgent", "model": "default"},
                 "writer": {"display_name": "WriterAgent", "model": "default"},
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
@@ -1203,14 +1203,14 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
     current_config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
     new_config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "RenamedGeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
@@ -1237,7 +1237,7 @@ async def test_initialize_keeps_config_unpublished_when_entity_account_preparati
     config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
@@ -1261,7 +1261,7 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
     current_config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             mindroom_user={"username": "mindroom_user", "display_name": "Old MindRoom User"},
         ),
         tmp_path,
@@ -1269,7 +1269,7 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
     new_config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             mindroom_user={"username": "mindroom_user", "display_name": "New MindRoom User"},
         ),
         tmp_path,
@@ -1309,7 +1309,7 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
     config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
@@ -1433,7 +1433,7 @@ async def test_prepare_entity_accounts_rejects_duplicate_persisted_matrix_ids(tm
                 "general": {"display_name": "GeneralAgent", "model": "default"},
                 "writer": {"display_name": "WriterAgent", "model": "default"},
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         ),
         tmp_path,
     )
@@ -1478,7 +1478,7 @@ async def test_prepare_entity_accounts_rejects_internal_user_entity_id_collision
     config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
         ),
         tmp_path,
@@ -1671,7 +1671,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
     current_config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             plugins=["./plugins/demo"],
         ),
         tmp_path,
@@ -1679,7 +1679,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
     new_config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             plugins=["./plugins/demo", "./plugins/other"],
         ),
         tmp_path,

@@ -30,7 +30,7 @@ from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -70,22 +70,30 @@ def _runtime(tmp_path: Path) -> ToolRuntimeContext:
 
 
 def _authored(toolkits: Sequence[AdaptedToolkit], owners: Mapping[str, str] | None) -> list[AdaptedToolkit]:
-    """Return ``toolkits`` with each function naming its authored toolkit, as agent assembly names them.
+    """Return ``toolkits`` with each function naming its authored and registered toolkit, as agent assembly does.
 
-    ``owners`` maps each function to its authored toolkit, and a function it leaves out is generated for the agent;
-    without it every function is authored under its own toolkit's name. The run's first function of a name is kept.
+    Each toolkit's name is the registered tool its functions come from. ``owners`` maps each function to its
+    authored toolkit, and a function it leaves out is generated for the agent; without it every function is authored
+    under its own toolkit's name. The run's first function of a name is kept.
     """
     authored = [
         replace(
             toolkit,
             functions=tuple(
-                replace(function, toolkit=toolkit.name if owners is None else owners.get(function.name))
+                _named(function, toolkit.name if owners is None else owners.get(function.name), toolkit.name)
                 for function in toolkit.functions
             ),
         )
         for toolkit in toolkits
     ]
     return list(offered_toolkits(authored, agent="helper"))
+
+
+def _named(function: ToolFunction, authored: str | None, registered: str) -> ToolFunction:
+    """Return ``function`` authored under ``authored`` from the registered tool ``registered``, or generated."""
+    if authored is None:
+        return replace(function, toolkit=None, registered_toolkit=None)
+    return replace(function, toolkit=authored, registered_toolkit=registered)
 
 
 async def _catalog(
@@ -575,8 +583,13 @@ async def test_cancelled_sync_leaf_keeps_resources_until_thread_finishes(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_authored_alias_and_toolkit_guidance_are_described(tmp_path: Path) -> None:
-    """A function is described under its authored toolkit, with its toolkit's guidance the prompt does not show."""
+async def test_a_brought_in_function_answers_to_its_own_tool_and_is_approved_under_the_one_bringing_it(
+    tmp_path: Path,
+) -> None:
+    """A function another tool brings in is described under the tool it comes from, with that toolkit's guidance.
+
+    Its approval names the tool that brings it in, which finds the same binding.
+    """
 
     def action() -> str:
         return "ok"
@@ -586,8 +599,14 @@ async def test_authored_alias_and_toolkit_guidance_are_described(tmp_path: Path)
         [_toolkit("implementation", action, instructions="Source guidance")],
         owners={"action": "authored_alias"},
     )
-    binding = await catalog.bind(ToolKey("authored_alias", "action"))
+    binding = await catalog.bind(ToolKey("implementation", "action"))
     assert binding.instructions == ("Source guidance",)
+    assert binding.approval_toolkit == "authored_alias"
+    assert catalog.approved_binding("authored_alias", "action") is binding
+    with pytest.raises(UnknownToolError, match="No toolkit 'authored_alias'"):
+        await catalog.bind(ToolKey("authored_alias", "action"))
+    with pytest.raises(UnknownToolError):
+        catalog.approved_binding("implementation", "action")
 
 
 @pytest.mark.asyncio

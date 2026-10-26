@@ -744,6 +744,7 @@ async def _start_agent_run(
         hooks=hooks,
         persist=persist_into(terminal, storage),
         request_template=replace(run_context.request_template, stream=stream),
+        metadata=run.metadata,
     )
     driven = drive_delegation_stream(
         events,

@@ -12,14 +12,15 @@ import ast
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 import httpx
 import pytest
 from google.oauth2.credentials import Credentials
+from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
@@ -28,10 +29,14 @@ from mindroom.llm.errors import MALFORMED_TOOL_CALL, ModelSafeguardRefusal, Prov
 from mindroom.llm.media import Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
+from mindroom.providers import names
 from mindroom.providers.anthropic.messages import ClaudeProvider
+from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.gemini.adapter import GeminiProvider
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.names import PROVIDER_ROUTES
 from mindroom.providers.ollama.adapter import OllamaProvider
+from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
@@ -266,15 +271,42 @@ def test_model_params_record_the_route_settings_without_credentials_or_clients(r
     assert provider.model_params["metadata"] == {"team": "a"}
 
 
-def test_unknown_models_and_providers_are_rejected(runtime_paths: RuntimePaths) -> None:
-    config = Config(
-        models={"b": ModelConfig(provider="openai", id="m"), "a": ModelConfig(provider="telepathy", id="m")},
-    )
+def test_unknown_models_are_rejected(runtime_paths: RuntimePaths) -> None:
+    config = Config(models={"b": ModelConfig(provider="openai", id="m"), "a": ModelConfig(provider="openai", id="m")})
 
     with pytest.raises(ValueError, match=r"^Unknown model: missing\. Available models: a, b$"):
         build_model_provider(config, runtime_paths, "missing")
-    with pytest.raises(ValueError, match=r"^Unsupported AI provider: telepathy$"):
-        build_model_provider(config, runtime_paths, "a")
+
+
+def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
+    """A misspelled provider fails config load, naming the model and the providers to choose from."""
+    with pytest.raises(ValidationError) as info:
+        Config.model_validate({"models": {"default": {"provider": "opneai", "id": "gpt-6-astra"}}})
+
+    assert iter_config_validation_messages(info.value) == [
+        (
+            "models → default → provider",
+            "Value error, Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, codex, "
+            "deepseek, google, groq, kimi, llama_cpp, ollama, openai, openrouter, synthetic, vertexai_claude, zai",
+        ),
+    ]
+
+
+def test_config_accepts_exactly_the_providers_the_registry_builds() -> None:
+    claude_routes = frozenset(get_args(ClaudeRouteKind.__value__))
+
+    assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"google", "ollama", "synthetic"} == PROVIDER_ROUTES
+
+
+def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_accepts() -> None:
+    """The dashboard tests pin its provider list to this fixture, so the dashboard offers no provider config rejects."""
+    fixture_path = (
+        Path(__file__).resolve().parents[2] / "frontend" / "src" / "test" / "fixtures" / "modelProviders.json"
+    )
+
+    assert json.loads(fixture_path.read_text(encoding="utf-8")) == sorted(
+        PROVIDER_ROUTES | set(names._PROVIDER_ALIASES),
+    )
 
 
 def test_the_model_in_use_is_logged_with_its_effective_id(runtime_paths: RuntimePaths) -> None:
@@ -544,12 +576,22 @@ async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shared_key_in", ["credentials", "environment"])
 async def test_an_azure_model_with_an_ad_token_never_sends_the_shared_key(
     runtime_paths: RuntimePaths,
     wire: Wire,
+    tmp_path: Path,
+    shared_key_in: str,
 ) -> None:
     """An Azure model that authenticates with an Entra ID token needs no key, so the shared one stays local."""
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("azure", {"api_key": "sk-shared"})
+    if shared_key_in == "credentials":
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("azure", {"api_key": "sk-shared"})
+    else:
+        runtime_paths = resolve_runtime_paths(
+            config_path=runtime_paths.config_path,
+            storage_path=tmp_path / "data",
+            process_env={"AZURE_OPENAI_API_KEY": "sk-shared"},
+        )
     extra_kwargs = {"azure_ad_token": "entra-token", "azure_endpoint": "https://test.openai.azure.com"}
     model_config = ModelConfig(
         provider="azure",

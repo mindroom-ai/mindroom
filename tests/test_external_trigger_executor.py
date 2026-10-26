@@ -38,7 +38,7 @@ def _config(tmp_path: Path) -> Config:
                 "research": AgentConfig(display_name="Research"),
                 "ops": AgentConfig(display_name="Ops"),
             },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         test_runtime_paths(tmp_path),
     )
@@ -58,7 +58,7 @@ def _config_with_unprepared_stale_agent(tmp_path: Path) -> Config:
                 "ops": AgentConfig(display_name="Ops"),
                 "mindtest": AgentConfig(display_name="MindTest"),
             },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         test_runtime_paths(tmp_path),
     )

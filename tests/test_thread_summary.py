@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import httpx
+import httpx2
 import nio
 import pytest
 from google.oauth2.credentials import Credentials
@@ -72,6 +73,7 @@ from mindroom.thread_tags import (
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, serve_conversation_reader
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.providers.golden_support import SentRequest, httpx2_transport
 from tests.test_thread_export_projected_history import PRINCIPAL as _PROJECTION_PRINCIPAL
 from tests.test_thread_export_projected_history import ROOM as _PROJECTION_ROOM
 from tests.test_thread_export_projected_history import ROOT as _PROJECTION_ROOT
@@ -2588,7 +2590,7 @@ class TestGenerateSummary:
     ) -> None:
         """A summary never sends the temperature its model authors, and routes that keep the default send none."""
         wire = _SummaryWire()
-        monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx.AsyncClient(transport=wire.transport).send)
+        monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
         config = _mock_config(summary_temperature=summary_temperature)
         config.models["summary"] = _wire_model_config(model_config, wire)
         runtime_paths = resolve_runtime_paths(
@@ -2673,13 +2675,18 @@ _GOOGLE_TOKEN = "summary-google-token"  # noqa: S105 - synthetic SDK credential
 
 
 class _SummaryWire:
-    """Record the JSON body of every request and reject it, so the summary request is all the test sees."""
+    """Record the JSON body of every request and reject it, so the summary request is all the test sees.
+
+    ``client`` is the httpx2 client OpenAI and Claude models send through, and ``transport`` the httpx transport
+    Gemini and Ollama SDK clients take.
+    """
 
     def __init__(self) -> None:
         self.bodies: list[dict[str, Any]] = []
         self.transport = httpx.MockTransport(self._respond)
+        self.client = httpx2.AsyncClient(transport=httpx2_transport(self._respond))
 
-    def _respond(self, request: httpx.Request) -> httpx.Response:
+    def _respond(self, request: SentRequest) -> httpx.Response:
         self.bodies.append(json.loads(request.content))
         error = {"type": "invalid_request_error", "message": "bad", "code": 400, "status": "INVALID_ARGUMENT"}
         return httpx.Response(400, json={"type": "error", "error": error})

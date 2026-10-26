@@ -5,7 +5,8 @@ Stored responses continue with ``previous_response_id`` while the request's syst
 ``store: false`` responses and portable replay send the history explicitly, with ordered output items and encrypted
 reasoning so a later request can replay a tool loop exactly. A changed system text on a stored route without
 portable replay resends the history rebuilt from its text and calls, without reasoning, because those responses
-record neither ordered output nor reasoning. A streamed turn counts only when ``response.completed`` arrives.
+record neither ordered output nor reasoning. A streamed turn ends with ``response.completed`` or
+``response.incomplete``, as a blocking one does; a stream that stops before either did not finish the turn.
 """
 
 from __future__ import annotations

@@ -109,16 +109,16 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         decisions=decisions,
         denial_reasons=denial_reasons,
     )
+    # The saved call is named by the toolkit its approval names until the rebuilt agent binds it, and then by the
+    # registered tool it is reached under there, which differs for an implied or preset tool.
     key = ToolKey(payload.toolkit, payload.function)
-    # Where the resumed call ran, which its own events in the reply's tool trace keep.
-    call_origin = ToolCallOrigin(payload.parent_bash_call_id, key.toolkit)
     call_id = payload.call_id
     arguments = deepcopy(payload.arguments)
     requirement = next((item for item in requirements if item.tool_execution.tool_call_id == call_id), None)
     if external is None and (
         requirement is None
         or not any(
-            call.tool_call_id == call_id and call.tool_name == key.function and call.toolkit_name == key.toolkit
+            call.tool_call_id == call_id and call.tool_name == payload.function and call.toolkit_name == payload.toolkit
             for call in continuation.calls
         )
     ):
@@ -157,8 +157,12 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     completed_messages = [message for message in messages[current_start:] if message.role == "tool"]
     media_results: list[ToolValue] = []
 
-    async def prepare() -> PreparedAgentToolCatalog:
-        nonlocal catalog, recovery_owner
+    def call_origin() -> ToolCallOrigin:
+        # Where the resumed call ran, which its own events in the reply's tool trace keep.
+        return ToolCallOrigin(payload.parent_bash_call_id, key.toolkit)
+
+    async def prepare() -> PreparedAgentToolBinding:
+        nonlocal catalog, recovery_owner, key
         catalog = await prepare_minimal_catalog(
             build,
             run=run,
@@ -166,6 +170,8 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
             delegation_depth=payload.delegation_depth,
             record=persisted,
         )
+        binding = catalog.approved_binding(payload.toolkit, payload.function)
+        key = binding.key
         if key.toolkit == "shell":
             lifetime = await resources.enter_async_context(response_cli_lifetime())
             lifetime.continuation_count = continuation.continuation_count
@@ -178,7 +184,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                 refresh_scheduler=refresh_scheduler,
             )
             recovery_owner.checkpoint.resume_saved_parent(payload.parent_bash_call_id)
-        return catalog
+        return binding
 
     child_toolkits = {call.tool_call_id: call.toolkit_name for call in continuation.calls}
 
@@ -198,7 +204,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     await presentation.publish(progress)
     try:
         if external is not None:
-            binding = await (await prepare()).bind(key)
+            binding = await prepare()
             await authorize(binding)
             outcome = await advance_cli_delegation(
                 binding,
@@ -227,7 +233,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                     tool_trace=tuple(presentation.tool_trace),
                     continuation_count=continuation.continuation_count,
                 )
-            presentation.complete_tool(outcome.call, origin=call_origin)
+            presentation.complete_tool(outcome.call, origin=call_origin())
             result = str(outcome.result or "")
         elif not decisions[call_id] or call_id == payload.parent_bash_call_id:
             assert requirement is not None
@@ -235,9 +241,9 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
             if not decisions[call_id]:
                 result = requirement.denial_note
             denied = replace(requirement.tool_execution.call, result=result, is_error=True)
-            presentation.complete_tool(denied, origin=call_origin)
+            presentation.complete_tool(denied, origin=call_origin())
         else:
-            binding = await (await prepare()).bind(key)
+            binding = await prepare()
             if recovery_owner is not None:
                 events = recovery_owner.execute_shell(
                     binding,
@@ -278,9 +284,9 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                         )
                     elif isinstance(event, AgentToolCallStep):
                         if event.kind == "started":
-                            presentation.start_tool(event.call, origin=call_origin)
+                            presentation.start_tool(event.call, origin=call_origin())
                         else:
-                            presentation.complete_tool(event.call, origin=call_origin)
+                            presentation.complete_tool(event.call, origin=call_origin())
                             result = str(event.call.result or "")
                         if event.kind == "continuation_required":
                             controls.append(event.call)

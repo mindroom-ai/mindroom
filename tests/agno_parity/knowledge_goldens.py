@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import chromadb
 import httpx
+import httpx2
 import numpy as np
 import ollama
 from openai import AsyncOpenAI, OpenAI
@@ -45,7 +46,7 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
     import pytest
     from chromadb.api.models.Collection import Collection
@@ -78,12 +79,12 @@ class _Recorder:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
 
-    def openai(self, request: httpx.Request) -> httpx.Response:
+    def openai(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append({"method": request.method, "url": str(request.url), "body": json.loads(request.content)})
         inputs = json.loads(request.content)["input"]
         count = 1 if isinstance(inputs, str) else len(inputs)
         data = [{"object": "embedding", "index": index, "embedding": [0.5, 0.25]} for index in range(count)]
-        return httpx.Response(200, json={"object": "list", "model": "parity", "data": data})
+        return httpx2.Response(200, json={"object": "list", "model": "parity", "data": data})
 
     def ollama(self, request: httpx.Request) -> httpx.Response:
         self.requests.append({"method": request.method, "url": str(request.url), "body": json.loads(request.content)})
@@ -106,16 +107,15 @@ class _RecordingModel:
 def _wire(embedder: Embedder, recorder: _Recorder) -> None:
     """Answer the embedder's SDK requests with canned replies, recording each one."""
     if isinstance(embedder, OpenAIEmbedder):
-        transport: Callable[[httpx.Request], httpx.Response] = recorder.openai
         embedder.client = OpenAI(
             api_key=embedder.api_key,
             base_url=embedder.base_url,
-            http_client=httpx.Client(transport=httpx.MockTransport(transport)),
+            http_client=httpx2.Client(transport=httpx2.MockTransport(recorder.openai)),
         )
         embedder.async_client = AsyncOpenAI(
             api_key=embedder.api_key,
             base_url=embedder.base_url,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(recorder.openai)),
         )
     elif isinstance(embedder, OllamaEmbedder):
         embedder.client = ollama.Client(host=embedder.host, transport=httpx.MockTransport(recorder.ollama))

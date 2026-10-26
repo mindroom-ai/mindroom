@@ -34,7 +34,7 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -1704,7 +1704,6 @@ async def test_a_member_keeps_its_hooks_across_its_delegation_continuation(
     )
     team.models["writer-model"] = ScriptedModel(
         [_cut_off("cut-1"), _cut_off("cut-2"), _delegate_to_helper("Dig"), _cut_off("cut-3"), answer("Rebuilt.")],
-        capabilities=Capabilities(claude_family=True),
     )
 
     await team.stream()

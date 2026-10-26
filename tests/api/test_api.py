@@ -24,6 +24,7 @@ import pytest
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from mindroom import constants, frontend_assets
 from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
@@ -32,7 +33,7 @@ from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
-from mindroom.config.main import Config, dashboard_config_schema
+from mindroom.config.main import Config, dashboard_config_schema, iter_config_validation_messages
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
@@ -3497,7 +3498,7 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
                 "config": {"model": "nomic-embed-text", "host": "http://localhost:11434"},
             },
         },
-        "models": {"default": {"provider": "test", "id": "test-model-2"}},
+        "models": {"default": {"provider": "openai", "id": "test-model-2"}},
         "agents": {
             "new_agent": {
                 "display_name": "New Agent",
@@ -3530,7 +3531,7 @@ def test_save_config_writes_keys_in_alphabetical_order(test_client: TestClient, 
     agent = {"display_name": "Agent", "role": "Role", "tools": [], "instructions": [], "rooms": []}
     new_config = {
         "router": {"model": "default"},
-        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {"zeta": agent, "alpha": agent},
     }
 
@@ -3549,7 +3550,7 @@ def test_save_config_persists_unassigned_configured_rooms(
 ) -> None:
     """Dashboard-created rooms should survive save even before responders are assigned."""
     new_config = {
-        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {
             "assistant": {
                 "display_name": "Assistant",
@@ -3730,6 +3731,28 @@ def test_save_config_validation_error_omits_submitted_api_keys(test_client: Test
     assert response.status_code == 422
     assert "either api_key or extra_kwargs.api_key" in response.text
     assert "sk-secret" not in response.text
+
+
+def test_structured_and_raw_saves_report_config_errors_like_every_config_surface(test_client: TestClient) -> None:
+    """Both dashboard saves report the shared config error messages, at locations the editors can match."""
+    config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": [7], "learnng": False}},
+    }
+    with pytest.raises(ValidationError) as info:
+        Config.model_validate(config)
+    messages = [message for _, message in iter_config_validation_messages(info.value)]
+
+    structured = test_client.put("/api/config/save", json=config)
+    raw = test_client.put("/api/config/raw", json={"source": yaml.safe_dump(config)})
+
+    expected = [
+        {"loc": ["agents", "assistant", "rooms", 0], "msg": messages[0], "type": "value_error"},
+        {"loc": ["agents", "assistant", "learnng"], "msg": messages[1], "type": "value_error"},
+    ]
+    assert (structured.status_code, structured.json()["detail"]) == (422, expected)
+    assert (raw.status_code, raw.json()["detail"]) == (422, expected)
 
 
 def test_save_config_can_recover_from_invalid_reload(

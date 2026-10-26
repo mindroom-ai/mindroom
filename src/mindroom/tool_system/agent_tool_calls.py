@@ -71,11 +71,6 @@ class DeferredAgentToolkit:
     materialize: Callable[[], Awaitable[AdaptedToolkit]]
 
 
-def _eager_toolkit(function: ToolFunction) -> str:
-    """Return the toolkit an eager ``function`` is reached under: its authored toolkit, or ``agent`` if generated."""
-    return function.toolkit or "agent"
-
-
 @dataclass(frozen=True, slots=True)
 class PreparedAgentToolBinding:
     """A prepared function, the catalog owning its exact live agent turn, and its toolkit's instructions."""
@@ -89,10 +84,10 @@ class PreparedAgentToolBinding:
     def approval_toolkit(self) -> str:
         """Return the toolkit an approval of this function's calls names: its authored toolkit, ``agent`` if generated.
 
-        A resumed approval rebuilds the agent with that toolkit attached, so it reaches the function under this name
-        even when this binding reached it under a deferred toolkit's registered name, which differs for an implied tool.
+        It differs from the toolkit this binding is reached under for an implied or preset tool. A resumed approval
+        rebuilds the agent with that toolkit attached and finds the function's binding by it (``approved_binding``).
         """
-        return _eager_toolkit(self.function)
+        return self.function.toolkit or "agent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +121,7 @@ type AgentToolCallEvent = AgentToolCallStep | AgentToolCallWaiting | AgentToolCa
 
 @dataclass
 class PreparedAgentToolCatalog:
-    """One turn's catalog of the agent's tools, each under the toolkit it was authored in.
+    """One turn's catalog of the agent's tools, each under the registered tool it comes from.
 
     ``runtime_context`` is the agent's own, under which the functions generated for its build run.
     ``run`` is the turn's run identity, whose session holds the state its calls share and receives the catalog's
@@ -214,7 +209,7 @@ class PreparedAgentToolCatalog:
         *,
         include: Callable[[ToolFunction], bool] | None = None,
     ) -> None:
-        """Bind the run's functions under the toolkit each is offered from; skip functions ``include`` rejects.
+        """Bind the run's functions under the registered tool each comes from; skip functions ``include`` rejects.
 
         ``toolkits`` are a run's, which offer each function name once. A function that names no toolkit was
         generated for the agent, such as the knowledge search and the skill readers, and is reached as ``agent``.
@@ -242,14 +237,14 @@ class PreparedAgentToolCatalog:
         functions: Sequence[ToolFunction],
         namespace: str | None = None,
     ) -> None:
-        """Bind ``functions`` of ``toolkit`` under ``namespace``, or each under its own toolkit, as ``agent`` for none."""
+        """Bind ``functions`` of ``toolkit`` under ``namespace``, or each under its registered tool, ``agent`` for none."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
         instructions = (toolkit.guidance,) if toolkit.guidance else ()
         for function in functions:
-            if namespace is None and function.toolkit == "agent":
+            if namespace is None and function.registered_toolkit == "agent":
                 msg = "The agent toolkit namespace is reserved for generated functions"
                 raise ValueError(msg)
-            key = ToolKey(namespace or _eager_toolkit(function), function.name)
+            key = ToolKey(namespace or function.registered_toolkit or "agent", function.name)
             if key in bindings or key in self._bindings:
                 msg = f"Duplicate qualified tool: {key.toolkit}.{key.function}"
                 raise ValueError(msg)
@@ -289,9 +284,8 @@ class PreparedAgentToolCatalog:
                 with self.execution_context():
                     toolkit = await deferred.materialize()
                 await connect_toolkits((toolkit,), self._closes)
-                # Every function a deferred toolkit materializes is reached under the deferred toolkit's registered
-                # name, not the function's authored ``toolkit``, which differs for an implied tool; an approval of
-                # one names the authored toolkit (``approval_toolkit``).
+                # A deferred toolkit's functions are reached under the name it was listed under, which an agent's
+                # build gives as the registered tool they come from.
                 self._prepare(toolkit, toolkit.functions, deferred.name)
                 del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
@@ -303,6 +297,26 @@ class PreparedAgentToolCatalog:
                     msg = f"No toolkit {key.toolkit!r}"
                 raise UnknownToolError(msg)
             return binding
+
+    def approved_binding(self, toolkit: str, function: str) -> PreparedAgentToolBinding:
+        """Return the binding of ``function`` whose calls an approval naming ``toolkit`` approves.
+
+        A resumed approval names the toolkit it approved (``approval_toolkit``), which its rebuilt agent attaches,
+        so the function is bound here already, under the registered tool it comes from.
+        """
+        self._check_open()
+        binding = next(
+            (
+                binding
+                for binding in self._bindings.values()
+                if binding.key.function == function and binding.approval_toolkit == toolkit
+            ),
+            None,
+        )
+        if binding is None:
+            msg = f"No function {function!r} approved under toolkit {toolkit!r}"
+            raise UnknownToolError(msg)
+        return binding
 
     async def close(self) -> None:
         """Refuse new work, wait for the operation that currently holds the catalog, then close what it connected."""

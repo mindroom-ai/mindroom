@@ -45,7 +45,11 @@ def _embedder(replies: list[_Reply], requests: list[dict[str, object]]) -> Ollam
 
 
 def test_ollama_embedder_returns_vectors_of_the_models_own_width() -> None:
-    """A 768-dimension model's vectors are used as they come, not discarded for missing a 4096-dimension default."""
+    """A 768-dimension model's vectors are used as they come, and no request asks for another width.
+
+    Ollama refuses a ``dimensions`` wider than the model's vector, so asking every model for one width fails all
+    narrower models.
+    """
     requests: list[dict[str, object]] = []
     vector = [0.25] * 768
     embedder = _embedder([[vector]], requests)
@@ -54,6 +58,7 @@ def test_ollama_embedder_returns_vectors_of_the_models_own_width() -> None:
     assert asyncio.run(embedder.aembed(["query"], purpose="query")) == [vector]
     # One text per request, queries and documents alike.
     assert [request["input"] for request in requests] == ["first", "second", "query"]
+    assert all("dimensions" not in request for request in requests)
 
 
 def test_ollama_embedder_rejects_an_empty_reply() -> None:

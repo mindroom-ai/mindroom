@@ -8,7 +8,6 @@ first request.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -59,9 +58,9 @@ from mindroom.providers.prompt_cache_key import derive_agent_prompt_cache_key, d
 from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
-    import httpx
+    import httpx2
     from openai import AsyncOpenAI
 
     from mindroom.config.models import ModelConfig
@@ -193,7 +192,7 @@ class ProviderRuntime:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
     codex_default_instructions: str
-    http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
+    http_client: httpx2.AsyncClient = MODEL_HTTP_CLIENT
 
 
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
@@ -216,28 +215,9 @@ def _provider_default_sampling(model_id: str) -> bool:
     )
 
 
-def _authored_base_url(client_params: object, base_url: object) -> str | None:
-    """Return the endpoint a config sets; ``client_params`` wins over ``base_url``, as over every client option.
-
-    Config load reads the endpoint to pick the ``openai`` route's API, so a wrongly typed value raises
-    ``ValueError`` naming its key instead of failing on the first string or mapping operation.
-    """
-    match client_params:
-        case {"base_url": nested} if nested:
-            return _authored_string("client_params.base_url", nested)
-        case Mapping() | None:
-            return _authored_string("base_url", base_url)
-        case _:
-            msg = f"extra_kwargs.client_params must be a mapping, not {type(client_params).__name__}"
-            raise ValueError(msg)
-
-
-def _authored_string(key: str, value: object) -> str | None:
-    """Return one authored ``extra_kwargs`` string, raising ``ValueError`` naming ``key`` when it is not one."""
-    if value is None or isinstance(value, str):
-        return value
-    msg = f"extra_kwargs.{key} must be a string, not {type(value).__name__}"
-    raise ValueError(msg)
+def _authored_base_url(client_params: Mapping[str, Any] | None, base_url: str | None) -> str | None:
+    """Return the endpoint a config sets; ``client_params`` wins over ``base_url``, as over every client option."""
+    return (client_params or {}).get("base_url") or base_url
 
 
 def _client_options(
@@ -260,7 +240,7 @@ def _client_options(
 def _sdk_client_kwargs(
     configured: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> dict[str, Any]:
     """Return SDK client keywords: the configured values that are set, with ``client_params`` merged over them.
 
@@ -292,7 +272,7 @@ def _openai_client(
     api_key: str,
     options: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> AsyncOpenAI:
     from openai import AsyncOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
@@ -377,26 +357,24 @@ def _chat_client_factory(
         def azure_client() -> AsyncOpenAI:
             from openai import AsyncAzureOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
-            key = api_key or process_env.get(api_key_env)
+            # The SDK refuses a key beside an Entra ID token, so a model signing in with one never reads the variable.
+            key = api_key or (None if alternative_auth else process_env.get(api_key_env))
             if not (key or alternative_auth):
                 msg = (
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     f"{api_key_env} environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
                 raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
-            # TODO(simplify): Azure accepts `timeout` and `max_retries` but leaves them out of its client. Build it from
-            # the shared client options, as the other routes do. Operators who set either would notice.
             azure: dict[str, Any] = {
+                **options,
+                # Azure has no default endpoint, and the SDK rejects an empty base URL beside azure_endpoint.
+                "base_url": base_url or None,
                 "api_key": key,
                 "api_version": settings.api_version or "2024-10-21",
-                "organization": settings.organization,
                 "azure_endpoint": settings.azure_endpoint or process_env.get(AZURE_OPENAI_ENV_BY_KEY["endpoint"]),
                 "azure_deployment": settings.azure_deployment or process_env.get(AZURE_OPENAI_ENV_BY_KEY["deployment"]),
-                "base_url": base_url or None,
                 "azure_ad_token": settings.azure_ad_token,
                 "azure_ad_token_provider": settings.azure_ad_token_provider,
-                "default_headers": settings.default_headers,
-                "default_query": settings.default_query,
             }
             return AsyncAzureOpenAI(**_sdk_client_kwargs(azure, settings, http_client))
 

@@ -5064,7 +5064,7 @@ class TestMultiAgentOrchestrator:
         config = _runtime_bound_config(
             Config(
                 agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
             tmp_path,
         )
@@ -5278,12 +5278,12 @@ class TestMultiAgentOrchestrator:
 
         current_config = Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             plugins=["./plugins/current"],
         )
         new_config = Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             plugins=["./plugins/updated"],
         )
 
@@ -5379,7 +5379,7 @@ class TestMultiAgentOrchestrator:
         current_config = _runtime_bound_config(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 plugins=[],
             ),
             tmp_path,
@@ -5387,7 +5387,7 @@ class TestMultiAgentOrchestrator:
         new_config = _runtime_bound_config(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 plugins=["./plugins/updated"],
             ),
             tmp_path,
@@ -5451,7 +5451,7 @@ class TestMultiAgentOrchestrator:
         current_config = _runtime_bound_config(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 plugins=[],
             ),
             tmp_path,
@@ -5459,7 +5459,7 @@ class TestMultiAgentOrchestrator:
         new_config = _runtime_bound_config(
             Config(
                 agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 plugins=["./plugins/updated"],
             ),
             tmp_path,
@@ -5539,7 +5539,7 @@ class TestMultiAgentOrchestrator:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -5559,7 +5559,7 @@ class TestMultiAgentOrchestrator:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -5633,7 +5633,7 @@ class TestMultiAgentOrchestrator:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )
@@ -5653,7 +5653,7 @@ class TestMultiAgentOrchestrator:
                         "rooms": ["lobby"],
                     },
                 },
-                models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             tmp_path,
         )

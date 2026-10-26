@@ -117,6 +117,8 @@
   },
   "request": {
     "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "role": "developer",
@@ -127,10 +129,8 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "gpt-6-astra",
       "reasoning": {},
       "store": true,
-      "stream": true,
       "tools": [
         {
           "name": "get_weather",
