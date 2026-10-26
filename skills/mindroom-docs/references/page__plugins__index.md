@@ -277,6 +277,9 @@ def greeter_tools() -> type[Toolkit]:
     return GreeterTools
 ```
 
+Pass `instructions="..."` to `Toolkit.__init__` for guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions, while each function's docstring is that function's description.
+A toolkit that subclasses one of Agno's own toolkits shows its instructions only with `add_instructions=True`.
+
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
 Other parameters receive a model's `"none"`, `"null"`, `"true"`, or `"false"` string, in any case, as `None` or a boolean.
