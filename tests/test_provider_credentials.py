@@ -52,6 +52,12 @@ def test_a_gemini_model_on_vertex_ai_needs_no_google_key(tmp_path: Path) -> None
 
     assert missing_model_api_key_provider(config, gemini_api, "default") == "google"
     assert missing_model_api_key_provider(config, vertex, "default") is None
+    enterprise = ModelConfig(
+        provider="gemini",
+        id="gemini-3.8-flash",
+        extra_kwargs={"client_params": {"enterprise": True}},
+    )
+    assert missing_model_api_key_provider(Config(models={"default": enterprise}), gemini_api, "default") is None
 
 
 def test_model_config_rejects_api_key_in_both_fields_without_echoing_keys() -> None:

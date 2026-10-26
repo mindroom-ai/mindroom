@@ -227,8 +227,14 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
-    """Fill a Vertex AI model's project, location, and Google credentials from the runtime env where it sets none."""
+    """Fill a Vertex AI model's project, location, and Google credentials from the runtime env where it sets none.
+
+    A model in express mode, with an ``api_key`` in ``client_params``, gets none of them, since google-genai refuses a
+    key beside a project, a location, or credentials.
+    """
     kwargs = dict(authored)
+    if (kwargs.get("client_params") or {}).get("api_key"):
+        return kwargs
     for key, variable in (("project_id", "GOOGLE_CLOUD_PROJECT"), ("location", "GOOGLE_CLOUD_LOCATION")):
         if not kwargs.get(key) and (value := runtime_paths.env_value(variable)):
             kwargs[key] = value

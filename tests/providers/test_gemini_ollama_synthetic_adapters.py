@@ -55,8 +55,10 @@ from tests.providers.gemini_ollama_support import (
 from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import StreamEvent
 
 GEMINI = {"provider": "google", "id": "gemini-3.1-pro-preview", "api_key": "test-key"}
@@ -264,6 +266,91 @@ async def test_the_sdk_s_own_vertex_switches_do_not_move_a_gemini_api_model(
 
     assert seen[0].url.host == "generativelanguage.googleapis.com"
     assert seen[0].headers["x-goog-api-key"] == "test-key"
+
+
+def _transported_gemini(
+    model_config: dict[str, Any],
+    respond: Callable[[httpx.Request], httpx.Response],
+    runtime_paths: RuntimePaths,
+    **client_params: Any,  # noqa: ANN401
+) -> gemini_adapter.GeminiProvider:
+    """Build a Gemini adapter whose SDK client sends through ``respond``, with ``client_params`` merged in as given."""
+    extra_kwargs = dict(model_config.get("extra_kwargs", {}))
+    extra_kwargs["client_params"] = {
+        **extra_kwargs.get("client_params", {}),
+        **client_params,
+        "http_options": {"httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))},
+    }
+    return gemini_adapter.build_provider(ModelConfig(**{**model_config, "extra_kwargs": extra_kwargs}), runtime_paths)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authored", "host"),
+    [
+        (
+            {
+                "client_params": {
+                    "enterprise": True,
+                    "project": "test-project",
+                    "location": "us-central1",
+                    "credentials": Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+                },
+            },
+            "us-central1-aiplatform.googleapis.com",
+        ),
+        ({"vertexai": True, "client_params": {"vertexai": False}}, "generativelanguage.googleapis.com"),
+    ],
+    ids=["client-params-enterprise", "client-params-vertexai-false"],
+)
+async def test_client_params_choose_the_gemini_route_and_the_sdk_agrees(
+    tmp_path: Path,
+    authored: dict[str, Any],
+    host: str,
+) -> None:
+    """An explicit ``enterprise`` or ``vertexai`` client option, which wins over every other option, picks the route."""
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    adapter = _transported_gemini(
+        {"provider": "google", "id": "gemini-3.8-flash", "api_key": "test-key", "extra_kwargs": authored},
+        respond,
+        runtime_paths_for(tmp_path),
+    )
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == host
+    # Vertex AI never takes the Gemini API key, which google-genai refuses beside a project.
+    assert ("x-goog-api-key" in seen[0].headers) is (host == "generativelanguage.googleapis.com")
+
+
+@pytest.mark.asyncio
+async def test_vertex_express_mode_takes_no_project_location_or_credentials_from_the_runtime_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Vertex AI key in ``client_params`` excludes a project, a location, and credentials, so none are filled in."""
+    env_credentials = Credentials(token="env-token")  # noqa: S106 - synthetic SDK credential
+    monkeypatch.setattr(google_adc, "_load_google_application_credentials", lambda _path: env_credentials)
+    (tmp_path / ".env").write_text(
+        "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
+        encoding="utf-8",
+    )
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    config = {"provider": "google", "id": "gemini-3.8-flash", "extra_kwargs": {"vertexai": True}}
+    adapter = _transported_gemini(config, respond, runtime_paths_for(tmp_path), api_key="express-key")
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == "aiplatform.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "express-key"
 
 
 def test_ollama_sends_the_runtime_env_key_unless_the_model_has_its_own(tmp_path: Path) -> None:
