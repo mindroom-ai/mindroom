@@ -19,11 +19,14 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.history.summary_message import is_scope_summary
+from mindroom.history.summary_rows import cut_at_event
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, run_from_row
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql, run_from_row
 from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import quote_identifier
 from tests.storage_oracle.actions import Scenario
 from tests.storage_oracle.backend import SESSION_ID
@@ -363,6 +366,40 @@ def test_a_converted_end_state_shows_its_last_recorded_observables_but_for_named
     _unminted(observed)
     assert first_difference(final, observed) is None, first_difference(final, observed)
     assert used == _END_STATE_PINS.get(sequence_id(path), frozenset())
+
+
+def test_a_fold_run_a_retirement_removed_converts_without_a_row(tmp_path: Path) -> None:
+    """A run a retirement removed after it folded stays without a row, so a redaction of what it read cuts nothing.
+
+    The Agno-layout store's retirement deleted the run and kept its fold's summary row behind the barrier, so the run
+    never loaded nor held an event again; no recording holds that shape.
+    """
+    names = AgnoTableNames("code")
+    database = names.database_path(tmp_path)
+    database.parent.mkdir(parents=True)
+    segment = {"run_id": "x", "metadata": {"matrix_seen_event_ids": ["$read-by-x"]}, "messages": [], "tools": []}
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for statement in agno_schema_sql(names):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, created_at) VALUES ('s', 'agent', 'code', 0)",
+        )
+        connection.execute(
+            "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, legacy, created_at, "
+            "segment_run_id, segment) VALUES ('s', 'agent:code', -1, 'legacy summary', 1, 0, NULL, NULL), "
+            "('s', 'agent:code', -1, 'S:legacy,x~', 0, 0, 'x', ?), ('s', 'agent:code', -1, NULL, 0, 0, NULL, NULL)",
+            (json.dumps(segment),),
+        )
+        connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('x', 's')")
+    store = create_state_storage("code", tmp_path)
+    session = ConversationSession(session_id="s", kind="agent", owner_id="code")
+    later = RunRecord(run_id="r0", agent_id="code", session_id="s", status=RunStatus.completed)
+
+    assert store.save_run(session, later, record_usage=False) == "written"
+    assert store.get_run("x") is None
+    assert store.save_run(session, RunRecord(run_id="x", agent_id="code"), record_usage=False) == "removed"
+    assert not cut_at_event(store, session_id="s", scope_key="agent:code", event_id="$read-by-x", match="any")
+    assert [run.run_id for run in store.list_runs("s")] == ["r0"]
 
 
 def test_every_mask_is_used_and_every_pin_names_an_input() -> None:
