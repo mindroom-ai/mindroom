@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Knowledge metadata from the Chroma-backed store.
 # Legacy format: Knowledge-index metadata omitted vector_store; its semantic vectors lived in Chroma.
 # Last legacy release: v2026.10.552; replacement: v2026.10.553 stored semantic indexes in owned SQLite files.
-# Handling: Keep absence empty so the query key no longer matches and every semantic index rebuilds once.
+# Handling: Keep absence empty so the query key no longer matches; the next refresh copies the vectors out of Chroma.
 # Coverage: tests/test_knowledge_indexing_config.py::test_chroma_era_metadata_rebuilds_in_the_owned_store.
 
 # LEGACY_COMPAT: Knowledge metadata without contextual chunk headers.

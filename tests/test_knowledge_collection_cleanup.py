@@ -138,7 +138,7 @@ async def test_a_chroma_era_index_is_copied_without_embedding_again(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upgrading copies the vectors Chroma held into the owned store, so unchanged files are not embedded again."""
+    """Upgrading copies the vectors Chroma held into the owned store: only a file changed since is embedded again."""
     chromadb = pytest.importorskip("chromadb")
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -180,13 +180,17 @@ async def test_a_chroma_era_index_is_copied_without_embedding_again(
             return super().embed(texts, purpose=purpose)
 
     monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_a, **_k: _CountingEmbedder())
+    (docs / "notes.md").write_text("Expense reports are due weekly.", encoding="utf-8")
     upgraded = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
 
     assert (await upgraded.reindex_all()).published
 
-    assert embedded == []
+    assert embedded == ["Expense reports are due weekly."]
     assert upgraded._published_collection is not None
-    assert sorted(row["content"] for row in stored_rows(upgraded._published_collection)) == sorted(
-        row["content"] for row in rows
-    )
+    assert sorted(row["content"] for row in stored_rows(upgraded._published_collection)) == [
+        "Expense reports are due weekly.",
+        "Travel policy and hotel limits.",
+    ]
+    hits = upgraded._published_collection.search([1.0], limit=1, query="hotel limits")
+    assert [hit.content for hit in hits] == ["Travel policy and hotel limits."]
     assert not (storage / "chroma.sqlite3").exists()

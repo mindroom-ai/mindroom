@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.knowledge.vector_store import StoredRow
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.dependencies import optional_dependency_environment
+from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.knowledge.vector_store import KnowledgeCollection
 
 logger = get_logger(__name__)
@@ -42,11 +43,14 @@ def copy_legacy_chroma_rows(
     candidate: KnowledgeCollection,
     *,
     select: Callable[[Mapping[str, Any]], bool],
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Copy the rows of one Chroma-era collection that ``select`` accepts into an owned candidate, verbatim.
 
-    Needs the ``chromadb`` package, which the Mem0 backend still uses; without it the caller re-embeds instead.
+    Needs the ``chromadb`` extra, installed on first use like the Mem0 backend's; when it cannot be installed the
+    caller re-embeds instead.
     """
+    ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
     with optional_dependency_environment():
         import chromadb  # noqa: PLC0415
 

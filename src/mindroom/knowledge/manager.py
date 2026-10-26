@@ -1199,7 +1199,13 @@ class KnowledgeManager:
         if published.exists() or not legacy_chroma_store_exists(self._base_storage_path):
             candidate.copy_rows(published, select=select)
         else:
-            copy_legacy_chroma_rows(self._base_storage_path, published_collection, candidate, select=select)
+            copy_legacy_chroma_rows(
+                self._base_storage_path,
+                published_collection,
+                candidate,
+                select=select,
+                runtime_paths=self.runtime_paths,
+            )
         return reused
 
     def _reusable_published_collection(self, persisted_state: PublishedIndexState | None) -> str | None:
@@ -1760,7 +1766,8 @@ class KnowledgeManager:
         ``force_reindex`` is the operator asking for vectors to be rebuilt
         rather than trusted, so it suppresses copying them from the published
         index. Every other reason a rebuild is forced -- changed settings, a
-        missing collection -- the reuse gates already reject on their own.
+        missing collection -- the reuse gates already reject on their own,
+        apart from a Chroma-era publication, whose vectors are copied once.
         """
         if not _semantic_indexing_enabled(self.config, self.base_id):
             return RefreshOutcome(indexed_count=0, published=False, error=None)
