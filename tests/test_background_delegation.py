@@ -1062,7 +1062,10 @@ async def test_rejected_background_start_settles_the_child_as_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A start refused before any job owns the child finishes its audit record like any child failure."""
+    """A start refused before any job owns the child finishes its audit record like any child failure.
+
+    The reply's record of the call is finished once, failed, with the text the parent reads.
+    """
     ran: list[DelegationChild] = []
 
     async def run_child(child: DelegationChild, **_kwargs: object) -> str:
@@ -1078,16 +1081,23 @@ async def test_rejected_background_start_settles_the_child_as_failed(
         await original_interrupt(child, **kwargs)
 
     monkeypatch.setattr(delegation_execution, "interrupt_child", interrupt)
+    recorder = SpanRecorder(stopped=False)
     response = await _drive_background_child(
         tmp_path,
         monkeypatch,
         await tool_job_runtime(tmp_path, authorize=lambda _job: False),
         run_child,
+        recorder=recorder,
     )
     assert ran == []
     assert held_during_settlement == [True], "Recovery could take the child mid-failure"
     result = str(next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting"))
     assert "failed: Tool job is not available" in result
+    arguments = {"agent_name": "code", "task": "Research"}
+    assert recorder.records == [
+        ("started", "run_subagent", arguments, None),
+        ("finished", "run_subagent", arguments, ToolOutcome(content=result, is_error=True)),
+    ]
     records = [json.loads(path.read_text()) for path in tmp_path.rglob("delegations/**/run.json")]
     assert [record["status"] for record in records] == ["failed"]
     state = DelegationState.from_metadata(response.metadata)

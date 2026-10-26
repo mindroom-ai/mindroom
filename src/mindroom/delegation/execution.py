@@ -1198,6 +1198,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             persona=target.persona,
         )
         state.children.append(child)
+    record_return = None
     detach = partial(
         _detach_from_job,
         state,
@@ -1305,6 +1306,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 raise
             except Exception as error:
                 if background is not None and background.has_job(child.delegation_id):
+                    # The job still owns the child, so its call stays recorded as started unless the wait finished it.
                     await detach(result=None, error=error)
                     raise
                 # The cause reaches the parent model and the child's record, so credentials in it are redacted.
@@ -1322,10 +1324,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         # Completed and failed children both close the parent call and its after hook.
         receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
+    failed = child.status != "completed"
     result = resolve_result(
         _finalize_delegation_output(_child_result_text(child, receipt), output_request),
-        failed=child.status != "completed",
+        failed=failed,
     )
+    if record_return is not None:
+        # A background child that failed before any job owned it fails the call its record opened.
+        await record_return(ToolOutcome(content=result, is_error=True) if failed else result)
     await after_delegation(
         hook_state,
         config=config,
