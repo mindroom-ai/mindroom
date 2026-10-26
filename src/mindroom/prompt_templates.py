@@ -126,12 +126,12 @@ def openai_compat_identity(
 ) -> str:
     """Return an agent's or team leader's identity in the OpenAI-compatible API, from its two rendered identities.
 
-    It is ``openai_identity``, opened by ``matrix_identity`` when the operator overrides the Matrix template
-    ``matrix_prompt_name`` in ``prompts`` but not the API template ``openai_prompt_name``, so their authored identity
-    still applies in the API.
+    It is ``openai_identity``, opened by ``matrix_identity`` and one blank line when the operator overrides the Matrix
+    template ``matrix_prompt_name`` in ``prompts`` but not the API template ``openai_prompt_name``, so their authored
+    identity still applies in the API, whatever whitespace it ends with.
     """
     if matrix_prompt_name in prompts and openai_prompt_name not in prompts:
-        return matrix_identity + openai_identity
+        return f"{matrix_identity.rstrip()}\n\n{openai_identity}"
     return openai_identity
 
 

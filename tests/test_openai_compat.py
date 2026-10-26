@@ -3477,10 +3477,14 @@ class TestTeamCompletion:
             ({}, ""),
             (
                 {"TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": "Custom identity of {display_name}.\n"},
-                "Custom identity of Super Team.\n",
+                "Custom identity of Super Team.\n\n",
+            ),
+            (
+                {"TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": "Custom identity of {display_name}."},
+                "Custom identity of Super Team.\n\n",
             ),
         ],
-        ids=["default", "custom_matrix_identity"],
+        ids=["default", "custom_matrix_identity", "custom_matrix_identity_without_a_trailing_newline"],
     )
     def test_an_api_team_leader_is_told_it_answers_through_the_api_as_its_members_are(
         self,
@@ -3490,7 +3494,8 @@ class TestTeamCompletion:
     ) -> None:
         """The leader gets the API identity and history format, never the Matrix chatroom, history, or mention guide.
 
-        An operator's custom Matrix leader identity, without a custom API one, opens it, as it does for an agent.
+        An operator's custom Matrix leader identity, without a custom API one, opens it a blank line apart, as it does
+        for an agent, whether or not the authored text ends with a newline.
         """
         config = team_config.model_copy(update={"prompts": prompts})
         runtime_paths = _runtime_paths_for_config(config)
