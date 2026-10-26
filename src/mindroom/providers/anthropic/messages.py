@@ -590,7 +590,8 @@ def _claude_capabilities(
         # non-default sampling on every route.
         provider_default_sampling=route == "vertexai_claude"
         or model_id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES),
-        claude_family=True,
+        # Claude's tokenizer has no local encoding and counts more tokens than o200k for some text.
+        conservative_token_estimates=True,
     )
 
 

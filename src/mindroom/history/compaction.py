@@ -688,7 +688,7 @@ async def _report_committed(
 def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], int], CompactionEstimateKind]:
     """Resolve one estimator together with the kind describing its arithmetic."""
     model_id = summary_model.identity.id
-    conservative_fallback = summary_model.capabilities.claude_family
+    conservative_fallback = summary_model.capabilities.conservative_token_estimates
     estimator = partial(
         estimate_compaction_input_tokens,
         model_id=model_id,

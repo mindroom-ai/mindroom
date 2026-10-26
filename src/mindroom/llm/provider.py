@@ -45,14 +45,18 @@ class ModelIdentity:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Capabilities:
-    """What a provider route supports, so policy code stops probing adapter classes."""
+    """What a provider route supports, so policy code stops probing adapter classes.
+
+    ``conservative_token_estimates`` marks a route whose tokenizer no local encoding matches and can count more
+    tokens than o200k for the same text, so compaction sizes its input by an upper bound.
+    """
 
     structured_output: StructuredOutput = "json_mode"
     omitted_media: frozenset[MediaKind] = frozenset()
     native_tool_search: bool = False
     native_compaction: bool = False
     provider_default_sampling: bool = False
-    claude_family: bool = False
+    conservative_token_estimates: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

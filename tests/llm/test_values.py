@@ -460,7 +460,9 @@ def test_model_request_defaults_are_immutable_and_empty() -> None:
 
 def test_capabilities_default_to_the_least_capable_route() -> None:
     assert Capabilities() == Capabilities(structured_output="json_mode", omitted_media=frozenset())
-    assert Capabilities(claude_family=True, omitted_media=frozenset({"video"})).omitted_media == {"video"}
+    assert Capabilities(conservative_token_estimates=True, omitted_media=frozenset({"video"})).omitted_media == {
+        "video",
+    }
 
 
 # --- errors ----------------------------------------------------------------------------------------------------
