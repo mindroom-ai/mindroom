@@ -59,7 +59,7 @@ def _write_backup(database: Path) -> Path:
     with ExitStack() as descriptors, closing(connect_conversation_database(database)) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
-        backup = write_conversion_backup(connection, database, descriptors)
+        backup = write_conversion_backup(database, descriptors)
         connection.rollback()
     return backup
 
@@ -210,6 +210,25 @@ def test_a_linked_database_or_sessions_directory_is_not_backed_up(tmp_path: Path
     assert sorted(path.name for path in elsewhere.parent.iterdir()) == [elsewhere.name]
 
 
+def test_an_earlier_attempts_backup_does_not_count_against_the_free_space(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry after a rolled-back attempt needs the same free space as the first attempt, beside that attempt's copy."""
+    database = _database(tmp_path)
+    needed = 5 * database.stat().st_size // 2
+    _backup_name(database).write_bytes(database.read_bytes())
+
+    def free_space(_directory: int) -> SimpleNamespace:
+        # The disk had ``needed`` bytes free before the earlier attempt wrote its copy.
+        leftover = _backup_name(database).stat().st_size if _backup_name(database).is_file() else 0
+        return SimpleNamespace(f_bavail=needed - leftover, f_frsize=1)
+
+    monkeypatch.setattr(os, "statvfs", free_space)
+
+    assert _write_backup(database).read_bytes() == database.read_bytes()
+
+
 def test_a_leftover_temporary_file_is_replaced(tmp_path: Path) -> None:
     """A crashed attempt's temporary file, even one larger than the database, is replaced by a fresh copy."""
     database = _database(tmp_path)
@@ -283,20 +302,6 @@ def test_the_whole_copy_and_its_rename_are_synced(tmp_path: Path, monkeypatch: p
     ]
 
 
-def test_the_backup_needs_the_write_lock(tmp_path: Path) -> None:
-    """Outside a transaction the file could change under the copy, so nothing is copied."""
-    database = _database(tmp_path)
-
-    with (
-        ExitStack() as descriptors,
-        closing(connect_conversation_database(database)) as connection,
-        pytest.raises(RuntimeError, match="write lock"),
-    ):
-        write_conversion_backup(connection, database, descriptors)
-
-    assert sorted(path.name for path in database.parent.iterdir()) == [database.name]
-
-
 def test_the_write_lock_outlives_the_backup(tmp_path: Path) -> None:
     """Closing a descriptor of the database would drop SQLite's locks, so the copy's closes when the caller says."""
     database = _database(tmp_path)
@@ -304,7 +309,7 @@ def test_the_write_lock_outlives_the_backup(tmp_path: Path) -> None:
     with ExitStack() as descriptors:
         with closing(connect_conversation_database(database)) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            write_conversion_backup(connection, database, descriptors)
+            write_conversion_backup(database, descriptors)
 
             assert _other_process_takes_write_lock(database) == "database is locked"
 

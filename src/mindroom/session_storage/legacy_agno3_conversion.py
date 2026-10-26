@@ -234,7 +234,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     """
     tables = table_names(connection)
     if tables:
-        write_conversion_backup(connection, path, descriptors)
+        write_conversion_backup(path, descriptors)
     if names.sessions in tables:
         _session_text_as_utf8(connection, names)
         seed_usage_ledger(connection, names)

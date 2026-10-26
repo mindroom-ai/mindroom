@@ -1760,6 +1760,41 @@ def test_a_conversion_without_room_to_compact_keeps_its_free_pages(
     assert _free_pages(database) > 0
 
 
+def test_an_interrupted_conversion_converts_on_retry_with_the_free_space_of_the_first_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempt that fails after its backup rolls back, and its backup does not count against the retry's space."""
+    database = _database_of_large_runs(tmp_path, 4)
+    original = database.read_bytes()
+    backup = database.with_name(f"{database.name}{BACKUP_SUFFIX}")
+    needed = 5 * len(original) // 2
+    statvfs = os.statvfs
+
+    def free_space(target: int | Path) -> Any:  # noqa: ANN401
+        # The backup's check asks through the directory's descriptor, on a disk that had ``needed`` bytes free.
+        if not isinstance(target, int):
+            return statvfs(target)
+        return SimpleNamespace(f_bavail=needed - (backup.stat().st_size if backup.is_file() else 0), f_frsize=1)
+
+    def interrupted(*_args: object) -> None:
+        msg = "killed mid-conversion"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(os, "statvfs", free_space)
+    convert_runs = legacy_agno3_conversion._convert_runs
+    monkeypatch.setattr(legacy_agno3_conversion, "_convert_runs", interrupted)
+    with pytest.raises(RuntimeError, match="killed"):
+        migrate_conversation_database(database, _NAMES)
+    assert (database.read_bytes(), backup.read_bytes()) == (original, original)
+
+    monkeypatch.setattr(legacy_agno3_conversion, "_convert_runs", convert_runs)
+    migrate_conversation_database(database, _NAMES)
+
+    assert _is_converted(database)
+    assert backup.read_bytes() == original
+
+
 class _RefusesVacuum(sqlite3.Connection):
     def execute(self, sql: str, *parameters: Any) -> sqlite3.Cursor:  # noqa: ANN401
         if sql == "VACUUM":
@@ -1828,11 +1863,11 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     locked, full = _store_at(root / "agents/locked"), _store_at(root / "agents/full")
     write_backup = legacy_agno3_conversion.write_conversion_backup
 
-    def backup_without_space(connection: sqlite3.Connection, database: Path, descriptors: ExitStack) -> Path:
+    def backup_without_space(database: Path, descriptors: ExitStack) -> Path:
         if database == full:
             msg = f"Converting {database} to storage v2 needs more bytes"
             raise ConversionSpaceError(msg)
-        return write_backup(connection, database, descriptors)
+        return write_backup(database, descriptors)
 
     monkeypatch.setattr(legacy_agno3_conversion, "write_conversion_backup", backup_without_space)
     before = outside.read_bytes()

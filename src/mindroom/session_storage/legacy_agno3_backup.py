@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at
 
 if TYPE_CHECKING:
-    import sqlite3
     from contextlib import ExitStack
     from pathlib import Path
 
@@ -31,31 +30,33 @@ class ConversionSpaceError(RuntimeError):
 # the conversion's Agno-era steps still read.
 # Last legacy release: v2026.10.569; replacement: the next release, storage v2's `<s>_log_*` tables.
 # Handling: Before the conversion writes anything, copy the file byte for byte to `<name>.db.pre-storage-v2` beside
-# it, so a downgrade can restore it; MindRoom never deletes the backup.
+# it, so a downgrade can restore it; a retry replaces an earlier attempt's backup, and MindRoom never deletes the backup
+# of a converted database.
 # Coverage: tests/session_storage/test_legacy_agno3_backup.py.
-def write_conversion_backup(connection: sqlite3.Connection, database: Path, descriptors: ExitStack) -> Path:
-    """Copy ``database`` to ``<name>.db.pre-storage-v2`` beside it, while ``connection`` holds its write lock.
+def write_conversion_backup(database: Path, descriptors: ExitStack) -> Path:
+    """Copy ``database`` to ``<name>.db.pre-storage-v2`` beside it, called while the conversion holds its write lock.
 
-    Free space must be at least two and a half times the file's size. The copy reads and writes only through descriptors of the
-    pinned directory, never following a link, and replaces an earlier attempt's temporary file.
+    Free space must be at least two and a half times the file's size. The copy reads and writes only through
+    descriptors of the pinned directory, never following a link, and replaces an earlier attempt's files.
 
     ``descriptors`` takes the database file's own descriptor. SQLite's locks are POSIX record locks, which a
     process loses on every descriptor of the file as soon as it closes any one of them, so the caller must close
-    ``descriptors`` only after it has closed ``connection``.
+    ``descriptors`` only after it has closed its connection.
     """
-    if not connection.in_transaction:
-        msg = f"The conversion backup of {database} needs the database's write lock"
-        raise RuntimeError(msg)
     backup_name = f"{database.name}{BACKUP_SUFFIX}"
     temporary_name = f"{backup_name}{_TEMPORARY_SUFFIX}"
     with open_directory_within_root(database.parent) as directory:
-        # A crashed attempt's file is unlinked by name, so a link planted there loses only itself.
-        with suppress(FileNotFoundError):
-            os.unlink(temporary_name, dir_fd=directory)
+        # Under the write lock the database is unconverted, since a failed or crashed attempt rolled back, so that
+        # attempt's backup holds nothing the database lacks and must not count against this attempt's free space. Its
+        # files are unlinked by name, so a link planted there loses only itself.
+        for name in (temporary_name, backup_name):
+            with suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=directory)
         source = open_regular_file_at(directory, database.name)
         descriptors.callback(os.close, source)
-        # The backup takes the file's size and the converted file grows by about as much again, measured at up to
-        # 2.04 times the size in all, so two and a half times leaves a margin.
+        # The backup takes the file's size and the converted file grows by about as much again before compaction:
+        # measured at up to 2.2 times the size in all (a 391 MB database's backup and an 860 MB converted file), so
+        # two and a half times leaves a margin.
         _require_free_space(directory, database, 5 * os.fstat(source).st_size // 2)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         with (
