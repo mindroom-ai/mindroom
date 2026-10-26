@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.response_runner import ResponseRequest
 
 
@@ -196,8 +197,7 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
 
     async def failing_process(_request: object, **kwargs: object) -> _ResponseGenerationOutcome:
         on_delivery_started = cast("Callable[[str | None], None]", kwargs["on_delivery_started"])
-        collector = cast("list[str]", kwargs["attempt_run_id_collector"])
-        collector.append("run-attempt-1")
+        cast("TurnRecorder", kwargs["turn_recorder"]).set_run_id("run-attempt-1")
         on_delivery_started("$stream-event")
         msg = "delivery pipe burst"
         raise RuntimeError(msg)

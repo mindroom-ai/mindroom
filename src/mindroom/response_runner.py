@@ -1040,7 +1040,6 @@ class _PreparedResponseRuntime:
     """Resolved runtime context shared by streaming and non-streaming responses."""
 
     resolved_target: MessageTarget
-    response_thread_id: str | None
     media_inputs: MediaInputs
     session_id: str
     model_prompt: str
@@ -2445,11 +2444,8 @@ class ResponseRunner:
         """Build normal post-response facts for one resumed native run."""
         return ResponseOutcome(
             response_run_id=final.response_run_id or continuation.run_id,
-            session_id=continuation.session_id,
             run_succeeded=final.terminal_status == "completed",
             response_target=target,
-            thread_summary_room_id=continuation.room_id if target.resolved_thread_id is not None else None,
-            thread_summary_thread_id=target.resolved_thread_id,
             thread_summary_message_count_hint=continuation.thread_summary_message_count_hint,
             thread_summary_entity_name=continuation.entity_name,
         )
@@ -2736,7 +2732,7 @@ class ResponseRunner:
         session_scope: HistoryScope,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-        run_id: str | None,
+        run_id: str,
         response_event_id: str | None,
     ) -> None:
         """Persist one failed or interrupted turn that never completed."""
@@ -2817,7 +2813,7 @@ class ResponseRunner:
         session_scope: HistoryScope,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-        run_id: str | None,
+        run_id: str,
         is_team: bool,
         response_event_id: str | None,
     ) -> None:
@@ -2834,7 +2830,7 @@ class ResponseRunner:
         persist_interrupted_replay_snapshot(
             storage=self.deps.state_writer.create_storage(execution_identity, scope=session_scope),
             session=new_scope_session(session_id=session_id, scope_id=session_scope.scope_id, is_team=is_team),
-            run_id=recorder.run_id or run_id or str(uuid4()),
+            run_id=recorder.run_id or run_id,
             snapshot=recorder.interrupted_snapshot(),
         )
 
@@ -2845,7 +2841,7 @@ class ResponseRunner:
         session_scope: HistoryScope,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-        run_id: str | None,
+        run_id: str,
         is_team: bool,
         response_event_id: str | None,
     ) -> None:
@@ -3854,7 +3850,6 @@ class ResponseRunner:
         run_id: str | None,
         active_event_ids: set[str],
         transient_enrichment_items: Sequence[EnrichmentItem],
-        system_enrichment_items: Sequence[EnrichmentItem],
     ) -> ResponseTurnContext:
         """Build the per-turn identity context for one agent response."""
         matrix_target_item = _matrix_message_target_item(
@@ -3892,7 +3887,7 @@ class ResponseRunner:
                 transient_enrichment_items,
                 matrix_target_item,
             ),
-            system_enrichment_items=tuple(system_enrichment_items),
+            system_enrichment_items=tuple(request.system_enrichment_items),
             participation=runtime.participation,
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
@@ -5005,11 +5000,8 @@ class ResponseRunner:
         def build_team_post_response_outcome(_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
             return ResponseOutcome(
                 response_run_id=team_turn_recorder.run_id or response_run_id,
-                session_id=session_id,
                 run_succeeded=team_turn_recorder.outcome == "completed",
                 response_target=resolved_target,
-                thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
-                thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )
@@ -5120,7 +5112,6 @@ class ResponseRunner:
         )
         return _PreparedResponseRuntime(
             resolved_target=resolved_target,
-            response_thread_id=response_thread_id,
             media_inputs=media_inputs,
             session_id=session_id,
             model_prompt=resolved_model_prompt,
@@ -5137,11 +5128,11 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        run_id: str | None,
+        run_id: str,
         runtime: _PreparedResponseRuntime,
+        history_scope: HistoryScope,
         active_event_ids: set[str],
         turn_recorder: TurnRecorder,
-        attempt_run_id_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> _NonStreamingGeneration:
         """Run one non-streaming AI request and return its artifacts by value."""
@@ -5151,9 +5142,6 @@ class ResponseRunner:
         )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
-
-        def note_attempt_run_id(current_run_id: str, _model_name: str) -> None:
-            attempt_run_id_collector.append(current_run_id)
 
         show_tool_calls = runtime.show_tool_calls
 
@@ -5177,7 +5165,6 @@ class ResponseRunner:
                     run_id=run_id,
                     active_event_ids=active_event_ids,
                     transient_enrichment_items=transient_enrichment_items,
-                    system_enrichment_items=request.system_enrichment_items,
                 ),
                 prompt=request.prompt,
                 runtime_paths=self.deps.runtime_paths,
@@ -5187,7 +5174,6 @@ class ResponseRunner:
                 current_timestamp_ms=request.current_timestamp_ms,
                 current_prompt_is_structured=request.current_prompt_is_structured,
                 knowledge=knowledge_resolution.knowledge,
-                on_attempt_start=note_attempt_run_id,
                 media=runtime.media_inputs,
                 show_tool_calls=show_tool_calls,
                 collect_streamed_response=show_tool_calls,
@@ -5222,7 +5208,7 @@ class ResponseRunner:
                 raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
-                session_scope=self.deps.state_writer.history_scope(),
+                session_scope=history_scope,
                 session_id=runtime.session_id,
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 run_id=run_id,
@@ -5236,13 +5222,13 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        run_id: str | None,
+        run_id: str,
         runtime: _PreparedResponseRuntime,
+        history_scope: HistoryScope,
         active_event_ids: set[str],
         turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
-        attempt_run_id_collector: list[str],
         identity: ResponseIdentity,
         pipeline_timing: DispatchPipelineTiming | None = None,
         visible_event_id_callback: Callable[[str], None] | None = None,
@@ -5252,9 +5238,6 @@ class ResponseRunner:
             target=runtime.resolved_target,
             request=request,
         )
-
-        def note_attempt_run_id(current_run_id: str, _model_name: str) -> None:
-            attempt_run_id_collector.append(current_run_id)
 
         def note_visible_response_event_id(response_event_id: str) -> None:
             turn_recorder.set_response_event_id(response_event_id)
@@ -5281,7 +5264,6 @@ class ResponseRunner:
                     run_id=run_id,
                     active_event_ids=active_event_ids,
                     transient_enrichment_items=transient_enrichment_items,
-                    system_enrichment_items=request.system_enrichment_items,
                 ),
                 prompt=request.prompt,
                 runtime_paths=self.deps.runtime_paths,
@@ -5291,7 +5273,6 @@ class ResponseRunner:
                 current_timestamp_ms=request.current_timestamp_ms,
                 current_prompt_is_structured=request.current_prompt_is_structured,
                 knowledge=knowledge_resolution.knowledge,
-                on_attempt_start=note_attempt_run_id,
                 media=runtime.media_inputs,
                 show_tool_calls=runtime.show_tool_calls,
                 run_metadata_collector=run_metadata_content,
@@ -5346,7 +5327,7 @@ class ResponseRunner:
                 if turn_recorder.outcome == "interrupted":
                     await self._persist_interrupted_recorder_off_loop(
                         recorder=turn_recorder,
-                        session_scope=self.deps.state_writer.history_scope(),
+                        session_scope=history_scope,
                         session_id=runtime.session_id,
                         execution_identity=runtime.tool_dispatch.execution_identity,
                         run_id=run_id,
@@ -5359,7 +5340,7 @@ class ResponseRunner:
                 raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
-                session_scope=self.deps.state_writer.history_scope(),
+                session_scope=history_scope,
                 session_id=runtime.session_id,
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 run_id=run_id,
@@ -5374,8 +5355,9 @@ class ResponseRunner:
         *,
         run_id: str,
         on_delivery_started: Callable[[str | None], None],
-        attempt_run_id_collector: list[str],
+        turn_recorder: TurnRecorder,
         runtime: _PreparedResponseRuntime,
+        history_scope: HistoryScope,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a response without streaming."""
         request = self._request_with_locked_target(request, runtime.resolved_target)
@@ -5384,25 +5366,15 @@ class ResponseRunner:
             identity=response_identity,
             request=request,
         )
-        session_scope = self.deps.state_writer.history_scope()
         session_started_watch = await self._setup_session_watch(
             lifecycle,
             request=request,
             tool_dispatch=runtime.tool_dispatch,
             session_id=runtime.session_id,
-            scope=session_scope,
+            scope=history_scope,
             resolved_target=runtime.resolved_target,
         )
         active_event_ids = await self._active_response_event_ids(request.room_id)
-        turn_recorder = self._build_turn_recorder(
-            user_message=runtime.model_prompt,
-            user_message_is_structured=request.current_prompt_is_structured,
-            reply_to_event_id=request.reply_to_event_id,
-            room_id=request.room_id,
-            thread_id=runtime.resolved_target.resolved_thread_id,
-            requester_id=request.user_id,
-            matrix_run_metadata=_agent_run_metadata(request),
-        )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
             return _generation_outcome(delivery, turn_recorder)
@@ -5413,9 +5385,9 @@ class ResponseRunner:
                     request,
                     run_id=run_id,
                     runtime=runtime,
+                    history_scope=history_scope,
                     active_event_ids=active_event_ids,
                     turn_recorder=turn_recorder,
-                    attempt_run_id_collector=attempt_run_id_collector,
                     pipeline_timing=request.pipeline_timing,
                 )
             except Exception:
@@ -5427,7 +5399,7 @@ class ResponseRunner:
                     await self._persist_failed_turn(
                         turn_recorder,
                         is_team=False,
-                        session_scope=session_scope,
+                        session_scope=history_scope,
                         session_id=runtime.session_id,
                         execution_identity=runtime.tool_dispatch.execution_identity,
                         run_id=run_id,
@@ -5478,7 +5450,7 @@ class ResponseRunner:
                 raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
-                session_scope=session_scope,
+                session_scope=history_scope,
                 session_id=runtime.session_id,
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 run_id=run_id,
@@ -5495,8 +5467,9 @@ class ResponseRunner:
         *,
         run_id: str,
         on_delivery_started: Callable[[str | None], None],
-        attempt_run_id_collector: list[str],
+        turn_recorder: TurnRecorder,
         runtime: _PreparedResponseRuntime,
+        history_scope: HistoryScope,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a streamed response."""
         request = self._request_with_locked_target(request, runtime.resolved_target)
@@ -5505,13 +5478,12 @@ class ResponseRunner:
             identity=response_identity,
             request=request,
         )
-        session_scope = self.deps.state_writer.history_scope()
         session_started_watch = await self._setup_session_watch(
             lifecycle,
             request=request,
             tool_dispatch=runtime.tool_dispatch,
             session_id=runtime.session_id,
-            scope=session_scope,
+            scope=history_scope,
             resolved_target=runtime.resolved_target,
         )
         # The streaming path keeps these caller-owned (unlike the non-streaming
@@ -5522,15 +5494,6 @@ class ResponseRunner:
         active_event_ids = await self._active_response_event_ids(request.room_id)
         tool_trace: list[Any] = []
         transport_outcome: StreamTransportOutcome | None = None
-        turn_recorder = self._build_turn_recorder(
-            user_message=runtime.model_prompt,
-            user_message_is_structured=request.current_prompt_is_structured,
-            reply_to_event_id=request.reply_to_event_id,
-            room_id=request.room_id,
-            thread_id=runtime.resolved_target.resolved_thread_id,
-            requester_id=request.user_id,
-            matrix_run_metadata=_agent_run_metadata(request),
-        )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
             return _generation_outcome(delivery, turn_recorder)
@@ -5546,11 +5509,11 @@ class ResponseRunner:
                         identity=response_identity,
                         run_id=run_id,
                         runtime=runtime,
+                        history_scope=history_scope,
                         active_event_ids=active_event_ids,
                         turn_recorder=turn_recorder,
                         tool_trace=tool_trace,
                         run_metadata_content=run_metadata_content,
-                        attempt_run_id_collector=attempt_run_id_collector,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=on_delivery_started,
                     )
@@ -5585,7 +5548,7 @@ class ResponseRunner:
             ):
                 await self._persist_interrupted_recorder_off_loop(
                     recorder=turn_recorder,
-                    session_scope=session_scope,
+                    session_scope=history_scope,
                     session_id=runtime.session_id,
                     execution_identity=runtime.tool_dispatch.execution_identity,
                     run_id=run_id,
@@ -5882,8 +5845,16 @@ class ResponseRunner:
         )
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         generation: _ResponseGenerationOutcome | None = None
-        attempt_run_ids: list[str] = []
         response_run_id = str(uuid4())
+        turn_recorder = self._build_turn_recorder(
+            user_message=runtime.model_prompt,
+            user_message_is_structured=normalized_request.current_prompt_is_structured,
+            reply_to_event_id=normalized_request.reply_to_event_id,
+            room_id=normalized_request.room_id,
+            thread_id=runtime.resolved_target.resolved_thread_id,
+            requester_id=normalized_request.user_id,
+            matrix_run_metadata=_agent_run_metadata(normalized_request),
+        )
         progress = _DeliveryProgress()
         response_identity = self._response_identity(request, response_kind="ai")
         lifecycle = self._build_lifecycle(
@@ -5922,16 +5893,18 @@ class ResponseRunner:
                     delivery_request,
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,
-                    attempt_run_id_collector=attempt_run_ids,
+                    turn_recorder=turn_recorder,
                     runtime=runtime,
+                    history_scope=history_scope,
                 )
             else:
                 generation = await self._process_and_respond(
                     delivery_request,
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,
-                    attempt_run_id_collector=attempt_run_ids,
+                    turn_recorder=turn_recorder,
                     runtime=runtime,
+                    history_scope=history_scope,
                 )
             if (
                 participation is not None
@@ -5951,18 +5924,14 @@ class ResponseRunner:
 
         def build_post_response_outcome(final_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
             return ResponseOutcome(
-                # The live collector list also covers raising exit paths, where the
-                # returned generation outcome never materialized.
-                response_run_id=attempt_run_ids[-1] if attempt_run_ids else response_run_id,
-                session_id=session_id,
+                # The recorder also covers raising exit paths, where the returned generation outcome never materialized.
+                response_run_id=turn_recorder.run_id or response_run_id,
                 run_succeeded=(
                     generation.run_succeeded
                     if generation is not None
                     else final_delivery_outcome.terminal_status == "completed" and not final_delivery_outcome.suppressed
                 ),
                 response_target=resolved_target,
-                thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
-                thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )

@@ -803,7 +803,7 @@ class TestUserIdPassthrough:
 
             mock_ai.assert_called_once()
             assert mock_ai.call_args.args[0].requester_id == "@alice:localhost"
-            assert callable(mock_ai.call_args.kwargs["on_attempt_start"])
+            assert mock_ai.call_args.kwargs["turn_recorder"] is not None
 
     @pytest.mark.asyncio
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
@@ -857,7 +857,7 @@ class TestUserIdPassthrough:
 
             mock_stream.assert_called_once()
             assert mock_stream.call_args.args[0].requester_id == "@bob:localhost"
-            assert callable(mock_stream.call_args.kwargs["on_attempt_start"])
+            assert mock_stream.call_args.kwargs["turn_recorder"] is not None
 
     @pytest.mark.asyncio
     async def test_streaming_tool_context_cleanup_survives_cross_task_close(self, tmp_path: Path) -> None:

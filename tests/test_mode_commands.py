@@ -111,7 +111,6 @@ async def test_mode_command_matches_response_runner_session(
         run_id="run",
         active_event_ids={"$next"},
         transient_enrichment_items=(),
-        system_enrichment_items=(),
     )
     expected = "minimal" if action == "show" else "standard"
     assert turn.agent_mode == expected

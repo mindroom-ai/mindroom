@@ -125,6 +125,7 @@ from mindroom.history.session_context import (
     load_scope_session,
     resolve_bound_team_scope,
 )
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import (
     CompactionLifecycle,
     HistoryScope,
@@ -163,6 +164,8 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
+    _agent_run_metadata,
+    _PreparedResponseRuntime,
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
@@ -564,6 +567,23 @@ async def prepare_agent_and_prompt_for_test(
     )
 
 
+def agent_turn_recorder_for_test(
+    runner: ResponseRunner,
+    request: ResponseRequest,
+    runtime: _PreparedResponseRuntime,
+) -> TurnRecorder:
+    """Return the recorder the runner gives an agent turn of ``request`` under ``runtime``."""
+    return runner._build_turn_recorder(
+        user_message=runtime.model_prompt,
+        user_message_is_structured=request.current_prompt_is_structured,
+        reply_to_event_id=request.reply_to_event_id,
+        room_id=request.room_id,
+        thread_id=runtime.resolved_target.resolved_thread_id,
+        requester_id=request.user_id,
+        matrix_run_metadata=_agent_run_metadata(request),
+    )
+
+
 async def process_and_respond_for_test(
     runner: ResponseRunner,
     request: ResponseRequest,
@@ -573,17 +593,20 @@ async def process_and_respond_for_test(
 ) -> _ResponseGenerationOutcome:
     """Deliver ``request`` through the runner's streaming or non-streaming driver with a plain turn's options.
 
-    ``options`` names the driver options a test sets; otherwise the turn runs under a fresh run id, ignores its
-    delivery start, collects its attempt run ids into a list nothing reads, and prepares its runtime from ``request``.
+    ``options`` names the driver options a test sets; otherwise the turn runs under a fresh run id in the bot's
+    history scope, ignores its delivery start, prepares its runtime from ``request``, and records into the recorder
+    the runner gives such a turn.
     """
     driver = runner._process_and_respond_streaming if streaming else runner._process_and_respond
+    runtime = options.pop("runtime", None) or await runner.prepare_response_runtime(request)
     driver_options: dict[str, Any] = {
         "run_id": str(uuid.uuid4()),
         "on_delivery_started": lambda _event_id: None,
-        "attempt_run_id_collector": [],
+        "runtime": runtime,
+        "history_scope": runner.deps.state_writer.history_scope(),
     }
-    if "runtime" not in options:
-        driver_options["runtime"] = await runner.prepare_response_runtime(request)
+    if "turn_recorder" not in options:
+        driver_options["turn_recorder"] = agent_turn_recorder_for_test(runner, request, runtime)
     return await driver(request, **(driver_options | options))
 
 

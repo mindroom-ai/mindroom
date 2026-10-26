@@ -154,8 +154,8 @@ def build_matrix_run_metadata(
     correlation_id: str | None = None,
     model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Build metadata dict for a run, tracking consumed Matrix event ids."""
+) -> dict[str, Any]:
+    """Build metadata dict for a run, tracking consumed Matrix event ids; it always records the model params."""
     metadata = dict(extra_metadata or {})
     if room_id is not None:
         metadata["room_id"] = room_id
@@ -190,7 +190,7 @@ def build_matrix_run_metadata(
         dict,
     ):
         metadata.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
-    return metadata or None
+    return metadata
 
 
 def build_llm_request_log_context(
