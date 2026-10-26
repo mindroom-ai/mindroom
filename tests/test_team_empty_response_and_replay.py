@@ -197,7 +197,7 @@ async def test_stored_history_does_not_count_as_an_attempt_s_answer(
 
     assert text.endswith("Recovered answer")
     assert "Previous turn answer" not in text
-    assert "Previous turn answer" in str(team.models["default"].requests[0].messages[2].content)
+    assert "Previous turn answer" in str(team.models["default"].requests[0].messages[3].content)
     assert len(team.models["default"].requests) == 2
 
 

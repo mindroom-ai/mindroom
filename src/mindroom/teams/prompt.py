@@ -1,21 +1,21 @@
-# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""The team leader's system message: the ``<team>`` block, the tool instructions, and the context.
+"""The team leader's system prompt, rendered like an agent's: the ``<team>`` block and tool instructions, then the turn.
 
-A team has no description, role, or instructions of its own, so the ``<team>`` block (the capability sentence, the
-member roster, and the mode's ``<delegation>`` block) opens the prompt. Texts and layout are part of every leader
-request's prompt-cache prefix: changing them changes the cacheable prefix and may prevent reuse of cached tokens.
+The ``<team>`` block (the capability sentence, the member roster, and the mode's ``<delegation>`` block) and the
+leader's tool instructions are the stable part; the date and session context with the turn's system enrichment are
+the turn part (``agent_loop.prompt``).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.llm.messages import Message
+from mindroom.agent_loop.prompt import PromptSpec, render_system_messages
 from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from mindroom.llm.messages import Message
     from mindroom.teams.spec import TeamMember
 
 _TEAM_OPENING_PROMPT = (
@@ -64,8 +64,7 @@ _TEAM_MEMBERS_CONTEXT_NOTE = (
 _TEAM_MEMBER_IDS_NOTE = "Member ids are the ids shown in the roster above, used exactly as written.\n"
 
 TEAM_MEMBER_NOT_FOUND_TEMPLATE = (
-    "Member with ID {member_id} not found in the team or any subteams. "
-    "Please choose the correct member from the list of members:\n\n{roster}"
+    "Member with ID {member_id} is not in this team. Choose a member from the list of members:\n\n{roster}"
 )
 
 
@@ -77,39 +76,44 @@ def render_members_roster(members: Sequence[TeamMember]) -> str:
     )
 
 
-def render_leader_system_message(
+def render_leader_system_messages(
     members: Sequence[TeamMember],
     mode: TeamMode,
     *,
     tool_instructions: Sequence[str],
-    additional_context: str,
-) -> Message:
-    """Return the leader's system message for ``members`` in ``mode``.
+    turn_context: str,
+) -> tuple[Message, ...]:
+    """Return the leader's system messages for ``members`` in ``mode``.
 
-    ``tool_instructions`` are the leader's toolkit instructions in offer order, and ``additional_context`` the
-    per-turn context MindRoom adds: the date context and any appended system enrichment.
+    ``tool_instructions`` are the leader's toolkit instructions in offer order, and ``turn_context`` the turn part: the
+    date and session context and any appended system enrichment.
     """
     delegation = (
         _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE
         if mode is TeamMode.COLLABORATE
         else _TEAM_COORDINATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE + _TEAM_MEMBER_IDS_NOTE
     )
-    content = (
+    team = (
         "<team>\n"
         f"{_TEAM_OPENING_PROMPT}"
         "\n<team_members>\n"
         f"{render_members_roster(members)}"
         "</team_members>\n"
         f"\n<delegation>\n{delegation}</delegation>\n"
-        "</team>\n\n"
+        "</team>"
     )
-    content += "".join(f"{instruction}\n" for instruction in tool_instructions)
-    content += f"<additional_context>\n{additional_context.strip()}\n</additional_context>\n\n"
-    return Message(role="system", content=content.strip())
+    return render_system_messages(
+        PromptSpec(
+            role=None,
+            instructions=(team,),
+            tool_instructions=tuple(tool_instructions),
+            turn_context=turn_context,
+        ),
+    )
 
 
 __all__ = [
     "TEAM_MEMBER_NOT_FOUND_TEMPLATE",
-    "render_leader_system_message",
+    "render_leader_system_messages",
     "render_members_roster",
 ]

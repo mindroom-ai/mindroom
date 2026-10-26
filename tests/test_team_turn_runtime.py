@@ -450,7 +450,8 @@ async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_
     await team.stream(ctx=ctx)
 
     # The transient block is the user message right after the prompt, apart from it.
-    assert [(message.role, message.content) for message in team.models["default"].requests[0].messages[1:]] == [
+    leader_request = team.models["default"].requests[0].messages
+    assert [(message.role, message.content) for message in leader_request if message.role != "system"] == [
         ("user", f'Current message:\n<msg event_id="{EVENT_ID}" from="{REQUESTER_ID}"><![CDATA[Hello]]></msg>'),
         (
             "user",

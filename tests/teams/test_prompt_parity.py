@@ -11,8 +11,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.llm.messages import Message
+from mindroom.teams.prompt import render_leader_system_messages
+from mindroom.teams.spec import TeamMode
 from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import golden_path, load_golden, record_scenario, regenerated_golden
+from tests.fakes.scripted_model import ScriptedModel
+from tests.team_runtime.squad import squad
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,3 +41,16 @@ async def test_the_production_team_turn_sends_every_golden_request(name: str, tm
     ]
     assert len(leader_requests) == 2
     assert len({request.messages[0].content for request in leader_requests}) == 1
+
+
+def test_the_leader_prompt_keeps_its_roster_stable_and_its_date_in_the_turn_part() -> None:
+    """The roster and delegation rules are the stable system message; a new date changes only the turn message."""
+    members = squad(ScriptedModel([]), ScriptedModel([]), ScriptedModel([])).members
+
+    monday = render_leader_system_messages(members, TeamMode.COORDINATE, tool_instructions=(), turn_context="Monday.")
+    tuesday = render_leader_system_messages(members, TeamMode.COORDINATE, tool_instructions=(), turn_context="Tuesday.")
+
+    assert monday[0].content == tuesday[0].content
+    assert str(monday[0].content).startswith("<team>\n")
+    assert str(monday[0].content).endswith("</team>")
+    assert (monday[1].content, tuesday[1].content) == ("Monday.", "Tuesday.")

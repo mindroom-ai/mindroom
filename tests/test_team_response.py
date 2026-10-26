@@ -151,7 +151,7 @@ def _contents(request_messages: Sequence[Message]) -> list[tuple[str, str]]:
 
 def _leader_turn_messages(team: TeamTurn) -> list[tuple[str, str]]:
     """Return the leader's first request after its system message: the replayed history, then the turn."""
-    return _contents(_leader(team).requests[0].messages[1:])
+    return _contents([message for message in _leader(team).requests[0].messages if message.role != "system"])
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +676,9 @@ async def test_a_private_ad_hoc_team_stores_under_its_requester_scope_and_replay
         ("run-1", team.scope.scope_id),
         ("run-2", team.scope.scope_id),
     ]
-    first_prompt, _answer, second_prompt = _contents(_leader(team).requests[1].messages[1:])
+    first_prompt, _answer, second_prompt = _contents(
+        [message for message in _leader(team).requests[1].messages if message.role != "system"],
+    )
     assert "First question" in first_prompt[1]
     assert _answer == ("assistant", "First answer")
     assert "Second question" in second_prompt[1]

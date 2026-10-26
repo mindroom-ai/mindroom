@@ -19,13 +19,13 @@ from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.providers import registry as provider_registry
-from mindroom.system_prompt import render_date_context
+from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.teams.formation import (
     not_materializable_team_agents_message,
     resolve_live_shared_agent_names,
     resolve_team_materializable_agent_names,
 )
-from mindroom.teams.prompt import render_leader_system_message
+from mindroom.teams.prompt import render_leader_system_messages
 from mindroom.teams.spec import TeamMember, TeamSpec
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
@@ -408,7 +408,7 @@ def build_team_spec(
 
     The leader is named by the team's label (``materialized_team_label``) and identified by the team's history scope,
     or by that label for a team that names no member and so has no scope. The leader prompt holds each member's
-    roster role, the leader's tool instructions in offer order, the provider family's note, and the date context with
+    roster role and the leader's tool instructions in offer order, then the date and session context with
     ``system_enrichment`` appended; the team's own history settings and call budget come from the configured team
     ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
@@ -449,18 +449,23 @@ def build_team_spec(
         toolkits=() if jobs is None else (jobs.controls,),
         max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
     )
-    additional_context = appended_context(
-        render_date_context(config.timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
+    turn_context = appended_context(
+        render_session_context(
+            render_date_context(
+                config.timezone,
+                datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
+            ),
+        ),
         system_enrichment,
     )
-    system_message = render_leader_system_message(
+    system_messages = render_leader_system_messages(
         team_members,
         mode,
         tool_instructions=toolkit_instructions(leader.toolkits),
-        additional_context=additional_context,
+        turn_context=turn_context,
     )
     return BuiltTeam(
-        spec=TeamSpec(leader=replace(leader, system_messages=(system_message,)), mode=mode, members=team_members),
+        spec=TeamSpec(leader=replace(leader, system_messages=system_messages), mode=mode, members=team_members),
         history_settings=team_view.history_settings,
         leader_middleware=() if jobs is None else jobs.middleware,
         leader_jobs=None if jobs is None else jobs.actor,
