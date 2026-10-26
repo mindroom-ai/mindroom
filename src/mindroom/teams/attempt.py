@@ -47,8 +47,11 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
     unless that is not its content: a failed run hands over why it failed. What a resumed run carried over from its
-    pause the document the resume continues already accounts for.
+    pause the document the resume continues already accounts for. A paused run shows nothing more: beyond the text
+    it streamed, its content is a paused notice, which a team reply never shows, as a pause of a live turn does not.
     """
+    if run.status is RunStatus.paused:
+        return None
     handover = run.new_handover_content
     return None if streamed and handover == run.content else handover
 

@@ -421,7 +421,7 @@ async def continue_paused_team_run(
                         await publish_team_presentation(progress, presentation)
         continued = attempt.terminal_record()
         # Each resumed run's slot shows what the run hands over beyond what it carried over from the pause and its
-        # events did not show: a paused notice, or a failed member run's reason.
+        # events did not show, such as a failed member run's reason; a run that paused again shows no paused notice.
         for run in (continued, *continued.ended_member_runs):
             attempt.show_unshown_handover(run)
         paused = paused_attempt_from_response(

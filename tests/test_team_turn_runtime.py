@@ -1207,13 +1207,6 @@ async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
             "**Writer**: Writer unavailable\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\nDone.",
             id="completed",
         ),
-        pytest.param(
-            [delegate("call-write", "writer", "Touch it too")],
-            [calls(tool_call("touch", "call-touch-2", label="risky"))],
-            f"**Writer**: {_MEMBER_PAUSED}\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\n"
-            "Team run paused. The following require input:\n- Writer: touch requires confirmation",
-            id="paused-again",
-        ),
     ],
 )
 async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_streamed_nothing(
@@ -1226,8 +1219,7 @@ async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_stream
     """A resume shows each run's content in a slot that streamed no text of its own, as the Agno-backed resume did.
 
     The approved checker's streamed answer stands as it streamed. The writer the resumed leader then hands a task
-    streams nothing: its error, or its paused notice when its own call pauses the team again, fills its slot, and a
-    leader that streamed nothing before that pause shows its paused notice as the consensus.
+    streams nothing, and its error fills its slot.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(leader)
@@ -1242,6 +1234,39 @@ async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_stream
 
     assert ProbeToolkit.calls == ["dangerous"]
     assert result.response_text == HEADER + body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+async def test_a_resume_that_pauses_on_another_member_s_call_shows_no_paused_notice_through_the_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """A resume that pauses again on a call of the writer shows no paused notice, nor does the reply it completes.
+
+    The writer the resumed leader hands a task pauses on its own gated call without text, so its run and the leader's
+    hold paused notices naming that call, which no earlier pause showed. A blocking reply and a streamed one end alike.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream)
+    team.models["default"] = ScriptedModel([delegate("call-write", "writer", "Touch it too"), answer("Both touched.")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel([calls(tool_call("touch", "call-touch-2", label="risky")), answer("")])
+
+    repaused = await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
+    assert isinstance(repaused, PausedAttempt)
+    assert repaused.response_text == (
+        f"{HEADER}**Checker**: Touched.\n\n\n*No team consensus - showing individual responses only*"
+    )
+    writer_call = replace(member_approval("call-touch-2", "risky"), invoking_agent="writer")
+    result = await team.resume(repaused, approved=True, approvals=(writer_call,))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous", "risky"]
+    assert result.response_text == f"{HEADER}**Checker**: Touched.\n\n\n**Team Consensus**:\n\nBoth touched."
+    record, _members = team.stored_runs()
+    assert record.status is RunStatus.completed
 
 
 _KEY = "api_key=unit-test-secret"
@@ -1437,6 +1462,8 @@ async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it
 async def _pause_after_the_checker_wrote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool = True,
 ) -> tuple[TeamTurn, PausedAttempt]:
     """Pause the team on the checker's gated call after the leader and the checker each wrote a sentence."""
     team = squad_turn(
@@ -1452,12 +1479,11 @@ async def _pause_after_the_checker_wrote(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.stream(show_tool_calls=False)
+        await team.reply(stream=stream, show_tool_calls=False)
     return team, raised.value.paused
 
 
 _WROTE_BEFORE_THE_PAUSE = f"{HEADER}**Checker**: Let me touch it.\n\n\n**Team Consensus**:\n\nAsking the checker."
-_CHECKER_PAUSED_AGAIN = "Team run paused. The following require input:\n- Checker: touch requires confirmation"
 
 
 @pytest.mark.asyncio
@@ -1506,7 +1532,7 @@ async def test_a_member_that_pauses_again_after_approval_shows_its_earlier_text_
 ) -> None:
     """A member whose approved call leads only to another gated call keeps its earlier text once in the new pause.
 
-    The leader sends no request while its member waits, and its paused notice says what the team waits for.
+    The leader sends no request while its member waits, so its run holds a paused notice, which the pause does not show.
     """
     team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
@@ -1516,22 +1542,25 @@ async def test_a_member_that_pauses_again_after_approval_shows_its_earlier_text_
 
     assert isinstance(repaused, PausedAttempt)
     assert ProbeToolkit.calls == ["dangerous"]
-    assert repaused.response_text == f"{_WROTE_BEFORE_THE_PAUSE}\n\n{_CHECKER_PAUSED_AGAIN}"
+    assert repaused.response_text == _WROTE_BEFORE_THE_PAUSE
     state = repaused.response_presentation_state
     assert [member["content"] for member in state["members"]] == ["", "Let me touch it."]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
 ) -> None:
-    """Two approvals in a row show the text the checker wrote before the first pause once.
+    """Two approvals in a row show the text the checker wrote before the first pause once, and no paused notice.
 
     Its first approved call leads only to a second gated call, and after the second it answers without text, as
-    the leader does; the leader's paused notice from the second pause stays.
+    the leader does. A blocking reply and a streamed one end alike.
     """
-    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
+    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch, stream=stream)
     team.models["default"] = ScriptedModel([answer("")])
     team.models["checker-model"] = ScriptedModel([calls(tool_call("touch", "call-touch-2", label="again")), answer("")])
 
@@ -1541,7 +1570,7 @@ async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous", "again"]
-    assert result.response_text == f"{_WROTE_BEFORE_THE_PAUSE}\n\n{_CHECKER_PAUSED_AGAIN}"
+    assert result.response_text == _WROTE_BEFORE_THE_PAUSE
 
 
 @pytest.mark.asyncio
