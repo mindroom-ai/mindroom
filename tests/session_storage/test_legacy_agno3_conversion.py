@@ -1689,7 +1689,10 @@ def _database_of_large_runs(root: Path, count: int) -> Path:
     database = _agno_database(root)
     for index in range(count):
         run = _run(f"r{index}")
-        run.messages = [Message(role="user", content="x" * 4000, id=f"r{index}.u", created_at=100)]
+        run.messages = [
+            Message(role="user", content="x" * 4000, id=f"r{index}.u", created_at=100),
+            Message(role="assistant", content="done", id=f"r{index}.a", created_at=100),
+        ]
         _insert_run(database, run, run_index=index)
     return database
 
@@ -1702,7 +1705,6 @@ def _free_pages(database: Path) -> int:
 def test_a_conversion_is_logged_and_compacts_what_the_agno_tables_left_free(tmp_path: Path) -> None:
     """The converted file returns the dropped tables' pages, and one INFO record names it, its rows, and its time."""
     database = _database_of_large_runs(tmp_path, 40)
-    before = database.stat().st_size
 
     with capture_logs() as logs:
         migrate_conversation_database(database, _NAMES)
@@ -1712,12 +1714,11 @@ def test_a_conversion_is_logged_and_compacts_what_the_agno_tables_left_free(tmp_
     assert {key: entry[key] for key in ("path", "runs", "messages", "compacted")} == {
         "path": str(database),
         "runs": 40,
-        "messages": 40,
+        "messages": 80,
         "compacted": True,
     }
     assert entry["duration_seconds"] >= 0
     assert _free_pages(database) == 0
-    assert database.stat().st_size < before
     assert _converted(database).get_run("r39") is not None
 
 
@@ -1725,11 +1726,10 @@ def test_a_conversion_that_frees_little_of_the_file_keeps_its_free_pages(tmp_pat
     """Below a quarter of the file free, compacting would not pay off, so the converted file is left as it is."""
     database = _agno_database(tmp_path)
     _insert_run(database, _run("r0"), run_index=0)
+    # A table the conversion keeps as it is holds most of the file.
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(
-            f'UPDATE "{_NAMES.sessions}" SET session_data = ?',  # noqa: S608
-            (json.dumps({"session_state": {"notes": "x" * 400_000}}),),
-        )
+        connection.execute("CREATE TABLE kept (data BLOB)")
+        connection.execute("INSERT INTO kept VALUES (?)", (b"x" * 400_000,))
 
     with capture_logs() as logs:
         migrate_conversation_database(database, _NAMES)

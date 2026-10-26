@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,8 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.event_loop_stall import EventLoopStallDetector
 from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.schema import TableNames
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.fakes.scripted_model import ScriptedModel, calls, tool_call
 
@@ -32,6 +36,7 @@ _STABLE_EVENTS = {
     },
     "matrix_sync_stall_diagnostics": {"agent", "no_progress_seconds", "sync_age", "generation", "snapshots"},
     "tool_call_limit_reached": {"entity", "budget", "model_requests"},
+    "conversation_converted": {"path", "runs", "messages", "compacted", "duration_seconds"},
 }
 
 
@@ -48,6 +53,20 @@ def test_docs_page_documents_exactly_the_stable_events_and_fields() -> None:
         for name, body in zip(sections[1::2], sections[2::2], strict=True)
     }
     assert documented == _STABLE_EVENTS
+
+
+def test_conversation_converted_keeps_its_name_and_fields(tmp_path: Path) -> None:
+    """Converting a database that holds a table logs the pinned record."""
+    names = TableNames("code")
+    database = names.database_path(tmp_path)
+    database.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE other (x)")
+
+    with capture_logs() as logs:
+        migrate_conversation_database(database, names)
+
+    assert _emitted_fields(logs, "conversation_converted") == _STABLE_EVENTS["conversation_converted"]
 
 
 def test_scheduler_lag_summary_keeps_its_name_and_fields() -> None:
