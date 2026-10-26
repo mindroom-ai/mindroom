@@ -173,25 +173,19 @@ def _insert_generation_rows(connection: sqlite3.Connection, names: AgnoTableName
     compactions = quote_identifier(f"{names.sessions}_compactions")
     compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
     summaries = quote_identifier(names.summaries)
-    # Nothing indexes ``compaction_id``: one pass over the archive serves every generation, where a query per
-    # generation would read the whole archive each time.
-    newest_runs = dict(
-        connection.execute(
-            f"SELECT archived.compaction_id, MAX(run.run_index) FROM {compacted_runs} AS archived "  # noqa: S608
-            f"JOIN {quote_identifier(names.runs)} AS run "
-            "ON run.session_id = archived.session_id AND run.run_id = archived.run_id "
-            "WHERE archived.run_data IS NOT NULL AND run.parent_run_id IS NULL GROUP BY archived.compaction_id",
-        ),
-    )
-    event_ids = _generation_event_ids(connection, names, "event_ids")
-    seen_event_ids = _generation_event_ids(connection, names, "seen_event_ids")
     positions: dict[tuple[str, str], int] = {}
     generations = connection.execute(
         f"SELECT id, session_id, scope_key, summary, summary_model, legacy, created_at FROM {compactions} "  # noqa: S608
         f"WHERE session_id IN (SELECT session_id FROM {quote_identifier(names.sessions)}) ORDER BY id",
     ).fetchall()
     for generation_id, session_id, scope_key, summary, summary_model, legacy, created_at in generations:
-        newest_run = newest_runs.get(generation_id)
+        (newest_run,) = connection.execute(
+            f"SELECT MAX(run.run_index) FROM {compacted_runs} AS archived "  # noqa: S608
+            f"JOIN {quote_identifier(names.runs)} AS run "
+            "ON run.session_id = archived.session_id AND run.run_id = archived.run_id "
+            "WHERE archived.compaction_id = ? AND archived.run_data IS NOT NULL AND run.parent_run_id IS NULL",
+            (generation_id,),
+        ).fetchone()
         if legacy:
             position = -1
         elif newest_run is not None:
@@ -209,30 +203,37 @@ def _insert_generation_rows(connection: sqlite3.Connection, names: AgnoTableName
                 summary,
                 summary_model,
                 legacy,
-                json.dumps(sorted(event_ids.get(generation_id, ()))),
-                json.dumps(sorted(seen_event_ids.get(generation_id, ()))),
+                json.dumps(_generation_event_ids(connection, names, generation_id, "event_ids")),
+                json.dumps(_generation_event_ids(connection, names, generation_id, "seen_event_ids")),
                 created_at,
             ),
         )
 
 
-def _generation_event_ids(connection: sqlite3.Connection, names: AgnoTableNames, column: str) -> dict[int, set[str]]:
-    """Return the event ids each generation's archived runs carry in ``column``, plus a legacy generation's own.
+def _generation_event_ids(
+    connection: sqlite3.Connection,
+    names: AgnoTableNames,
+    generation_id: int,
+    column: str,
+) -> list[str]:
+    """Return the event ids a generation's archived runs carry in ``column``, plus a legacy generation's own.
 
     Only text entries of valid JSON count: worker code can write the archive, and no writer stored any other.
     """
     compactions = quote_identifier(f"{names.sessions}_compactions")
     compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
-    event_ids: dict[int, set[str]] = {}
-    for generation_id, value in connection.execute(
-        f"SELECT archived.compaction_id, item.value FROM {compacted_runs} AS archived, "  # noqa: S608
-        f"json_each({_json_or_empty(f'archived.{column}')}) AS item WHERE item.type = 'text' "
-        f"UNION ALL SELECT generation.id, item.value FROM {compactions} AS generation, "
-        f"json_each({_json_or_empty('generation.legacy_event_ids')}) AS item "
-        "WHERE generation.legacy = 1 AND item.type = 'text'",
-    ):
-        event_ids.setdefault(generation_id, set()).add(value)
-    return event_ids
+    return sorted(
+        value
+        for (value,) in connection.execute(
+            f"SELECT item.value FROM {compacted_runs} AS archived, "  # noqa: S608
+            f"json_each({_json_or_empty(f'archived.{column}')}) AS item "
+            "WHERE archived.compaction_id = ? AND item.type = 'text' "
+            f"UNION SELECT item.value FROM {compactions} AS generation, "
+            f"json_each({_json_or_empty('generation.legacy_event_ids')}) AS item "
+            "WHERE generation.id = ? AND generation.legacy = 1 AND item.type = 'text'",
+            (generation_id, generation_id),
+        )
+    )
 
 
 def _json_or_empty(column: str) -> str:
