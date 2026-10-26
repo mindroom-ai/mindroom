@@ -1105,7 +1105,6 @@ path = "mindroom.session_storage.legacy_agno3_conversion"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.constants",
-    "mindroom.delegation.state",
     "mindroom.history.legacy_compaction_state",
     "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.storage",

@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 from contextlib import closing
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +20,6 @@ from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.constants import resolve_runtime_paths
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.summary_rows import folded_tool_call_ids, history_event_ids, legacy_event_ids, retire
 from mindroom.history.types import HistoryScope
@@ -944,86 +942,6 @@ def test_a_repeated_message_id_gets_a_derived_one(tmp_path: Path) -> None:
             ("r:1", "three"),
         ]
     assert _dump(tmp_path / "first" / "sessions" / "code.db") == _dump(tmp_path / "second" / "sessions" / "code.db")
-
-
-def _child(**changes: object) -> dict[str, Any]:
-    persona = SubagentPersona(source_kind="inline", source_name="writer", system_prompt="Write.", tools=("shell",))
-    child = DelegationChild(
-        delegation_id="d1",
-        parent_tool_call_id="call",
-        caller_agent_name="code",
-        child_agent_name="helper",
-        task="task",
-        session_id="child-session",
-        run_id="child-run",
-        model_name="model",
-        depth=1,
-        execution_identity={},
-        persona=persona,
-    )
-    data = json.loads(json.dumps(asdict(child)))
-    for key, value in changes.items():
-        if key.startswith("persona."):
-            data["persona"].pop(key.removeprefix("persona."))
-        elif value is None:
-            data.pop(key)
-    return data
-
-
-_LEGACY_CHILDREN = {
-    "without_agent_mode": _child(agent_mode=None),
-    "without_requested_model_name": _child(requested_model_name=None),
-    "without_persona": _child(persona=None),
-    "persona_without_skills": _child(**{"persona.skills": None}),
-    "persona_without_knowledge": _child(**{"persona.knowledge": None}),
-}
-
-
-@pytest.mark.parametrize("place", ["children", "pending_tool_sources"])
-@pytest.mark.parametrize("shape", sorted(_LEGACY_CHILDREN))
-def test_delegation_snapshots_are_stored_whole(tmp_path: Path, shape: str, place: str) -> None:
-    """A delegation snapshot an older release wrote is stored as today's reader reads it, with every field present."""
-    child = _LEGACY_CHILDREN[shape]
-    snapshot: dict[str, Any] = (
-        {"children": [child]}
-        if place == "children"
-        else {"pending_tool_sources": {"call": {"child": child, "tool_call_id": "call"}}}
-    )
-    database = _agno_database(tmp_path)
-    run = _run("parent", status=RunStatus.paused)
-    run.metadata = {**(run.metadata or {}), DELEGATION_STATE_KEY: snapshot}
-    _insert_run(database, run, run_index=0)
-
-    store = _converted(database)
-
-    stored = store.get_run("parent")
-    assert stored is not None
-    expected = json.loads(json.dumps(DelegationState.from_metadata(run.metadata).to_dict()))
-    assert stored.metadata[DELEGATION_STATE_KEY] == expected  # type: ignore[index]
-    [stored_child] = expected["children"] or [source["child"] for source in expected["pending_tool_sources"].values()]
-    assert set(stored_child) == set(DelegationChild.__dataclass_fields__)
-    if stored_child["persona"] is not None:
-        assert set(stored_child["persona"]) == set(SubagentPersona.__dataclass_fields__)
-    assert (
-        DelegationState.from_metadata(stored.metadata).to_dict()
-        == DelegationState.from_metadata(run.metadata).to_dict()
-    )
-
-
-def test_a_delegation_snapshot_the_reader_refuses_stays_as_stored(tmp_path: Path) -> None:
-    """A snapshot today's reader cannot read is kept byte for byte and logged by run id."""
-    database = _agno_database(tmp_path)
-    run = _run("parent")
-    run.metadata = {DELEGATION_STATE_KEY: {"children": [{"unknown": 1}]}}
-    _insert_run(database, run, run_index=0)
-
-    with capture_logs() as logs:
-        store = _converted(database)
-
-    assert store.get_run("parent").metadata == run.metadata  # type: ignore[union-attr]
-    assert [entry["run_id"] for entry in logs if entry["event"] == "conversation_delegation_snapshot_kept"] == [
-        "parent",
-    ]
 
 
 def test_summary_rows_keep_their_order_against_the_runs(tmp_path: Path) -> None:

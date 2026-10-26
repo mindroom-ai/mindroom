@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.history.legacy_compaction_state import adopt_summary_rows
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.types import HistoryScope
@@ -378,7 +377,7 @@ def _convert_runs(
     def write(run: _Run) -> None:
         seq = next(seqs)
         places.add(run, seq)
-        _write_run(connection, names, session_id, run, seq, path)
+        _write_run(connection, names, session_id, run, seq)
 
     # A load read a row without a position first, but no summary row ever covered it, so it always loaded; first here,
     # it would sort under every summary's ``through``, so it goes last, where none covers it.
@@ -518,14 +517,11 @@ def _write_run(
     session_id: str,
     run: _Run,
     seq: int,
-    path: Path,
 ) -> None:
     # The repair reads call ids, so it runs on messages whose ids are text or None.
     _use_text_call_ids(run.record.messages, run.record.tools or ())
     run.record.messages = repair_legacy_tool_calls(run.record.messages)
     data = run.record.to_dict()
-    if isinstance(metadata := data.get("metadata"), dict):
-        data["metadata"] = _current_delegation_snapshot(path, run.record.run_id, metadata)
     kind = run_kind(run.record)
     upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=run.created_at, updated_at=run.updated_at)
     _convert_messages(connection, names, data)
@@ -556,27 +552,6 @@ def _convert_messages(connection: sqlite3.Connection, names: TableNames, data: d
             message["id"] = derived
         seen.add(message["id"])
     set_visible_messages(connection, names, data["run_id"], messages, data["status"])
-
-
-# LEGACY_COMPAT: Delegation snapshots in run metadata missing fields later releases added.
-# Legacy format: `metadata.mindroom_delegation` whose `children` and `pending_tool_sources[*].child` omit `agent_mode`
-# (written through v2026.10.18), `requested_model_name` (through v2026.10.244), or `persona` (through v2026.10.230), or
-# whose persona omits `skills` (through v2026.10.245) or `knowledge` (through v2026.10.263).
-# Last legacy release: v2026.10.263; replacement: v2026.10.264 writes every field.
-# Handling: Each converted run's snapshot is read through `DelegationState.from_metadata` and stored as it writes it
-# back, every field present, so the readers' defaults for absent fields can go later; a snapshot the reader refuses
-# stays as stored and is logged by run id.
-# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_delegation_snapshots_are_stored_whole and
-# ::test_a_delegation_snapshot_the_reader_refuses_stays_as_stored.
-def _current_delegation_snapshot(path: Path, run_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
-    if metadata.get(DELEGATION_STATE_KEY) is None:
-        return metadata
-    try:
-        snapshot = DelegationState.from_metadata(metadata).to_dict()
-    except Exception as error:
-        logger.warning("conversation_delegation_snapshot_kept", path=str(path), run_id=run_id, error=str(error))
-        return metadata
-    return {**metadata, DELEGATION_STATE_KEY: snapshot}
 
 
 # LEGACY_COMPAT: Agno-layout summary rows positioned by `after_run_index`.
