@@ -1,4 +1,4 @@
-"""A conversation database keeps the table names Agno 3 gave it, and storage v2's layout is the one it states."""
+"""Every table of a conversation database is named after its storage name, and storage v2's layout is the one it states."""
 
 from __future__ import annotations
 
@@ -9,14 +9,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.session_storage.schema import (
-    LOG_VERSION,
-    TableNames,
-    log_schema_sql,
-    run_log_sql,
-    schema_sql,
-    table_names,
-)
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql, agno_schema_sql
+from mindroom.session_storage.schema import LOG_VERSION, TableNames, log_schema_sql, table_names
 from tests.session_storage.goldens import golden_stores
 
 if TYPE_CHECKING:
@@ -24,8 +18,8 @@ if TYPE_CHECKING:
 
 
 def test_a_databases_tables_are_all_named_after_its_storage_name() -> None:
-    """``<name>.db`` holds ``<name>_sessions`` and the tables beside it; the pairing has this one owner."""
-    names = TableNames("code")
+    """``<name>.db`` holds ``<name>_sessions`` and the tables beside it, the Agno layout's too; the pairing has one owner."""
+    names = AgnoTableNames("code")
 
     assert names.sessions == "code_sessions"
     assert names.runs == "code_sessions_runs"
@@ -41,7 +35,7 @@ def test_a_databases_tables_are_all_named_after_its_storage_name() -> None:
 
 def test_storage_v2_names_the_runs_table_of_agno_like_every_other() -> None:
     """The storage named ``agno`` keeps no runs table named differently once its log tables replace the old ones."""
-    names = TableNames("agno")
+    names = AgnoTableNames("agno")
 
     assert (names.runs, names.log_runs) == ("agno_runs", "agno_sessions_log_runs")
 
@@ -64,11 +58,11 @@ def test_a_storage_name_must_name_a_file_directly_inside_its_sessions_directory(
         TableNames(storage_name).database_path(tmp_path)
 
 
-def test_the_schema_creates_exactly_the_tables_the_names_give_it() -> None:
-    """The DDL of each owner creates the table ``TableNames`` names, so no table is named in two places."""
-    names = TableNames("code")
+def test_the_agno_schema_creates_exactly_the_tables_the_names_give_it() -> None:
+    """The Agno layout's DDL creates the tables ``AgnoTableNames`` names, so no table is named in two places."""
+    names = AgnoTableNames("code")
     with closing(sqlite3.connect(":memory:")) as connection:
-        for statement in schema_sql(names):
+        for statement in agno_schema_sql(names):
             connection.execute(statement)
         tables = table_names(connection)
 
@@ -92,9 +86,9 @@ def test_the_pairing_is_the_one_every_database_agno_wrote_follows(store: GoldenS
 )
 def test_the_runs_table_keeps_the_name_agno_gave_it(storage_name: str, runs: str) -> None:
     """Agno 3 names the runs table beside its default ``agno_sessions`` table ``agno_runs``, else ``<sessions>_runs``."""
-    names = TableNames(storage_name)
+    names = AgnoTableNames(storage_name)
     with closing(sqlite3.connect(":memory:")) as connection:
-        for statement in run_log_sql(names):
+        for statement in agno_runs_sql(names):
             connection.execute(statement)
         tables = table_names(connection)
 

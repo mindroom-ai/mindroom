@@ -1,4 +1,4 @@
-"""A compaction archive written by a released MindRoom becomes summary rows once, when its database opens."""
+"""A compaction archive written by a released MindRoom becomes summary rows once, when its database converts on open."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
-from tests.conftest import seed_session
 from tests.history_helpers import folded_run_ids, stored_run_ids
+from tests.session_storage.agno_layout import write_agno_database
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -85,16 +85,13 @@ def _main_database(
     blob: list[dict[str, object]] | None = None,
 ) -> None:
     """Write a conversation database as a release with the compaction archive left it."""
-    storage = _open(tmp_path)
     session = (
         ConversationSession(kind="team", session_id="s1", owner_id="eng", runs=live)
         if team
         else ConversationSession(kind="agent", session_id="s1", owner_id="code", runs=live)
     )
-    seed_session(storage, session)
+    write_agno_database(_db(tmp_path), session)
     with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
-        connection.execute("DROP TABLE IF EXISTS code_sessions_summaries")
-        connection.execute("DROP TABLE IF EXISTS code_sessions_removed_runs")
         for statement in _ARCHIVE_DDL:
             connection.execute(statement)
         for generation in generations:

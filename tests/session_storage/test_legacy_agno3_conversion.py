@@ -21,7 +21,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
-from mindroom.history.summary_rows_next import folded_tool_call_ids
+from mindroom.history.summary_rows import folded_tool_call_ids
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage import legacy_agno3_conversion
@@ -30,8 +30,9 @@ from mindroom.session_storage.legacy_agno3_conversion import (
     migrate_conversation_database,
     migrate_conversation_storage,
 )
-from mindroom.session_storage.schema import LOG_SESSION_COLUMNS, LOG_VERSION, TableNames, schema_sql, table_names
-from mindroom.session_storage.store_next import ConversationStore
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql
+from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
+from mindroom.session_storage.store import ConversationStore
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.record import FIXTURES, GOLDEN_DUMPS, storage_name_of
 
@@ -92,7 +93,7 @@ def _agno_database(root: Path, *sessions: tuple[str, str, str], names: TableName
     database = names.database_path(root)
     database.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database)) as connection, connection:
-        for statement in schema_sql(names):
+        for statement in agno_schema_sql(AgnoTableNames(names.storage_name)):
             connection.execute(statement)
         for session_id, kind, owner in sessions or ((_SESSION, "agent", "code"),):
             connection.execute(
@@ -131,7 +132,7 @@ def _insert_run(
     kind = run_type or ("team" if "member_responses" in data else "agent")
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
-            f'INSERT INTO "{TableNames.of_database(database).runs}" (run_id, session_id, run_type, agent_id, team_id, '  # noqa: S608
+            f'INSERT INTO "{AgnoTableNames.of_database(database).runs}" (run_id, session_id, run_type, agent_id, team_id, '  # noqa: S608
             "parent_run_id, status, run_index, run_data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 data["run_id"],
@@ -539,6 +540,34 @@ def test_messages_convert_under_the_saves_rule(tmp_path: Path) -> None:
     assert [message.id for message in store.get_run("waiting").messages] == ["waiting.system", "waiting.waiting.u"]  # type: ignore[union-attr]
 
 
+def test_converted_runs_drop_their_stored_tool_schemas(tmp_path: Path) -> None:
+    """Older releases stored every tool schema in run metadata, a paused team run's embedded members included."""
+    database = _agno_database(tmp_path, (_SESSION, "team", "squad"))
+    tool = ToolExecution(tool_call_id="call", tool_name="shell", requires_confirmation=True, created_at=100)
+    member = _run("m1", status=RunStatus.paused, parent_run_id="t1")
+    member.metadata = {"tools_schema": [{}], "room_id": "!r"}
+    team = TeamRunRecord(
+        run_id="t1",
+        team_id="squad",
+        session_id=_SESSION,
+        status=RunStatus.paused,
+        created_at=100,
+        metadata={"tools_schema": [{"name": "x"}], "room_id": "!r"},
+        requirements=[RunRequirement(tool_execution=tool, id="req", member_agent_id="code", member_run_id="m1")],
+        member_responses=[member],
+    )
+    _insert_run(database, team, run_index=0)
+
+    store = _converted(database)
+
+    paused, stored_member = store.get_run("t1"), store.get_run("m1")
+    assert isinstance(paused, TeamRunRecord)
+    assert paused.metadata == {"room_id": "!r"}
+    assert [run.metadata for run in paused.member_responses] == [{"room_id": "!r"}]
+    assert stored_member is not None
+    assert stored_member.metadata == {"room_id": "!r"}
+
+
 def test_a_repeated_message_id_gets_a_derived_one(tmp_path: Path) -> None:
     """A message id a run holds twice is derived from the run and the place, unique, and the same in every conversion."""
     for copy in ("first", "second"):
@@ -780,7 +809,7 @@ def test_a_converted_database_holds_only_the_v2_layout(tmp_path: Path, dump: Pat
     migrate_conversation_database(database, names)
 
     with closing(sqlite3.connect(database)) as connection:
-        assert table_names(connection) - {"agno_schema_versions", "sqlite_sequence"} == {
+        assert table_names(connection) == {
             names.sessions,
             names.usage,
             names.log_meta,
@@ -788,12 +817,13 @@ def test_a_converted_database_holds_only_the_v2_layout(tmp_path: Path, dump: Pat
             names.log_messages,
             names.log_summaries,
             names.log_removed,
+            "sqlite_sequence",
         }
         columns = [row[0] for row in connection.execute("SELECT name FROM pragma_table_info(?)", (names.sessions,))]
         indexes = {row[0] for row in connection.execute("SELECT name FROM pragma_index_list(?)", (names.sessions,))}
         meta = connection.execute(f'SELECT version, next_seq FROM "{names.log_meta}"').fetchall()  # noqa: S608
         (largest,) = connection.execute(f'SELECT COALESCE(MAX(seq), 0) FROM "{names.log_runs}"').fetchone()  # noqa: S608
-    assert columns == list(LOG_SESSION_COLUMNS)
+    assert columns == list(SESSION_COLUMNS)
     assert {index for index in indexes if not index.startswith("sqlite_autoindex")} == {
         f"idx_{names.sessions}_session_type",
     }
@@ -843,6 +873,30 @@ def test_a_failed_conversion_leaves_the_database_as_it_was(tmp_path: Path, monke
 
     assert _is_converted(database)
     assert backup.read_bytes() == original
+
+
+def test_a_failed_conversion_rolls_back_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure while a cursor still reads rolls back before the close, which that cursor would leave unfinished.
+
+    An unfinished close keeps the transaction and its journal open, though closing the backup's descriptor drops
+    the file's locks; its rollback would then write the file without holding them.
+    """
+    database, names = _restore(GOLDEN_DUMPS[0], tmp_path)
+
+    def read_then_fail(connection: sqlite3.Connection, *_: object) -> None:
+        reading = connection.execute(f'SELECT session_id FROM "{names.sessions}"')  # noqa: S608
+        reading.fetchone()
+        msg = "injected"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(legacy_agno3_conversion, "_convert_summary", read_then_fail)
+    with pytest.raises(RuntimeError, match="injected") as interrupted:
+        migrate_conversation_database(database, names)
+
+    # The failure's traceback keeps the reading cursor alive, as it does for a caller that logs or re-raises it.
+    assert interrupted.traceback
+    assert not Path(f"{database}-journal").exists()
+    assert _other_process_takes_write_lock(database) == "locked"
 
 
 def test_a_converted_database_costs_one_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

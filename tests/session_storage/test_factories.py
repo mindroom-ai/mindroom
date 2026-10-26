@@ -1,4 +1,4 @@
-"""Opening a conversation database through the factories: migrations first, then the owned store, tables on first write."""
+"""Opening a conversation database through the factories: the preflight, the conversion, then the store."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage import agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX
+from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, runtime_paths_for, seed_session
@@ -32,18 +34,18 @@ def _open(tmp_path: Path) -> ConversationStore:
 
 def _tables(db_file: Path) -> set[str]:
     with closing(sqlite3.connect(db_file)) as connection:
-        return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        return table_names(connection)
 
 
 def _run(run_id: str) -> RunRecord:
     return RunRecord(run_id=run_id, agent_id="code", session_id="session-1")
 
 
-def test_migrations_run_in_order_under_the_preflight_lock_before_the_store_opens(
+def test_the_conversion_runs_under_the_preflight_lock_before_the_store_opens(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Archive check, usage ledger, summary rows, then the store, all while the recovery lock is held."""
+    """Archive check, conversion, then the store, all while the recovery lock is held."""
     order: list[str] = []
 
     @contextmanager
@@ -59,33 +61,31 @@ def test_migrations_run_in_order_under_the_preflight_lock_before_the_store_opens
         return real_store(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(agent_storage, "session_storage_preflight", preflight)
-    monkeypatch.setattr(agent_storage, "migrate_usage_database", lambda *_a, **_k: order.append("usage"))
-    monkeypatch.setattr(agent_storage, "migrate_to_summary_rows", lambda *_a, **_k: order.append("summary rows"))
+    monkeypatch.setattr(agent_storage, "migrate_conversation_database", lambda *_a, **_k: order.append("conversion"))
     monkeypatch.setattr(agent_storage, "ConversationStore", open_store)
 
     _open(tmp_path)
 
-    assert order == ["preflight", "usage", "summary rows", "open", "preflight released"]
+    assert order == ["preflight", "conversion", "open", "preflight released"]
 
 
-def test_a_fresh_database_gets_its_tables_from_the_first_write_only(tmp_path: Path) -> None:
-    """Opening creates the file and nothing in it; the first run save creates every table at once."""
+def test_a_new_database_gets_every_table_when_it_opens(tmp_path: Path) -> None:
+    """Opening creates the file with every storage v2 table and no backup, so no write creates a table."""
     store = _open(tmp_path)
 
+    names = TableNames("code")
     assert store.path == tmp_path / "sessions" / "code.db"
-    assert _tables(store.path) == set()
-
-    store.save_runs(
-        ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
-        [_run("r1")],
-    )
-
-    assert _tables(store.path) >= {
-        "code_sessions",
-        "code_sessions_runs",
-        "code_sessions_usage",
-        "code_sessions_summaries",
+    assert _tables(store.path) == {
+        names.sessions,
+        names.usage,
+        names.log_meta,
+        names.log_runs,
+        names.log_messages,
+        names.log_summaries,
+        names.log_removed,
+        "sqlite_sequence",
     }
+    assert sorted(path.name for path in store.path.parent.iterdir()) == ["code.db"]
 
 
 def test_a_storage_name_that_leaves_the_sessions_directory_opens_nothing(tmp_path: Path) -> None:
@@ -97,32 +97,36 @@ def test_a_storage_name_that_leaves_the_sessions_directory_opens_nothing(tmp_pat
 
 
 def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_path: Path) -> None:
-    """A real 2.6.12 database gets its usage ledger and summary rows, its blob runs become rows, and later saves append."""
+    """A real 2.6.12 database converts once, its usage ledger seeded and its blob runs rows, and later saves append."""
     db_file = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
+    original = db_file.read_bytes()
 
     store = _open(tmp_path)
 
-    assert {"code_sessions_usage", "code_sessions_summaries"} <= _tables(db_file)
+    assert {"code_sessions_usage", "code_sessions_log_runs", "code_sessions_log_summaries"} <= _tables(db_file)
     with closing(sqlite3.connect(db_file)) as connection:
         assert [run_id for (run_id,) in connection.execute("SELECT run_id FROM code_sessions_usage ORDER BY id")] == [
             "run-1",
             "run-2",
             "run-3",
         ]
-        assert connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone() == (None,)
+        assert "runs" not in {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
         # Opening a pre-existing file must keep its rollback journal.
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
     loaded = store.load_session("session-1", "agent")
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
 
-    store.delete_run_subtrees(ConversationSession(kind="agent", session_id="session-1", owner_id="code"), ["run-2"])
-    store.save_runs(loaded, [_run("run-4")])
+    store.delete_runs(["run-2"], session_id="session-1")
+    store.save_run(loaded, _run("run-4"), record_usage=False)
     reopened = _open(tmp_path).load_session("session-1", "agent")
 
     assert reopened is not None
     assert [run.run_id for run in reopened.runs] == ["run-1", "run-3", "run-4"]
     assert stored_run_ids(_open(tmp_path), "session-1") == ["run-1", "run-3", "run-4"]
+    # The converted file passes the preflight on every reopen, and its backup keeps the original.
+    assert not list(tmp_path.glob("sessions.incompatible-*"))
+    assert db_file.with_name(f"code.db{BACKUP_SUFFIX}").read_bytes() == original
 
 
 def test_a_private_agents_store_is_the_requesters_own(tmp_path: Path) -> None:
