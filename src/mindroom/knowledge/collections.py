@@ -233,9 +233,9 @@ def _row_metadata(
 ) -> Metadata:
     """Return one chunk's stored metadata, with the keys and values rows have always carried.
 
-    Search results show the model every stored key except ``name``, so the
-    set stays the one existing collections hold: the reader's own keys, the
-    source signature, and ``linked_to``, ``content_hash``, and ``content_id``.
+    New rows keep the set existing collections hold, the reader's own keys, the source signature, and ``linked_to``,
+    ``content_hash``, and ``content_id``, so a collection reads the same whichever release wrote its rows. Search hits
+    leave out the keys that serve indexing (``knowledge.read_worker``).
     """
     metadata: dict[str, Any] = {key: value for key, value in chunk.metadata.items() if value is not None}
     metadata.update(source_metadata)

@@ -173,7 +173,7 @@ class ResponsesSettings:
     extra_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
     extra_body: dict[str, Any] | None = None
     request_params: dict[str, Any] | None = None
-    # Split the shared system prefix from session context so the prefix caches across threads.
+    # Mark the stable system message, the first, with an explicit prompt-cache breakpoint where the route takes one.
     cache_system_prompt: bool = True
     # Client parameters.
     api_key: str | None = field(default=None, metadata=SECRET)

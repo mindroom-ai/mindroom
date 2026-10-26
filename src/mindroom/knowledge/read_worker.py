@@ -33,8 +33,8 @@ if TYPE_CHECKING:
 # The parent runs this module with `python -m`, so `__name__` is `__main__`.
 logger = get_logger("mindroom.knowledge.read_worker")
 
-# Stored row keys that serve indexing and say nothing about the chunk; ``content_id``, ``content_hash``, and the empty
-# ``linked_to`` are the keys the rows Agno wrote carry.
+# Stored row keys that serve indexing and say nothing about the chunk: the source signature, and the ``content_id``,
+# ``content_hash``, and empty ``linked_to`` every row carries (``knowledge.collections``).
 _INDEXING_KEYS = frozenset(
     {SOURCE_MTIME_NS_KEY, SOURCE_SIZE_KEY, SOURCE_DIGEST_KEY, "content_id", "content_hash", "linked_to"},
 )
@@ -43,8 +43,8 @@ _INDEXING_KEYS = frozenset(
 def _query_collection(collection: Collection, embedding: Sequence[float], *, limit: int) -> list[SearchHit]:
     """Return the ``limit`` nearest chunks, nearest first, each with its source, its reader keys, and its distance.
 
-    A chunk stored twice under one name appears once. The row keys that serve indexing, the source signature and
-    the content hash and id, and Agno's empty ``linked_to`` stay out of the hit.
+    A chunk stored twice under one name appears once. The row keys that serve indexing (``_INDEXING_KEYS``) stay out
+    of the hit.
     """
     result = collection.query(
         query_embeddings=[list(embedding)],

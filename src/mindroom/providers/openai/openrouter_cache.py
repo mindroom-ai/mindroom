@@ -2,8 +2,8 @@
 
 OpenRouter forwards ``cache_control`` markers on content parts and function tools to Anthropic-family upstreams,
 which cache only up to explicit breakpoints, so only model ids routed to Anthropic are marked. Placement follows
-:mod:`mindroom.providers.cache_ladder`: the shared system prefix, the two newest cacheable messages, and the last
-tool, with one TTL and at most four markers.
+:mod:`mindroom.providers.cache_ladder`: the stable system prompt (the first system message), the two newest cacheable
+messages, and the last tool, with one TTL and at most four markers.
 """
 
 from __future__ import annotations
