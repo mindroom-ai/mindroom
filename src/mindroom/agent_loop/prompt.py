@@ -27,8 +27,9 @@ class PromptSpec:
     ``persona`` is an authored prompt that leads the stable part in place of the agent's identity.
     ``role`` fills ``<your_role>``: an agent's identity, runtime facts, preloaded files, and authored role (only the
     runtime facts under a persona), or a team's identity.
-    ``markdown`` states the chat's Markdown output format right after the role (``MARKDOWN_OUTPUT_FORMAT``); callers
-    with an output schema, and realtime voice calls, leave it False.
+    ``markdown`` states the chat's Markdown output format right after the role (``MARKDOWN_OUTPUT_FORMAT``): an agent
+    and a team leader set it from the ``markdown`` setting, and a voice call, realtime or cascaded, turns it off
+    (``matrix_rtc.call_tools._spoken``), since a call speaks its replies.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered.
     ``turn_context`` is the turn part: the date and session context, plus the blocks a turn appends
     (``build.prompt_for_turn``).
