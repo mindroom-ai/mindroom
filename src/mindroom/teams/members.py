@@ -18,6 +18,7 @@ from mindroom.history.session_context import resolve_bound_team_scope
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
+from mindroom.prompt_templates import render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.teams.formation import (
@@ -340,13 +341,9 @@ def _team_member(
     def new_hooks() -> LoopHooks:
         return agent_loop_hooks(as_member, turn, queued_notices=False)
 
-    # An agent build always renders its role; only a helper's prompt may go without one.
-    if build.prompt.role is None:
-        msg = f"Team member {build.spec.id!r} has no role for the leader's roster"
-        raise ValueError(msg)
     return TeamMember(
         spec=replace(build.spec, system_messages=prompt_for_turn(build, system_enrichment)),
-        role=build.prompt.role,
+        role=config.agents[build.spec.id].role,
         new_hooks=new_hooks,
         request_template=build.request_template,
     )
@@ -407,8 +404,9 @@ def build_team_spec(
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
     The leader is named by the team's label (``materialized_team_label``) and identified by the team's history scope,
-    or by that label for a team that names no member and so has no scope. The leader prompt holds each member's
-    roster role and the leader's tool instructions in offer order, then the date and session context with
+    or by that label for a team that names no member and so has no scope. The leader prompt opens with the team's
+    identity, the configured team's name and purpose or the ad hoc team's label, then holds each member's authored
+    role and the leader's tool instructions in offer order, then the date and session context with
     ``system_enrichment`` appended; the team's own history settings and call budget come from the configured team
     ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
@@ -458,9 +456,16 @@ def build_team_spec(
         ),
         system_enrichment,
     )
+    team_config = config.teams.get(configured_team_name) if configured_team_name is not None else None
+    identity = render_prompt_template(
+        config.get_prompt("TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE"),
+        display_name=label if team_config is None else team_config.display_name,
+        team_purpose="" if team_config is None else f"Team purpose: {team_config.role}\n",
+    )
     system_messages = render_leader_system_messages(
         team_members,
         mode,
+        identity=identity,
         tool_instructions=toolkit_instructions(leader.toolkits),
         turn_context=turn_context,
     )

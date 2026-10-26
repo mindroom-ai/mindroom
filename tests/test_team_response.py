@@ -267,6 +267,25 @@ async def test_the_router_in_a_direct_member_list_is_skipped(
 
 
 @pytest.mark.asyncio
+async def test_the_leader_reads_each_member_s_authored_role_and_its_own_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The roster shows each member's authored role, not its whole prompt, and the leader prompt opens with the team."""
+    team = _team(tmp_path, monkeypatch, leader=[answer("Team response")], members=("general", "research"))
+    await team.reply(stream=True, agent_names=["general", "research"])
+
+    leader_prompt = str(_leader(team).requests[0].messages[0].content)
+    assert leader_prompt.startswith(
+        "<your_role>\n## Your Identity\nYou are Team (GeneralAgent, ResearchAgent), a team in the Mindroom",
+    )
+    assert "<conversation>" in leader_prompt
+    assert '<member id="general" name="GeneralAgent">\n  Role: Answers.\n</member>' in leader_prompt
+    assert '<member id="research" name="ResearchAgent">\n  Role: Researches.\n</member>' in leader_prompt
+    assert "Matrix ID: @mindroom_general" not in leader_prompt
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_a_leader_on_a_claude_route_answers_with_its_reply_on_either_path(
     tmp_path: Path,
@@ -953,11 +972,11 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     assert _notices(team, "prior-response") == [("run-earlier", "persisted", QUEUED_MESSAGE_NOTICE_TEXT)]
 
 
-def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one(
+def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every agent build renders a role, so a build without one is a broken invariant, not a member with no role."""
+    """The leader reads the role the member's config authors, whatever the member's own prompt renders around it."""
     team = _team(tmp_path, monkeypatch)
     members = materialize_team_members(
         list(team.member_names),
@@ -968,19 +987,21 @@ def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one
         active_model_names=dict.fromkeys(team.member_names, "default"),
     )
     [build] = members.builds
-    roleless = replace(members, builds=[replace(build, prompt=replace(build.prompt, role=None))])
+    assert build.prompt.role is not None
+    assert build.prompt.role != "Answers."
 
-    with pytest.raises(ValueError, match="Team member 'general' has no role for the leader's roster"):
-        build_team_spec(
-            members=roleless,
-            mode=team.mode,
-            config=team.config,
-            runtime_paths=team.runtime_paths,
-            scope_context=None,
-            execution_identity=team.identity,
-            model_name="default",
-            configured_team_name=None,
-        )
+    built = build_team_spec(
+        members=members,
+        mode=team.mode,
+        config=team.config,
+        runtime_paths=team.runtime_paths,
+        scope_context=None,
+        execution_identity=team.identity,
+        model_name="default",
+        configured_team_name=None,
+    )
+
+    assert [member.role for member in built.spec.members] == ["Answers."]
 
 
 @pytest.mark.asyncio

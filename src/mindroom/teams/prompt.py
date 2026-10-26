@@ -1,8 +1,9 @@
-"""The team leader's system prompt, rendered like an agent's: the ``<team>`` block and tool instructions, then the turn.
+"""The team leader's system prompt, rendered like an agent's: its identity, the ``<team>`` block, then the turn.
 
-The ``<team>`` block (the capability sentence, the member roster, and the mode's ``<delegation>`` block) and the
-leader's tool instructions are the stable part; the date and session context with the turn's system enrichment are
-the turn part (``agent_loop.prompt``).
+The team's identity (its name, its purpose, and how conversation history reaches it), the ``<team>`` block (the
+capability sentence, the member roster with each member's authored role, and the mode's ``<delegation>`` block), and
+the leader's tool instructions are the stable part; the date and session context with the turn's system enrichment
+are the turn part (``agent_loop.prompt``).
 """
 
 from __future__ import annotations
@@ -19,16 +20,14 @@ if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMember
 
 _TEAM_OPENING_PROMPT = (
-    "You coordinate this team to fulfill the user's request. "
-    "You have a team of specialists, listed below. "
-    "Delegate to members when their expertise or tools are needed; "
-    "answer directly — including with your own tools — when they are not.\n"
+    "You lead this team to fulfill the user's request. Its members are listed below. "
+    "Delegate to members when their expertise or tools are needed; answer directly when they are not.\n"
 )
 
 _TEAM_COORDINATE_DELEGATION_TEMPLATE = (
     "You work in coordinate mode: you hand sub-tasks to members with "
     "`delegate_task_to_member` and write the answer yourself.\n\n"
-    "- Match each sub-task to the member whose role and description fit it best. When sub-tasks do not "
+    "- Match each sub-task to the member whose role fits it best. When sub-tasks do not "
     "depend on each other, delegate them in the same turn instead of one per turn.\n"
     "- A member's output is evidence, not your answer. When a member fails, refuses, or returns "
     "nothing, say so plainly and name what it reported — never supply a cause, source, or finding "
@@ -41,7 +40,7 @@ _TEAM_COORDINATE_DELEGATION_TEMPLATE = (
 )
 
 _TEAM_COLLABORATE_DELEGATION_TEMPLATE = (
-    "You work in broadcast mode: one call puts the same task to every member, then you write the "
+    "You work in collaborate mode: one call puts the same task to every member, then you write the "
     "answer yourself.\n\n"
     "- Call `delegate_task_to_members` exactly once. One call reaches every member; do not call it "
     "once per member.\n"
@@ -69,7 +68,7 @@ TEAM_MEMBER_NOT_FOUND_TEMPLATE = (
 
 
 def render_members_roster(members: Sequence[TeamMember]) -> str:
-    """Return the ``<team_members>`` entries: one ``<member>`` element per member with its id, name, and role."""
+    """Return the ``<team_members>`` entries: one ``<member>`` element per member with its id, name, and authored role."""
     return "".join(
         f'<member id="{member.spec.id}" name="{member.spec.name}">\n  Role: {member.role}\n</member>\n'
         for member in members
@@ -80,13 +79,15 @@ def render_leader_system_messages(
     members: Sequence[TeamMember],
     mode: TeamMode,
     *,
+    identity: str,
     tool_instructions: Sequence[str],
     turn_context: str,
 ) -> tuple[Message, ...]:
     """Return the leader's system messages for ``members`` in ``mode``.
 
-    ``tool_instructions`` are the leader's toolkit instructions in offer order, and ``turn_context`` the turn part: the
-    date and session context and any appended system enrichment.
+    ``identity`` is the team's rendered identity (``TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE``), ``tool_instructions`` the
+    leader's toolkit instructions in offer order, and ``turn_context`` the turn part: the date and session context and
+    any appended system enrichment.
     """
     delegation = (
         _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE
@@ -104,7 +105,7 @@ def render_leader_system_messages(
     )
     return render_system_messages(
         PromptSpec(
-            role=None,
+            role=identity,
             instructions=(team,),
             tool_instructions=tuple(tool_instructions),
             turn_context=turn_context,

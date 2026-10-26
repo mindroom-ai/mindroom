@@ -46,7 +46,7 @@ teams:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `display_name` | string | *required* | Name shown in Matrix |
-| `role` | string | *required* | Description of the team's purpose |
+| `role` | string | *required* | Description of the team's purpose, which the team model reads beside each member agent's own `role` when it chooses whom to delegate to |
 | `agents` | list | *required* | Names of agents under `agents:` that form the team; at least one, no duplicates |
 | `mode` | string | `coordinate` | `coordinate` or `collaborate` |
 | `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs the team joins and responds in |

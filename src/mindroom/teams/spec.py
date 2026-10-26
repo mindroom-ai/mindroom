@@ -30,10 +30,9 @@ class TeamMember:
     """One member as the leader sees and runs it, in the team one turn or approval resume builds.
 
     ``spec.id`` is the member id the leader delegates to and the stored ``agent_id``; ``spec.name`` the roster name
-    and stored ``agent_name``. ``role`` is the roster text the leader reads. ``new_hooks`` builds the hooks of one
-    run of this member; a run takes its hooks only through ``hooks(run_id)``, which keeps them across the run's
-    continuations in this team. ``request_template`` applies to every run and resume, except that the team run's
-    stream mode overrides its ``stream`` field, so a member streams exactly when its team run does.
+    and stored ``agent_name``. ``role`` is the member's authored role, which the leader's roster shows. ``new_hooks``
+    builds the hooks of one run of this member; a run takes its hooks only through ``hooks(run_id)``, which keeps them
+    across the run's continuations in this team. ``request_template`` applies to every run and resume.
     """
 
     spec: AgentSpec

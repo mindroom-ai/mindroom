@@ -408,7 +408,7 @@ async def test_a_collaborate_team_puts_the_task_to_every_member_and_reads_them_i
     assert record.tools is not None
     assert record.tools[0].result == "Writer fact.Checker fact."
     assert sorted(member.agent_id or "" for member in members) == ["checker", "writer"]
-    assert "broadcast mode" in str(team.models["default"].requests[0].messages[0].content)
+    assert "collaborate mode" in str(team.models["default"].requests[0].messages[0].content)
 
 
 @pytest.mark.asyncio

@@ -47,10 +47,18 @@ def test_the_leader_prompt_keeps_its_roster_stable_and_its_date_in_the_turn_part
     """The roster and delegation rules are the stable system message; a new date changes only the turn message."""
     members = squad(ScriptedModel([]), ScriptedModel([]), ScriptedModel([])).members
 
-    monday = render_leader_system_messages(members, TeamMode.COORDINATE, tool_instructions=(), turn_context="Monday.")
-    tuesday = render_leader_system_messages(members, TeamMode.COORDINATE, tool_instructions=(), turn_context="Tuesday.")
+    def render(day: str) -> tuple[Message, ...]:
+        return render_leader_system_messages(
+            members,
+            TeamMode.COORDINATE,
+            identity="You are Squad.",
+            tool_instructions=(),
+            turn_context=day,
+        )
+
+    monday, tuesday = render("Monday."), render("Tuesday.")
 
     assert monday[0].content == tuesday[0].content
-    assert str(monday[0].content).startswith("<team>\n")
+    assert str(monday[0].content).startswith("<your_role>\nYou are Squad.\n</your_role>\n\n<team>\n")
     assert str(monday[0].content).endswith("</team>")
     assert (monday[1].content, tuesday[1].content) == ("Monday.", "Tuesday.")
