@@ -17249,7 +17249,7 @@ ResponseResult(
 )
 ```
 
-`TurnIntent` is one of `"user_message"`, `"managed_message"`, `"router_handoff"`, `"router_notice"`, `"scheduled_fire"`, `"external_trigger"`, `"hook_message"`, `"hook_dispatch"`, or `"trusted_internal_relay"`.
+`TurnIntent` is one of `"user_message"`, `"managed_message"`, `"router_handoff"`, `"router_notice"`, `"scheduled_fire"`, `"external_trigger"`, `"hook_message"`, `"hook_dispatch"`, `"trusted_internal_relay"`, or `"job_follow_up"`.
 `origin.may_dispatch_without_mention` is true for `hook_dispatch`, `external_trigger`, `router_handoff`, and `scheduled_fire` turns.
 `origin.may_answer_interactive_prompt` is true only for human-requested `user_message`, `router_handoff`, and `trusted_internal_relay` turns.
 `dispatch_policy_source_kind` is usually `None`; when it is `"active_thread_follow_up"`, `source_kind` still holds the original modality such as `"message"` or `"voice"`.

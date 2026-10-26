@@ -3,7 +3,7 @@
 Plugins import MindRoom's entry points from here; the modules that own them may change between releases.
 `GoogleCloudToolkit` and the `mindroom.memory` helpers stay in their documented modules, because those modules load
 Agno at import and this one stays free of Agno and provider SDKs.
-`tests/test_plugin_api.py` pins these names and each callable's parameter names and kinds.
+`tests/test_plugin_api.py` pins these names, each callable's parameter names and kinds, and each enum's member names.
 """
 
 from __future__ import annotations

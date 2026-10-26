@@ -83,27 +83,26 @@ _CONFIG_LAYER_ROOTS = frozenset(
 # The registry additionally carries httpx (sandbox proxy transport) and click
 # (tool CLI plumbing).
 _REGISTRY_ROOTS = _CONFIG_LAYER_ROOTS | frozenset({"brotli", "click", "httpx", "idna", "zstandard"})
-# The full tool-module sweep adds Agno's tool layer (docstring_parser and
-# packaging) and the httpx transport tree.
-_TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
+# The httpx transport tree, which the tool-module sweep and the plugin API both load.
+_HTTPX_TRANSPORT_ROOTS = frozenset(
     {
-        "agno",
         "anyio",
         "attrs",
         "certifi",
-        "docstring_parser",
         "h11",
         "h2",
         "hpack",
         "httpcore",
         "hyperframe",
         "outcome",
-        "packaging",
         "sniffio",
         "sortedcontainers",
         "trio",
     },
 )
+# The full tool-module sweep adds Agno's tool layer (docstring_parser and
+# packaging) and the httpx transport tree.
+_TOOLS_ROOTS = _REGISTRY_ROOTS | _HTTPX_TRANSPORT_ROOTS | frozenset({"agno", "docstring_parser", "packaging"})
 # Top-level CLI help only needs command metadata and presentation libraries.
 # Command implementations must defer networking, crypto, config validation,
 # and provider imports until the selected command runs.
@@ -138,28 +137,17 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     # Plugins import their entry points without Agno: the registry footprint plus the OAuth helpers' clients
     # (authlib, requests, and the httpx transport tree) and the provider registry's httpx2 client and tiktoken.
     "mindroom.plugin_api": _REGISTRY_ROOTS
+    | _HTTPX_TRANSPORT_ROOTS
     | frozenset(
         {
-            "anyio",
-            "attrs",
             "authlib",
-            "certifi",
             "chardet",
             "charset_normalizer",
-            "h11",
-            "h2",
-            "hpack",
-            "httpcore",
             "httpx2",
-            "hyperframe",
-            "outcome",
             "requests",
-            "sniffio",
             "socks",
-            "sortedcontainers",
             "tiktoken",
             "tiktoken_ext",
-            "trio",
             "urllib3",
         },
     ),
