@@ -157,7 +157,8 @@ def delete_run_subtrees_in_transaction(
     """Delete session ``session_id``'s Agno run rows ``run_ids`` and every run below them in the caller's transaction.
 
     Returns the deleted ids. Team member runs are rows whose ``parent_run_id`` is the team run, so a deleted run
-    takes its whole subtree.
+    takes its whole subtree. A member row whose run id is not text, which worker code can write, stays for the
+    conversion to leave out, as it leaves out every such row.
     """
     runs = quote_identifier(names.runs)
     found = {run_id for run_id in run_ids if run_id}
@@ -166,7 +167,8 @@ def delete_run_subtrees_in_transaction(
         frontier = {
             run_id
             for (run_id,) in connection.execute(
-                f"SELECT run_id FROM {runs} WHERE session_id = ? AND parent_run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
+                f"SELECT run_id FROM {runs} WHERE session_id = ? AND typeof(run_id) = 'text' "  # noqa: S608
+                "AND parent_run_id IN (SELECT value FROM json_each(?))",
                 (session_id, json.dumps(sorted(frontier))),
             )
         } - found

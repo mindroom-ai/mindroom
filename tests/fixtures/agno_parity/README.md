@@ -258,9 +258,9 @@ Every run with a provider request also has its usage row in `<table>_usage`.
 
 Agno's own readers are not lossless.
 Re-serializing a stored run adds `"events": []` to it and to every member response, drops an empty `tools` list, and drops `Audio.format`, so a row written back after Agno read it carries those changes.
-The resumed runs are such rows, since Agno's continuation reads the paused run from storage before saving it, and so is any loaded run MindRoom edits and saves with `save_runs`.
+The resumed runs are such rows, since Agno's continuation reads the paused run from storage before saving it, and so is any loaded run the capturing release edited and saved back whole.
 `tests/session_storage/test_store_goldens.py` pins exactly these differences.
-The store goldens carry no `matrix_response_event_id` linkage, which MindRoom adds with `save_runs` after delivering a reply.
+The store goldens carry no `matrix_response_event_id` linkage, which MindRoom adds to a run's metadata after delivering a reply.
 
 The `run-error` record holds the previous turn's answer followed by `(turn failed before completion)`, because the Agno-era interrupted-turn text fell back to replayed history when the failed request produced no assistant message; the golden keeps that stored legacy data, while the owned loop keeps only the failed reply's own text (`tests/test_agent_turn_runtime.py::test_an_error_record_never_repeats_an_earlier_answer`).
 

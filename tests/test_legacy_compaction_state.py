@@ -105,6 +105,31 @@ def test_opening_storage_adopts_legacy_summary_tombstones_and_seen_ids_once(tmp_
     assert [run.run_id for run in stored.runs or []] == ["kept"]
 
 
+def test_a_member_row_whose_id_is_not_text_below_a_tombstoned_run_does_not_stop_the_conversion(tmp_path: Path) -> None:
+    """Worker code can write a tombstoned copy's member row with an id that is not text; the copy goes, the row stays out."""
+    database = _seed_as_older_release(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="code",
+            runs=[
+                RunRecord(run_id="gone", agent_id="code"),
+                RunRecord(run_id="member", agent_id="code", parent_run_id="gone"),
+                RunRecord(run_id="kept", agent_id="code"),
+            ],
+            summary=ScopeSummary(text="legacy summary", updated_at=_EPOCH),
+            metadata=_compaction_metadata(_SCOPE.key, {"compacted_run_ids": ["gone"]}),
+        ),
+    )
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("UPDATE code_sessions_runs SET run_id = ? WHERE run_id = 'member'", (b"\x09",))
+
+    storage = _open(tmp_path)
+
+    assert stored_run_ids(storage, "session") == ["kept"]
+
+
 def test_opening_storage_adopts_a_summary_without_compaction_state_under_the_row_scope(tmp_path: Path) -> None:
     """A replayed summary with no retired keys belongs to the scope that owns the session row."""
     team_scope = HistoryScope(kind="team", scope_id="squad")

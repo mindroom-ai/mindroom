@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import sys
 import time
 from bisect import bisect_right
 from contextlib import ExitStack, closing
@@ -255,14 +256,16 @@ def _summary_rows(
 ) -> Iterator[_SummaryRow]:
     """Read session ``session_id``'s summary rows that meet ``condition`` in ``id`` order, one segment at a time.
 
-    Worker code can write the table, so a value no reader of the converted row could use is replaced: a position that
-    is not a number sorts after every run, where SQLite sorted it for a load; event ids keep only their text entries;
-    and a creation time that is not whole seconds a datetime holds becomes the conversion's.
+    Worker code can write the table, so a value no reader of the converted row could use is replaced: a row whose scope
+    key is not text, which no read names, is left out; a position that is not a number sorts after every numbered run
+    and before every run without one, where SQLite sorted it for a load; a fold's run id that is not text names no run;
+    event ids keep only their text entries; and a creation time that is not whole seconds a datetime holds becomes the
+    conversion's.
     """
     rows = connection.execute(
         "SELECT id, scope_key, after_run_index, summary, legacy, event_ids, seen_event_ids, created_at, "  # noqa: S608
         f"segment_run_id, CAST(segment AS TEXT) FROM {quote_identifier(names.summaries)} WHERE session_id = ? "
-        f"{condition} ORDER BY id",
+        f"AND typeof(scope_key) = 'text' {condition} ORDER BY id",
         (session_id,),
     )
     now = int(time.time())
@@ -271,13 +274,13 @@ def _summary_rows(
         yield _SummaryRow(
             row_id,
             scope_key,
-            after_run_index if isinstance(after_run_index, int | float) else math.inf,
+            after_run_index if isinstance(after_run_index, int | float) else sys.float_info.max,
             summary,
             legacy,
             _text_event_ids(event_ids),
             _text_event_ids(seen),
             stored_timestamp(created_at, now),
-            run_id,
+            run_id if isinstance(run_id, str) else None,
             cast("dict[str, Any]", decoded) if isinstance(decoded, dict) else None,
         )
 
@@ -305,16 +308,18 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # run's embedded members replace or create their member rows, since a resume read them; a fold whose run has no row and
 # was not removed gets a cancelled one right after its latest summary row, with the fold's metadata and members. Workflow
 # rows and rows that do not decode are left out, the latter logged by id; the backup keeps both. Worker code can write
-# the run data, so an embedded or folded member whose run id is not text is left out too, a member's creation time
-# that is not whole seconds a datetime holds becomes its team run row's or its fold's, and each message and tool keeps
-# its call ids only as text or none (`_use_text_call_ids`).
+# the run data, so a row whose run id is not text is left out too, with what a paused team row embeds, as is an
+# embedded or folded member whose run id is not text; a position that is not a number goes last, as SQLite sorted it;
+# a member's creation time that is not whole seconds a datetime holds becomes its team run row's or its fold's; and
+# each message and tool keeps its call ids only as text or none (`_use_text_call_ids`).
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
 # ::test_members_of_members_join_their_team_run, ::test_a_paused_team_runs_embedded_members_become_its_member_rows,
 # ::test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary,
 # ::test_fold_runs_without_a_row_sort_by_their_latest_fold,
 # ::test_workflow_rows_and_rows_that_do_not_decode_are_left_out,
 # ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, ::test_members_with_unusable_values_convert_alone,
-# ::test_converted_call_ids_are_text_or_none_so_folded_calls_read,
+# ::test_converted_call_ids_are_text_or_none_so_folded_calls_read, ::test_a_run_row_whose_id_is_not_text_is_left_out,
+# ::test_a_run_whose_position_is_not_a_number_goes_last_as_a_load_read_it,
 # tests/storage_oracle/test_migrated.py::test_a_converted_input_shows_its_recording_but_for_named_masks, and
 # tests/storage_oracle/test_migrated.py::test_a_fold_run_a_retirement_removed_converts_without_a_row.
 def _convert_runs(
@@ -344,11 +349,11 @@ def _convert_runs(
     # it would sort under every summary's ``through``, so it goes last, where none covers it.
     for run_id, parent_run_id, kind, run_data, run_index, created_at, updated_at in connection.execute(
         f"SELECT run_id, parent_run_id, run_type, CAST(run_data AS TEXT), run_index, created_at, "  # noqa: S608
-        f"COALESCE(updated_at, created_at) FROM {runs} WHERE session_id = ? "
+        f"COALESCE(updated_at, created_at) FROM {runs} WHERE session_id = ? AND typeof(run_id) = 'text' "
         "ORDER BY run_index IS NULL, run_index, created_at, run_id",
         (session_id,),
     ):
-        index = math.inf if run_index is None else run_index
+        index = run_index if isinstance(run_index, int | float) else math.inf
         # A fold's run without a row sorts after every run at or before its summary row, before every later one.
         while pending and pending[0].index < index:
             write(pending.pop(0))
@@ -397,7 +402,7 @@ def _embedded_members(connection: sqlite3.Connection, names: AgnoTableNames, ses
     embedded: dict[str, RunRecord] = {}
     for run_id, run_data in connection.execute(
         f"SELECT run_id, CAST(run_data AS TEXT) FROM {quote_identifier(names.runs)} WHERE session_id = ? "  # noqa: S608
-        "AND run_type = 'team' AND status = ?",
+        "AND typeof(run_id) = 'text' AND run_type = 'team' AND status = ?",
         (session_id, RunStatus.paused.value),
     ):
         team = _decoded(partial(run_from_row, "team"), run_data)
@@ -425,7 +430,8 @@ def _fold_owners_without_rows(connection: sqlite3.Connection, names: AgnoTableNa
         f"AND segment_run_id NOT IN (SELECT run_id FROM {quote_identifier(names.removed_runs)})"
     )
     for row in _summary_rows(connection, names, session_id, without_row):
-        folds.setdefault(cast("str", row.segment_run_id), []).append(row)
+        if row.segment_run_id is not None:
+            folds.setdefault(row.segment_run_id, []).append(row)
     runs: list[_Run] = []
     for run_id, owned in folds.items():
         latest = owned[-1]
@@ -546,11 +552,14 @@ def _current_delegation_snapshot(path: Path, run_id: str, metadata: dict[str, An
 # sorted at or before its `after_run_index`, else 0, which keeps every run-to-row and row-to-row order; a fold's row
 # names its run in `fold_run_id` and keeps the answered and seen ids of the segment's metadata as its provenance.
 # Inserting the ids sets the id sequence past the largest; `summary_model` is dropped. Worker code can write the table,
-# so a position that is not a number sorts after every run, as SQLite sorted it for a load, event ids keep only their
-# text entries, and a creation time that is not whole seconds a datetime holds becomes the conversion's.
+# so a row whose scope key is not text, which no read names, is left out; a position that is not a number sorts after
+# every numbered run and before every run without one, as SQLite sorted it for a load; a fold's run id that is not text
+# names no run; event ids keep only their text entries; and a creation time that is not whole seconds a datetime holds
+# becomes the conversion's.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_summary_rows_keep_their_order_against_the_runs,
 # ::test_summary_ids_are_never_handed_out_again, ::test_a_fold_row_keeps_its_runs_provenance,
-# ::test_a_summary_row_whose_position_is_not_a_number_covers_every_run_as_a_load_read_it,
+# ::test_a_summary_row_whose_position_is_not_a_number_covers_every_numbered_run_as_a_load_read_it,
+# ::test_a_summary_row_whose_scope_key_is_not_text_is_left_out, ::test_a_fold_whose_run_id_is_not_text_names_no_run,
 # ::test_summary_event_ids_keep_only_their_text_entries, and
 # ::test_a_summary_rows_unusable_creation_time_becomes_the_conversions.
 def _convert_summary(

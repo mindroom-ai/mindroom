@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import sqlite3
-from contextlib import closing
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -25,7 +22,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.native_compaction import replay_basis
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
@@ -37,6 +34,7 @@ from tests.history_helpers import (
     stored_run_ids,
     summary_rows_of,
 )
+from tests.session_storage.agno_layout import write_agno_database
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -63,38 +61,7 @@ def open_legacy(tmp_path: Path) -> Callable[[ConversationSession], ConversationS
     """Write a session as a pre-archive release left it, then open it, which converts it and adopts its state."""
 
     def open_migrated(session: ConversationSession) -> ConversationStore:
-        names = AgnoTableNames("code")
-        database = names.database_path(tmp_path)
-        database.parent.mkdir(parents=True)
-        # A pre-archive release kept Agno's sessions and runs tables, its replayed summary in the session row's
-        # ``summary``, and no summary-row tables.
-        with closing(sqlite3.connect(database)) as connection, connection:
-            for statement in agno_runs_sql(names):
-                connection.execute(statement)
-            connection.execute(
-                f'INSERT INTO "{names.sessions}" (session_id, session_type, agent_id, session_data, metadata, '  # noqa: S608
-                "summary, created_at, updated_at) VALUES (?, 'agent', ?, ?, ?, ?, 1, 1)",
-                (
-                    session.session_id,
-                    session.owner_id,
-                    json.dumps({"session_state": session.session_state}),
-                    json.dumps(session.metadata),
-                    json.dumps({"summary": session.summary.text}) if session.summary is not None else None,
-                ),
-            )
-            for run_index, run in enumerate(session.runs):
-                connection.execute(
-                    f'INSERT INTO "{names.runs}" (run_id, session_id, run_type, agent_id, status, run_index, '  # noqa: S608
-                    "run_data, created_at) VALUES (?, ?, 'agent', ?, ?, ?, ?, 1)",
-                    (
-                        run.run_id,
-                        session.session_id,
-                        run.agent_id,
-                        run.status.value,
-                        run_index,
-                        json.dumps(run.to_dict()),
-                    ),
-                )
+        write_agno_database(AgnoTableNames("code").database_path(tmp_path), session, usage=False)
         storage = _open(tmp_path)
         assert _summary(_stored(storage)) == _summary(session)
         return storage

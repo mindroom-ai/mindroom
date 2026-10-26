@@ -29,7 +29,8 @@ def write_agno_database(path: Path, *sessions: ConversationSession, usage: bool 
 
     The file holds Agno 3's sessions and runs tables and, unless ``usage`` is false, the usage ledger, empty. Each
     session's row holds its state, its metadata, and its replayed summary in Agno's ``summary`` column; each of its
-    runs is a row placed by ``run_index`` in list order, holding the run's stored dict.
+    runs is a row placed by ``run_index`` in list order, holding the run's stored dict, and dated by the run or, when it
+    has no time, by its session.
     """
     names = AgnoTableNames.of_database(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +54,13 @@ def write_agno_database(path: Path, *sessions: ConversationSession, usage: bool 
                     session.created_at,
                 ),
             )
-            _insert_runs(connection, names, session.session_id, (run.to_dict() for run in session.runs))
+            _insert_runs(
+                connection,
+                names,
+                session.session_id,
+                (run.to_dict() for run in session.runs),
+                created_at=session.created_at,
+            )
     return path
 
 
@@ -70,7 +77,7 @@ def converted_store(
     """
     write_agno_database(path, ConversationSession(session_id=SESSION_ID, kind=kind, owner_id=owner_id, created_at=1))
     with closing(sqlite3.connect(path)) as connection, connection:
-        _insert_runs(connection, AgnoTableNames.of_database(path), SESSION_ID, runs)
+        _insert_runs(connection, AgnoTableNames.of_database(path), SESSION_ID, runs, created_at=1)
     migrate_conversation_database(path, TableNames.of_database(path))
     return ConversationStore(path)
 
@@ -80,7 +87,10 @@ def _insert_runs(
     names: AgnoTableNames,
     session_id: str,
     runs: Iterable[Mapping[str, Any]],
+    *,
+    created_at: int,
 ) -> None:
+    """Insert ``runs``, stored run dicts, as session ``session_id``'s rows, dated ``created_at`` when a run has no time."""
     connection.executemany(
         f"INSERT INTO {quote_identifier(names.runs)} (run_id, session_id, run_type, agent_id, team_id, "  # noqa: S608
         "user_id, parent_run_id, status, run_index, run_data, created_at, updated_at) "
@@ -97,8 +107,8 @@ def _insert_runs(
                 data["status"],
                 run_index,
                 json.dumps(data),
-                data.get("created_at", 1),
-                data.get("created_at", 1),
+                data.get("created_at") or created_at,
+                data.get("created_at") or created_at,
             )
             for run_index, data in enumerate(runs)
         ],
