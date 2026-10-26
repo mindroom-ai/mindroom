@@ -265,6 +265,37 @@ async def test_an_after_call_switch_rebuilds_the_leader_and_members_on_the_new_m
 
 
 @pytest.mark.asyncio
+async def test_a_later_rebuild_keeps_the_model_an_after_call_switch_gave_the_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """A rebuild after a switch's rebuild keeps the switched model; the members never fall back to their configured one."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        default=[delegate("call-team", "general", "Switch"), answer("Switching.")],
+        general=[calls(tool_call("model", "call-model")), calls(_switch("after-toolcall"))],
+        large=[
+            delegate("call-again", "general", "Again"),
+            calls(tool_call("model", "call-model-2")),
+            # A next-turn switch runs the turn once more without applying a model to the members.
+            calls(_switch("next-turn", call_id="call-switch-2")),
+            answer("Switching again."),
+            delegate("call-third", "general", "Finish"),
+            calls(tool_call("model", "call-model-3")),
+            answer("Member finished."),
+            answer("Finished with the new model."),
+        ],
+    )
+
+    text = await team.respond(message=PROMPT)
+
+    assert text.endswith("Finished with the new model.")
+    assert probe.active_models == ["general-model", "large", "large"]
+
+
+@pytest.mark.asyncio
 async def test_the_last_successful_switch_wins_over_a_later_rejected_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
