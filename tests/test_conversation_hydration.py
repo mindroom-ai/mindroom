@@ -2147,6 +2147,51 @@ class TestMarkersFromAnOlderWalk:
         assert await bodies(alice, "$root") == ["the question", "the whole answer", "a newer question"]
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
+    async def test_the_previous_walk_versions_markers_walk_threads_again_and_keep_rooms(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A thread the previous walk marked gets back an ordinary edit, and the room it marked is not walked again.
+
+        Only the thread walk changed. The previous one trusted a recursive walk
+        to deliver ordinary edits, which older Tuwunel paging dropped.
+        """
+        epoch = await alice.membership_epoch(ROOM)
+        reply = raw("$reply", "first wording", sender=BOB, ts=2_000, thread_id="$root")
+        edit = raw("$edit", "second wording", sender=BOB, ts=3_000, replaces="$reply")
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id="$root",
+            events=(_projected(raw("$root", "the question")), _projected(reply)),
+            complete=True,
+            attempted_policy_rank=HydrationPolicy.PROMPT,
+            expected_membership_epoch=epoch,
+        )
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            complete=True,
+            attempted_policy_rank=HydrationPolicy.PROMPT,
+            expected_membership_epoch=epoch,
+        )
+        await journal_store.backend.write(
+            lambda transaction: transaction.execute("UPDATE conversation_hydration SET walk_version = 1"),
+        )
+        client = FakeClient(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [reply, edit], "$reply": [edit]},
+        )
+        hydrate = hydrator(alice, client)
+
+        await hydrate.ensure_hydrated(room_id=ROOM, thread_id=None)
+        await hydrate.ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.history_pages == 0
+        assert client.relation_calls == 1
+        assert await bodies(alice, "$root") == ["the question", "second wording"]
+
 
 def _projected(source: dict[str, Any]) -> ProjectedEvent:
     """Return the projection view of one raw event source."""
