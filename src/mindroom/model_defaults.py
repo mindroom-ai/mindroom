@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 __all__ = (
     "ANTHROPIC_BASE_URL_DEFAULT",
     "CARTESIA_TTS",
-    "CEREBRAS_API_PATH",
     "CEREBRAS_HOST_DEFAULT",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
     "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
@@ -28,7 +27,6 @@ __all__ = (
     "GOOGLE_IMAGE",
     "GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "GOOGLE_VEO",
-    "GROQ_API_PATH",
     "GROQ_HOST_DEFAULT",
     "GROQ_TRANSCRIPTION",
     "GROQ_TTS",
@@ -207,9 +205,7 @@ OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
 ANTHROPIC_BASE_URL_DEFAULT = "https://api.anthropic.com"
 DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
 GROQ_HOST_DEFAULT = "https://api.groq.com"
-GROQ_API_PATH = "/openai/v1"
 CEREBRAS_HOST_DEFAULT = "https://api.cerebras.ai"
-CEREBRAS_API_PATH = "/v1"
 ZAI_BASE_URL_DEFAULT = "https://api.z.ai/api/paas/v4"
 OPENROUTER_BASE_URL_DEFAULT = "https://openrouter.ai/api/v1"
 

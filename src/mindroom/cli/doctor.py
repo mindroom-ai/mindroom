@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -15,7 +16,7 @@ import typer
 from rich.markup import escape
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, env_key_for_provider
+from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_values
 from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
@@ -187,34 +188,50 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
     return config, 1, 0, 0
 
 
-def _models_using_shared_key(
-    config: Config,
-    env_key: str,
-    runtime_paths: RuntimePaths,
-) -> dict[str, ModelConfig] | None:
-    """Return the models, by name, that read the shared ``env_key``, or None when the credential store is unreadable."""
+def _models_reading_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> dict[str, ModelConfig]:
+    """Return the models, by name, that may read the shared ``env_key``: all of its models if the store is unreadable."""
+    models = {name: model for name, model in config.models.items() if env_key_for_provider(model.provider) == env_key}
     try:
         return {
-            name: model
-            for name, model in config.models.items()
-            if env_key_for_provider(model.provider) == env_key
-            and not model_uses_own_credential(name, model, runtime_paths)
+            name: model for name, model in models.items() if not model_uses_own_credential(name, model, runtime_paths)
         }
     except (OSError, ValueError):
-        return None
+        return models
 
 
-def _print_key_not_checked(subject: str, env_key: str, user: str, endpoint: str) -> None:
-    """Print that the shared ``env_key`` is not checked for ``user``, which calls a custom endpoint."""
-    console.print(f"[yellow]![/yellow] {subject}: {env_key} not checked for {user}, which calls {escape(endpoint)}")
+def _endpoint_settings(value: object, path: str) -> list[str]:
+    """Return the path of each setting under ``value`` that can point a client at another server or credential.
+
+    Any set key whose name contains ``base``, ``host``, ``endpoint``, or ``header`` counts, at any depth, so doctor
+    never has to know which of them a provider's client reads.
+    """
+    if not isinstance(value, Mapping):
+        return []
+    found: list[str] = []
+    for key, item in value.items():
+        if item and any(part in str(key).lower() for part in ("base", "host", "endpoint", "header")):
+            found.append(f"{path}.{key}")
+        else:
+            found.extend(_endpoint_settings(item, f"{path}.{key}"))
+    return found
 
 
-def _custom_endpoints(models: dict[str, ModelConfig], runtime_paths: RuntimePaths) -> dict[str, str]:
-    """Return the endpoint, by model name, of each model that calls one its config or its route's variable sets."""
-    # Deferred: the provider routes load the model HTTP client and token counter.
-    from mindroom.providers.registry import configured_endpoint  # noqa: PLC0415
+def _endpoint_variables(env_key: str, runtime_paths: RuntimePaths) -> list[str]:
+    """Return the set endpoint variables of ``env_key``'s provider family, such as ``OPENAI_BASE_URL``."""
+    family = env_key.removesuffix("API_KEY")
+    return sorted(
+        name
+        for name, value in runtime_env_values(runtime_paths).items()
+        if name.startswith(family) and name.endswith(("_URL", "_HOST", "_ENDPOINT", "_API_BASE")) and value.strip()
+    )
 
-    return {name: endpoint for name, model in models.items() if (endpoint := configured_endpoint(model, runtime_paths))}
+
+def _shared_key_not_checked(subject: str, env_key: str, reasons: Sequence[str]) -> bool:
+    """Report the shared ``env_key`` as not checked when ``reasons`` name a setting that may send it elsewhere."""
+    if reasons:
+        listed = ", ".join(reasons)
+        console.print(f"[yellow]![/yellow] {subject}: {env_key} not checked: {listed} may send it elsewhere")
+    return bool(reasons)
 
 
 def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
@@ -455,23 +472,36 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
     if not env_key:
         return 0, 0, 0
 
-    # Models with their own credential never read the shared key. When the credential store is
-    # unreadable that is unknown, so the key counts as needed and only the default endpoint is probed.
-    shared_key_models = _models_using_shared_key(config, env_key, runtime_paths)
+    return _check_shared_key(provider, env_key, config, runtime_paths)
+
+
+def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check one route's shared ``env_key`` at the provider's own API. Returns (passed, failed, warnings).
+
+    Doctor never works out where the runtime sends a key, which a header, a stored credential, or an SDK variable can
+    change. So it skips the check while the provider's endpoint variable is set, reports each model that reads the key
+    and sets an endpoint-like setting as not checked, and checks the key unless every model that reads it was skipped.
+    """
+    # Models with their own credential never read the shared key.
+    shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
     api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths)
     if not api_key:
-        needs_shared_key = shared_key_models is None or bool(shared_key_models)
-        if needs_shared_key:
+        if shared_key_models:
             console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, int(needs_shared_key)
-
-    # The shared key is checked only at the provider's own API. A custom endpoint may take another credential the
-    # runtime sends in its place, such as a header, so a model calling one is reported as not checked.
-    custom_endpoints = _custom_endpoints(shared_key_models or {}, runtime_paths)
-    for name, endpoint in custom_endpoints.items():
-        _print_key_not_checked(provider, env_key, name, endpoint)
-    if shared_key_models and len(custom_endpoints) == len(shared_key_models):
-        return 0, 0, len(custom_endpoints)
+        return 0, 0, int(bool(shared_key_models))
+    if _shared_key_not_checked(provider, env_key, _endpoint_variables(env_key, runtime_paths)):
+        return 0, 0, 1
+    skipped = [
+        name
+        for name, model in shared_key_models.items()
+        if _shared_key_not_checked(
+            provider,
+            env_key,
+            _endpoint_settings({"host": model.host, "extra_kwargs": model.extra_kwargs}, f"models.{name}"),
+        )
+    ]
+    if shared_key_models and len(skipped) == len(shared_key_models):
+        return 0, 0, len(skipped)
     valid, detail = _validate_provider_key(provider, api_key)
     passed, failed, warnings = _print_validation(
         valid,
@@ -480,7 +510,7 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
         f"{provider} API key invalid",
         f"{provider}: could not validate key",
     )
-    return passed, failed, warnings + len(custom_endpoints)
+    return passed, failed, warnings + len(skipped)
 
 
 def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -555,9 +585,17 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
         return 0, 0, 1
-    # A shared key is checked only at the provider's own API, as for models.
-    if llm_base_url and env_key and not configured_key:
-        _print_key_not_checked("Memory LLM", env_key, f"{llm_provider}/{llm_model}", llm_base_url)
+    # A shared key is checked only where no endpoint setting or variable could send it elsewhere, as for models.
+    if (
+        env_key
+        and not configured_key
+        and _shared_key_not_checked(
+            "Memory LLM",
+            env_key,
+            _endpoint_settings(config.memory.llm.config, "memory.llm.config")
+            + _endpoint_variables(env_key, runtime_paths),
+        )
+    ):
         return 0, 0, 1
     # The runtime drops host for memory LLMs other than Ollama.
     valid, detail = _validate_provider_key(llm_provider, api_key or "", llm_base_url)
@@ -618,6 +656,8 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         console.print(
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
         )
+        return 0, 0, 1
+    if env_key and _shared_key_not_checked("Memory embedder", env_key, _endpoint_variables(env_key, runtime_paths)):
         return 0, 0, 1
 
     valid, detail = _validate_provider_key(emb.provider, api_key or "")

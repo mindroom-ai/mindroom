@@ -4212,7 +4212,7 @@ class TestDoctor:
         assert message in normalize_console_output(result.output)
 
     def test_custom_base_url_is_not_sent_the_shared_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor checks a shared key only at the provider's own API, so a custom base_url gets no key check."""
+        """A model with a custom base_url gets no shared-key check, at that endpoint or at the provider's API."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n"
@@ -4244,7 +4244,7 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         output = " ".join(result.output.split())
-        assert "OPENAI_API_KEY not checked for default, which calls http://localhost:9292/v1" in output
+        assert "OPENAI_API_KEY not checked: models.default.extra_kwargs.base_url may send it elsewhere" in output
         assert not any("localhost:9292" in u or "api.openai.com" in u for u in called_urls)
 
     def test_memory_ollama_embedder_checks_reachability(
@@ -4346,12 +4346,12 @@ class TestDoctor:
         assert "Memory LLM: openai/m API key valid" in result.output
         assert ("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-mem"}) in requests
 
-    def test_memory_llm_host_is_not_the_endpoint_for_non_ollama_providers(
+    def test_memory_llm_host_keeps_the_shared_key_from_every_server(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The runtime drops host for non-Ollama memory LLMs, so doctor validates their default endpoint."""
+        """A memory LLM ``host`` counts as an endpoint setting, so the shared key is not checked, though Mem0 drops it."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             _VALID_CONFIG
@@ -4364,7 +4364,7 @@ class TestDoctor:
         _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
 
         shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
-        assert shared_key_urls == ["https://api.openai.com/v1/models"]
+        assert shared_key_urls == []
 
     def test_memory_llm_explicit_key_is_checked_at_its_openai_base_url(
         self,
