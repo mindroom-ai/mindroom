@@ -1155,7 +1155,6 @@ visibility = [
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
@@ -2661,7 +2660,6 @@ depends_on = [
     "mindroom.session_storage.store",
     "mindroom.background_tasks",
     "mindroom.error_handling",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
@@ -7833,11 +7831,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.claude_replay_compat"
-depends_on = ["mindroom.history.run_visibility"]
-visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
-
-[[modules]]
 path = "mindroom.history.message_content"
 depends_on = [
     "mindroom.token_budget",
@@ -7926,7 +7919,6 @@ visibility = [
 path = "mindroom.history.summary_input"
 depends_on = [
     "mindroom.constants",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.message_content",
     "mindroom.timing",
     "mindroom.token_budget",

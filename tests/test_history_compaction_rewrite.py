@@ -18,7 +18,6 @@ from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
 )
 from mindroom.history import summary_rows
-from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.compaction import (
     SummaryModel,
     _emit_compaction_hook,
@@ -57,7 +56,6 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
-from mindroom.providers.anthropic.wire import format_claude_messages
 from mindroom.providers.errors import classify_provider_error
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
@@ -1583,240 +1581,30 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path, mon
     assert observed == ["failed", "fast:session-1"]
 
 
-def test_private_strip_stale_anthropic_replay_fields_returns_zero_without_user_messages() -> None:
-    assistant = Message(
-        role="assistant",
-        content="assistant",
-        provider_data={"signature": "sig-1", "keep": "yes"},
-        reasoning_content="thinking",
-        redacted_reasoning_content="redacted",
-    )
-
-    assert strip_stale_anthropic_replay_fields([assistant]) == 0
-    assert assistant.provider_data == {"signature": "sig-1", "keep": "yes"}
-    assert assistant.reasoning_content == "thinking"
-    assert assistant.redacted_reasoning_content == "redacted"
-
-
-def test_private_strip_stale_anthropic_replay_fields_preserves_single_turn_after_last_user() -> None:
-    assistant = Message(
-        role="assistant",
-        content="assistant",
-        provider_data={"signature": "sig-1"},
-        reasoning_content="thinking",
-        redacted_reasoning_content="redacted",
-    )
-    messages = [
-        Message(role="user", content="question"),
-        assistant,
-    ]
-
-    assert strip_stale_anthropic_replay_fields(messages) == 0
-    assert assistant.provider_data == {"signature": "sig-1"}
-    assert assistant.reasoning_content == "thinking"
-    assert assistant.redacted_reasoning_content == "redacted"
-
-
-def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_preserves_current_turn() -> None:
-    old_assistant = Message(
-        role="assistant",
-        content="old assistant",
-        provider_data={"signature": "sig-old", "keep": "yes"},
-        reasoning_content="old thinking",
-        redacted_reasoning_content="old redacted",
-    )
-    current_assistant = Message(
-        role="assistant",
-        content="current assistant",
-        provider_data={"signature": "sig-current"},
-        reasoning_content="current thinking",
-        redacted_reasoning_content="current redacted",
-    )
-    messages = [
-        Message(role="user", content="old user"),
-        old_assistant,
-        Message(role="user", content="current user"),
-        current_assistant,
-    ]
-
-    assert strip_stale_anthropic_replay_fields(messages) == 1
-    assert old_assistant.provider_data == {"keep": "yes"}
-    assert old_assistant.reasoning_content is None
-    assert old_assistant.redacted_reasoning_content is None
-    assert current_assistant.provider_data == {"signature": "sig-current"}
-    assert current_assistant.reasoning_content == "current thinking"
-    assert current_assistant.redacted_reasoning_content == "current redacted"
-
-
-@pytest.mark.parametrize(("top_level_signature", "signed_thinking"), [(False, False), (False, True), (True, True)])
-@pytest.mark.parametrize("split_runs", [False, True])
-def test_strip_stale_anthropic_content_blocks_preserves_provider_replay(
-    top_level_signature: bool,
-    signed_thinking: bool,
-    split_runs: bool,
-) -> None:
-    """Compaction drops stale signed blocks without losing text/tools or changing the current turn."""
-    replay_blocks = [
-        {"type": "text", "text": "old answer"},
-        {"type": "server_tool_use", "id": "search-1", "name": "web_search", "input": {"query": "weather"}},
-        {"type": "web_search_tool_result", "tool_use_id": "search-1", "content": []},
-        {"type": "tool_use", "id": "call-1", "name": "get_status", "input": {}},
-    ]
+def test_the_compaction_hook_input_keeps_stored_thinking() -> None:
+    """Hooks read the stored messages as copies, thinking and signatures included; the Claude wire decides what to send."""
     old_assistant = Message(
         role="assistant",
         content="old answer",
         reasoning_content="old thinking",
-        redacted_reasoning_content="old redacted",
-        tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "get_status", "arguments": "{}"}}],
         provider_data={
-            "keep": "yes",
-            "content_blocks": [
-                *(
-                    [{"type": "thinking", "thinking": "old thinking", "signature": "sig-old"}]
-                    if signed_thinking
-                    else []
-                ),
-                *deepcopy(replay_blocks[:2]),
-                {"type": "redacted_thinking", "data": "old redacted"},
-                *deepcopy(replay_blocks[2:]),
-            ],
-            **({"signature": "sig-old"} if top_level_signature else {}),
+            "signature": "sig-old",
+            "content_blocks": [{"type": "thinking", "thinking": "old thinking", "signature": "sig-old"}],
         },
     )
-    current_blocks = [
-        {"type": "thinking", "thinking": "current thinking", "signature": "sig-current"},
-        {"type": "redacted_thinking", "data": "current redacted"},
-        {"type": "text", "text": "current answer"},
-    ]
-    current_assistant = Message(
-        role="assistant",
-        content="current answer",
-        reasoning_content="current thinking",
-        provider_data={"signature": "sig-current", "content_blocks": deepcopy(current_blocks)},
+    messages = [Message(role="user", content="old question"), old_assistant, Message(role="user", content="now")]
+
+    copied = messages_for_runs([_completed_run("old-run", messages=messages)], _ALL_HISTORY_SETTINGS)
+
+    assert copied[1] is not old_assistant
+    assert (copied[1].reasoning_content, copied[1].provider_data) == (
+        old_assistant.reasoning_content,
+        old_assistant.provider_data,
     )
-    messages = [
-        Message(role="user", content="old question"),
-        old_assistant,
-        Message(role="tool", content="ready", tool_call_id="call-1"),
-        Message(role="user", content="current question"),
-        current_assistant,
-        Message(role="user", content="queued notice", provider_data={"mindroom_queued_message_notice": True}),
-    ]
-
-    if split_runs:
-        original_messages = deepcopy(messages)
-        replay_messages = messages_for_runs(
-            [
-                _completed_run("old-run", messages=messages[:3]),
-                _completed_run("current-run", messages=messages[3:]),
-            ],
-            _ALL_HISTORY_SETTINGS,
-        )
-        assert messages == original_messages
-        messages = replay_messages
-        old_assistant = messages[1]
-        current_assistant = messages[4]
-    else:
-        assert strip_stale_anthropic_replay_fields(messages) == 1
-    assert old_assistant.provider_data == {"keep": "yes", "content_blocks": replay_blocks}
-    assert old_assistant.reasoning_content is None
-    assert old_assistant.redacted_reasoning_content is None
-    formatted = format_claude_messages(messages, append_trailing_user_message=False).messages
-    assistant_turns = [message["content"] for message in formatted if message["role"] == "assistant"]
-    assert assistant_turns == [replay_blocks, current_blocks]
-    assert current_assistant.provider_data == {"signature": "sig-current", "content_blocks": current_blocks}
-    assert current_assistant.reasoning_content == "current thinking"
-    assert strip_stale_anthropic_replay_fields(messages) == 0
-
-
-def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:
-    tool_assistant = Message(
-        role="assistant",
-        content="tool call",
-        provider_data={"signature": "sig-tool"},
-        reasoning_content="thinking",
-        redacted_reasoning_content="redacted",
-        tool_calls=[
-            {"id": "call-1", "type": "function", "function": {"name": "tool", "arguments": "{}"}},
-        ],
-    )
-    final_assistant = Message(
-        role="assistant",
-        content="final answer",
-        provider_data={"signature": "sig-final"},
-        reasoning_content="more thinking",
-        redacted_reasoning_content="more redacted",
-    )
-    messages = [
-        Message(role="user", content="question"),
-        tool_assistant,
-        Message(role="tool", content="tool result", tool_call_id="call-1"),
-        final_assistant,
-    ]
-
-    assert strip_stale_anthropic_replay_fields(messages) == 0
-    assert tool_assistant.provider_data == {"signature": "sig-tool"}
-    assert tool_assistant.reasoning_content == "thinking"
-    assert tool_assistant.redacted_reasoning_content == "redacted"
-    assert final_assistant.provider_data == {"signature": "sig-final"}
-    assert final_assistant.reasoning_content == "more thinking"
-    assert final_assistant.redacted_reasoning_content == "more redacted"
-
-
-@pytest.mark.parametrize("marker", [True, "persisted"], ids=["live", "persisted"])
-def test_private_strip_stale_anthropic_replay_fields_ignores_queued_notice(marker: bool | str) -> None:
-    interrupted_assistant = Message(
-        role="assistant",
-        content="tool call",
-        provider_data={"signature": "sig-tool"},
-        reasoning_content="thinking",
-        redacted_reasoning_content="redacted",
-        tool_calls=[
-            {"id": "call-1", "type": "function", "function": {"name": "tool", "arguments": "{}"}},
-        ],
-    )
-    messages = [
-        Message(role="user", content="question"),
-        interrupted_assistant,
-        Message(role="tool", content="tool result", tool_call_id="call-1"),
-        Message(
-            role="user",
-            content="A queued-message notice was delivered.",
-            provider_data={
-                "mindroom_queued_message_notice": marker,
-                "mindroom_queued_message_notice_response_turn_id": "response-1",
-            },
-        ),
-    ]
-
-    assert strip_stale_anthropic_replay_fields(messages) == 0
-    assert interrupted_assistant.provider_data == {"signature": "sig-tool"}
-    assert interrupted_assistant.reasoning_content == "thinking"
-    assert interrupted_assistant.redacted_reasoning_content == "redacted"
-
-
-def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_signature() -> None:
-    assistant = Message(
-        role="assistant",
-        content="assistant",
-        provider_data={"keep": "yes"},
-        reasoning_content="thinking",
-        redacted_reasoning_content="redacted",
-    )
-    messages = [
-        Message(role="user", content="old user"),
-        assistant,
-        Message(role="user", content="current user"),
-    ]
-
-    assert strip_stale_anthropic_replay_fields(messages) == 0
-    assert assistant.provider_data == {"keep": "yes"}
-    assert assistant.reasoning_content == "thinking"
-    assert assistant.redacted_reasoning_content == "redacted"
 
 
 @pytest.mark.asyncio
-async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields_from_remaining_runs(
+async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_thinking(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -1899,9 +1687,9 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
     assert rewrite_result.compacted_run_count == 1
     assert [run.run_id for run in working_session.runs] == ["run-2"]
     remaining_messages = working_session.runs[0].messages or []
-    assert remaining_messages[1].provider_data == {"keep": "yes"}
-    assert remaining_messages[1].reasoning_content is None
-    assert remaining_messages[1].redacted_reasoning_content is None
+    assert remaining_messages[1].provider_data == {"signature": "sig-old", "keep": "yes"}
+    assert remaining_messages[1].reasoning_content == "old thinking"
+    assert remaining_messages[1].redacted_reasoning_content == "old redacted"
     assert remaining_messages[3].provider_data == {"signature": "sig-current"}
     assert remaining_messages[3].reasoning_content == "current thinking"
     assert remaining_messages[3].redacted_reasoning_content == "current redacted"
@@ -1909,8 +1697,8 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("split_runs", [False, True])
-async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path: Path, split_runs: bool) -> None:
-    """Final compaction persist should copy sanitized remaining runs onto the latest session."""
+async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tmp_path: Path, split_runs: bool) -> None:
+    """Final compaction persist keeps the remaining runs on the latest session, their stored thinking included."""
     config, _runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, _runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -2001,9 +1789,9 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == [run.run_id for run in remaining_runs]
     remaining_messages = [message for run in persisted.runs for message in run.messages or []]
-    assert remaining_messages[1].provider_data == {"keep": "yes"}
-    assert remaining_messages[1].reasoning_content is None
-    assert remaining_messages[1].redacted_reasoning_content is None
+    assert remaining_messages[1].provider_data == {"signature": "sig-old", "keep": "yes"}
+    assert remaining_messages[1].reasoning_content == "old thinking"
+    assert remaining_messages[1].redacted_reasoning_content == "old redacted"
     assert remaining_messages[3].provider_data == {"signature": "sig-current"}
     assert remaining_messages[3].reasoning_content == "current thinking"
     assert remaining_messages[3].redacted_reasoning_content == "current redacted"
