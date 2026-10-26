@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -19,6 +20,7 @@ from mindroom.session_storage.legacy_agno3_conversion import migrate_conversatio
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.schema import TableNames
 from mindroom.usage import legacy_usage_storage
+from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from tests.conftest import create_agno_2_sessions_db
 
 if TYPE_CHECKING:
@@ -107,6 +109,30 @@ def test_migration_reads_the_agno_runs_table_beside_agno_sessions(tmp_path: Path
     with closing(sqlite3.connect(path)) as connection:
         rows = connection.execute("SELECT run_id, usage_data FROM agno_sessions_usage").fetchall()
     assert [(run_id, json.loads(data)["metrics"]["total_tokens"]) for run_id, data in rows] == [("run", 7)]
+
+
+@pytest.mark.parametrize("created_at", [None, True, "invalid", [], {}, math.nan, math.inf])
+def test_a_blob_run_with_an_unusable_timestamp_keeps_its_usage(tmp_path: Path, created_at: object) -> None:
+    """A blob run whose timestamp is absent or malformed converts, and its usable token counters stay reported."""
+    path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
+    blob = [{"run_id": "odd", "agent_id": "code", "created_at": created_at, "metrics": {"total_tokens": 20}}]
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE code_sessions SET runs = ?", (json.dumps(json.dumps(blob)),))
+
+    _convert(path)
+
+    source = UsageStorageSource(
+        path=path,
+        path_label=path.name,
+        scope="shared_agent",
+        source_agent_id="code",
+        allowed_agent_ids=frozenset({"code"}),
+        requester_isolated=False,
+    )
+    [row] = list(iter_usage_storage_rows(source))
+    assert isinstance(row, UsageSessionRow)
+    [run] = row.runs
+    assert (run.run_id, run.created_at, run.metrics["total_tokens"]) == ("odd", None, 20)
 
 
 def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

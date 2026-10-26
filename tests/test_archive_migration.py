@@ -9,6 +9,8 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom import constants
 from mindroom.history import summary_rows
 from mindroom.history.storage import read_scope_seen_event_ids
@@ -395,3 +397,79 @@ def test_redacting_an_archived_message_after_migration_cuts_from_its_run(tmp_pat
     assert replay.summary == "summary of r0"
     assert replay.stored == ["r0"]
     assert replay.loaded == []
+
+
+def _set_archived(tmp_path: Path, column: str, value: str) -> None:
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        connection.execute(f"UPDATE code_sessions_compacted_runs SET {column} = ?", (value,))  # noqa: S608
+
+
+@pytest.mark.parametrize(
+    "run_data",
+    ["not json", "[1]", "5", "[" * 100_000 + "]" * 100_000],
+    ids=["not-json", "list", "number", "too-deep"],
+)
+def test_an_archived_run_that_does_not_decode_stays_out(tmp_path: Path, run_data: str) -> None:
+    """Worker code can write the archive; a run that is no JSON object does not return, and the rest converts."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    _set_archived(tmp_path, "run_data", run_data)
+
+    replay = _replay(tmp_path)
+
+    assert (replay.loaded, replay.stored, replay.summary) == (["r1"], ["r1"], "summary of r0")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"created_at": "NaN"},
+        {"created_at": "1e400"},
+        {"created_at": "100000000000000000000000"},
+        {"team_id": '{"a": 1}'},
+        {"user_id": "[1]"},
+        {"run_id": "5"},
+    ],
+    ids=["nan-time", "infinite-time", "time-beyond-64-bits", "object-team", "list-requester", "number-id"],
+)
+def test_an_archived_run_with_unusable_values_returns_without_them(tmp_path: Path, change: dict[str, str]) -> None:
+    """A value no writer stored is left out of the restored row, so the run returns behind its summary."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    run_data = (
+        json.dumps(_run("r0").to_dict())[:-1] + "".join(f', "{key}": {value}' for key, value in change.items()) + "}"
+    )
+    _set_archived(tmp_path, "run_data", run_data)
+
+    replay = _replay(tmp_path)
+
+    assert (replay.loaded, replay.stored, replay.folded) == (["r1"], ["r0", "r1"], ["r0"])
+    with closing(sqlite3.connect(_db(tmp_path))) as connection:
+        created = [created_at for (created_at,) in connection.execute("SELECT created_at FROM code_sessions_log_runs")]
+    assert all(isinstance(created_at, int) and created_at > 0 for created_at in created)
+
+
+@pytest.mark.parametrize(
+    "stored",
+    ["not json", "5", "null", '{"at": 1}', '[1, "$odd", [2]]'],
+    ids=["not-json", "number", "null", "object", "mixed"],
+)
+def test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text(tmp_path: Path, stored: str) -> None:
+    """Event ids that are not text entries of valid JSON match no redaction, and the database still converts."""
+    _main_database(
+        tmp_path,
+        live=[_run("r1")],
+        generations=[
+            _Generation("legacy summary", legacy=True, legacy_event_ids=("$legacy",)),
+            _Generation("legacy summary and r0", [_run("r0")]),
+        ],
+    )
+    _set_archived(tmp_path, "event_ids", stored)
+    _set_archived(tmp_path, "seen_event_ids", stored)
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        connection.execute("UPDATE code_sessions_compactions SET legacy_event_ids = ?", (stored,))
+
+    storage = _open(tmp_path)
+
+    expected = {"$odd"} if "$odd" in stored else set()
+    for kind in ("all", "seen"):
+        assert summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind=kind) == expected
+    assert _replay(tmp_path).loaded == ["r1"]

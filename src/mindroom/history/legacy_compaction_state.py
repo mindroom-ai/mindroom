@@ -126,11 +126,14 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
 # with the event ids of its archived runs, then drops both archive tables. Replay and redaction candidates
 # match what the archive gave after its pre-reply reconcile, and so do seen ids, except that metadata seen ids
 # reconcile dropped when the cached summary differed from the newest generation (an interrupted summary
-# write) stay; tombstones are not carried over.
+# write) stay; tombstones are not carried over. Worker code can write the archive, so an archived run that is not a JSON
+# object does not return, and event ids count only as text entries of valid JSON; neither fails the conversion.
 # Coverage: tests/test_archive_migration.py::test_ordinary_generations_become_summary_rows_after_their_runs,
 # ::test_a_legacy_generation_stays_in_force_before_every_run, ::test_retired_generations_keep_their_runs_behind_the_barrier,
 # ::test_stale_copies_of_archived_and_tombstoned_runs_are_dropped, ::test_archived_member_runs_return_with_their_team_run,
-# and ::test_redaction_candidates_keep_what_the_archive_matched.
+# ::test_redaction_candidates_keep_what_the_archive_matched, ::test_an_archived_run_that_does_not_decode_stays_out,
+# ::test_an_archived_run_with_unusable_values_returns_without_them, and
+# ::test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text.
 def _convert_archive(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     compactions = quote_identifier(f"{names.sessions}_compactions")
     compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
@@ -144,8 +147,10 @@ def _convert_archive(connection: sqlite3.Connection, names: AgnoTableNames) -> N
         delete_run_subtrees_in_transaction(connection, names, {run_id for run_id, _ in entries}, session_id=session_id)
         restored: list[str] = []
         for run_id, run_data in entries:
-            if run_data is not None:
-                insert_run_entry(connection, names, json.loads(run_data), session_id=session_id)
+            # A tombstone holds no run, and an archived run that is not a JSON object, which worker code can leave,
+            # cannot return; the backup keeps both. The row's id wins over any the run's JSON holds.
+            if (entry := decoded_mapping(run_data)) is not None:
+                insert_run_entry(connection, names, {**entry, "run_id": run_id}, session_id=session_id)
                 restored.append(run_id)
         restored_ids = set(restored)
         live = [run_id for run_id in ordered_run_ids(connection, names, session_id) if run_id not in restored_ids]
@@ -201,19 +206,29 @@ def _generation_event_ids(
     generation_id: int,
     column: str,
 ) -> list[str]:
-    """Return the event ids a generation's archived runs carry in ``column``, plus a legacy generation's own."""
+    """Return the event ids a generation's archived runs carry in ``column``, plus a legacy generation's own.
+
+    Only text entries of valid JSON count: worker code can write the archive, and no writer stored any other.
+    """
     compactions = quote_identifier(f"{names.sessions}_compactions")
     compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
     return sorted(
         value
         for (value,) in connection.execute(
-            f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.{column}) "  # noqa: S608
-            "WHERE archived.compaction_id = ? "
-            f"UNION SELECT value FROM {compactions} AS generation, json_each(generation.legacy_event_ids) "
-            "WHERE generation.id = ? AND generation.legacy = 1",
+            f"SELECT item.value FROM {compacted_runs} AS archived, "  # noqa: S608
+            f"json_each({_json_or_empty(f'archived.{column}')}) AS item "
+            "WHERE archived.compaction_id = ? AND item.type = 'text' "
+            f"UNION SELECT item.value FROM {compactions} AS generation, "
+            f"json_each({_json_or_empty('generation.legacy_event_ids')}) AS item "
+            "WHERE generation.id = ? AND generation.legacy = 1 AND item.type = 'text'",
             (generation_id, generation_id),
         )
     )
+
+
+def _json_or_empty(column: str) -> str:
+    """Return SQL for ``column``'s JSON, or an empty array when it holds none, so ``json_each`` never fails on it."""
+    return f"CASE WHEN json_valid({column}) THEN {column} ELSE '[]' END"
 
 
 def _legacy_tombstones(raw_state: dict[str, Any]) -> tuple[str, ...] | None:

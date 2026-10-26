@@ -1,4 +1,4 @@
-"""Run data older Agno releases stored: Agno 2 run blobs, JSON columns encoded twice, and rows without a position."""
+"""Run data older Agno releases stored: Agno 2 blobs, doubly encoded JSON columns, unplaced rows, and timestamps."""
 
 from __future__ import annotations
 
@@ -42,9 +42,12 @@ def decode_session_json(raw_value: object) -> object:
 # no summary-row table, and finds a sessions table that still has the column, every blob entry with a string run id
 # that has no row yet becomes a run row, the session's rows are renumbered in the order Agno's merge read them, and the
 # blob is cleared, in the conversion's write transaction, so the runs convert in the order a read gave them.
-# Entries without a string run id are dropped, as no read could address them.
-# Coverage: tests/session_storage/test_legacy_agno2_runs.py and
-# tests/session_storage/test_factories.py::test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order.
+# Entries without a string run id are dropped, as no read could address them. Worker code can write the blob, so a
+# column value Agno never wrote, one that is not text or a creation time that is not positive whole seconds, is left
+# out of the row (the creation time becomes the conversion's), and no entry fails the conversion.
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py,
+# tests/session_storage/test_factories.py::test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order, and
+# tests/test_legacy_usage_storage.py::test_a_blob_run_with_an_unusable_timestamp_keeps_its_usage.
 def has_blob_column(connection: sqlite3.Connection, names: AgnoTableNames) -> bool:
     """Return whether the sessions table still has the column Agno 2 kept run blobs in, which may hold some."""
     return "runs" in {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}
@@ -103,6 +106,10 @@ def renumber_runs(connection: sqlite3.Connection, names: AgnoTableNames, session
     )
 
 
+# The text columns of an Agno 3 run row that Agno derived from the run dict's keys of the same name.
+_TEXT_COLUMNS = ("agent_id", "team_id", "workflow_id", "user_id", "parent_run_id", "status")
+
+
 def insert_run_entry(
     connection: sqlite3.Connection,
     names: AgnoTableNames,
@@ -113,7 +120,8 @@ def insert_run_entry(
     """Write one serialized run as a run row without an index, with the columns Agno 3 derived from a run dict.
 
     A run that names an agent is an agent run and any other a team run; MindRoom stored no other kind of run.
-    A row that already has the run's id is kept.
+    A row that already has the run's id is kept. A column value that is not text, or a creation time that is not a
+    stored timestamp (``stored_timestamp``), is left out, as Agno wrote none.
     """
     run_type = "agent" if entry.get("agent_id") or entry.get("agent_name") else "team"
     now = int(time.time())
@@ -125,24 +133,32 @@ def insert_run_entry(
             entry["run_id"],
             session_id,
             run_type,
-            entry.get("agent_id"),
-            entry.get("team_id"),
-            entry.get("workflow_id"),
-            entry.get("user_id"),
-            entry.get("parent_run_id"),
-            entry.get("status"),
+            *(_text(entry.get(key)) for key in _TEXT_COLUMNS),
             json.dumps(entry),
-            entry.get("created_at") or now,
+            stored_timestamp(entry.get("created_at"), now),
             now,
         ),
     )
+
+
+def stored_timestamp(value: object, default: int) -> int:
+    """Return ``value``, a creation time read from stored run data, or ``default`` when it is none MindRoom wrote.
+
+    MindRoom wrote whole seconds since the epoch. Worker code can write session data, so the value can be anything JSON
+    holds: text, NaN, a fraction, or a number SQLite cannot store gives ``default``.
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**63 else default
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _legacy_entries(blob: object) -> dict[str, dict[str, Any]]:
     """Return the blob's run entries a read could address by id, keyed by run id in stored order."""
     try:
         decoded = decode_session_json(blob)
-    except (TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError):
         return {}
     entries: dict[str, dict[str, Any]] = {}
     for entry in decoded if isinstance(decoded, list) else []:
@@ -163,4 +179,5 @@ __all__ = [
     "number_unindexed_runs",
     "ordered_run_ids",
     "renumber_runs",
+    "stored_timestamp",
 ]

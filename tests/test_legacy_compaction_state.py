@@ -145,23 +145,19 @@ def test_opening_storage_leaves_uncompacted_scopes_and_their_seen_ids_alone(tmp_
     assert stored.metadata == metadata
 
 
-def test_opening_storage_ignores_malformed_legacy_metadata(tmp_path: Path) -> None:
-    """Unreadable metadata is left as it is instead of failing the conversation database open."""
+@pytest.mark.parametrize("column", ["metadata", "summary"])
+@pytest.mark.parametrize("stored", ["not json", "[" * 100_000 + "]" * 100_000], ids=["not-json", "too-deep"])
+def test_opening_storage_ignores_malformed_legacy_metadata(tmp_path: Path, column: str, stored: str) -> None:
+    """Metadata or a replayed summary no decoder reads is left as it is instead of failing the database open."""
     _seed_as_older_release(tmp_path, ConversationSession(kind="agent", session_id="session", owner_id="code"))
-    connection = sqlite3.connect(tmp_path / "sessions" / "code.db")
-    try:
-        connection.execute("UPDATE code_sessions SET metadata = 'not json' WHERE session_id = 'session'")
-        connection.commit()
-    finally:
-        connection.close()
+    with closing(sqlite3.connect(tmp_path / "sessions" / "code.db")) as connection, connection:
+        connection.execute(f"UPDATE code_sessions SET {column} = ? WHERE session_id = 'session'", (stored,))  # noqa: S608
 
     storage = _open(tmp_path)
     assert summary_rows_of(storage, _SCOPE.key, "session") == []
-    connection = sqlite3.connect(tmp_path / "sessions" / "code.db")
-    try:
-        assert connection.execute("SELECT metadata FROM code_sessions").fetchone() == ("not json",)
-    finally:
-        connection.close()
+    if column == "metadata":
+        with closing(sqlite3.connect(tmp_path / "sessions" / "code.db")) as connection:
+            assert connection.execute("SELECT metadata FROM code_sessions").fetchone() == (stored,)
 
 
 def test_opening_storage_keeps_seen_ids_of_a_scope_without_a_summary(tmp_path: Path) -> None:

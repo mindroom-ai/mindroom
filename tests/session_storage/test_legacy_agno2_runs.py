@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from typing import TYPE_CHECKING, Any
@@ -26,6 +28,21 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 _NAMES = AgnoTableNames("code")
+# JSON nested deeper than the decoder recurses.
+_TOO_DEEP = "[" * 100_000 + "]" * 100_000
+# Values worker code can write in a blob entry where Agno wrote text or a timestamp.
+_ODD_VALUES = {
+    "nan": math.nan,
+    "infinity": math.inf,
+    "beyond_64_bits": 2**70,
+    "negative": -5,
+    "fraction": 1.5,
+    "text": "yesterday",
+    "object": {"at": 1},
+    "list": [1],
+    "bool": True,
+}
+_TEXT_FIELDS = ("agent_id", "team_id", "workflow_id", "user_id", "parent_run_id", "status")
 
 
 def _agno_2_database(tmp_path: Path) -> Path:
@@ -125,16 +142,46 @@ def test_blob_entries_a_read_could_not_address_are_dropped(tmp_path: Path) -> No
     assert not _has_blob_column(db_file)
 
 
-def test_an_unreadable_blob_is_cleared_without_rows(tmp_path: Path) -> None:
-    """A blob that is not JSON holds nothing a read could return."""
+@pytest.mark.parametrize("blob", ["not json", _TOO_DEEP], ids=["not-json", "too-deep"])
+def test_an_unreadable_blob_is_cleared_without_rows(tmp_path: Path, blob: str) -> None:
+    """A blob that is not JSON, or that no decoder can read, holds nothing a read could return."""
     db_file = _agno_2_database(tmp_path)
     with closing(sqlite3.connect(db_file)) as connection, connection:
-        connection.execute("UPDATE code_sessions SET runs = 'not json'")
+        connection.execute("UPDATE code_sessions SET runs = ?", (blob,))
 
     _converted(db_file)
 
     assert _log(db_file) == []
     assert not _has_blob_column(db_file)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        *(("created_at", value) for value in _ODD_VALUES.values()),
+        *((field, value) for field in _TEXT_FIELDS for value in (_ODD_VALUES["object"], _ODD_VALUES["list"], 2**70)),
+    ],
+    ids=[
+        *(f"created_at-{name}" for name in _ODD_VALUES),
+        *(f"{field}-{name}" for field in _TEXT_FIELDS for name in ("object", "list", "beyond_64_bits")),
+    ],
+)
+def test_a_blob_entry_with_an_unusable_value_converts_alone(tmp_path: Path, field: str, value: object) -> None:
+    """A value Agno never wrote in an entry is left out of its row, so the database still converts with every other run."""
+    db_file = _agno_2_database(tmp_path)
+    _set_blob(db_file, [{**_entry("odd", 1), field: value}, _entry("ok", 2)])
+    started = int(time.time())
+
+    store = _converted(db_file)
+
+    assert "ok" in [run_id for run_id, _, _ in _log(db_file)]
+    with closing(sqlite3.connect(db_file)) as connection:
+        created = dict(connection.execute("SELECT run_id, created_at FROM code_sessions_log_runs").fetchall())
+    assert all(isinstance(created_at, int) and created_at > 0 for created_at in created.values())
+    if field == "created_at":
+        # The conversion's time stands in for one Agno never wrote.
+        assert created["odd"] >= started
+    assert store.load_session("session-1", "agent") is not None
 
 
 def test_a_database_with_summary_rows_is_never_migrated_again(tmp_path: Path) -> None:

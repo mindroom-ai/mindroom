@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -503,6 +504,76 @@ def test_rows_worker_code_wrote_in_odd_shapes_convert_alone(tmp_path: Path) -> N
     parents = dict(_query(database, 'SELECT run_id, parent_run_id FROM "code_sessions_log_runs"'))
     assert (parents["emb-replaced"], parents["emb-created"]) == ("team", "team")
     assert _loaded_ids(store, "healthy") == ["fine"]
+
+
+_ODD_VALUES = {
+    "nan": math.nan,
+    "infinity": math.inf,
+    "beyond_64_bits": 2**70,
+    "text": "yesterday",
+    "object": {"at": 1},
+    "list": [1],
+    "bool": True,
+}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        *(("created_at", value) for value in _ODD_VALUES.values()),
+        *(("run_id", value) for name, value in _ODD_VALUES.items() if name != "text"),
+    ],
+    ids=[
+        *(f"created_at-{name}" for name in _ODD_VALUES),
+        *(f"run_id-{name}" for name in _ODD_VALUES if name != "text"),
+    ],
+)
+def test_members_with_unusable_values_convert_alone(tmp_path: Path, field: str, value: object) -> None:
+    """A member a paused team run embeds, or a fold stores, with a run id or a time Agno never wrote converts alone.
+
+    A member whose run id is not text is left out; one whose time is not a timestamp takes its team run row's or its
+    fold's, and every other run converts.
+    """
+    database = _agno_database(tmp_path, (_SESSION, "team", "squad"))
+    embedded = _run("embedded", status=RunStatus.paused, parent_run_id="team").to_dict() | {field: value}
+    team = TeamRunRecord(run_id="team", team_id="squad", session_id=_SESSION, status=RunStatus.paused).to_dict()
+    _insert_run(database, team | {"member_responses": [embedded]}, run_index=0, created_at=300)
+    folded = _run("folded", parent_run_id="gone").to_dict() | {field: value}
+    _insert_summary(database, 1, 0, segment_run_id="gone", segment={"metadata": {}, "member_responses": [folded]})
+
+    store = _converted(database)
+
+    seqs, created = _seqs(database), dict(_query(database, 'SELECT run_id, created_at FROM "code_sessions_log_runs"'))
+    assert set(seqs) == {"team", "gone"} | ({"embedded", "folded"} if field == "created_at" else set())
+    if field == "created_at":
+        assert (created["embedded"], created["folded"]) == (300, 200)
+        assert (store.get_run("embedded").created_at, store.get_run("folded").created_at) == (300, 200)  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [math.nan, 5, "call", {"id": "call"}, [1], ["call"], [{"id": {"nested": 1}}], [{"id": ["call"]}]],
+    ids=["nan", "number", "text", "object", "list-of-number", "list-of-text", "object-id", "list-id"],
+)
+def test_segment_messages_name_only_text_call_ids(tmp_path: Path, calls: object) -> None:
+    """Tool calls and result ids of any shape worker code wrote name no call unless they are text."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("live", status=RunStatus.paused), run_index=0)
+    odd = {"id": "live.odd", "role": "assistant", "content": "x", "tool_calls": calls, "tool_call_id": {"id": "c0"}}
+    named = Message(role="tool", content="result", id="live.t0", tool_call_id="c0", created_at=100).to_dict()
+    segment = {
+        "metadata": {},
+        "messages": [odd, named],
+        "tools": [{"tool_call_id": "c0", "tool_name": "probe"}, {"tool_call_id": "call", "tool_name": "probe"}],
+    }
+    _insert_summary(database, 1, -1, segment_run_id="live", segment=segment)
+
+    _converted(database)
+
+    rows = _message_rows(database, "live")
+    assert ("live:1:call", 1) in rows
+    assert ("live:1:c0", 1) not in rows
+    assert {("live.odd", 1), ("live.t0", 1)} <= set(rows)
 
 
 def test_workflow_rows_and_rows_that_do_not_decode_are_left_out(tmp_path: Path) -> None:

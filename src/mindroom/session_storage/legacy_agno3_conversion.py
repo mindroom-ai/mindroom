@@ -29,6 +29,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.codec import run_kind
+from mindroom.session_storage.legacy_agno2_runs import stored_timestamp
 from mindroom.session_storage.legacy_agno3_backup import write_conversion_backup
 from mindroom.session_storage.legacy_agno3_schema import (
     AGNO_SCHEMA_VERSIONS_TABLE,
@@ -50,7 +51,7 @@ from mindroom.usage.legacy_usage_storage import seed_usage_ledger
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -277,13 +278,15 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # first, so no summary row covers it, as none did; a member of a member is re-parented to its team run. A paused team
 # run's embedded members replace or create their member rows, since a resume read them; a fold whose run has no row gets a
 # cancelled one right after its latest summary row, with the fold's metadata and members. Workflow rows and rows that
-# do not decode are left out, the latter logged by id; the backup keeps both.
+# do not decode are left out, the latter logged by id; the backup keeps both. Worker code can write the run data, so an
+# embedded or folded member whose run id is not text is left out too, and a member's creation time that is not
+# positive whole seconds becomes its team run row's or its fold's.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
 # ::test_members_of_members_join_their_team_run, ::test_a_paused_team_runs_embedded_members_become_its_member_rows,
 # ::test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary,
 # ::test_fold_runs_without_a_row_sort_by_their_latest_fold,
 # ::test_workflow_rows_and_rows_that_do_not_decode_are_left_out,
-# ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, and
+# ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, ::test_members_with_unusable_values_convert_alone, and
 # tests/storage_oracle/test_migrated.py::test_a_converted_input_shows_its_recording_but_for_named_masks.
 def _convert_runs(
     connection: sqlite3.Connection,
@@ -329,9 +332,9 @@ def _convert_runs(
             record.run_id, record.parent_run_id = run_id, _team_run(parents, parent_run_id)
         write(_Run(record, index, created_at, updated_at))
         if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
-            for member in record.member_responses:
+            for member in _addressable_members(record):
                 if not _has_row(connection, names, member.run_id):
-                    member.parent_run_id = run_id
+                    member.parent_run_id, member.created_at = run_id, stored_timestamp(member.created_at, created_at)
                     write(_Run(member, index, member.created_at, updated_at))
     for run in pending:
         write(run)
@@ -369,10 +372,15 @@ def _embedded_members(connection: sqlite3.Connection, names: AgnoTableNames, ses
         (session_id, RunStatus.paused.value),
     ):
         team = _decoded(partial(run_from_row, "team"), run_data)
-        for member in team.member_responses if isinstance(team, TeamRunRecord) else ():
+        for member in _addressable_members(team) if isinstance(team, TeamRunRecord) else ():
             member.parent_run_id = run_id
             embedded[member.run_id] = member
     return embedded
+
+
+def _addressable_members(team: TeamRunRecord) -> list[RunRecord]:
+    """Return the members a paused team run embeds that a resume can address: those whose run id is text."""
+    return [member for member in team.member_responses if isinstance(member.run_id, str)]
 
 
 def _fold_owners_without_rows(connection: sqlite3.Connection, names: AgnoTableNames, session_id: str) -> list[_Run]:
@@ -403,11 +411,17 @@ def _fold_owners_without_rows(connection: sqlite3.Connection, names: AgnoTableNa
         )
         index = latest.after_run_index + 0.5
         runs.append(_Run(record, index, latest.created_at, latest.created_at))
-        members = {member.get("run_id"): member for row in owned for member in row.segment_list("member_responses")}
+        members = {
+            member_id: member
+            for row in owned
+            for member in row.segment_list("member_responses")
+            if isinstance(member_id := member.get("run_id"), str)
+        }
         for member_id, data in members.items():
-            if isinstance(member_id, str) and not _has_row(connection, names, member_id):
+            if not _has_row(connection, names, member_id):
                 member = _decoded(RunRecord.from_dict, {**data, "parent_run_id": run_id})
                 if member is not None:
+                    member.created_at = stored_timestamp(member.created_at, latest.created_at)
                     runs.append(_Run(member, index, member.created_at, latest.created_at))
     # Stable, so each run's new members stay right after it.
     return sorted(runs, key=lambda run: run.index)
@@ -528,10 +542,11 @@ def _convert_summary(
 # Handling: In row order, each segment message the run's row lacks becomes a message row folded by that row, and one it
 # holds gains the flag; a tool execution no folded message names becomes a folded tool-result message with its call
 # id; the segment's members gain the flag on their rows, so the run's folded tool calls stay what they were. A segment
-# whose run is not this session's converted row, or that does not decode, flags nothing.
+# whose run is not this session's converted row, or that does not decode, flags nothing, and a call id that is not text
+# names no call.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_segment_flags_what_its_fold_took,
 # ::test_a_segment_tool_no_folded_message_names_stays_folded, ::test_a_segment_whose_run_is_not_converted_flags_nothing,
-# and ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone.
+# ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, and ::test_segment_messages_name_only_text_call_ids.
 def _convert_segment(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -544,8 +559,7 @@ def _convert_segment(
         return
     decoded = (_decoded(Message.from_dict, message) for message in row.segment_list("messages"))
     messages = [message.to_dict() for message in decoded if message is not None]
-    named = {call.get("id") for message in messages for call in message.get("tool_calls") or ()}
-    named |= {message.get("tool_call_id") for message in messages}
+    named = _named_call_ids(messages)
     for tool in row.segment_list("tools"):
         call_id = tool.get("tool_call_id")
         if isinstance(call_id, str) and call_id not in named:
@@ -560,6 +574,16 @@ def _convert_segment(
     members = [member.get("run_id") for member in row.segment_list("member_responses")]
     member_ids = [member_id for member_id in members if isinstance(member_id, str)]
     flag_folded(connection, names, session_id, run_id, messages, member_ids, row.id)
+
+
+def _named_call_ids(messages: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Return the tool call ids message dicts name, as calls or as results; ids that are not text name none."""
+    named: list[object] = []
+    for message in messages:
+        calls = message.get("tool_calls")
+        named += [call.get("id") for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
+        named.append(message.get("tool_call_id"))
+    return {call_id for call_id in named if isinstance(call_id, str)}
 
 
 def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> Record | None:
