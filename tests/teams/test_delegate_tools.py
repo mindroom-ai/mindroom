@@ -1,6 +1,6 @@
 """What the leader reads for a finished member run, with and without streaming, which is never ``null``.
 
-The last tests answer a delegation call that waited on a paused member once the member's run ends.
+``answer_delegation`` answers a delegation call that waited on a paused member once the member's run ends.
 """
 # ruff: noqa: D103
 

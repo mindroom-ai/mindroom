@@ -26,6 +26,7 @@ from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.teams.squad import (
+    CHECKER_PAUSED_PIECE,
     PROVIDER,
     SQUAD,
     SQUAD_APPROVED,
@@ -54,7 +55,6 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 APPROVED_CALL = "call-checker-multiply-approved"
-CHECKER_PAUSED_PIECE = "Agent Checker: Requires human input before continuing."
 
 
 def _paused_team_approved() -> TeamRunRecord:

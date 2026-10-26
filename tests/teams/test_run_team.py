@@ -30,6 +30,7 @@ from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
 from tests.providers.golden_support import Wire, hide_provider_environment, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter
 from tests.teams.squad import (
+    CHECKER_PAUSED_PIECE,
     PANEL,
     SQUAD,
     Store,
@@ -55,8 +56,6 @@ if TYPE_CHECKING:
     from mindroom.teams.runtime import TeamRunEvent
 
 pytestmark = pytest.mark.asyncio
-
-CHECKER_PAUSED_PIECE = "Agent Checker: Requires human input before continuing."
 
 
 def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetrics) -> list[Any]:
