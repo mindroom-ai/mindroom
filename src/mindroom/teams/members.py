@@ -20,7 +20,7 @@ from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.prompt_templates import render_prompt_template
 from mindroom.providers import registry as provider_registry
-from mindroom.system_prompt import render_date_context, render_session_context
+from mindroom.system_prompt import render_session_context
 from mindroom.teams.formation import (
     not_materializable_team_agents_message,
     resolve_live_shared_agent_names,
@@ -447,15 +447,7 @@ def build_team_spec(
         toolkits=() if jobs is None else (jobs.controls,),
         max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
     )
-    turn_context = appended_context(
-        render_session_context(
-            render_date_context(
-                config.timezone,
-                datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
-            ),
-        ),
-        system_enrichment,
-    )
+    turn_context = appended_context(render_session_context(config), system_enrichment)
     team_config = config.teams.get(configured_team_name) if configured_team_name is not None else None
     identity = render_prompt_template(
         config.get_prompt("TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE"),

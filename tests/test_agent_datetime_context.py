@@ -17,8 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.llm.messages import system_text
-from mindroom.prompts import DATETIME_CONTEXT_TEMPLATE
-from mindroom.system_prompt import render_date_context
+from mindroom.system_prompt import render_session_context
 from mindroom.teams.members import build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
@@ -47,32 +46,33 @@ def _datetime_test_config() -> Config:
     )
 
 
-def test_render_date_context_format() -> None:
-    """Test the datetime context formatting."""
+def test_the_session_context_names_the_date_and_timezone() -> None:
+    """The session context holds the date and the configured timezone, without a clock time."""
     frozen_now = datetime(2026, 3, 20, 13, 30, tzinfo=ZoneInfo("America/New_York"))
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
-        context = render_date_context("America/New_York", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        context = render_session_context(Config(timezone="America/New_York"))
 
     assert context == (
-        "## Current Date and Time\nToday is Friday, March 20, 2026.\nTimezone: America/New_York (EDT)\n\n"
+        "<mindroom_session_context>\n## Current Date and Time\nToday is Friday, March 20, 2026.\n"
+        "Timezone: America/New_York (EDT)\n</mindroom_session_context>"
     )
 
 
-def test_render_date_context_utc() -> None:
-    """Test datetime context with UTC timezone."""
+def test_the_session_context_in_utc() -> None:
+    """The default timezone is UTC."""
     frozen_now = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
-        context = render_date_context("UTC", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        context = render_session_context(Config())
 
-    assert context == ("## Current Date and Time\nToday is Friday, March 20, 2026.\nTimezone: UTC (UTC)\n\n")
+    assert "Today is Friday, March 20, 2026.\nTimezone: UTC (UTC)\n" in context
 
 
-def test_render_date_context_invalid_timezone() -> None:
-    """Test that invalid timezone raises ZoneInfoNotFoundError."""
+def test_the_session_context_rejects_an_unknown_timezone() -> None:
+    """An unknown timezone raises ZoneInfoNotFoundError."""
     with pytest.raises(ZoneInfoNotFoundError):
-        render_date_context("Invalid/Timezone", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        render_session_context(Config(timezone="Invalid/Timezone"))
 
 
 def _build(config: Config, monkeypatch: pytest.MonkeyPatch) -> AgentBuild:

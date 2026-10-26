@@ -53,7 +53,7 @@ from mindroom.shared_directories.paths import (
     describe_agent_shared_directories,
     primary_tools_reach_shared_directories,
 )
-from mindroom.system_prompt import render_date_context, render_session_context
+from mindroom.system_prompt import render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
@@ -2061,12 +2061,7 @@ def create_agent(
         instructions=tuple(instructions),
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         tool_instructions=tool_assembly.instructions,
-        turn_context=render_session_context(
-            render_date_context(
-                config.timezone,
-                datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
-            ),
-        ),
+        turn_context=render_session_context(config),
         skills_block=None if offered_skills is None else offered_skills.prompt_block(),
         knowledge_block=None if enabled_knowledge is None else enabled_knowledge.prompt_block(),
     )

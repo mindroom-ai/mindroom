@@ -2754,7 +2754,7 @@ visibility = ["mindroom.providers.anthropic.messages"]
 
 [[modules]]
 path = "mindroom.providers.cache_ladder"
-depends_on = ["mindroom.hooks.enrichment", "mindroom.providers.claude_wire_blocks", "mindroom.system_prompt"]
+depends_on = ["mindroom.hooks.enrichment", "mindroom.providers.claude_wire_blocks"]
 visibility = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.providers.openai",
