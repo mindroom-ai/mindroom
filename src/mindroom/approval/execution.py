@@ -233,7 +233,9 @@ async def _continue_persisted_agent(
             runtime_model_name=continuation.runtime_model_name,
         )
     if response.status is not RunStatus.completed:
-        raise RuntimeError(response.content or "Approval continuation did not complete")
+        # Paused on a call no approval asks about and no delegation answers, such as a plugin's externally executed
+        # call: nothing can resume it, so the resume fails with what the run hands over.
+        raise RuntimeError(response.handover_content or "Approval continuation did not complete")
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),

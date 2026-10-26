@@ -830,6 +830,44 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     )
 
 
+class _HandOffProbe(ProbeToolkit):
+    """The squad's probe toolkit plus ``hand_off``, a call executed outside the agent loop, which nothing answers."""
+
+    def __init__(self) -> None:
+        Toolkit.__init__(
+            self,
+            name="probe",
+            tools=[self.touch, self.scope, self.dig, self.model, self.hand_off],
+            external_execution_required_tools=["hand_off"],
+        )
+
+    async def hand_off(self) -> str:
+        """Hand the work to an external executor."""
+        return "handed off"
+
+
+@pytest.mark.asyncio
+async def test_a_team_approval_resume_that_pauses_on_a_call_nothing_answers_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member that pauses again on an externally executed call no approval asks about fails the team's resume."""
+    with registered_toolkit(PROBE_TOOL, _HandOffProbe):
+        team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+        team.models["checker-model"] = ScriptedModel([calls(tool_call("hand_off", "call-hand"))])
+
+        with pytest.raises(RuntimeError):
+            await team.resume(
+                raised.paused,
+                approved=True,
+                approvals=(member_approval("call-touch", "dangerous"),),
+            )
+
+    assert ProbeToolkit.calls == ["dangerous"]
+    record, _members = team.stored_runs()
+    assert record.status is RunStatus.paused
+
+
 @pytest.mark.asyncio
 async def test_a_member_resumed_by_an_approval_stores_to_the_team_scope(
     tmp_path: Path,

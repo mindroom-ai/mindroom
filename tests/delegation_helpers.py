@@ -576,6 +576,39 @@ class MetadataProbeTools(Toolkit):
         return "report written"
 
 
+class HandOffTools(Toolkit):
+    """The gated ``write_report`` of the ``report`` toolkit, and ``hand_off``, a call executed outside the agent loop.
+
+    Nothing in MindRoom answers ``hand_off``: a run that calls it pauses with no approval to ask for.
+    """
+
+    handed_off: ClassVar[list[str]] = []
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="report",
+            tools=[self.write_report, self.hand_off],
+            external_execution_required_tools=["hand_off"],
+        )
+
+    async def write_report(self) -> str:
+        """Write the report."""
+        return "report written"
+
+    async def hand_off(self) -> str:
+        """Hand the work to an external executor."""
+        type(self).handed_off.append("handed off")
+        return "handed off"
+
+
+@contextmanager
+def registered_hand_off_tool() -> Iterator[type[HandOffTools]]:
+    """Register ``HandOffTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""
+    HandOffTools.handed_off.clear()
+    with registered_toolkit("report", HandOffTools):
+        yield HandOffTools
+
+
 @contextmanager
 def registered_metadata_probe_tool() -> Iterator[type[MetadataProbeTools]]:
     """Register ``MetadataProbeTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""

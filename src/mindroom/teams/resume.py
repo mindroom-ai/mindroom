@@ -462,6 +462,7 @@ async def continue_paused_team_run(
         if paused is not None:
             return continued_team_pause(presentation, paused)
         if continued.status is not RunStatus.completed:
+            # Paused on a call no approval asks about and no delegation answers, as the agent resume fails on it.
             raise RuntimeError(continued.handover_content or "Team continuation did not complete")
         if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)

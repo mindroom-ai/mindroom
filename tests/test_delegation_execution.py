@@ -52,6 +52,7 @@ from tests.delegation_helpers import (
     approval_calls_for,
     approval_executor,
     pause_parent,
+    registered_hand_off_tool,
     registered_metadata_probe_tool,
     registered_report_tool,
     respond,
@@ -445,6 +446,46 @@ async def test_an_approved_call_reads_the_run_metadata_of_the_run_it_resumes(
     assert isinstance(result, CompletedApprovalRun)
     [metadata] = probe.seen
     assert metadata["room_id"] == identity.room_id
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_that_pauses_on_a_call_nothing_answers_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run that pauses on an externally executed call no approval asks about fails the resume.
+
+    Only a delegation's call is answered outside the loop, so a plugin function marked for external execution
+    leaves the resumed run paused with nothing to resume it, as it fails a live turn.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = replace(_leader_identity(), agent_name="code")
+    ScriptedAgents(
+        {"code": ScriptedModel([calls(tool_call("write_report", "write-call")), calls(tool_call("hand_off", "hand"))])},
+    ).install(monkeypatch)
+
+    with registered_hand_off_tool() as tools:
+        paused = await respond("code", "Write", config=config, runtime_paths=paths, identity=identity, run_id="run")
+        assert isinstance(paused, PausedAttempt)
+        with pytest.raises(RuntimeError) as raised:
+            await resume(
+                approval_executor(config, paths),
+                paused,
+                approval_calls_for(paused, default_agent="code", toolkit_names={"write_report": "report"}),
+                agent_name="code",
+                identity=identity,
+                config=config,
+                runtime_paths=paths,
+                decisions={"write-call": True},
+            )
+
+    assert tools.handed_off == []
+    stored = create_session_storage("code", config, paths, identity).get_run("run")
+    assert stored is not None
+    assert stored.status is RunStatus.paused
+    # The resume fails with what the paused run hands over, before the reply's continuation runs.
+    assert str(raised.value) == stored.handover_content
 
 
 @pytest.mark.asyncio
