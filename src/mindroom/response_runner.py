@@ -4811,7 +4811,6 @@ class ResponseRunner:
                             member_model_names=member_model_names,
                             media=resolved_request.media,
                             show_tool_calls=show_tool_calls,
-                            run_id_callback=team_turn_recorder.set_run_id,
                             user_id=requester_user_id,
                             current_timestamp_ms=request.current_timestamp_ms,
                             current_prompt_is_structured=request.current_prompt_is_structured,
@@ -4903,7 +4902,6 @@ class ResponseRunner:
                                     member_model_names=member_model_names,
                                     media=resolved_request.media,
                                     show_tool_calls=show_tool_calls,
-                                    run_id_callback=team_turn_recorder.set_run_id,
                                     user_id=requester_user_id,
                                     current_timestamp_ms=request.current_timestamp_ms,
                                     current_prompt_is_structured=request.current_prompt_is_structured,
@@ -5155,7 +5153,6 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any] = {}
 
         def note_attempt_run_id(current_run_id: str, _model_name: str) -> None:
-            turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
         show_tool_calls = runtime.show_tool_calls
@@ -5257,7 +5254,6 @@ class ResponseRunner:
         )
 
         def note_attempt_run_id(current_run_id: str, _model_name: str) -> None:
-            turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
         def note_visible_response_event_id(response_event_id: str) -> None:

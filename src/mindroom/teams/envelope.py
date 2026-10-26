@@ -92,7 +92,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
@@ -379,7 +379,6 @@ class _TeamTurn:
     model_name: str | None
     media: MediaInputs
     show_tool_calls: bool
-    run_id_callback: Callable[[str], None] | None
     user_id: str | None
     response_sender_id: str | None
     compaction_lifecycle: CompactionLifecycle | None
@@ -536,8 +535,7 @@ class _TeamTurn:
             compaction_lifecycle=self.compaction_lifecycle,
             turn_recorder=self.turn_recorder,
         )
-        if self.run_id_callback is not None:
-            self.run_id_callback(attempt.run_id)
+        self.turn_recorder.set_run_id(attempt.run_id)
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
             run_input=run_input,
@@ -824,7 +822,6 @@ def _team_turn(
     model_name: str | None,
     media: MediaInputs | None,
     show_tool_calls: bool,
-    run_id_callback: Callable[[str], None] | None,
     user_id: str | None,
     response_sender_id: str | None,
     compaction_lifecycle: CompactionLifecycle | None,
@@ -893,7 +890,6 @@ def _team_turn(
         model_name=model_name,
         media=media or MediaInputs(),
         show_tool_calls=show_tool_calls,
-        run_id_callback=run_id_callback,
         user_id=user_id,
         response_sender_id=response_sender_id,
         compaction_lifecycle=compaction_lifecycle,
@@ -922,7 +918,6 @@ async def team_response(
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
-    run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
@@ -952,7 +947,6 @@ async def team_response(
         model_name=model_name,
         media=media,
         show_tool_calls=show_tool_calls,
-        run_id_callback=run_id_callback,
         user_id=user_id,
         response_sender_id=response_sender_id,
         compaction_lifecycle=compaction_lifecycle,
@@ -996,7 +990,6 @@ async def team_response_stream(
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
-    run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
@@ -1027,7 +1020,6 @@ async def team_response_stream(
         model_name=model_name,
         media=media,
         show_tool_calls=show_tool_calls,
-        run_id_callback=run_id_callback,
         user_id=user_id,
         response_sender_id=response_sender_id,
         compaction_lifecycle=compaction_lifecycle,

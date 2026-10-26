@@ -762,19 +762,13 @@ async def test_the_stored_team_run_carries_the_turn_s_run_session_and_requester(
     stream: bool,
 ) -> None:
     team = _team(tmp_path, monkeypatch, leader=[answer("General response")])
-    run_ids: list[str] = []
 
-    await team.reply(
-        stream=stream,
-        ctx=team.ctx(run_id="run-123"),
-        user_id="@alice:localhost",
-        run_id_callback=run_ids.append,
-    )
+    await team.reply(stream=stream, ctx=team.ctx(run_id="run-123"), user_id="@alice:localhost")
 
     record, members = team.stored_runs()
     assert (record.run_id, record.session_id, record.user_id) == ("run-123", SESSION_ID, "@alice:localhost")
     assert members == []
-    assert run_ids == ["run-123"]
+    assert team.recorder.run_id == "run-123"
 
 
 @pytest.mark.asyncio

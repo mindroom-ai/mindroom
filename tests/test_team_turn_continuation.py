@@ -108,15 +108,11 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_with_rebuilt_memb
         default=[delegate("call-team", "general", "Switch"), answer("Switching."), answer("Finished the task.")],
         general=[calls(_switch("next-turn"))],
     )
-    run_ids: list[str] = []
-
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
-        text = await team.reply(
-            stream=stream,
-            message=PROMPT,
-            run_id_callback=run_ids.append,
-            show_tool_calls=show_tool_calls,
-        )
+        text = await team.reply(stream=stream, message=PROMPT, show_tool_calls=show_tool_calls)
+    session = team.storage.load_session(SESSION_ID, "team")
+    assert session is not None
+    run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
 
     assert text.endswith("Finished the task.")
     assert "Switching." not in text
@@ -129,6 +125,8 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_with_rebuilt_memb
     assert run_ids[0] == "run-1"
     assert len(run_ids) == 2
     assert run_ids[1] != "run-1"
+    # The recorder holds the run id of the attempt that answered.
+    assert team.recorder.run_id == run_ids[1]
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text.endswith("Finished the task.")
     # The turn's trace still carries the first attempt's model switch.
@@ -151,9 +149,7 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
         general=[calls(_switch("next-turn"))],
     )
     assert team.storage.load_session(SESSION_ID, "team") is None
-    run_ids: list[str] = []
-
-    await team.reply(stream=stream, message=PROMPT, run_id_callback=run_ids.append)
+    await team.reply(stream=stream, message=PROMPT)
 
     first, *_, continued = team.models["default"].requests
     contents = [str(message.content) for message in continued.messages]
@@ -163,7 +159,9 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
     assert CONTINUATION_MARK in contents[-1]
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None
-    assert [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)] == run_ids
+    run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
+    assert len(run_ids) == 2
+    assert team.recorder.run_id == run_ids[-1]
 
 
 @pytest.mark.asyncio

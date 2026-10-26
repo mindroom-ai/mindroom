@@ -596,9 +596,8 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
         cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
         run_id = cast("str | None", kwargs["ctx"].run_id)
         seen_run_ids.append(run_id)
-        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
         if run_id is not None:
-            run_id_callback(run_id)
+            cast("TurnRecorder", kwargs["turn_recorder"]).set_run_id(run_id)
         assert run_id is not None
         seed_session(
             store,
@@ -1792,7 +1791,7 @@ async def test_generate_team_response_helper_links_its_reply_event_to_the_report
     store = _team_store(config, runtime_paths)
 
     def run_team_attempt(kwargs: dict[str, object]) -> None:
-        cast("Callable[[str], None]", kwargs["run_id_callback"])("team-run")
+        cast("TurnRecorder", kwargs["turn_recorder"]).set_run_id("team-run")
         seed_session(
             store,
             _team_session(

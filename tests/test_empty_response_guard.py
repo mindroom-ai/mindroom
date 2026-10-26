@@ -281,6 +281,28 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_the_turn_recorder_holds_the_run_id_of_the_attempt_that_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """After an empty attempt's retry, the recorder names the retry's stored run, which an interruption would record."""
+    config = _config(tmp_path)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("Recovered")])})
+    recorder = TurnRecorder(user_message="test")
+
+    if stream:
+        await _stream(config, turn_recorder=recorder)
+    else:
+        await _respond(config, turn_recorder=recorder)
+
+    [run] = stored_runs(config, runtime_paths_for(config), "session-1")
+    assert recorder.run_id == run.run_id
+
+
+@pytest.mark.asyncio
 async def test_stream_agent_response_retries_once_after_empty_completed_stream(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
