@@ -204,15 +204,18 @@ def materialize_team_members(
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    config: Config,
     configured_team_name: str | None,
     reason_prefix: str,
     active_model_names: Mapping[str, str],
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
 ) -> ResolvedExactTeamMembers:
-    """Materialize the exact requested team-member set from the live orchestrator without silent fallback."""
-    assert orchestrator.config is not None
+    """Materialize the exact requested team-member set under the turn's ``config`` without silent fallback.
+
+    The orchestrator says which shared agents are running now.
+    """
     materializable_agent_names = resolve_team_materializable_agent_names(
-        orchestrator.config,
+        config,
         resolve_live_shared_agent_names(orchestrator),
         allow_direct_private_agents=allow_direct_private_team_agents(
             execution_identity,
@@ -221,7 +224,7 @@ def materialize_team_members(
     )
     return materialize_exact_team_members(
         requested_team_agent_names(agent_names),
-        config=orchestrator.config,
+        config=config,
         runtime_paths=orchestrator.runtime_paths,
         execution_identity=execution_identity,
         materializable_agent_names=materializable_agent_names,

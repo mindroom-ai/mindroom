@@ -201,6 +201,39 @@ async def test_model_changes_made_mid_turn_do_not_reach_the_rebuilt_members(
 
 
 @pytest.mark.asyncio
+async def test_a_config_reload_mid_turn_does_not_reach_the_rebuilt_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn runs on the config it started with: the members its continuation rebuilds keep that config's roles."""
+
+    async def reload_the_config() -> None:
+        reloaded = team.config.model_copy(deep=True)
+        reloaded.agents["general"].role = "Reloaded role."
+        team.orchestrator.config = reloaded
+
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        default=[
+            delegate("call-team", "general", "Switch"),
+            answer("Switching."),
+            delegate("call-again", "general", "Finish"),
+            answer("Finished the task."),
+        ],
+        general=[[Await(reload_the_config), *calls(_switch("next-turn"))], answer("Done.")],
+    )
+
+    text = await team.respond(message=PROMPT)
+
+    assert text.endswith("Finished the task.")
+    first, rebuilt = (str(request.messages[0].content) for request in team.models["general-model"].requests)
+    assert "Answers." in first
+    assert "Answers." in rebuilt
+    assert "Reloaded role." not in rebuilt
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_an_after_call_switch_rebuilds_the_leader_and_members_on_the_new_model(
     tmp_path: Path,

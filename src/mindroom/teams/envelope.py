@@ -368,7 +368,11 @@ class _TeamTurnHolder:
 
 @dataclass(frozen=True)
 class _TeamTurn:
-    """The constants of one team turn, shared by its attempts."""
+    """The constants of one team turn, shared by its attempts.
+
+    ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
+    agent turn runs on the config it was given; ``orchestrator`` says which agents are running now.
+    """
 
     ctx: ResponseTurnContext
     orchestrator: OrchestratorRuntime
@@ -452,6 +456,7 @@ class _TeamTurn:
             self.requested_agent_names,
             self.orchestrator,
             self.execution_identity,
+            config=self.config,
             reason_prefix=self.reason_prefix,
             configured_team_name=self.configured_team_name,
             active_model_names=model_names,
@@ -872,6 +877,7 @@ def _team_turn(
             requested_agent_names,
             orchestrator,
             execution_identity,
+            config=config,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
