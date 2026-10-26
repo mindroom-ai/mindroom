@@ -3546,7 +3546,7 @@ def _timezone_test_config(runtime_paths: RuntimePaths) -> Config:
         Config(
             timezone="America/Los_Angeles",
             agents={"atlas": AgentConfig(display_name="Atlas", role="Test assistant", timezone="Europe/Amsterdam")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         runtime_paths,
     )
