@@ -173,7 +173,7 @@ Matrix sync callback
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
 | `teams/members.py` | Materializing a team's exact members as agent builds without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's prompt, role, and loop hooks |
 | `teams/spec.py` | `TeamMode`, `TeamMember`, and `TeamSpec`: what a team run is built from |
-| `teams/prompt.py` | The leader's system message in the layout Agno rendered: roster, mode block, tool instructions, provider note, context |
+| `teams/prompt.py` | The leader's system messages, rendered like an agent's: the stable one holds the team's identity, the markdown line, the roster and mode block, and tool instructions; the turn one holds the date, session context, and enrichment |
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, and the pause a paused member propagates to the team run |
 | `teams/runtime.py` | `run_team` and `continue_team` over the agent loop: members as child runs, member decisions routed by member and call, team usage |
 | `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, the live document a resumed run publishes, and `format_team_response`, the blocking Matrix reply rendered from a finished run's records, which a stopped or failed blocking turn also records |
@@ -415,8 +415,8 @@ Matrix sync callback
 | `agent_loop/tools.py` | The tools a run offers, and one assistant message's tool calls planned, run, and answered: resolution, the tool-call limit, pause classification, and result messages |
 | `agent_loop/build.py` | `AgentBuild`, what `create_agent` produces for the loop, and `prompt_for_turn`, its system message with one turn's context appended |
 | `agent_loop/prompt.py` | `PromptSpec` and `render_system_messages`: an agent's system prompt from named sections, as a stable system message and a turn system message |
-| `agent_loop/structured.py` | The JSON prompt a JSON-mode route needs for an output schema, and lenient parsing of answers into the schema |
-| `agent_loop/helper.py` | `complete_prompt`: one tool-less helper request under its rendered system message, optionally read into a schema, with the run record its usage is saved from |
+| `agent_loop/structured.py` | The schema-derived JSON prompt a JSON-mode route needs for an output schema, and parsing answers into the schema: strict where the route enforces the schema, with repairs only on JSON-mode routes |
+| `agent_loop/helper.py` | `complete_prompt`: one tool-less helper request whose system message is its instructions as written, optionally read into a schema, with the run record its usage is saved from |
 | `agent_loop/output_limit.py` | `output_limit_policy`: answers the tool calls of a response the output limit cut off instead of running them, and fails the run on the third cut-off response |
 | `tools/agno_compat_*.py`, `custom_tools/agno_compat_*.py`, and `oauth/agno_compat_google_auth.py` | Repairs of Agno toolkits and of Google auth's toolkit binding; see `docs/architecture/agno-compatibility.md` for the boundary inventory and upstream tracking |
 | `constants.py` | Shared constants, paths, and environment variable defaults |
