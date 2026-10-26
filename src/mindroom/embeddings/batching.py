@@ -25,6 +25,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from threading import Event
 
     from mindroom.embeddings.base import Embedder
 
@@ -81,7 +82,7 @@ class RefreshEmbedder:
         """Return whether one request can still carry several chunk texts."""
         return not self._batching_disabled and self.embedder.sends_batches
 
-    def embed_texts(self, texts: Sequence[str]) -> dict[str, list[float]]:
+    def embed_texts(self, texts: Sequence[str], *, stop: Event | None = None) -> dict[str, list[float]]:
         """Embed one planned batch of distinct chunk texts as documents, in one request when batching is usable.
 
         Batch support is a capability claim that only a real multi-input
@@ -100,12 +101,13 @@ class RefreshEmbedder:
         it embeds it again through :meth:`embed_each`, where the failure is
         retried and recorded against that file. A rejected credential is
         re-raised because it is provably global, and grinding one doomed
-        request per remaining chunk would bury the cause.
+        request per remaining chunk would bury the cause. Once ``stop`` is set,
+        that path starts no further request and leaves the rest to their files.
         """
         if not self.batches() or len(texts) == 1:
             # A single-input request proves nothing about batch support, so it
             # is never allowed to retire batching.
-            return self._embed_each_leaving_failures(texts)
+            return self._embed_each_leaving_failures(texts, stop)
 
         try:
             vectors = self.embedder.embed(texts, purpose="document")
@@ -113,7 +115,7 @@ class RefreshEmbedder:
             if embedder_failure_is_transient(exc) or not embedder_batch_cardinality_mismatch(exc):
                 raise
             self._disable_batching(f"multi-input request failed: {describe_embedder_error(exc)}")
-            return self._embed_each_leaving_failures(texts)
+            return self._embed_each_leaving_failures(texts, stop)
 
         if len(vectors) != len(texts):
             # The partial result is discarded on purpose: with fewer vectors
@@ -121,7 +123,7 @@ class RefreshEmbedder:
             # one belongs to, and guessing by position would silently attach a
             # vector to the wrong chunk.
             self._disable_batching(f"multi-input request returned {len(vectors)} vectors for {len(texts)} inputs")
-            return self._embed_each_leaving_failures(texts)
+            return self._embed_each_leaving_failures(texts, stop)
 
         return {text: self._validated(vector) for text, vector in zip(texts, vectors, strict=True)}
 
@@ -129,10 +131,12 @@ class RefreshEmbedder:
         """Embed each chunk text as a document in its own request, raising the first failure."""
         return [self._validated(self.embedder.embed([text], purpose="document")[0]) for text in texts]
 
-    def _embed_each_leaving_failures(self, texts: Sequence[str]) -> dict[str, list[float]]:
+    def _embed_each_leaving_failures(self, texts: Sequence[str], stop: Event | None) -> dict[str, list[float]]:
         """Embed one text per request, leaving out every text but a credential rejection fails."""
         vectors: dict[str, list[float]] = {}
         for text in texts:
+            if stop is not None and stop.is_set():
+                break
             try:
                 vectors[text] = self.embed_each([text])[0]
             except Exception as exc:
