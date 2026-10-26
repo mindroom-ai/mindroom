@@ -34,10 +34,12 @@ _ARCHIVE_DDL = (
     "session_id TEXT NOT NULL REFERENCES code_sessions(session_id) ON DELETE CASCADE, "
     "scope_key TEXT NOT NULL, summary TEXT, summary_model TEXT, "
     "legacy INTEGER NOT NULL DEFAULT 0, legacy_event_ids TEXT, created_at INTEGER NOT NULL)",
+    "CREATE INDEX code_sessions_compactions_scope ON code_sessions_compactions (session_id, scope_key)",
     "CREATE TABLE code_sessions_compacted_runs (id INTEGER PRIMARY KEY, "
     "compaction_id INTEGER NOT NULL REFERENCES code_sessions_compactions(id) ON DELETE CASCADE, "
     "session_id TEXT NOT NULL, run_id TEXT NOT NULL, run_type TEXT, event_ids TEXT NOT NULL, "
     "seen_event_ids TEXT NOT NULL DEFAULT '[]', run_data TEXT, UNIQUE(session_id, run_id))",
+    "CREATE INDEX code_sessions_compacted_runs_generation ON code_sessions_compacted_runs (compaction_id)",
 )
 
 
