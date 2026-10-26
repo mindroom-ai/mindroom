@@ -99,8 +99,8 @@ class ToolExecution:
         # Legacy format: stored tool executions hold ``metrics`` (``start_time``, ``end_time``, ``duration``) and
         # ``created_at``, and stored requirements hold an ISO 8601 ``created_at``, in run rows, summary-row segments,
         # delegation state, and CLI approval payloads; no MindRoom code read them.
-        # Last legacy release: v2026.10.542, which wrote them as every earlier release did; replacement: the next
-        # release, whose tool executions and requirements store neither.
+        # Last legacy release: v2026.10.542, which wrote them as every earlier release did; replacement: v2026.10.543,
+        # whose tool executions and requirements store neither.
         # Handling: the keys are ignored on read and never written again, so a rewritten row drops them.
         # Coverage: tests/llm/test_codecs.py::test_tool_execution_round_trips_agno_dict_minus_dropped_keys,
         #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
